@@ -1,0 +1,23 @@
+{
+  "productName": "Nami Portable Tests",
+  "identifier": "dev.local.nami.portable-tests",
+  "app": {
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "portable-test-translation",
+          "windows": ["translation"],
+          "webviews": ["translation"],
+          "permissions": [
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "core:event:allow-emit",
+            "core:window:allow-start-dragging",
+            "allow-p0-common",
+            "allow-p0-translation"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -17,7 +17,7 @@ export function HistoryView({ t, snapshot, command, native }: ViewProps) {
 
   return <div className="history-view" aria-hidden={!snapshot.window.historyVisible} inert={!snapshot.window.historyVisible} onKeyDown={(event) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === 'Escape' || (event.metaKey && event.key.toLowerCase() === 'w')) {
+    if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
       event.preventDefault(); void command('window_hide', { region: 'translation' });
     }
   }}>

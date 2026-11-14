@@ -1620,6 +1620,32 @@ fn run_history_driver(app: &AppHandle) -> DomCase {
     }
 }
 
+fn assert_history_store_projection(app: &AppHandle) -> Result<(), String> {
+    let shared = app.state::<AppState>().history.lock().unwrap().snapshot();
+    let native = history_snapshot(app)?;
+    let rows = native["rows"].as_array().ok_or("missing native rows")?;
+    let live = rows
+        .iter()
+        .filter(|row| row["id"].as_str().is_some_and(|id| !id.is_empty()))
+        .count();
+    if live != shared.records.len() {
+        return Err("native projection record count differs from shared history".into());
+    }
+    for record in &shared.records {
+        let row = rows
+            .iter()
+            .find(|row| row["id"].as_str() == Some(&record.id))
+            .ok_or("shared history record missing from native projection")?;
+        if row["favorite"] != record.is_favorite || row["pinned"] != record.is_pinned {
+            return Err("native history flags differ from shared history".into());
+        }
+    }
+    if native["selected"].as_str() != shared.selected_id.as_deref() {
+        return Err("native selected row differs from shared history".into());
+    }
+    Ok(())
+}
+
 fn run_history_native_actions(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -1812,6 +1838,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
         ] {
             let value = on_main(app, move |app| {
                 history_click(app, tag)?;
+                assert_history_store_projection(app)?;
                 history_snapshot(app)
             })?;
             if value["rows"][2][field] != expected {
@@ -1913,7 +1940,26 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
         samples.push(exposed);
         wait_motion(app)?;
         let protected = on_main(app, |app| {
+            let revision = app
+                .state::<AppState>()
+                .history
+                .lock()
+                .unwrap()
+                .snapshot()
+                .revision;
             history_click(app, 1004)?;
+            if app
+                .state::<AppState>()
+                .history
+                .lock()
+                .unwrap()
+                .snapshot()
+                .revision
+                != revision
+            {
+                return Err("protected native deletion changed shared history".into());
+            }
+            assert_history_store_projection(app)?;
             history_snapshot(app)
         })?;
         if protected["rows"][0]["id"] != "sample-01"
@@ -1924,6 +1970,10 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
         samples.push(protected);
         let deleted = on_main(app, |app| {
             history_click(app, 1024)?;
+            assert_history_store_projection(app)?;
+            if history_record(app, "sample-03").is_some() {
+                return Err("deleted record remained in shared history".into());
+            }
             history_snapshot(app)
         })?;
         if deleted["ordinaryCount"] != 17 {
@@ -2112,6 +2162,7 @@ fn run_runtime_history(app: &AppHandle) -> DomCase {
                 return Err("runtime history content changed".into());
             }
             crate::commands::select_history_sample(app, Some(record.id), false)?;
+            assert_history_store_projection(app)?;
             Ok(())
         })?;
         let dom = wait_dom(app, "const source=document.querySelector('.source-input');const result=document.querySelector('.result-column');return {ready:source?.value==='Synthetic runtime selection' && result?.textContent==='合成原生译文',source:source?.value,result:result?.textContent};")?;

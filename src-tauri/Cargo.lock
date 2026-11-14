@@ -1992,6 +1992,7 @@ name = "nami"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "chrono",
  "html-escape",
  "objc2",
  "objc2-app-kit",

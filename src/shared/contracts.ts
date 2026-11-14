@@ -15,7 +15,20 @@ export interface WindowState {
   secondaryEnabled: boolean;
 }
 
+export interface PlatformCapabilities {
+  platform: 'macos' | 'windows' | 'linux' | 'other';
+  nativeHistory: boolean;
+  nativeChrome: boolean;
+  nativeMaterial: boolean;
+  selection: boolean;
+  clipboardWrite: boolean;
+  autoPaste: boolean;
+  accessibilityPermission: boolean;
+  primaryModifier: 'meta' | 'control';
+}
+
 export interface AppSnapshot {
+  capabilities: PlatformCapabilities;
   locale: Locale;
   translationEngine: 'edge' | 'google';
   accessibility: boolean;
@@ -30,6 +43,7 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   translationEngine: 'edge',
   accessibility: false,

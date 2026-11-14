@@ -18,7 +18,7 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
   const samples = favoritesOnly ? [] : clipboardSamples.filter((sample) => sample.text.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
 
   async function useSample(sampleId: string, action: 'copy' | 'paste') {
-    if (!native) return;
+    if (!native || (action === 'copy' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return;
     const current = ++operation.current;
     activity(1);
     setSelected(sampleId);
@@ -39,7 +39,7 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
 
   function keydown(event: KeyboardEvent) {
     if (event.nativeEvent.isComposing) return;
-    if (event.key === 'Escape' || (event.metaKey && event.key.toLowerCase() === 'w')) {
+    if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
       event.preventDefault(); operation.current += 1;
       void command('window_hide', { region: 'clipboard' });
     }
@@ -63,14 +63,14 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
     </header>
     <div className="clipboard-list" aria-label={t('sample')}>
       {samples.map((sample, index) => <article className={selected === sample.id ? 'clipboard-row selected' : 'clipboard-row'} key={sample.id}>
-        <button type="button" ref={(element) => { if (element) rowRefs.current.set(sample.id, element); else rowRefs.current.delete(sample.id); }} className="record-body" disabled={!native} aria-label={`${t('sample')}: ${sample.text}`} onFocus={() => setSelected(sample.id)} onClick={() => void useSample(sample.id, 'paste')} onKeyDown={(event) => {
+        <button type="button" ref={(element) => { if (element) rowRefs.current.set(sample.id, element); else rowRefs.current.delete(sample.id); }} className="record-body" disabled={!native || !snapshot.capabilities.autoPaste} aria-label={`${t('sample')}: ${sample.text}`} onFocus={() => setSelected(sample.id)} onClick={() => void useSample(sample.id, 'paste')} onKeyDown={(event) => {
           if (event.key === 'ArrowDown' && samples[index + 1]) { event.preventDefault(); focusRow(samples[index + 1].id); }
           else if (event.key === 'ArrowUp') { event.preventDefault(); if (samples[index - 1]) focusRow(samples[index - 1].id); else search.current?.focus(); }
         }}>
           <span className="record-icon"><ClipboardList aria-hidden="true" /></span>
           <span className="record-content"><span className="record-meta">{t('text')}<span>{t('sample')}</span></span><span className="record-text">{sample.text}</span></span>
         </button>
-        <button type="button" className="clipboard-icon-button record-copy" disabled={!native} aria-label={`${t('copy')}: ${sample.text}`} onClick={() => void useSample(sample.id, 'copy')}><Copy aria-hidden="true" /></button>
+        <button type="button" className="clipboard-icon-button record-copy" disabled={!native || !snapshot.capabilities.clipboardWrite} aria-label={`${t('copy')}: ${sample.text}`} onClick={() => void useSample(sample.id, 'copy')}><Copy aria-hidden="true" /></button>
       </article>)}
       {!samples.length && <div className="clipboard-empty"><p>{favoritesOnly ? 'No favorites yet' : t('noMatches')}</p></div>}
     </div>

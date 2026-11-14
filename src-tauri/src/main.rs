@@ -1,8 +1,14 @@
 mod commands;
-mod model;
+mod history_runtime;
+#[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
+mod portable_ui_tests;
+use nami::{history, model, translation};
 mod platform;
 mod selection;
-mod translation;
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+mod windows;
+#[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
+#[path = "portable_windows.rs"]
 mod windows;
 
 use model::WindowState;
@@ -19,6 +25,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 pub struct AppState {
+    history: Mutex<history::HistoryStore>,
     windows: Mutex<WindowState>,
     locale: Mutex<String>,
     shortcut_errors: Mutex<Vec<String>>,
@@ -40,6 +47,7 @@ impl Default for AppState {
             windows.history_width_initialized = true;
         }
         Self {
+            history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
             windows: Mutex::new(windows),
             locale: Mutex::new("en".into()),
             shortcut_errors: Mutex::new(Vec::new()),
@@ -82,9 +90,9 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .manage(AppState::default())
-        .plugin(
+    let builder = tauri::Builder::default().manage(AppState::default());
+    let builder = if platform::capabilities().selection {
+        builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if shortcut.key == Code::KeyT || event.state() == ShortcutState::Pressed {
@@ -114,6 +122,10 @@ fn main() {
                 })
                 .build(),
         )
+    } else {
+        builder
+    };
+    builder
         .invoke_handler(tauri::generate_handler![
             commands::app_snapshot,
             commands::translation_run,
@@ -128,6 +140,8 @@ fn main() {
             commands::history_width_set,
             commands::translation_chrome_update,
             commands::history_sample_select,
+            commands::history_snapshot,
+            commands::history_record_update,
             commands::translation_columns_set,
             commands::translation_sample_copy,
             commands::clipboard_record_use,
@@ -135,7 +149,16 @@ fn main() {
             commands::permission_request,
         ])
         .setup(|app| {
-            #[cfg(feature = "ui-tests")]
+            #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
+            if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
+                portable_ui_tests::start(app.handle()).map_err(std::io::Error::other)?;
+                return Ok(());
+            }
+            #[cfg(all(
+                feature = "ui-tests",
+                target_os = "macos",
+                not(feature = "portable-ui")
+            ))]
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 windows::start_ui_regression(app.handle()).map_err(std::io::Error::other)?;
                 return Ok(());
@@ -148,7 +171,7 @@ fn main() {
             let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Nami", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&translation, &clipboard, &settings, &quit])?;
-            TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .title("N")
                 .tooltip("Nami")
                 .menu(&menu)
@@ -164,18 +187,22 @@ fn main() {
                             .unwrap()
                             .push(code);
                     }
-                })
-                .build(app)?;
-            for shortcut in [
-                Shortcut::new(Some(Modifiers::SUPER), Code::KeyT),
-                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV),
-            ] {
-                if app.global_shortcut().register(shortcut).is_err() {
-                    app.state::<AppState>()
-                        .shortcut_errors
-                        .lock()
-                        .unwrap()
-                        .push(shortcut.to_string());
+                });
+            #[cfg(not(target_os = "macos"))]
+            let tray = tray.icon(app.default_window_icon().ok_or("missing app icon")?.clone());
+            tray.build(app)?;
+            if platform::capabilities().selection {
+                for shortcut in [
+                    Shortcut::new(Some(Modifiers::SUPER), Code::KeyT),
+                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV),
+                ] {
+                    if app.global_shortcut().register(shortcut).is_err() {
+                        app.state::<AppState>()
+                            .shortcut_errors
+                            .lock()
+                            .unwrap()
+                            .push(shortcut.to_string());
+                    }
                 }
             }
             windows::show(app.handle(), "translation").map_err(std::io::Error::other)?;
@@ -192,6 +219,7 @@ fn main() {
                 tauri::RunEvent::Exit => record_lifecycle(app, "exit", None),
                 _ => {}
             }
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Err(code) = windows::show(app, "translation") {
                     app.state::<AppState>()

@@ -115,6 +115,15 @@ impl WindowState {
         self.translation_visible = true;
     }
 
+    pub fn select_history_record(&mut self, repeated: bool, retranslate: bool) {
+        if repeated && !retranslate && self.translation_visible && !self.translation_pinned {
+            self.translation_visible = false;
+            self.history_visible = true;
+        } else {
+            self.show_translation();
+        }
+    }
+
     pub fn blur(&mut self) {
         self.translation_visible &= self.translation_pinned;
         self.history_visible &= self.history_pinned;
@@ -251,6 +260,28 @@ impl OperationResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_selection_toggles_authoritative_state_without_frontend_roundtrips() {
+        let mut state = super::WindowState::default();
+        state.select_history_record(false, false);
+        assert!(state.translation_visible);
+        for expected in [false, true, false, true] {
+            state.select_history_record(true, false);
+            assert_eq!(state.translation_visible, expected);
+            assert!(state.history_visible);
+        }
+        state.translation_pinned = true;
+        state.select_history_record(true, false);
+        assert!(state.translation_visible);
+        state.translation_pinned = false;
+        state.select_history_record(true, true);
+        assert!(state.translation_visible);
+        state.select_history_record(true, false);
+        assert!(!state.translation_visible);
+        state.select_history_record(false, false);
+        assert!(state.translation_visible);
+    }
+
     use super::*;
 
     #[cfg(not(feature = "ui-tests"))]

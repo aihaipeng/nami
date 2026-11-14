@@ -32,6 +32,47 @@ def identity():
     return fingerprint
 
 
+def setup():
+    config = ROOT / '.nami-signing-identity'
+    if config.exists():
+        identity()
+        print('Nami fixed local signing identity is available.')
+        return
+    keychain = run('security', 'default-keychain', '-d', 'user', capture_output=True, text=True).stdout.strip().strip('"')
+    with tempfile.TemporaryDirectory(prefix='nami-certificate-') as directory:
+        scratch = Path(directory)
+        certificate = scratch / 'certificate.pem'
+        found = subprocess.run(['security', 'find-certificate', '-a', '-c', 'Nami Local Development', '-p', keychain],
+                               capture_output=True, check=False)
+        certificate.write_bytes(found.stdout)
+        if not found.stdout:
+            settings = scratch / 'signing.cnf'
+            settings.write_text('[req]\ndistinguished_name = name\n[name]\n[signing]\n'
+                                'basicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\n'
+                                'extendedKeyUsage = critical,codeSigning\n')
+            key = scratch / 'Nami Local Development.key'
+            run('/usr/bin/openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '3650',
+                '-subj', '/CN=Nami Local Development/O=Nami Local Development',
+                '-keyout', str(key), '-out', str(certificate), '-extensions', 'signing', '-config', str(settings),
+                capture_output=True)
+            key.chmod(0o600)
+            run('security', 'import', str(key), '-k', keychain, '-T', '/usr/bin/codesign')
+            run('security', 'import', str(certificate), '-k', keychain)
+        if certificate.read_bytes().count(b'BEGIN CERTIFICATE') != 1:
+            raise RuntimeError('Multiple Nami certificates found; automatic selection stopped')
+        output = run('/usr/bin/openssl', 'x509', '-in', str(certificate), '-noout', '-fingerprint', '-sha1',
+                     capture_output=True, text=True).stdout
+        fingerprint = output.split('=', 1)[1].strip().replace(':', '')
+        if not re.fullmatch(r'[0-9A-Fa-f]{40}', fingerprint):
+            raise RuntimeError('Invalid certificate fingerprint')
+        identities = run('security', 'find-identity', '-p', 'codesigning', capture_output=True, text=True).stdout
+        if fingerprint.upper() not in identities.upper():
+            raise RuntimeError('Restore the original certificate and private key; no replacement will be generated')
+        with open(config, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+            output.write(fingerprint + '\n')
+    print('Nami local signing identity pinned. Keep the original certificate and private key in Keychain.')
+
+
 def requirement(app):
     result = run('codesign', '-d', '-r-', str(app), capture_output=True, text=True)
     for line in (result.stdout + result.stderr).splitlines():
@@ -100,11 +141,22 @@ def install(fingerprint):
     run('open', str(INSTALLED))
 
 
-if __name__ == '__main__':
-    if len(sys.argv) != 2 or sys.argv[1] not in ('build', 'install'):
-        raise SystemExit('Usage: python3 tools/local-app.py build|install')
+def main(args=None):
+    args = sys.argv[1:] if args is None else args
+    if len(args) != 1 or args[0] not in ('setup', 'build', 'install'):
+        raise SystemExit('Usage: python tools/local-app.py setup|build|install')
+    if sys.platform != 'darwin':
+        raise SystemExit('Local certificate signing and /Applications installation require macOS. '
+                         'Use npm run tauri -- build for a native Windows/Linux build.')
+    if args[0] == 'setup':
+        setup()
+        return
     fingerprint = identity()
-    if sys.argv[1] == 'build':
+    if args[0] == 'build':
         build(fingerprint)
     else:
         install(fingerprint)
+
+
+if __name__ == '__main__':
+    main()

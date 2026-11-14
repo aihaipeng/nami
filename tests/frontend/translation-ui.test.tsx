@@ -7,7 +7,7 @@ import { historySamples } from '../../src/translation/history';
 
 const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
 const sample = historySamples[0];
-const select = (id = sample.id, retranslate = false) => emit('history_sample_selected', { sampleId: id, retranslate });
+const select = (id = sample.id, retranslate = false) => act(async () => { await bridge.invoke('history_sample_select', { sampleId: id, retranslate }); });
 
 // These tests exercise DOM behavior and the native bridge contract. AppKit geometry,
 // glass rendering and frame pacing are covered by the separate native checks.
@@ -178,20 +178,64 @@ describe('selection across native webviews', () => {
     expect(screen.getByRole('button', { name: 'Secondary language: French' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
     expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe(sample.translations[1]);
-    expect(calls('window_show').at(-1)).toEqual(['window_show', { target: 'translation' }]);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    expect(calls('window_show')).toHaveLength(0);
   });
 
   it('selecting the same record again hides only translation while retaining history', async () => {
     await mount(); await select(); await select();
-    expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation', keepHistory: true }]);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(bridge.snapshot.window.historyVisible).toBe(true);
+    expect(calls('window_hide')).toHaveLength(0);
+    expect((document.querySelector('.source-input') as HTMLTextAreaElement).value).toBe(sample.text);
+  });
+
+  it('leaves collapse and restore authoritative in the backend across rapid selection commands', async () => {
+    await mount();
+    const visible: boolean[] = [];
+    await act(async () => {
+      for (let index = 0; index < 3; index += 1) {
+        await bridge.invoke('history_sample_select', { sampleId: sample.id, retranslate: false });
+        visible.push(bridge.snapshot.window.translationVisible);
+      }
+    });
+    expect(visible).toEqual([true, false, true]);
     expect(source().value).toBe(sample.text);
+    expect(calls('window_show')).toHaveLength(0);
+    expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('restores data without toggling windows when selection events arrive before delayed window state', async () => {
+    await mount();
+    await act(async () => {
+      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
+      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
+      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
+    });
+    expect(source().value).toBe(sample.text);
+    expect(calls('window_show')).toHaveLength(0);
+    expect(calls('window_hide')).toHaveLength(0);
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    expect(calls('window_show')).toHaveLength(0);
+    expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('clears backend selection without changing translation visibility', async () => {
+    await mount(); await select(); await select();
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    await act(async () => { await bridge.invoke('history_sample_select', { sampleId: null, retranslate: false }); });
+    expect(bridge.history.selectedId).toBeNull();
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(calls('window_show')).toHaveLength(0);
+    expect(calls('window_hide')).toHaveLength(0);
   });
 
   it('keeps a pinned translation visible when selecting the same record again', async () => {
     bridge.snapshot.window.translationPinned = true;
     await mount(); await select(); await select();
     expect(calls('window_hide')).toHaveLength(0);
-    expect(calls('window_show')).toHaveLength(2);
+    expect(calls('window_show')).toHaveLength(0);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
   });
 
   it('retranslation submits the record through the selected service', async () => {
@@ -203,13 +247,15 @@ describe('selection across native webviews', () => {
 
   it('selecting a row in the history view restores translation through the shared event bus', async () => {
     const user = userEvent.setup(); const translation = await mount(); const history = await mount('history');
-    const button = within(history.container).getByRole('button', { name: `Sample translation: ${sample.text}` });
+    const button = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
     await user.click(button);
     expect((within(translation.container).getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement).value).toBe(sample.text);
     expect(within(translation.container).getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
     expect(button.getAttribute('aria-pressed')).toBe('true');
     await user.click(button);
-    expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation', keepHistory: true }]);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(bridge.snapshot.window.historyVisible).toBe(true);
+    expect(calls('window_hide')).toHaveLength(0);
   });
 
   it('submitting a selected sample clears history selection and cached output', async () => {
@@ -245,7 +291,7 @@ describe('selection across native webviews', () => {
     const translation = await mount();
     const history = await mount('history');
     await select();
-    const selected = within(history.container).getByRole('button', { name: `Sample translation: ${sample.text}` });
+    const selected = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
     expect(selected.getAttribute('aria-pressed')).toBe('true');
     const input = within(translation.container).getByRole('textbox', { name: 'Source text' });
     fireEvent.change(input, { target: { value: 'Edited draft' } });
@@ -273,7 +319,7 @@ describe('selection across native webviews', () => {
 
   it('ignores unknown record IDs instead of replacing the current draft', async () => {
     await mount(); fireEvent.change(source(), { target: { value: 'Private local draft' } });
-    await select('missing-record');
+    await emit('history_sample_selected', { sampleId: 'missing-record', retranslate: false });
     expect(source().value).toBe('Private local draft');
     expect(calls('window_show')).toHaveLength(0);
   });

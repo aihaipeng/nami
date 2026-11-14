@@ -139,6 +139,7 @@ pub fn current_apple_event() -> Option<serde_json::Value> {
     }
 }
 
+#[cfg(not(feature = "portable-ui"))]
 pub fn reduce_motion() -> bool {
     unsafe {
         let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];

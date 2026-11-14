@@ -1,10 +1,12 @@
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
+import type { HistorySnapshot } from '../../src/translation/history';
 import { initialSnapshot, type AppSnapshot, type WindowState } from '../../src/shared/contracts';
 
 const bridge = vi.hoisted(() => ({
   label: 'translation',
   snapshot: undefined as unknown as AppSnapshot,
+  history: undefined as unknown as HistorySnapshot,
   listeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
   invoke: vi.fn(),
   listen: vi.fn(),
@@ -59,6 +61,8 @@ beforeEach(() => {
   cleanup();
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
+  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, clipboardWrite: true, autoPaste: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null };
   bridge.snapshot.window.historyVisible = true;
   bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
   bridge.listeners.clear(); frames.clear(); reducedMotion = false;
@@ -66,10 +70,45 @@ beforeEach(() => {
     if (name === 'selection_take') return null;
     if (name === 'translation_run') {
       const request = args as { text: string; source: string; targets: string[] };
-      return { ...historySamples[0], id: 'translation-test', text: request.text, sourceLanguage: request.source, targetLanguages: request.targets, translations: request.targets.map((_, index) => `Synthetic translation ${index + 1}`) };
+      const record = { ...historySamples[0], id: 'translation-test', text: request.text, sourceLanguage: request.source, targetLanguages: request.targets, translations: request.targets.map((_, index) => `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false };
+      bridge.history.records = [...bridge.history.records.filter(({ id }) => id !== record.id), record];
+      bridge.history.selectedId = record.id; ++bridge.history.revision;
+      deliver('history_changed', structuredClone(bridge.history));
+      return record;
+    }
+    if (name === 'history_snapshot') return structuredClone(bridge.history);
+    if (name === 'history_record_update') {
+      const { recordId, action } = args as { recordId: string; action: string };
+      const record = bridge.history.records.find(({ id }) => id === recordId);
+      if (!record) throw new Error('not_found');
+      if (action === 'delete') {
+        if (record.isFavorite || record.isPinned) throw new Error('history_protected');
+        bridge.history.records = bridge.history.records.filter(({ id }) => id !== recordId);
+        if (bridge.history.selectedId === recordId) bridge.history.selectedId = null;
+      } else if (action === 'favorite') record.isFavorite = !record.isFavorite;
+      else if (action === 'pin') record.isPinned = !record.isPinned;
+      else throw new Error('invalid_argument');
+      ++bridge.history.revision; deliver('history_changed', structuredClone(bridge.history));
+      return structuredClone(bridge.history);
     }
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);
-    if (name === 'history_sample_select') deliver('history_sample_selected', args);
+    if (name === 'history_sample_select') {
+      const selected = args as { sampleId: string | null; retranslate: boolean };
+      const record = bridge.history.records.find(({ id }) => id === selected.sampleId);
+      if (selected.sampleId !== null && !record) throw new Error('invalid_argument');
+      if (selected.sampleId !== null) {
+        const collapse = bridge.history.selectedId === selected.sampleId && !selected.retranslate
+          && bridge.snapshot.window.translationVisible && !bridge.snapshot.window.translationPinned;
+        bridge.snapshot.window.translationVisible = !collapse;
+        bridge.snapshot.window.translationExtent = collapse ? 0 : bridge.snapshot.window.translationWidth;
+        bridge.snapshot.window.historyVisible = true;
+        bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
+        deliver('window_state', structuredClone(bridge.snapshot.window));
+      }
+      bridge.history.selectedId = selected.sampleId; ++bridge.history.revision;
+      deliver('history_changed', structuredClone(bridge.history));
+      deliver('history_sample_selected', { ...selected, record });
+    }
     return undefined;
   });
   bridge.listen.mockReset().mockImplementation(async (name: string, callback: (event: { payload: unknown }) => void) => {
@@ -88,7 +127,13 @@ function deliver(name: string, payload: unknown) {
 }
 
 export async function emit(name: string, payload: unknown) {
-  await act(async () => { deliver(name, payload); });
+  await act(async () => {
+    if (name === 'history_sample_selected') {
+      bridge.history.selectedId = (payload as { sampleId: string | null }).sampleId; ++bridge.history.revision;
+      deliver('history_changed', structuredClone(bridge.history));
+    }
+    deliver(name, payload);
+  });
 }
 
 export async function windowState(patch: Partial<WindowState>) {
@@ -103,6 +148,7 @@ export async function mount(label: 'translation' | 'history' | 'settings' = 'tra
   await waitFor(() => {
     if (bridge.invoke.mock.calls.filter(([name]) => name === 'app_snapshot').length <= previous) throw new Error('App has not connected to its native snapshot');
   });
+  await act(async () => {});
   return result;
 }
 

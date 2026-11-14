@@ -17,6 +17,7 @@ fn authorize(window: &Webview, labels: &[&str]) -> Result<(), String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    capabilities: platform::Capabilities,
     locale: String,
     accessibility: bool,
     shortcut_errors: Vec<String>,
@@ -32,6 +33,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
     )?;
     let state = app.state::<AppState>();
     let snapshot = Snapshot {
+        capabilities: platform::capabilities(),
         locale: state.locale.lock().unwrap().clone(),
         accessibility: platform::accessibility(),
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
@@ -205,6 +207,9 @@ pub fn translation_chrome_update(
     {
         return Err("invalid_argument".into());
     }
+    if !platform::capabilities().native_chrome {
+        return Ok(false);
+    }
     windows::update_translation_chrome(
         &app,
         state.source_label,
@@ -223,6 +228,41 @@ struct HistorySelection {
     sample_id: Option<String>,
     retranslate: bool,
     record: Option<crate::model::HistoryRecord>,
+}
+
+#[tauri::command]
+pub fn history_snapshot(
+    window: Webview,
+    app: AppHandle,
+) -> Result<crate::history::HistorySnapshot, String> {
+    authorize(&window, &["translation", "history"])?;
+    Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
+}
+
+#[tauri::command]
+pub fn history_record_update(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+    action: String,
+) -> Result<crate::history::HistorySnapshot, String> {
+    authorize(&window, &["translation", "history"])?;
+    update_history_record(&app, &record_id, &action)
+}
+
+pub(crate) fn update_history_record(
+    app: &AppHandle,
+    id: &str,
+    action: &str,
+) -> Result<crate::history::HistorySnapshot, String> {
+    app.state::<AppState>()
+        .history
+        .lock()
+        .unwrap()
+        .update(id, action)?;
+    windows::refresh_history(app)?;
+    windows::publish_history(app)?;
+    Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
 }
 
 #[tauri::command]
@@ -247,7 +287,28 @@ pub(crate) fn select_history_sample(
     if sample_id.is_some() && record.is_none() {
         return Err("invalid_argument".into());
     }
+    let repeated = app
+        .state::<AppState>()
+        .history
+        .lock()
+        .unwrap()
+        .snapshot()
+        .selected_id
+        == sample_id;
     windows::select_native_history(app, sample_id.as_deref())?;
+    if sample_id.is_some() {
+        let visible = {
+            let state = app.state::<AppState>();
+            let mut windows = state.windows.lock().unwrap();
+            windows.select_history_record(repeated, retranslate);
+            windows.translation_visible
+        };
+        if visible {
+            windows::show(app, "translation")?;
+        } else {
+            windows::apply_translation(app)?;
+        }
+    }
     let selection = HistorySelection {
         sample_id,
         retranslate,
@@ -298,6 +359,9 @@ pub fn locale_set(window: Webview, app: AppHandle, locale: String) -> Result<(),
 #[tauri::command]
 pub fn permission_request(window: Webview) -> Result<bool, String> {
     authorize(&window, &["settings"])?;
+    if !platform::capabilities().accessibility_permission {
+        return Err("platform_unavailable".into());
+    }
     Ok(platform::request_accessibility())
 }
 
@@ -553,16 +617,7 @@ pub async fn translation_run(
         {
             return Err("cancelled".into());
         }
-        let date = unsafe {
-            use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-            use objc2_foundation::{ns_string, NSString};
-            let formatter: Retained<AnyObject> = msg_send![class!(NSDateFormatter), new];
-            let _: () =
-                msg_send![&*formatter, setDateFormat: ns_string!("yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ")];
-            let now: *mut AnyObject = msg_send![class!(NSDate), date];
-            let value: Retained<NSString> = msg_send![&*formatter, stringFromDate: now];
-            value.to_string()
-        };
+        let date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let record = crate::model::HistoryRecord {
             id: format!("translation-{revision}"),
             text,

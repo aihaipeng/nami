@@ -5,10 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, preferReducedMotion, releasePointerCapture, scrollTo, setPointerCapture, windowState } from './harness';
 import { historySamples } from '../../src/translation/history';
 
-const records = () => screen.queryAllByRole('button', { name: /^Sample translation:/ });
+const records = () => screen.queryAllByRole('button', { name: /^Translation:/ });
 const row = (id: string) => {
   const record = historySamples.find((record) => record.id === id)!;
-  return screen.getByRole('button', { name: `Sample translation: ${record.text.replace(/\s+/g, ' ').trim()}` }).closest('article')!;
+  return screen.getByRole('button', { name: `Translation: ${record.text.replace(/\s+/g, ' ').trim()}` }).closest('article')!;
 };
 
 describe('history list and session actions', () => {
@@ -85,14 +85,14 @@ describe('history list and session actions', () => {
     expect(row('sample-03').classList.contains('pinned')).toBe(false);
   });
 
-  it('allows deleting only unprotected session records and resets them on remount', async () => {
+  it('allows deleting only unprotected records and retains backend state on remount', async () => {
     const user = userEvent.setup(); const view = await mount('history');
     expect(within(row('sample-01')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
     expect(within(row('sample-04')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     expect(records()).toHaveLength(19);
     view.unmount(); await mount('history');
-    expect(records()).toHaveLength(20);
+    expect(records()).toHaveLength(19);
   });
 
   it('pins the history region through the native contract and reflects returned state', async () => {
@@ -106,9 +106,9 @@ describe('history list and session actions', () => {
 
   it('sends only a fixture ID for normal selection, retranslation and source copying', async () => {
     const user = userEvent.setup(); await mount('history');
-    await user.click(within(row('sample-03')).getByRole('button', { name: /^Sample translation:/ }));
+    await user.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: false }]);
-    expect(within(row('sample-03')).getByRole('button', { name: /^Sample translation:/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('true');
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Retranslate' }));
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: true }]);
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Copy source text' }));
@@ -131,9 +131,9 @@ describe('history list and session actions', () => {
   it('accepts cross-view selection events and clears highlight without erasing records', async () => {
     await mount('history');
     await emit('history_sample_selected', { sampleId: 'sample-03', retranslate: false });
-    expect(within(row('sample-03')).getByRole('button', { name: /^Sample translation:/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('true');
     await emit('history_sample_selected', { sampleId: null, retranslate: false });
-    expect(within(row('sample-03')).getByRole('button', { name: /^Sample translation:/ }).getAttribute('aria-pressed')).toBe('false');
+    expect(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('false');
     expect(records()).toHaveLength(20);
   });
 
@@ -155,7 +155,7 @@ describe('history list and session actions', () => {
     vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 500 } as DOMRect);
     vi.spyOn(article, 'getBoundingClientRect').mockReturnValue({ top: 80, bottom: 160 } as DOMRect);
     scrollTo.mockClear();
-    await user.click(within(article).getByRole('button', { name: /^Sample translation:/ }));
+    await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).toHaveBeenCalledWith({ top: 76, behavior: 'smooth' });
     expect(scrollTo.mock.contexts.at(-1)).toBe(list);
     expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', retranslate: false });
@@ -167,10 +167,10 @@ describe('history list and session actions', () => {
     vi.spyOn(pinned, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 300 } as DOMRect);
     const measure = vi.spyOn(article, 'getBoundingClientRect').mockReturnValue({ top: 110, bottom: 200 } as DOMRect);
     scrollTo.mockClear();
-    await user.click(within(article).getByRole('button', { name: /^Sample translation:/ }));
+    await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).not.toHaveBeenCalled();
     preferReducedMotion(); measure.mockReturnValue({ top: 250, bottom: 320 } as DOMRect);
-    await user.click(within(article).getByRole('button', { name: /^Sample translation:/ }));
+    await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).toHaveBeenCalledWith({ top: 24, behavior: 'instant' });
     expect(scrollTo.mock.contexts.at(-1)).toBe(pinned);
   });

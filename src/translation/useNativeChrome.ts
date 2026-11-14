@@ -18,7 +18,7 @@ export function useNativeChrome(native: boolean, state: ChromeState, onAction: (
   const action = useRef(onAction);
   action.current = onAction;
   useEffect(() => {
-    if (!native) return;
+    if (!native) { setConnected(false); setReady(false); return; }
     let disposed = false;
     const remove = listen<ChromeAction>('translation_chrome_action', ({ payload }) => {
       if (!disposed && ['source', 'translate', 'actions'].includes(payload)) action.current(payload);
@@ -28,12 +28,12 @@ export function useNativeChrome(native: boolean, state: ChromeState, onAction: (
   }, [native]);
   const { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible } = state;
   useEffect(() => {
-    if (!connected) return;
+    if (!native || !connected) return;
     let disposed = false;
     void invoke<boolean>('translation_chrome_update', {
       state: { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible },
     }).then((installed) => { if (!disposed && installed === true) setReady(true); }).catch(() => {});
     return () => { disposed = true; };
-  }, [connected, sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible]);
-  return ready;
+  }, [native, connected, sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible]);
+  return native && ready;
 }

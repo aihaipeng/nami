@@ -14,6 +14,8 @@ fn main() {
             "history_width_set",
             "translation_chrome_update",
             "history_sample_select",
+            "history_snapshot",
+            "history_record_update",
             "translation_columns_set",
             "translation_sample_copy",
             "clipboard_record_use",

@@ -3,8 +3,10 @@ import { HistoryIcon } from './HistoryIcon';
 import type { ViewProps } from '../App';
 import { cn } from '../lib/utils';
 import { languages } from '../shared/languages';
-import { filterHistory, historyPreview, historySamples, historyScrollTarget, type HistoryRecord } from './history';
-import sampleIcon from '../../src-tauri/icons/icon.png';
+import { filterHistory, historyPreview, historyScrollTarget, type HistoryRecord } from './history';
+import fallbackIcon from '../../src-tauri/icons/icon.png';
+import { useHistory } from './useHistory';
+import { ActivityBeam } from '../shared/ActivityBeam';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
@@ -13,7 +15,9 @@ interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'>
 }
 
 export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown }: Props) {
-  const [records, setRecords] = useState(historySamples);
+  const history = useHistory(native);
+  const records = history.snapshot.records;
+  const selection = native ? history.snapshot.selectedId : selectedId;
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const search = useRef<HTMLInputElement>(null);
@@ -25,10 +29,6 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
 
   useEffect(() => { list.current?.scrollTo(0, 0); pinnedList.current?.scrollTo(0, 0); }, [query, favoritesOnly]);
 
-  function update(id: string, field: 'isFavorite' | 'isPinned') {
-    setRecords((current) => current.map((record) => record.id === id ? { ...record, [field]: !record[field] } : record));
-  }
-
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
     const date = new Date(record.date);
@@ -36,9 +36,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const two = (value: number) => String(value).padStart(2, '0');
     const time = `${today ? '' : `${two(date.getMonth() + 1)}-${two(date.getDate())} `}${two(date.getHours())}:${two(date.getMinutes())}`;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
-    return <article key={record.id} data-record-id={record.id} className={cn('history-row', selectedId === record.id && 'selected', record.isPinned && 'pinned')}
+    return <article key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', record.isPinned && 'pinned')}
       style={{ '--history-actions-width': `${canDelete ? 124 : 99}px` } as CSSProperties}>
-      <button className="history-row-select" aria-label={`Sample translation: ${record.text}`} aria-pressed={selectedId === record.id} onClick={(event) => {
+      <button className="history-row-select" aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
         const row = event.currentTarget.closest<HTMLElement>('.history-row');
         const scroller = row?.closest<HTMLElement>('.history-list, .history-pinned');
         if (row && scroller) {
@@ -49,7 +49,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         onSelect(record);
       }}>
         <span className="history-row-heading">
-          <img className="history-origin" src={sampleIcon} alt="Nami sample" title="Synthetic test record · Nami" />
+          <img className="history-origin" src={record.sourceApp?.iconDataUrl ?? fallbackIcon} alt={record.sourceApp?.name ?? 'Nami'} title={record.sourceApp?.name ?? 'Nami'} />
           <span className="history-languages" title={label}>{label}</span>
           <time dateTime={record.date}>{time}</time>
         </span>
@@ -57,15 +57,16 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       </button>
       <div className="history-row-actions" role="group" aria-label={t('actions')}>
         <button className="icon-button" title={t('retranslate')} aria-label={t('retranslate')} onClick={() => onSelect(record, true)}><HistoryIcon name="arrow.clockwise" /></button>
-        <button className="icon-button" title={t('copySource')} aria-label={t('copySource')} disabled={!native} onClick={() => void command('translation_sample_copy', { sampleId: record.id, part: 'source' })}><HistoryIcon name="doc.on.doc" /></button>
-        <button className="icon-button" title={record.isFavorite ? t('unfavorite') : t('favorite')} aria-label={record.isFavorite ? t('unfavorite') : t('favorite')} aria-pressed={record.isFavorite} onClick={() => update(record.id, 'isFavorite')}><HistoryIcon name={record.isFavorite ? 'star.fill' : 'star'} /></button>
-        <button className="icon-button" title={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-label={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-pressed={record.isPinned} onClick={() => update(record.id, 'isPinned')}><HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} /></button>
-        {canDelete && <button className="icon-button history-delete" title={t('deleteHistory')} aria-label={t('deleteHistory')} onClick={() => setRecords((current) => current.filter(({ id }) => id !== record.id))}><HistoryIcon name="trash" /></button>}
+        <button className="icon-button" title={t('copySource')} aria-label={t('copySource')} disabled={!native || !snapshot.capabilities.clipboardWrite} onClick={() => void command('translation_sample_copy', { sampleId: record.id, part: 'source' })}><HistoryIcon name="doc.on.doc" /></button>
+        <button className="icon-button" title={record.isFavorite ? t('unfavorite') : t('favorite')} aria-label={record.isFavorite ? t('unfavorite') : t('favorite')} aria-pressed={record.isFavorite} disabled={!native} onClick={() => void history.update(record.id, 'favorite')}><HistoryIcon name={record.isFavorite ? 'star.fill' : 'star'} /></button>
+        <button className="icon-button" title={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-label={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-pressed={record.isPinned} disabled={!native} onClick={() => void history.update(record.id, 'pin')}><HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} /></button>
+        {canDelete && <button className="icon-button history-delete" title={t('deleteHistory')} aria-label={t('deleteHistory')} disabled={!native} onClick={() => void history.update(record.id, 'delete')}><HistoryIcon name="trash" /></button>}
       </div>
     </article>;
   }
 
   return <aside id="translation-history" className="history-panel" aria-label={t('history')} onKeyDown={onKeyDown}>
+    {history.loading && <ActivityBeam label={t('working')} />}
     <div className="drag-strip" data-tauri-drag-region />
     <header className="history-toolbar" onMouseDown={(event) => {
       if ((event.target as HTMLElement).closest('button')) event.preventDefault();
@@ -77,10 +78,11 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       <button className="icon-button" title={t('favoriteHistory')} aria-label={t('favoriteHistory')} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(true)}><HistoryIcon name={favoritesOnly ? 'star.fill' : 'star'} /></button>
       <button className="icon-button history-pin" title={state.historyPinned ? t('unpin') : t('pinHistory')} aria-label={state.historyPinned ? t('unpin') : t('pinHistory')} aria-pressed={state.historyPinned} onClick={() => void command('window_pin', { region: 'history', pinned: !state.historyPinned })}><HistoryIcon name={state.historyPinned ? 'pin.fill' : 'pin'} /></button>
     </header>
+    {history.error && <p role="alert" className="history-error">{t('nativeError')}</p>}
     <div ref={pinnedList} className={cn('history-pinned', !filtered.some((record) => record.isPinned) && 'empty')}>{filtered.filter((record) => record.isPinned).map(row)}</div>
     <div ref={list} className="history-list">
       {filtered.filter((record) => !record.isPinned).map(row)}
-      {filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
+      {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </div>
   </aside>;
 }

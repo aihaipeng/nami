@@ -26,6 +26,7 @@ function currentTarget(): ViewTarget {
 export default function App() {
   const [target, setTarget] = useState<ViewTarget>(currentTarget);
   const [snapshot, setSnapshot] = useState<AppSnapshot>(initialSnapshot);
+  const [connected, setConnected] = useState(!native);
   const [error, setError] = useState(false);
   const [pending, setPending] = useState(0);
   const t = translator(snapshot.locale);
@@ -59,11 +60,23 @@ export default function App() {
         removers.push(remove);
       }
       const data = await invoke<AppSnapshot>('app_snapshot');
-      if (!disposed) setSnapshot({ ...data, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, window: latestWindow ?? data.window });
+      if (!disposed) {
+        document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
+        document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
+        setSnapshot({ ...data, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, window: latestWindow ?? data.window });
+        setConnected(true);
+      }
     }
     void connect().catch(() => { if (!disposed) setError(true); });
     return () => { disposed = true; removers.forEach((remove) => remove()); };
   }, []);
+
+  useEffect(() => {
+    if (connected) {
+      document.documentElement.dataset.nativeMaterial = String(snapshot.capabilities.nativeMaterial);
+      document.documentElement.dataset.nativeHistory = String(snapshot.capabilities.nativeHistory);
+    }
+  }, [connected, snapshot.capabilities]);
 
   useEffect(() => {
     document.documentElement.lang = resolveLanguage(snapshot.locale);
@@ -94,7 +107,7 @@ export default function App() {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine }));
       }
     } catch {
       setError(true);
@@ -112,11 +125,11 @@ export default function App() {
     </nav>}
     {error && <div role="alert" className="global-error">{t('nativeError')}</div>}
     <main className={cn('app-surface', target)}>
-      {pending > 0 && <ActivityBeam label={t('working')} />}
-      {target === 'translation' && <Translation {...common} />}
-      {target === 'history' && <HistoryView {...common} />}
-      {target === 'clipboard' && <Clipboard {...common} />}
-      {target === 'settings' && <Settings {...common} />}
+      {(!connected || pending > 0) && <ActivityBeam label={t('working')} />}
+      {connected && target === 'translation' && <Translation {...common} />}
+      {connected && target === 'history' && <HistoryView {...common} />}
+      {connected && target === 'clipboard' && <Clipboard {...common} />}
+      {connected && target === 'settings' && <Settings {...common} />}
     </main>
   </>;
 }

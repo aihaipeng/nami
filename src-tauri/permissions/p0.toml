@@ -6,7 +6,7 @@ commands.allow = ["app_snapshot", "window_show", "window_hide"]
 [[permission]]
 identifier = "allow-p0-translation"
 description = "Translation host layout only."
-commands.allow = ["window_pin", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take"]
+commands.allow = ["window_pin", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_record_update", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take"]
 
 [[permission]]
 identifier = "allow-p0-clipboard"

@@ -1,5 +1,5 @@
 use crate::{
-    model::{HistoryRecord, PanelFrame, WindowState},
+    model::{PanelFrame, WindowState},
     platform, AppState,
 };
 use objc2::{rc::Retained, runtime::AnyObject, DefinedClass, MainThreadOnly};
@@ -24,21 +24,16 @@ mod native_history;
 #[path = "windows/native_resize.rs"]
 mod native_resize;
 
-pub(crate) fn select_native_history(app: &AppHandle, id: Option<&str>) -> Result<(), String> {
+pub(crate) use crate::history_runtime::{
+    history_add, history_record, publish_history, select_native_history,
+};
+
+pub(crate) fn refresh_history(app: &AppHandle) -> Result<(), String> {
+    let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();
     if let Some(window) = app.get_window("translation") {
-        native_history::set_selected(&window, id)?;
+        native_history::apply_snapshot(&window, &snapshot)?;
     }
     Ok(())
-}
-
-pub(crate) fn history_record(app: &AppHandle, id: &str) -> Option<HistoryRecord> {
-    let window = app.get_window("translation")?;
-    native_history::record(&window, id)
-}
-
-pub(crate) fn history_add(app: &AppHandle, record: HistoryRecord) -> Result<(), String> {
-    let window = app.get_window("translation").ok_or("window_geometry")?;
-    native_history::add(&window, record)
 }
 
 unsafe extern "C" {

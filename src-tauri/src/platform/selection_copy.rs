@@ -182,7 +182,7 @@ pub fn finish_selection_copy(
     }
 }
 
-#[cfg(feature = "ui-tests")]
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
 pub fn test_selection_clipboard() -> Result<(), String> {
     unsafe {
         let name = NSString::from_str(&format!(

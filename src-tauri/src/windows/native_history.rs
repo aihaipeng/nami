@@ -793,15 +793,11 @@ impl NativeHistory {
 
     fn select(&self, index: usize, retranslate: bool) {
         let id = self.ivars().records.borrow()[index].id.clone();
-        *self.ivars().selected.borrow_mut() = Some(id.clone());
         if let Some(row) = self.ivars().rows.borrow().get(index) {
             unsafe {
                 let frame: NSRect = objc2::msg_send![&**row, frame];
                 let _: bool = objc2::msg_send![&**row, scrollRectToVisible: rect(0.0,0.0,frame.size.width,frame.size.height)];
             }
-        }
-        for row in self.ivars().rows.borrow().iter() {
-            row.setNeedsDisplay(true);
         }
         if crate::commands::select_history_sample(&self.ivars().app, Some(id), retranslate).is_err()
         {
@@ -890,20 +886,18 @@ impl NativeHistory {
             }
             return;
         }
-        {
-            let mut records = self.ivars().records.borrow_mut();
-            let record = &mut records[index];
-            if action == 2 {
-                record.is_favorite = !record.is_favorite;
-            }
-            if action == 3 {
-                record.is_pinned = !record.is_pinned;
-            }
-            if action == 4 && !record.is_pinned && !record.is_favorite {
-                record.id.clear();
+        let action = match action {
+            2 => "favorite",
+            3 => "pin",
+            4 => "delete",
+            _ => return,
+        };
+        let id = self.ivars().records.borrow()[index].id.clone();
+        if let Err(code) = crate::commands::update_history_record(&self.ivars().app, &id, action) {
+            if code != "history_protected" {
+                self.report_error();
             }
         }
-        self.reload(false);
     }
     fn update_toolbar(&self) {
         self.setNeedsDisplay(true);
@@ -1188,11 +1182,11 @@ impl NativeHistory {
 
 pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
     let marker = objc2::MainThreadMarker::new().ok_or("window_geometry")?;
-    let records = crate::model::initial_history_records();
+    let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();
     let root = NativeHistory::alloc(marker).set_ivars(HistoryState {
         app: app.clone(),
-        records: RefCell::new(records),
-        selected: RefCell::new(None),
+        records: RefCell::new(snapshot.records),
+        selected: RefCell::new(snapshot.selected_id),
         favorites_only: Cell::new(false),
         favorite_icon_filled: Cell::new(false),
         pin_icon_filled: Cell::new(false),
@@ -1403,38 +1397,56 @@ fn root(window: &Window) -> Result<Retained<NativeHistory>, String> {
     unsafe { Retained::retain(pointer).ok_or("window_geometry".into()) }
 }
 
-pub(super) fn record(window: &Window, id: &str) -> Option<Record> {
-    objc2::MainThreadMarker::new()?;
-    let root = root(window).ok()?;
-    let record = root
-        .ivars()
-        .records
-        .borrow()
-        .iter()
-        .find(|record| record.id == id)
-        .cloned();
-    record
-}
-
-pub(super) fn add(window: &Window, record: Record) -> Result<(), String> {
+pub(super) fn apply_snapshot(
+    window: &Window,
+    snapshot: &crate::history::HistorySnapshot,
+) -> Result<(), String> {
     let marker = objc2::MainThreadMarker::new().ok_or("window_geometry")?;
     let root = root(window)?;
-    if record.id.is_empty()
-        || root
+    let mut changed = false;
+    {
+        let mut records = root.ivars().records.borrow_mut();
+        for projected in records.iter_mut().filter(|record| !record.id.is_empty()) {
+            if let Some(record) = snapshot
+                .records
+                .iter()
+                .find(|record| record.id == projected.id)
+            {
+                changed |= projected.is_favorite != record.is_favorite
+                    || projected.is_pinned != record.is_pinned;
+                *projected = record.clone();
+            } else {
+                // Keep row indices and native instances stable after deleting a record.
+                projected.id.clear();
+                changed = true;
+            }
+        }
+    }
+    let mut added = false;
+    for record in &snapshot.records {
+        if !root
             .ivars()
             .records
             .borrow()
             .iter()
-            .any(|r| r.id == record.id)
-    {
-        return Err("history_record".into());
+            .any(|item| item.id == record.id)
+        {
+            let index = root.ivars().records.borrow().len();
+            root.ivars().records.borrow_mut().push(record.clone());
+            unsafe {
+                root.add_row(marker, index, record);
+            }
+            added = true;
+        }
     }
-    let index = root.ivars().records.borrow().len();
-    root.ivars().records.borrow_mut().push(record.clone());
-    unsafe {
-        root.add_row(marker, index, &record);
+    *root.ivars().selected.borrow_mut() = snapshot.selected_id.clone();
+    if changed || added {
+        root.reload(added);
+    } else {
+        for row in root.ivars().rows.borrow().iter() {
+            row.setNeedsDisplay(true);
+        }
     }
-    root.reload(true);
     Ok(())
 }
 
@@ -1452,15 +1464,6 @@ pub(super) fn sync(window: &Window, history_visible: bool) -> Result<(), String>
         }
     }
     root.update_toolbar();
-    Ok(())
-}
-
-pub(super) fn set_selected(window: &Window, id: Option<&str>) -> Result<(), String> {
-    let root = root(window)?;
-    *root.ivars().selected.borrow_mut() = id.map(str::to_string);
-    for row in root.ivars().rows.borrow().iter() {
-        row.setNeedsDisplay(true);
-    }
     Ok(())
 }
 

@@ -10,6 +10,12 @@ export interface HistoryRecord {
   sourceApp?: { bundleId: string; name: string; iconDataUrl: string | null } | null;
 }
 
+export interface HistorySnapshot {
+  revision: number;
+  records: HistoryRecord[];
+  selectedId: string | null;
+}
+
 export interface HistorySelection {
   sampleId: string | null;
   retranslate: boolean;

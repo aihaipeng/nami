@@ -45,7 +45,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const normalizedCaret = useRef<number | null>(null);
   const select = useRef<(record: HistoryRecord, retranslate: boolean) => void>(() => {});
   const state = snapshot.window;
-  const nativeChrome = useNativeChrome(native, {
+  const committedHistoryWidth = useRef(state.historyWidth);
+  const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
+  useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
+  const capabilities = snapshot.capabilities;
+  const primaryKey = capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl';
+  const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
+  const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, {
     sourceLabel: source === 'auto' ? 'Auto-Detect' : languages.find(([code]) => code === source)?.[1] ?? source,
     sourceWidth,
     translateLabel: t('translation'), actionsLabel: t('actions'),
@@ -83,7 +89,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [native]);
 
   useEffect(() => {
-    if (!native) return;
+    if (!native || !capabilities.selection) return;
     let disposed = false;
     const take = async () => {
       const context = await invoke<{ text: string; error: string | null } | null>('selection_take');
@@ -92,7 +98,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     const remove = listen('selection_ready', () => { void take().catch(() => setServiceError('Unable to read selected text.')); });
     void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read selected text.'); });
     return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
-  }, [native]);
+  }, [native, capabilities.selection]);
 
   useEffect(() => {
     cancelRequest(); setCachedResults([]); setServiceError(null);
@@ -124,7 +130,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (!element) return;
     const measure = () => {
       const picker = sourceBar.current?.querySelector<HTMLElement>('.language-picker');
-      if (native && picker && sourceBar.current) {
+      if (capabilities.nativeHistory && picker && sourceBar.current) {
         sourceBar.current.style.paddingRight = `${picker.offsetWidth + 24}px`;
         if (picker.offsetWidth > 0) setSourceWidth(Math.min(200, Math.max(32, picker.offsetWidth)));
       }
@@ -140,7 +146,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     void document.fonts.ready.then(measure);
     measure();
     return () => observer.disconnect();
-  }, [source, secondary, primary, snapshot.locale, state.translationVisible, native]);
+  }, [source, secondary, primary, snapshot.locale, state.translationVisible, capabilities.nativeHistory]);
 
   function clearSelection() {
     if (native && selectedId !== null) void command('history_sample_select', { sampleId: null, retranslate: false });
@@ -188,7 +194,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function selectHistory(record: HistoryRecord, retranslate = false) {
     setPopup(null);
-    if (!retranslate && selectedId === record.id && state.translationVisible && !state.translationPinned) {
+    if (!native && !retranslate && selectedId === record.id && state.translationVisible && !state.translationPinned) {
       void command('window_hide', { region: 'translation', keepHistory: true });
       return;
     }
@@ -200,7 +206,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
     if (retranslate) void translateText(record.text, record.sourceLanguage, record.targetLanguages, false);
-    void command('window_show', { target: 'translation' });
+    if (!native) void command('window_show', { target: 'translation' });
     input.current?.focus({ preventScroll: true });
   }
 
@@ -211,7 +217,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }
 
   function copyTranslation(index: number) {
-    if (!native || !selectedId || !cachedResults[index]) return;
+    if (!native || !capabilities.clipboardWrite || !selectedId || !cachedResults[index]) return;
     setPopup(null);
     void command('translation_sample_copy', { sampleId: selectedId, part: index ? 'secondary' : 'primary' });
   }
@@ -222,17 +228,17 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       event.preventDefault();
       if (popup) { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else void command('window_hide', { region: 'translation' });
-    } else if (event.metaKey && event.key.toLowerCase() === 'w') {
+    } else if (primaryPressed(event) && event.key.toLowerCase() === 'w') {
       event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
-    } else if (region === 'translation' && event.metaKey && event.key === 'Enter') {
+    } else if (region === 'translation' && primaryPressed(event) && event.key === 'Enter') {
       event.preventDefault(); submit();
-    } else if (region === 'translation' && event.metaKey && (event.key === '1' || event.key === '2')) {
+    } else if (region === 'translation' && primaryPressed(event) && (event.key === '1' || event.key === '2')) {
       event.preventDefault(); copyTranslation(Number(event.key) - 1);
-    } else if (region === 'translation' && event.metaKey && event.key.toLowerCase() === 'k') {
+    } else if (region === 'translation' && primaryPressed(event) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       if (popup === 'actions') { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else setPopup('actions');
-    } else if (region === 'translation' && event.metaKey && event.shiftKey && event.key.toLowerCase() === 'p') {
+    } else if (region === 'translation' && primaryPressed(event) && event.shiftKey && event.key.toLowerCase() === 'p') {
       event.preventDefault(); togglePin();
     }
   }
@@ -259,19 +265,19 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   } as CSSProperties;
 
   return <div className={cn('translation-shell', state.historyVisible && 'with-history', !state.translationVisible && 'history-only')} style={shellStyle}>
-    {!native && <div className="history-clip" hidden={!state.historyVisible && state.historyExtent === 0} aria-hidden={!state.historyVisible} inert={!state.historyVisible}>
-    <HistoryPanel t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId} onSelect={selectHistory} onKeyDown={(event) => keydown(event, 'history')} />
+    {!capabilities.nativeHistory && <div className="history-clip" style={historyWidthChanged ? { transition: 'none' } : undefined} hidden={!state.historyVisible && state.historyExtent === 0} aria-hidden={!state.historyVisible} inert={!state.historyVisible}>
+    <HistoryPanel t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId} onSelect={native ? (record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); } : selectHistory} onKeyDown={(event) => keydown(event, 'history')} />
     </div>}
-    <div className="translation-clip" hidden={!native && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
+    <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
     <section className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}
       onKeyDown={(event) => keydown(event, 'translation')}
       onKeyDownCapture={(event) => {
-        if (event.metaKey) { keydown(event, 'translation'); if (event.defaultPrevented) event.stopPropagation(); }
+        if (primaryPressed(event)) { keydown(event, 'translation'); if (event.defaultPrevented) event.stopPropagation(); }
       }}>
       <div className="drag-strip" data-tauri-drag-region />
       <header ref={sourceBar} className="source-bar">
         <button className="icon-button history-trigger" title={t('history')} aria-label={t('history')} aria-expanded={state.historyVisible}
-          aria-controls={native ? undefined : 'translation-history'} aria-pressed={state.historyVisible} onMouseDown={(event) => event.preventDefault()}
+          aria-controls={capabilities.nativeHistory ? undefined : 'translation-history'} aria-pressed={state.historyVisible} onMouseDown={(event) => event.preventDefault()}
           onClick={() => { setPopup(null); void command('history_toggle'); }}><HistoryIcon name="clock" /></button>
         <textarea ref={input} className="source-input" aria-label={t('sourceLabel')} rows={1} wrap="off" spellCheck={false} value={displaySource(draft)}
           onChange={(event) => {
@@ -282,7 +288,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             setDraft(editSource(draft, next)); setNotice(null); clearSelection(); setCachedResults([]);
           }}
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current && !event.metaKey) event.preventDefault(); }} />
+          onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current && !primaryPressed(event)) event.preventDefault(); }} />
         {picker('source', source, (value) => changeLanguage(setSource, value), 'auto')}
       </header>
       <div className={cn('result-columns', secondary === 'none' && 'single-column')}>
@@ -298,13 +304,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           {picker('secondary', secondary, (value) => changeLanguage(setSecondary, value), 'none')}
         </div>
         <div ref={actionGroup} className={cn('translation-actions', !actionsFit && 'actions-overflow')} aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
-          <button className="translation-action" disabled={!draft.trim()} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={['⌘', '↵']} /></button>
-          <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={['⌘', 'K']} /></button>
+          <button className="translation-action" disabled={!draft.trim()} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={[primaryKey, '↵']} /></button>
+          <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={[primaryKey, 'K']} /></button>
         </div>
       </footer>
       {popup === 'actions' && <FloatingPanel anchor={actionButton} onClose={() => setPopup(null)} label={t('actions')} role="menu" width={310} side="top" className="action-menu">
         <div role="group" onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || event.metaKey) return;
+          if (event.nativeEvent.isComposing || primaryPressed(event)) return;
           const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
           const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -313,15 +319,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             event.preventDefault(); buttons[event.key === 'Home' ? 0 : buttons.length - 1]?.focus();
           }
         }}>
-          <button role="menuitem" disabled={!native || !cachedResults[0]} onClick={() => copyTranslation(0)}>{t('copyPrimary')}<Keycaps keys={['⌘', '1']} /></button>
-          {secondary !== 'none' && <button role="menuitem" disabled={!native || !cachedResults[1]} onClick={() => copyTranslation(1)}>{t('copySecondary')}<Keycaps keys={['⌘', '2']} /></button>}
+          <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[0]} onClick={() => copyTranslation(0)}>{t('copyPrimary')}<Keycaps keys={[primaryKey, '1']} /></button>
+          {secondary !== 'none' && <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[1]} onClick={() => copyTranslation(1)}>{t('copySecondary')}<Keycaps keys={[primaryKey, '2']} /></button>}
           {secondary === 'none' && <button role="menuitem" onClick={() => { changeLanguage(setSecondary, 'zh-CN'); setPopup(null); input.current?.focus(); }}>Enable Second Language</button>}
-          <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={['⌘', '⇧', 'P']} /></button>
+          <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={[primaryKey, '⇧', 'P']} /></button>
         </div>
       </FloatingPanel>}
     </section>
     </div>
-    {!native && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}
+    {!capabilities.nativeHistory && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}
       onStart={() => setPopup(null)} onEscape={() => input.current?.focus()} />}
   </div>;
 }
