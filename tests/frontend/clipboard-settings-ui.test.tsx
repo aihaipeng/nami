@@ -42,7 +42,7 @@ describe('clipboard recording settings', () => {
       return invoke(name, args);
     });
     await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clipboard' }));
     expect((screen.getByRole('switch') as HTMLInputElement).checked).toBe(true);
   });
 });

@@ -696,15 +696,26 @@ pub async fn clipboard_query(
     query: String,
     favorites_only: bool,
     cursor: Option<nami::clipboard::ClipboardCursor>,
-) -> Result<nami::clipboard::ClipboardPage, String> {
+) -> Result<nami::clipboard::ClipboardQueryResult, String> {
     authorize(&window, &["clipboard"])?;
     crate::clipboard_runtime::database(&app, move |database| {
-        database.clipboard_page(
+        let page = database.clipboard_page(
             &query,
             favorites_only,
             cursor.as_ref(),
             crate::database::PAGE_SIZE,
-        )
+        )?;
+        let alternate = if cursor.is_none() {
+            Some(database.clipboard_page(
+                &query,
+                !favorites_only,
+                None,
+                crate::database::PAGE_SIZE,
+            )?)
+        } else {
+            None
+        };
+        Ok(nami::clipboard::ClipboardQueryResult { page, alternate })
     })
     .await
 }

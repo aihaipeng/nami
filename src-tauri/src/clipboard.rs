@@ -24,17 +24,37 @@ pub struct ClipboardRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardCursor {
     pub pinned: bool,
-    pub date: String,
+    pub created_at: i64,
     pub sequence: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ClipboardSummary {
+    pub id: String,
+    pub kind: String,
+    pub text: String,
+    pub date: String,
+    pub is_favorite: bool,
+    pub is_pinned: bool,
+    pub source_app_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClipboardPage {
-    pub records: Vec<ClipboardRecord>,
+    pub records: Vec<ClipboardSummary>,
+    pub sources: std::collections::BTreeMap<i64, serde_json::Value>,
     pub cursor: Option<ClipboardCursor>,
     pub has_more: bool,
     pub total_records: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardQueryResult {
+    pub page: ClipboardPage,
+    pub alternate: Option<ClipboardPage>,
 }
 
 pub fn fingerprint(kind: &str, bytes: &[u8]) -> String {

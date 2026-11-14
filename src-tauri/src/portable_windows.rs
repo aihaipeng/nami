@@ -34,6 +34,7 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         "settings" => (840.0, 640.0),
         _ => return Err("invalid_argument".into()),
     };
+    let focused = !cfg!(feature = "ui-tests") || std::env::var_os("NAMI_UI_TEST_REPORT").is_none();
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(if label == "settings" {
             "Nami · Settings"
@@ -45,6 +46,7 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         .decorations(true)
         .transparent(false)
         .visible(false)
+        .focused(focused)
         .center()
         .build()
         .map_err(|_| "window_create")?;
@@ -256,7 +258,16 @@ pub fn show(app: &AppHandle, target: &str) -> Result<(), String> {
         apply_translation(app)?;
     }
     window.show().map_err(|_| "window_show")?;
+    #[cfg(feature = "ui-tests")]
+    if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
+        return emit_state(app);
+    }
     window.set_focus().map_err(|_| "window_focus")?;
+    if target == "clipboard" {
+        if let Some(view) = app.get_webview(target) {
+            view.set_focus().map_err(|_| "window_focus")?;
+        }
+    }
     emit_state(app)
 }
 

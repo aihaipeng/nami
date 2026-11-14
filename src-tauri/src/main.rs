@@ -240,8 +240,14 @@ fn main() {
                         std::sync::atomic::Ordering::SeqCst,
                     );
                     *app.state::<AppState>().database.lock().unwrap() = Some(database);
-                    app.state::<AppState>().history_page.lock().unwrap().cursor =
-                        page.cursor.clone();
+                    {
+                        let state = app.state::<AppState>();
+                        let mut paging = state.history_page.lock().unwrap();
+                        paging.cursor = page.cursor.clone();
+                        paging
+                            .cache
+                            .insert(database::HistoryQuery::default(), page.clone());
+                    }
                     app.state::<AppState>()
                         .history
                         .lock()

@@ -1164,8 +1164,8 @@ pub fn show(app: &AppHandle, target: &str) -> Result<(), String> {
     // makeKeyAndOrderFront alone. Activate it so global shortcuts and the tray
     // menu deliver keyboard focus to the tool window.
     activate_application();
-    if target == "translation" {
-        if let Some(view) = app.get_webview("translation") {
+    if matches!(target, "translation" | "clipboard") {
+        if let Some(view) = app.get_webview(target) {
             view.set_focus().map_err(|_| "window_focus")?;
         }
     }

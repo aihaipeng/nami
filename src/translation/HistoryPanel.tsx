@@ -37,7 +37,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const favoriteChanged = lastQuery.current.favoritesOnly !== favoritesOnly;
     const submit = () => {
       lastQuery.current = { query, favoritesOnly };
-      void history.setQuery(query, favoritesOnly);
+      void history.setQuery(query, favoritesOnly, favoriteChanged);
     };
     if (favoriteChanged) { submit(); return; }
     const timer = window.setTimeout(submit, 150);
@@ -87,7 +87,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   }
 
   return <aside id="translation-history" className="history-panel" aria-label={t('history')} onKeyDown={onKeyDown}>
-    {history.loading && <ActivityBeam label={t('working')} />}
+    {history.showLoading && <ActivityBeam label={t('working')} />}
     <div className="drag-strip" data-tauri-drag-region />
     <header className="history-toolbar" onMouseDown={(event) => {
       if ((event.target as HTMLElement).closest('button')) event.preventDefault();

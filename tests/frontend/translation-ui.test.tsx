@@ -245,6 +245,17 @@ describe('selection across native webviews', () => {
     expect(calls('window_hide')).toHaveLength(0);
   });
 
+  it('moves the only history selection to the new record after retranslation', async () => {
+    await mount(); const history = await mount('history');
+    await select();
+    const original = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
+    expect(original.getAttribute('aria-pressed')).toBe('true');
+    await select(sample.id, true);
+    await waitFor(() => expect(history.container.querySelector('[data-record-id="translation-test"] .history-row-select')?.getAttribute('aria-pressed')).toBe('true'));
+    expect(original.getAttribute('aria-pressed')).toBe('false');
+    expect(history.container.querySelectorAll('.history-row.selected')).toHaveLength(1);
+  });
+
   it('selecting a row in the history view restores translation through the shared event bus', async () => {
     const user = userEvent.setup(); const translation = await mount(); const history = await mount('history');
     const button = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });

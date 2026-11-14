@@ -29,6 +29,7 @@ struct HistoryState {
     load_pending: Cell<bool>,
     query_serial: Cell<u64>,
     requested_query: RefCell<Option<(String, bool)>>,
+    rendered_query: RefCell<String>,
     suppress_load: Cell<bool>,
     favorites_only: Cell<bool>,
     favorite_icon_filled: Cell<bool>,
@@ -43,6 +44,7 @@ struct HistoryState {
     progress: Cell<usize>,
     shortcuts: Cell<usize>,
     rows: RefCell<Vec<Retained<HistoryRow>>>,
+    row_cache: RefCell<HashMap<String, Retained<HistoryRow>>>,
     size: Cell<NSSize>,
     divider: Cell<usize>,
     empty_label: Cell<usize>,
@@ -51,8 +53,9 @@ struct HistoryState {
 
 struct RowState {
     root: usize,
-    index: usize,
+    index: Cell<usize>,
     hovered: Cell<bool>,
+    flags: Cell<(bool, bool)>,
     tracking: RefCell<Option<Retained<AnyObject>>>,
     heading: Cell<usize>,
     time: Cell<usize>,
@@ -321,7 +324,7 @@ objc2::define_class!(
     struct HistoryRow;
     impl HistoryRow {
         #[unsafe(method(tag))]
-        fn tag(&self) -> isize { 3000 + self.ivars().index as isize }
+        fn tag(&self) -> isize { 3000 + self.ivars().index.get() as isize }
         #[unsafe(method(isFlipped))]
         fn flipped(&self) -> bool { true }
         #[unsafe(method(acceptsFirstMouse:))]
@@ -339,12 +342,12 @@ objc2::define_class!(
         #[unsafe(method(accessibilityPerformPress))]
         fn accessible_press(&self) -> bool {
             let root = unsafe { &*(self.ivars().root as *const NativeHistory) };
-            root.select(self.ivars().index, false); true
+            root.select(self.ivars().index.get(), false); true
         }
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _: *mut AnyObject) {
             let root = unsafe { &*(self.ivars().root as *const NativeHistory) };
-            root.select(self.ivars().index, false);
+            root.select(self.ivars().index.get(), false);
             unsafe {
                 let window: *mut AnyObject = objc2::msg_send![self, window];
                 let _: bool = objc2::msg_send![window, makeFirstResponder: root];
@@ -639,7 +642,7 @@ impl HistoryRow {
     fn protected(&self) -> bool {
         let root = unsafe { &*(self.ivars().root as *const NativeHistory) };
         let records = root.ivars().records.borrow();
-        records[self.ivars().index].is_favorite || records[self.ivars().index].is_pinned
+        records[self.ivars().index.get()].is_favorite || records[self.ivars().index.get()].is_pinned
     }
     fn set_hover(&self, value: bool) {
         if self.ivars().hovered.replace(value) == value {
@@ -664,7 +667,7 @@ impl HistoryRow {
     unsafe fn draw_row(&self) {
         let root = &*(self.ivars().root as *const NativeHistory);
         let records = root.ivars().records.borrow();
-        let record = &records[self.ivars().index];
+        let record = &records[self.ivars().index.get()];
         let selected = root.ivars().selected.borrow().as_deref() == Some(&record.id);
         let bounds: NSRect = objc2::msg_send![self, bounds];
         let shape: *mut AnyObject = objc2::msg_send![objc2::class!(NSBezierPath), bezierPathWithRoundedRect: rect(0.5,0.5,bounds.size.width-1.0,bounds.size.height-1.0), xRadius: 10.0_f64, yRadius: 10.0_f64];
@@ -767,8 +770,9 @@ impl NativeHistory {
     unsafe fn add_row(&self, marker: objc2::MainThreadMarker, index: usize, record: &Record) {
         let row = HistoryRow::alloc(marker).set_ivars(RowState {
             root: self as *const Self as usize,
-            index,
+            index: Cell::new(index),
             hovered: Cell::new(false),
+            flags: Cell::new((false, false)),
             tracking: RefCell::new(None),
             heading: Cell::new(0),
             time: Cell::new(0),
@@ -876,6 +880,7 @@ impl NativeHistory {
                 r.is_pinned == pinned
                     && (!self.ivars().favorites_only.get() || r.is_favorite)
                     && !r.id.is_empty()
+                    && self.ivars().order.borrow().contains_key(&r.id)
             })
             .map(|(i, _)| i)
             .collect();
@@ -924,7 +929,7 @@ impl NativeHistory {
         unsafe {
             let progress = self.ivars().progress.get() as *mut AnyObject;
             if !progress.is_null() {
-                if loading {
+                if self.ivars().load_pending.get() {
                     let _: () =
                         objc2::msg_send![progress, startAnimation: std::ptr::null::<AnyObject>()];
                 } else {
@@ -950,8 +955,26 @@ impl NativeHistory {
         *self.ivars().requested_query.borrow_mut() = Some((query.clone(), favorites_only));
         let serial = self.ivars().query_serial.get().wrapping_add(1);
         self.ivars().query_serial.set(serial);
-        self.ivars().query_pending.set(true);
+        self.ivars().query_pending.set(false);
         self.ivars().load_pending.set(false);
+        match crate::history_runtime::restore_cached_query(
+            &self.ivars().app,
+            crate::database::HistoryQuery {
+                text: query.clone(),
+                favorites_only,
+            },
+        ) {
+            Ok(true) => {
+                self.update_loading();
+                return;
+            }
+            Err(_) => {
+                self.report_error();
+                return;
+            }
+            Ok(false) => {}
+        }
+        self.ivars().query_pending.set(true);
         self.ivars().has_more.set(false);
         self.reload(true);
         self.update_loading();
@@ -1166,8 +1189,10 @@ impl NativeHistory {
                 if count == 1 { "record" } else { "records" }
             ));
             let _: () = objc2::msg_send![self.ivars().record_count.get() as *mut AnyObject, setStringValue: &*count_text];
-            for row in self.ivars().rows.borrow().iter() {
-                let _: () = objc2::msg_send![&**row, removeFromSuperview];
+            for (index, row) in self.ivars().rows.borrow().iter().enumerate() {
+                if !pinned.contains(&index) && !ordinary.contains(&index) {
+                    let _: () = objc2::msg_send![&**row, removeFromSuperview];
+                }
             }
             for (indices, document) in [
                 (&pinned, self.ivars().pinned_document.get()),
@@ -1175,24 +1200,35 @@ impl NativeHistory {
             ] {
                 for &index in indices {
                     let row = self.ivars().rows.borrow()[index].clone();
-                    let _: () = objc2::msg_send![document as *mut AnyObject, addSubview: &*row];
+                    let parent: *mut AnyObject = objc2::msg_send![&*row, superview];
+                    if parent != document as *mut AnyObject {
+                        let _: () = objc2::msg_send![document as *mut AnyObject, addSubview: &*row];
+                    }
                 }
             }
             for (index, row) in self.ivars().rows.borrow().iter().enumerate() {
                 let record = self.ivars().records.borrow()[index].clone();
                 let actions = row.ivars().actions.borrow();
-                set_symbol(
-                    &actions[2],
-                    if record.is_favorite {
-                        "star.fill"
-                    } else {
-                        "star"
-                    },
-                );
-                set_symbol(
-                    &actions[3],
-                    if record.is_pinned { "pin.fill" } else { "pin" },
-                );
+                let previous = row
+                    .ivars()
+                    .flags
+                    .replace((record.is_favorite, record.is_pinned));
+                if previous.0 != record.is_favorite {
+                    set_symbol(
+                        &actions[2],
+                        if record.is_favorite {
+                            "star.fill"
+                        } else {
+                            "star"
+                        },
+                    );
+                }
+                if previous.1 != record.is_pinned {
+                    set_symbol(
+                        &actions[3],
+                        if record.is_pinned { "pin.fill" } else { "pin" },
+                    );
+                }
                 let _: () = objc2::msg_send![&*actions[4], setEnabled: row.ivars().hovered.get() && !record.is_favorite && !record.is_pinned];
                 let _: () = objc2::msg_send![&*actions[4], setHidden: record.is_favorite || record.is_pinned];
                 for (button, label) in [
@@ -1410,6 +1446,7 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         load_pending: Cell::new(false),
         query_serial: Cell::new(0),
         requested_query: RefCell::new(Some((String::new(), false))),
+        rendered_query: RefCell::new(String::new()),
         suppress_load: Cell::new(false),
         favorites_only: Cell::new(false),
         favorite_icon_filled: Cell::new(false),
@@ -1424,6 +1461,7 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         progress: Cell::new(0),
         shortcuts: Cell::new(0),
         rows: RefCell::new(Vec::new()),
+        row_cache: RefCell::new(HashMap::new()),
         size: Cell::new(NSSize::ZERO),
         divider: Cell::new(0),
         empty_label: Cell::new(0),
@@ -1661,14 +1699,42 @@ pub(super) fn apply_snapshot(
         root.ivars().total_records.replace(snapshot.total_records) != snapshot.total_records;
     root.ivars().has_more.set(snapshot.has_more);
     root.ivars().suppress_load.set(true);
+    let query_changed = root.ivars().rendered_query.replace(root.query()) != root.query();
     if reset {
-        for row in root.ivars().rows.borrow().iter() {
+        let old_records = std::mem::take(&mut *root.ivars().records.borrow_mut());
+        let old_rows = std::mem::take(&mut *root.ivars().rows.borrow_mut());
+        let mut cached = std::mem::take(&mut *root.ivars().row_cache.borrow_mut());
+        if query_changed {
+            cached.clear();
+        }
+        for (record, row) in old_records.into_iter().zip(old_rows) {
             unsafe {
-                let _: () = objc2::msg_send![&**row, removeFromSuperview];
+                let _: () = objc2::msg_send![&*row, removeFromSuperview];
+            }
+            if !query_changed && !record.id.is_empty() {
+                cached.insert(record.id, row);
             }
         }
-        root.ivars().rows.borrow_mut().clear();
-        root.ivars().records.borrow_mut().clear();
+        *root.ivars().records.borrow_mut() = snapshot.records.clone();
+        for (index, record) in snapshot.records.iter().enumerate() {
+            if let Some(row) = cached.remove(&record.id) {
+                row.ivars().index.set(index);
+                for (action, button) in row.ivars().actions.borrow().iter().enumerate() {
+                    unsafe {
+                        let _: () = objc2::msg_send![&**button, setTag: RECORD_TAG + index as isize * 10 + action as isize];
+                    }
+                }
+                root.ivars().rows.borrow_mut().push(row);
+            } else {
+                unsafe {
+                    root.add_row(marker, index, record);
+                }
+            }
+        }
+        *root.ivars().row_cache.borrow_mut() = cached
+            .into_iter()
+            .take(crate::database::PAGE_SIZE)
+            .collect();
     }
     let incoming: HashMap<&str, &Record> = snapshot
         .records
@@ -1705,6 +1771,19 @@ pub(super) fn apply_snapshot(
         }
     }
     let previous = root.ivars().selected.replace(snapshot.selected_id.clone());
+    if reset || previous != snapshot.selected_id {
+        for (record, row) in root
+            .ivars()
+            .records
+            .borrow()
+            .iter()
+            .zip(root.ivars().rows.borrow().iter())
+        {
+            if reset || Some(&record.id) != snapshot.selected_id.as_ref() {
+                row.set_hover(false);
+            }
+        }
+    }
     if changed {
         root.reload(reset);
     } else if previous != snapshot.selected_id {
@@ -1714,6 +1793,22 @@ pub(super) fn apply_snapshot(
                 || snapshot.selected_id.as_deref() == Some(record.id.as_str())
             {
                 row.setNeedsDisplay(true);
+            }
+        }
+    }
+    if previous != snapshot.selected_id {
+        let index = root
+            .ivars()
+            .records
+            .borrow()
+            .iter()
+            .position(|record| Some(&record.id) == snapshot.selected_id.as_ref());
+        if let Some(index) = index {
+            if let Some(row) = root.ivars().rows.borrow().get(index) {
+                unsafe {
+                    let bounds: NSRect = objc2::msg_send![&**row, bounds];
+                    let _: bool = objc2::msg_send![&**row, scrollRectToVisible: bounds];
+                }
             }
         }
     }
@@ -1739,6 +1834,58 @@ pub(super) fn sync(window: &Window, history_visible: bool) -> Result<(), String>
 }
 
 #[cfg(feature = "ui-tests")]
+pub(super) fn verify_flag_icons(window: &Window) -> Result<(), String> {
+    let root = root(window)?;
+    for (record, row) in root
+        .ivars()
+        .records
+        .borrow()
+        .iter()
+        .zip(root.ivars().rows.borrow().iter())
+    {
+        for (index, reference) in [
+            (
+                2,
+                if record.is_favorite {
+                    include_bytes!("../../../src/assets/history/reference-star-filled.png")
+                        .as_slice()
+                } else {
+                    include_bytes!("../../../src/assets/history/reference-star.png").as_slice()
+                },
+            ),
+            (
+                3,
+                if record.is_pinned {
+                    include_bytes!("../../../src/assets/history/reference-pin-filled.png")
+                        .as_slice()
+                } else {
+                    include_bytes!("../../../src/assets/history/reference-pin.png").as_slice()
+                },
+            ),
+        ] {
+            unsafe {
+                let data: *mut AnyObject = objc2::msg_send![objc2::class!(NSData), dataWithBytes: reference.as_ptr(), length: reference.len()];
+                let allocated: *mut AnyObject = objc2::msg_send![objc2::class!(NSImage), alloc];
+                let expected: *mut AnyObject = objc2::msg_send![allocated, initWithData: data];
+                let expected = Retained::from_raw(expected).ok_or("missing reference icon")?;
+                let _: () = objc2::msg_send![&*expected, setSize: NSSize::new(14.0,14.0)];
+                let _: () = objc2::msg_send![&*expected, setTemplate: true];
+                let expected: Retained<AnyObject> =
+                    objc2::msg_send![&*expected, TIFFRepresentation];
+                let image: *mut AnyObject =
+                    objc2::msg_send![&*row.ivars().actions.borrow()[index], image];
+                let actual: Retained<AnyObject> = objc2::msg_send![image, TIFFRepresentation];
+                let equal: bool = objc2::msg_send![&*actual, isEqualToData: &*expected];
+                if !equal {
+                    return Err("native history flag icon differs from its saved state".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ui-tests")]
 pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
     let root = root(window)?;
     let pinned = root.indices(true);
@@ -1746,6 +1893,9 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
     let records = root.ivars().records.borrow();
     let mut rows = Vec::new();
     for (index, row) in root.ivars().rows.borrow().iter().enumerate() {
+        if !root.ivars().order.borrow().contains_key(&records[index].id) {
+            continue;
+        }
         unsafe {
             let f: NSRect = objc2::msg_send![&**row, frame];
             let parent: *mut AnyObject = objc2::msg_send![&**row, superview];
@@ -1774,7 +1924,17 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
                 objc2::msg_send![row.ivars().heading.get() as *mut AnyObject, frame];
             let time_cell: *mut AnyObject = objc2::msg_send![time, cell];
             let time_size: NSSize = objc2::msg_send![time_cell, cellSize];
-            rows.push(serde_json::json!({"id":records[index].id,"pinned":records[index].is_pinned,"favorite":records[index].is_favorite,"x":f.origin.x,"y":f.origin.y,"width":f.size.width,"height":f.size.height,"parentPointer":parent as usize,"viewportY":viewport.origin.y,"pointer":Retained::as_ptr(row) as usize,"hidden":parent.is_null(),"actions":actions,"headingCenterY":heading_frame.origin.y+heading_frame.size.height/2.0,"timeCenterY":time_frame.origin.y+time_frame.size.height/2.0,"timeWidth":time_frame.size.width,"timeRequiredWidth":time_size.width,"timeHeight":time_frame.size.height,"timeRequiredHeight":time_size.height}));
+            let preview = row.ivars().preview.get() as *mut AnyObject;
+            let preview_frame: NSRect = objc2::msg_send![preview, frame];
+            let preview_font: *mut AnyObject = objc2::msg_send![preview, font];
+            let font_name: Retained<NSString> = objc2::msg_send![preview_font, fontName];
+            let font_size: f64 = objc2::msg_send![preview_font, pointSize];
+            let layout: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSLayoutManager), new];
+            let line_height: f64 =
+                objc2::msg_send![&*layout, defaultLineHeightForFont: preview_font];
+            let preview_cell: *mut AnyObject = objc2::msg_send![preview, cell];
+            let preview_cell_size: NSSize = objc2::msg_send![preview_cell, cellSizeForBounds: rect(0.0, 0.0, preview_frame.size.width, 10000.0)];
+            rows.push(serde_json::json!({"id":records[index].id,"hovered":row.ivars().hovered.get(),"selected":root.ivars().selected.borrow().as_deref()==Some(records[index].id.as_str()),"pinned":records[index].is_pinned,"favorite":records[index].is_favorite,"x":f.origin.x,"y":f.origin.y,"width":f.size.width,"height":f.size.height,"parentPointer":parent as usize,"viewportY":viewport.origin.y,"pointer":Retained::as_ptr(row) as usize,"hidden":parent.is_null(),"actions":actions,"previewFrame":{"x":preview_frame.origin.x,"y":preview_frame.origin.y,"width":preview_frame.size.width,"height":preview_frame.size.height},"previewFont":{"name":font_name.to_string(),"size":font_size,"lineHeight":line_height},"previewCellSize":{"width":preview_cell_size.width,"height":preview_cell_size.height},"headingCenterY":heading_frame.origin.y+heading_frame.size.height/2.0,"timeCenterY":time_frame.origin.y+time_frame.size.height/2.0,"timeWidth":time_frame.size.width,"timeRequiredWidth":time_size.width,"timeHeight":time_frame.size.height,"timeRequiredHeight":time_size.height}));
         }
     }
     let mut toolbar = Vec::new();

@@ -49,6 +49,8 @@ def suite_commands(suite, python):
     units = py('-m', 'not native and not signing and not tools')
     performance = (cargo + ['--release', '--lib', 'database::tests::benchmark_large_history',
                             '--', '--ignored', '--exact', '--nocapture'], {})
+    clipboard_performance = (cargo + ['--release', '--lib', 'database::clipboard::tests::benchmark_large_clipboard',
+                                      '--', '--ignored', '--exact', '--nocapture'], {})
     static = [
         ([npm, 'run', 'build'], {}),
         (['cargo', 'fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--check'], {}),
@@ -59,7 +61,7 @@ def suite_commands(suite, python):
         'ui': [frontend('ui'), hidden, visible],
         'functional': [frontend('functional'), rust('history::tests', '--lib'),
                        rust('model::tests', '--lib'), rust('translation::tests', '--lib')],
-        'dfx-performance': [performance],
+        'dfx-performance': [performance, clipboard_performance],
         'dfx-reliability': [frontend('dfx-reliability'), rust('database::tests', '--lib')],
         'dfx-security': [frontend('dfx-security'), py('-m', 'dfx_security and not signing'),
                          rust('platform::selection_copy::tests', '--bin', 'nami'),
@@ -68,7 +70,7 @@ def suite_commands(suite, python):
         'dfx-compatibility': [frontend('dfx-compatibility'),
                               py('-m', 'dfx_compatibility and not native'), *static],
         'all': [*static, frontend(), units, rust(), rust(None, '--all-features'),
-                tools, hidden, signing, performance, visible],
+                tools, hidden, signing, performance, clipboard_performance, visible],
     }
     if suite not in commands:
         raise ValueError(f'Unknown test suite: {suite}')

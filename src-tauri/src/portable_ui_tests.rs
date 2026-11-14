@@ -52,6 +52,14 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         state.history_width_initialized = true;
     }
     windows::show(app, "translation")?;
+    if app
+        .get_window("translation")
+        .ok_or("missing test window")?
+        .is_focused()
+        .map_err(|_| "window_focus")?
+    {
+        return Err("isolated portable host must not take keyboard focus".into());
+    }
     let finished = Arc::new(AtomicBool::new(false));
     let owned = app.clone();
     let received = finished.clone();

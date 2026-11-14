@@ -41,31 +41,40 @@ pub(crate) async fn payload(
     app: &AppHandle,
     id: String,
 ) -> Result<platform::ClipboardPayload, String> {
+    let state = app.state::<AppState>();
+    // Keep deletion and capture serialized while file reads run without the database mutex.
+    let _write = state.clipboard_writes.lock().await;
     let root = image_root(app)?;
-    database(app, move |database| {
-        let record = database.clipboard_record(&id)?;
-        match record.kind.as_str() {
-            "text" => Ok(platform::ClipboardPayload::Text(record.text)),
-            "files" => Ok(platform::ClipboardPayload::Files(
-                serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?,
-            )),
-            "image" => {
-                let path = record.image_path.ok_or("storage_corrupt")?;
-                let bytes = clipboard::read_image(&root, &path)?;
-                let extension = if path.ends_with(".png") {
-                    "png"
-                } else {
-                    "tiff"
-                };
-                Ok(platform::ClipboardPayload::Image {
-                    bytes,
-                    extension: extension.into(),
-                })
-            }
-            _ => Err("storage_corrupt".into()),
+    let record = database(app, move |database| database.clipboard_record(&id)).await?;
+    tauri::async_runtime::spawn_blocking(move || record_payload(&root, record))
+        .await
+        .map_err(|_| "storage_worker")?
+}
+
+fn record_payload(
+    root: &Path,
+    record: ClipboardRecord,
+) -> Result<platform::ClipboardPayload, String> {
+    match record.kind.as_str() {
+        "text" => Ok(platform::ClipboardPayload::Text(record.text)),
+        "files" => Ok(platform::ClipboardPayload::Files(
+            serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?,
+        )),
+        "image" => {
+            let path = record.image_path.ok_or("storage_corrupt")?;
+            let bytes = clipboard::read_image(root, &path)?;
+            let extension = if path.ends_with(".png") {
+                "png"
+            } else {
+                "tiff"
+            };
+            Ok(platform::ClipboardPayload::Image {
+                bytes,
+                extension: extension.into(),
+            })
         }
-    })
-    .await
+        _ => Err("storage_corrupt".into()),
+    }
 }
 
 fn observe_pending(
@@ -174,10 +183,24 @@ pub(crate) fn start(app: &AppHandle) {
                 }
             };
             let captured_version = capture.version;
-            let result = database(&app, move |database| {
-                persist_capture(database, &root, capture)
+            let worker = app.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                persist_capture_with(&root, capture, |record| {
+                    let state = worker.state::<AppState>();
+                    if let Some(error) = state.storage_error.lock().unwrap().clone() {
+                        return Err(error);
+                    }
+                    let mut database = state.database.lock().unwrap();
+                    database
+                        .as_mut()
+                        .ok_or("storage_unavailable")?
+                        .clipboard_insert(record)
+                        .map(|_| ())
+                })
             })
-            .await;
+            .await
+            .map_err(|_| "storage_worker".to_owned())
+            .and_then(|result| result);
             drop(_write);
             match result {
                 Ok(()) => {
@@ -209,10 +232,28 @@ pub(crate) fn image_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|_| "storage_unavailable".into())
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "ui-tests",
+        target_os = "macos",
+        not(feature = "portable-ui")
+    )
+))]
 pub(crate) fn persist_capture(
     database: &mut HistoryDatabase,
     root: &Path,
     capture: platform::ClipboardCapture,
+) -> Result<(), String> {
+    persist_capture_with(root, capture, |record| {
+        database.clipboard_insert(record).map(|_| ())
+    })
+}
+
+fn persist_capture_with(
+    root: &Path,
+    capture: platform::ClipboardCapture,
+    insert: impl FnOnce(&ClipboardRecord) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut created_image = None;
     let (kind, text, image_path, fingerprint) = match capture.payload {
@@ -234,7 +275,7 @@ pub(crate) fn persist_capture(
             ("image", String::new(), Some(path), fingerprint)
         }
     };
-    let saved = database.clipboard_insert(&ClipboardRecord {
+    let saved = insert(&ClipboardRecord {
         id: uuid::Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
@@ -250,7 +291,7 @@ pub(crate) fn persist_capture(
             clipboard::remove_image(root, &path)?;
         }
     }
-    saved.map(|_| ())
+    saved
 }
 
 #[cfg(test)]
@@ -402,6 +443,79 @@ mod tests {
     }
 
     #[test]
+    fn image_preparation_and_failed_commit_cleanup_surround_only_the_database_insert() {
+        let root = std::env::temp_dir().join(format!("nami-capture-lock-{}", uuid::Uuid::new_v4()));
+        let database = std::sync::Mutex::new(HistoryDatabase::open(Path::new(":memory:")).unwrap());
+        let bytes = b"\x89PNG\r\n\x1a\nprepared outside SQL".to_vec();
+        let capture = || platform::ClipboardCapture {
+            version: 1,
+            payload: platform::ClipboardPayload::Image {
+                bytes: bytes.clone(),
+                extension: "png".into(),
+            },
+            source_app: None,
+        };
+        let hash = clipboard::fingerprint("image", &bytes);
+        let relative = format!("origin/{}/{}.png", &hash[..2], hash);
+        let saved = std::cell::RefCell::new(None);
+        persist_capture_with(&root, capture(), |record| {
+            assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
+            let mut guard = database
+                .try_lock()
+                .expect("preparation must not hold the SQL lock");
+            *saved.borrow_mut() = Some(guard.clipboard_insert(record)?);
+            Ok(())
+        })
+        .unwrap();
+        let record = saved.into_inner().unwrap();
+        let guard = database.lock().unwrap();
+        assert_eq!(
+            record_payload(&root, record).unwrap(),
+            platform::ClipboardPayload::Image {
+                bytes: bytes.clone(),
+                extension: "png".into()
+            }
+        );
+        drop(guard);
+        let fresh = b"\x89PNG\r\n\x1a\nuncommitted outside SQL".to_vec();
+        let fresh_hash = clipboard::fingerprint("image", &fresh);
+        let fresh_path = format!("origin/{}/{}.png", &fresh_hash[..2], fresh_hash);
+        let result = persist_capture_with(
+            &root,
+            platform::ClipboardCapture {
+                version: 2,
+                payload: platform::ClipboardPayload::Image {
+                    bytes: fresh,
+                    extension: "png".into(),
+                },
+                source_app: None,
+            },
+            |record| {
+                let guard = database
+                    .try_lock()
+                    .expect("resource preparation must release the SQL lock");
+                assert!(root.join(record.image_path.as_deref().unwrap()).is_file());
+                drop(guard);
+                Err("storage_busy".into())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "storage_busy");
+        assert!(!root.join(fresh_path).exists());
+        assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
+        assert_eq!(
+            database
+                .try_lock()
+                .unwrap()
+                .clipboard_page("", false, None, 100)
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn failed_capture_removes_only_new_images() {
         let root =
             std::env::temp_dir().join(format!("nami-capture-failure-{}", uuid::Uuid::new_v4()));
@@ -418,12 +532,16 @@ mod tests {
             source_app: None,
         };
         persist_capture(&mut database, &root, capture(existing.clone())).unwrap();
-        let existing_path = database
+        let existing_id = database
             .clipboard_page("", false, None, 100)
             .unwrap()
             .records[0]
+            .id
+            .clone();
+        let existing_path = database
+            .clipboard_record(&existing_id)
+            .unwrap()
             .image_path
-            .clone()
             .unwrap();
         let lock = rusqlite::Connection::open(&path).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -454,9 +572,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nami-capture-{}", uuid::Uuid::new_v4()));
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let paths = vec![
-            "/synthetic/space # %.txt".to_owned(),
-            "/synthetic/new\nline".to_owned(),
+            root.join("space # %.txt").to_string_lossy().into_owned(),
+            root.join("new\nline").to_string_lossy().into_owned(),
         ];
+        assert!(paths.iter().all(|path| Path::new(path).is_absolute()));
         let png = b"\x89PNG\r\n\x1a\nsynthetic".to_vec();
         for payload in [
             platform::ClipboardPayload::Text("full synthetic text".into()),
@@ -497,7 +616,12 @@ mod tests {
             .find(|record| record.kind == "image")
             .unwrap();
         assert_eq!(
-            clipboard::read_image(&root, image.image_path.as_deref().unwrap()).unwrap(),
+            record_payload(&root, database.clipboard_record(&image.id).unwrap())
+                .map(|payload| match payload {
+                    platform::ClipboardPayload::Image { bytes, .. } => bytes,
+                    _ => panic!("expected image"),
+                })
+                .unwrap(),
             png
         );
         persist_capture(

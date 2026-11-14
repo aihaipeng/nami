@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 pub const PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -35,6 +35,7 @@ pub struct HistoryCursor {
     pub created_at: i64,
 }
 
+#[derive(Clone)]
 pub struct HistoryPage {
     pub records: Vec<HistoryRecord>,
     pub cursor: Option<HistoryCursor>,
@@ -45,6 +46,7 @@ pub struct HistoryPage {
 pub struct HistoryDatabase {
     connection: Connection,
     total_records: usize,
+    clipboard_total_records: usize,
 }
 
 fn storage_error(error: rusqlite::Error) -> String {
@@ -146,6 +148,14 @@ impl HistoryDatabase {
         if version < 2 {
             clipboard::migrate(&mut connection)?;
         }
+        if version < 3 {
+            clipboard::migrate_v3(&mut connection)?;
+        }
+        let clipboard_total_records = connection
+            .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(storage_error)? as usize;
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_error)?;
@@ -158,6 +168,7 @@ impl HistoryDatabase {
         Ok(Self {
             connection,
             total_records: total_records as usize,
+            clipboard_total_records,
         })
     }
 

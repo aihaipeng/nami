@@ -62,7 +62,7 @@ def test_named_suites_have_explicit_commands_and_no_implicit_network_tests(tmp_p
         assert all('live_services_translate_synthetic_text' not in command for command, _ in commands)
         ignored = [command for command, _ in commands if '--ignored' in command]
         assert bool(ignored) == (suite in {'all', 'dfx-performance'})
-        assert all('database::tests::benchmark_large_history' in command and '--exact' in command for command in ignored)
+        assert all(any(name in command for name in ['database::tests::benchmark_large_history', 'database::clipboard::tests::benchmark_large_clipboard']) and '--exact' in command for command in ignored)
 
 
 @pytest.mark.parametrize('suite,project', [
@@ -76,10 +76,10 @@ def test_frontend_project_mapping(tmp_path, suite, project):
 
 def test_performance_is_release_exact_and_does_not_launch_native_windows(tmp_path):
     commands = dev.suite_commands('dfx-performance', tmp_path / 'python')
-    assert len(commands) == 1
-    command, _ = commands[0]
-    assert command == ['cargo', 'test', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--lib',
-                       'database::tests::benchmark_large_history', '--', '--ignored', '--exact', '--nocapture']
+    assert len(commands) == 2
+    for (command, _), name in zip(commands, ['database::tests::benchmark_large_history', 'database::clipboard::tests::benchmark_large_clipboard']):
+        assert command == ['cargo', 'test', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--lib',
+                           name, '--', '--ignored', '--exact', '--nocapture']
 
 
 def test_all_runs_native_serially_once_and_performance_before_visible(tmp_path):
@@ -87,8 +87,9 @@ def test_all_runs_native_serially_once_and_performance_before_visible(tmp_path):
     hidden = [i for i, (command, env) in enumerate(commands) if command[-2:] == ['-m', 'native']]
     visible = [i for i, (command, env) in enumerate(commands) if env.get('NAMI_UI_TEST_VISIBLE') == '1']
     performance = [i for i, (command, env) in enumerate(commands) if '--release' in command]
-    assert len(hidden) == len(visible) == len(performance) == 1
-    assert hidden[0] < performance[0] < visible[0]
+    assert len(hidden) == len(visible) == 1
+    assert len(performance) == 2
+    assert hidden[0] < performance[0] < performance[1] < visible[0]
     assert commands[visible[0]][0][-1] == 'tests/python/test_native_ui.py::test_native_ui'
     assert all('pytest' not in command or '-n' not in command for command, _ in commands)
 

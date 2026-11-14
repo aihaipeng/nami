@@ -9,7 +9,7 @@ import type { ClipboardPage, ClipboardRecord } from '../../src/clipboard/useClip
 
 let records: ClipboardRecord[];
 let queryHandler: ((args: { query: string; favoritesOnly: boolean; cursor: unknown }) => Promise<ClipboardPage>) | undefined;
-const cursor = { pinned: false, date: '2026-11-14T10:00:00Z', sequence: 100 };
+const cursor = { pinned: false, createdAt: 1794650400000, sequence: 100 };
 function page(query = '', favoritesOnly = false): ClipboardPage {
   return { records: structuredClone(records.filter((record) => (!favoritesOnly || record.isFavorite) && record.text.toLowerCase().includes(query.toLowerCase()))), cursor: null, hasMore: false, totalRecords: records.length };
 }
@@ -20,7 +20,7 @@ function scrollNearEnd() {
   element.scrollTop = 400;
   fireEvent.scroll(element);
 }
-const listRows = () => document.querySelectorAll('.history-row');
+const listRows = () => document.querySelectorAll('.history-row:not([hidden])');
 
 beforeEach(() => {
   records = [
@@ -29,10 +29,21 @@ beforeEach(() => {
   ];
   queryHandler = undefined;
   const original = bridge.invoke.getMockImplementation()!;
+  let revision = 0;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_query') {
       const request = args as { query: string; favoritesOnly: boolean; cursor: unknown };
-      return queryHandler ? queryHandler(request) : page(request.query, request.favoritesOnly);
+      const encode = (page: ClipboardPage) => {
+        const sources: Record<string, NonNullable<ClipboardRecord['sourceApp']>> = {};
+        const records = page.records.map(({ sourceApp, ...record }) => {
+          const id = sourceApp ? Object.keys(sources).find((key) => JSON.stringify(sources[key]) === JSON.stringify(sourceApp)) ?? String(Object.keys(sources).length + 1) : null;
+          if (id) sources[id] = sourceApp!;
+          return { ...record, sourceAppId: id ? Number(id) : null };
+        });
+        return { ...page, records, sources };
+      };
+      const result = queryHandler ? await queryHandler(request) : page(request.query, request.favoritesOnly);
+      return { page: encode(result), alternate: request.cursor ? null : encode(page(request.query, !request.favoritesOnly)) };
     }
     if (name === 'clipboard_record_update') {
       const { recordId, action } = args as { recordId: string; action: string };
@@ -40,6 +51,7 @@ beforeEach(() => {
       if (action === 'delete') records = records.filter(({ id }) => id !== recordId);
       if (action === 'favorite') record.isFavorite = !record.isFavorite;
       if (action === 'pin') record.isPinned = !record.isPinned;
+      bridge.listeners.get('clipboard_changed')?.forEach((callback) => callback({ payload: ++revision }));
       return;
     }
     if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
@@ -80,6 +92,35 @@ describe('database clipboard history', () => {
     fireEvent.lostPointerCapture(scrollbar, { pointerId: 9 });
     fireEvent.pointerMove(scrollbar, { pointerId: 9, clientY: 0 });
     expect(element.scrollTop).toBe(212.5);
+  });
+
+  it('hides the scrollbar after inactivity, reveals it on scroll and keeps it visible during drag', async () => {
+    const mounted = await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    vi.useFakeTimers();
+    try {
+      scrollNearEnd();
+      const scrollbar = screen.getByRole('scrollbar');
+      expect(scrollbar.classList.contains('visible')).toBe(true);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(scrollbar.classList.contains('visible')).toBe(false);
+      fireEvent.scroll(document.querySelector('.history-list')!);
+      expect(scrollbar.classList.contains('visible')).toBe(true);
+      fireEvent.pointerDown(scrollbar.firstElementChild!, { pointerId: 7, button: 0, clientY: 20 });
+      act(() => vi.advanceTimersByTime(1500));
+      expect(scrollbar.classList.contains('visible')).toBe(true);
+      fireEvent.lostPointerCapture(scrollbar, { pointerId: 7 });
+      act(() => vi.advanceTimersByTime(1000));
+      expect(scrollbar.classList.contains('visible')).toBe(false);
+      fireEvent.focus(scrollbar);
+      act(() => vi.advanceTimersByTime(1500));
+      expect(scrollbar.classList.contains('visible')).toBe(true);
+      fireEvent.blur(scrollbar);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(scrollbar.classList.contains('visible')).toBe(false);
+      fireEvent.scroll(document.querySelector('.history-list')!);
+      mounted.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('toggles shortcut help, closes it before hiding the card, and dismisses outside', async () => {
@@ -149,7 +190,89 @@ describe('database clipboard history', () => {
     expect(document.activeElement).toBe(screen.getByRole('searchbox'));
     await user.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     await waitFor(() => expect(listRows()).toHaveLength(1));
-    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: true, cursor: null });
+    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false, cursor: null });
+  });
+
+  it('switches cached filters immediately without an activity beam or another database round trip', async () => {
+    queryHandler = async (request) => ({ ...page(request.query, request.favoritesOnly), hasMore: !request.favoritesOnly, cursor: request.favoritesOnly ? null : cursor });
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    const firstNode = row('first');
+    queryHandler = async () => { throw new Error('switch must not query'); };
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(row('first')).toBe(firstNode);
+    expect(firstNode.hidden).toBe(true);
+    expect(listRows()).toHaveLength(1);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    const queries = calls('clipboard_query').length;
+    fireEvent.click(screen.getByRole('button', { name: 'All clipboard records' }));
+    expect(listRows()).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(listRows()).toHaveLength(1);
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    records[0].isFavorite = true;
+    queryHandler = undefined;
+    await emit('clipboard_changed', 8);
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    fireEvent.click(screen.getByRole('button', { name: 'All clipboard records' }));
+    await waitFor(() => expect(calls('clipboard_query')).toHaveLength(queries + 1));
+  });
+
+  it('rejects a late refresh after switching to a prefetched page and resets both views on search', async () => {
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async () => new Promise((resolve) => { finish = resolve; });
+    await emit('clipboard_changed', 9);
+    // A cache invalidation needs authoritative data; a newer search must win over that response.
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Saved' } });
+    queryHandler = undefined;
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    await act(async () => finish(page('', true)));
+    expect(listRows()).toHaveLength(1);
+    const queries = calls('clipboard_query').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(listRows()).toHaveLength(0);
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    expect(row('pinned')).toBeNull();
+  });
+
+  it('prefetches favorites outside the first all page and keeps native image nodes mounted across switches', async () => {
+    records = Array.from({ length: 125 }, (_, index) => ({ ...records[0], id: `record-${index}`, isFavorite: index === 124, sourceApp: { name: 'Synthetic', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } }));
+    queryHandler = async (request) => ({ ...page(request.query, request.favoritesOnly), records: records.slice(0, 100), hasMore: true, cursor });
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    const original = row('record-0'); const source = original.querySelector('img');
+    expect(row('record-124').hidden).toBe(true);
+    const queries = calls('clipboard_query').length;
+    for (let index = 0; index < 8; index++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+      expect(listRows()).toHaveLength(1); expect(row('record-124').hidden).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: 'All clipboard records' }));
+      expect(listRows()).toHaveLength(100); expect(row('record-0')).toBe(original);
+      expect(original.querySelector('img')).toBe(source);
+    }
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    expect(document.querySelectorAll('.history-row')).toHaveLength(101);
+  });
+
+  it('omits successful copy, paste and manual-paste footer messages', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    let status = 'copied';
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? { status, copyStatus: 'current', code: null } : original(name, args));
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    for (status of ['copied', 'dispatched', 'manual']) {
+      await act(async () => fireEvent.click(within(row('first')).getByRole('button', { name: 'Copy' })));
+      expect(document.querySelector('.clipboard-feedback')).toBeNull();
+    }
+  });
+
+  it('refreshes both first pages only once per committed record update event', async () => {
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    const initial=calls('clipboard_query').length;
+    await act(async () => fireEvent.click(within(row('first')).getByRole('button', { name: 'Favorite' })));
+    await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
+    expect(calls('clipboard_query')).toHaveLength(initial+1);
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(listRows()).toHaveLength(2);
+    expect(calls('clipboard_query')).toHaveLength(initial+1);
   });
 
   it('uses record IDs for full copy and paste and persists favorite, pin, and delete actions', async () => {
@@ -315,6 +438,22 @@ describe('database clipboard history', () => {
     expect(bridge.listeners.get('clipboard_changed')?.size).toBe(1);
     hook.unmount();
     expect(bridge.listeners.get('clipboard_changed')?.size).toBe(0);
+  });
+
+  it.each([false, true])('hides on Escape from the window or search input even when pinned=%s', async (pinned) => {
+    bridge.snapshot.window.clipboardPinned = pinned;
+    const mounted = await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    fireEvent.keyDown(window, { key: 'Escape', isComposing: true });
+    expect(calls('window_hide')).toHaveLength(0);
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(calls('window_hide')).toHaveLength(1);
+    expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'clipboard' });
+    const search = screen.getByRole('searchbox'); search.focus();
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(calls('window_hide')).toHaveLength(2);
+    mounted.unmount();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(calls('window_hide')).toHaveLength(2);
   });
 
   it('moves keyboard focus through rows and hides with Escape', async () => {

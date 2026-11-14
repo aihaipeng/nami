@@ -37,6 +37,12 @@ pub(crate) fn history_add(app: &AppHandle, record: HistoryRecord) -> Result<(), 
         .lock()
         .unwrap()
         .add(record)?;
+    app.state::<AppState>()
+        .history_page
+        .lock()
+        .unwrap()
+        .cache
+        .clear();
     windows::refresh_history(app)?;
     publish_history(app)
 }
@@ -92,6 +98,12 @@ pub(crate) async fn update_record(
             .lock()
             .unwrap()
             .update(&id, &action)?;
+        app.state::<AppState>()
+            .history_page
+            .lock()
+            .unwrap()
+            .cache
+            .clear();
         windows::refresh_history(&app)?;
         publish_history(&app)?;
         Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
@@ -138,7 +150,11 @@ pub(crate) async fn commit_translation(
             .translation_revision
             .load(std::sync::atomic::Ordering::SeqCst)
             == revision;
-        let query = state.history_page.lock().unwrap().query.clone();
+        let query = {
+            let mut page = state.history_page.lock().unwrap();
+            page.cache.clear();
+            page.query.clone()
+        };
         state
             .history
             .lock()
@@ -155,6 +171,37 @@ pub(crate) async fn commit_translation(
 pub(crate) struct PageState {
     pub query: crate::database::HistoryQuery,
     pub cursor: Option<crate::database::HistoryCursor>,
+    pub cache: crate::history::HistoryPageCache,
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub(crate) fn restore_cached_query(
+    app: &AppHandle,
+    query: crate::database::HistoryQuery,
+) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let Ok(_write) = state.history_writes.try_lock() else {
+        return Ok(false);
+    };
+    if let Some(error) = state.storage_error.lock().unwrap().clone() {
+        return Err(error);
+    }
+    let page = {
+        let mut paging = state.history_page.lock().unwrap();
+        let Some(page) = paging.cache.get(&query) else {
+            return Ok(false);
+        };
+        paging.query = query;
+        paging.cursor = page.cursor.clone();
+        page
+    };
+    state
+        .history_query_revision
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state.history.lock().unwrap().apply_page(page, true);
+    windows::refresh_history(app)?;
+    publish_history(app)?;
+    Ok(true)
 }
 
 pub(crate) async fn query_history(
@@ -220,24 +267,37 @@ async fn load_page(
         PageState {
             query,
             cursor: None,
+            cache: Default::default(),
         }
     } else {
-        state.history_page.lock().unwrap().clone()
+        let paging = state.history_page.lock().unwrap();
+        PageState {
+            query: paging.query.clone(),
+            cursor: paging.cursor.clone(),
+            cache: Default::default(),
+        }
     };
+    let cached = reset
+        .then(|| state.history_page.lock().unwrap().cache.get(&request.query))
+        .flatten();
     let worker = app.clone();
     let work = request.clone();
-    let page = tauri::async_runtime::spawn_blocking(move || {
-        let state = worker.state::<AppState>();
-        let database = state.database.lock().unwrap();
-        database.as_ref().ok_or("storage_unavailable")?.page(
-            &work.query,
-            work.cursor.as_ref(),
-            crate::database::PAGE_SIZE,
-        )
-    })
-    .await
-    .map_err(|_| "storage_worker")?
-    .map_err(|error| storage_failure(app, error))?;
+    let page = if let Some(page) = cached {
+        page
+    } else {
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = worker.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            database.as_ref().ok_or("storage_unavailable")?.page(
+                &work.query,
+                work.cursor.as_ref(),
+                crate::database::PAGE_SIZE,
+            )
+        })
+        .await
+        .map_err(|_| "storage_worker")?
+        .map_err(|error| storage_failure(app, error))?
+    };
     crate::commands::on_main(app, move |app| {
         let state = app.state::<AppState>();
         if state
@@ -247,10 +307,14 @@ async fn load_page(
         {
             return Ok(state.history.lock().unwrap().snapshot());
         }
-        *state.history_page.lock().unwrap() = PageState {
-            query: request.query,
-            cursor: page.cursor.clone(),
-        };
+        {
+            let mut paging = state.history_page.lock().unwrap();
+            if reset {
+                paging.cache.insert(request.query.clone(), page.clone());
+            }
+            paging.query = request.query;
+            paging.cursor = page.cursor.clone();
+        }
         state.history.lock().unwrap().apply_page(page, reset);
         windows::refresh_history(&app)?;
         publish_history(&app)?;

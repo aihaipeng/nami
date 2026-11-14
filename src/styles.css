@@ -178,7 +178,7 @@
   .history-search button .history-symbol { width: 14px; height: 14px; }
   .history-viewport { position: absolute; inset: 48px 0 28px; display: flex; flex-direction: column; min-height: 0; }
   .history-pinned { flex: 0 1 auto; min-height: 0; max-height: 100%; overflow: auto; padding: 4px 10px 8px; }
-  .history-viewport:has(.history-list > .history-row) .history-pinned { max-height: 45%; }
+  .history-viewport:has(.history-list > .history-row:not([hidden])) .history-pinned { max-height: 45%; }
   .history-pinned:not(.empty) + .history-list { margin-top: 4px; }
   .history-pinned.empty { height: 0; padding: 0; }
   .history-list { position: relative; flex: 1; min-height: 0; padding: 4px 10px 8px; overflow: auto; }
@@ -186,7 +186,9 @@
   .history-list, .history-pinned { scrollbar-width: none; -webkit-mask-image: var(--history-edge-mask); mask-image: var(--history-edge-mask); }
   .history-list::-webkit-scrollbar, .history-pinned::-webkit-scrollbar { display: none; }
   .history-scrollbar { position: absolute; z-index: 2; right: 0; top: 0; bottom: 0; width: 12px; touch-action: none; }
-  .history-scrollbar-thumb { position: absolute; top: 0; right: 3px; width: 6px; border-radius: 3px; background: var(--history-scroll-thumb); }
+  .history-scrollbar-thumb { opacity: 0; transition: opacity 180ms ease-out; position: absolute; top: 0; right: 3px; width: 6px; border-radius: 3px; background: var(--history-scroll-thumb); }
+  .history-scrollbar.visible .history-scrollbar-thumb { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .history-scrollbar-thumb { transition: none; } }
   .history-scrollbar:hover .history-scrollbar-thumb, .history-scrollbar:focus-visible .history-scrollbar-thumb { background: var(--history-secondary); }
   .history-footer { position: absolute; bottom: 4px; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 14px; color: var(--history-secondary); font-size: 11px; }
   .history-footer .history-shortcuts { color: var(--history-secondary); }
@@ -195,7 +197,8 @@
   .history-shortcuts-panel > div { display: flex; justify-content: space-between; height: 24px; color: var(--history-label); }
   .history-shortcuts-panel > div > span:last-child, .history-shortcuts-panel small { color: var(--history-secondary); }
   .history-shortcuts-panel small { display: block; font-size: 10px; }
-  .history-row { position: relative; border: 1px solid transparent; border-radius: 10px; margin-bottom: 4px; }
+  .history-row { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-feature-settings: normal; position: relative; border: 1px solid transparent; border-radius: 10px; margin-bottom: 4px; }
+  .history-row[hidden] { display: none; }
   .history-row:last-child { margin-bottom: 0; }
   .history-row:hover { background: hsl(var(--foreground) / .04); }
   .history-row.selected { background: hsl(var(--foreground) / .09); }
@@ -206,7 +209,7 @@
   .history-origin { width: 14px; height: 14px; flex-shrink: 0; border-radius: 4px; }
   .history-languages { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; }
   .history-row time { margin-left: 3px; font-size: 11px; flex-shrink: 0; }
-  .history-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 20px; margin-top: 6px; }
+  .history-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: normal; padding: 0 2px; margin-top: 6px; }
   .history-row-actions { position: absolute; display: flex; align-items: center; gap: 1px; right: 5px; top: 3px; opacity: 0; visibility: hidden; transform: translateX(8px); transition: opacity .1s ease-out, transform .1s ease-out, visibility .1s; }
   .history-row:hover .history-row-actions, .history-row:focus-within .history-row-actions { opacity: 1; visibility: visible; transform: translateX(0); transition-duration: .14s; }
   .history-row:hover time, .history-row:focus-within time { visibility: hidden; }

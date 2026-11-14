@@ -33,6 +33,73 @@ pub(super) fn migrate(connection: &mut rusqlite::Connection) -> Result<(), Strin
     transaction.commit().map_err(storage_error)
 }
 
+pub(super) fn migrate_v3(connection: &mut rusqlite::Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search;
+        ALTER TABLE clipboard_records RENAME TO clipboard_records_v2;
+        CREATE TABLE clipboard_records (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK(kind IN ('text','image','files')), summary TEXT NOT NULL,
+            date TEXT NOT NULL, created_at INTEGER NOT NULL,
+            is_favorite INTEGER NOT NULL CHECK(is_favorite IN (0,1)),
+            is_pinned INTEGER NOT NULL CHECK(is_pinned IN (0,1)),
+            source_app_id INTEGER REFERENCES source_apps(id), image_path TEXT, fingerprint TEXT NOT NULL
+        );
+        CREATE TABLE clipboard_contents (
+            sequence INTEGER PRIMARY KEY REFERENCES clipboard_records(sequence) ON DELETE CASCADE,
+            text TEXT NOT NULL, search_folded TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO source_apps(payload) SELECT DISTINCT source_app FROM clipboard_records_v2 WHERE source_app IS NOT NULL;
+    ").map_err(storage_error)?;
+    {
+        let mut rows = tx.prepare("SELECT sequence,id,kind,summary,date,is_favorite,is_pinned,source_app,image_path,fingerprint FROM clipboard_records_v2").map_err(storage_error)?;
+        let mut source = rows.query([]).map_err(storage_error)?;
+        let mut insert = tx.prepare("INSERT INTO clipboard_records(sequence,id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,image_path,fingerprint) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,(SELECT id FROM source_apps WHERE payload=?9),?10,?11)").map_err(storage_error)?;
+        while let Some(row) = source.next().map_err(storage_error)? {
+            let date: String = row.get(4).map_err(storage_error)?;
+            let created = chrono::DateTime::parse_from_rfc3339(&date)
+                .map_err(|_| "storage_corrupt")?
+                .timestamp_millis();
+            let app: Option<String> = row.get(7).map_err(storage_error)?;
+            if let Some(app) = &app {
+                serde_json::from_str::<serde_json::Value>(app).map_err(|_| "storage_corrupt")?;
+            }
+            insert
+                .execute(params![
+                    row.get::<_, i64>(0).map_err(storage_error)?,
+                    row.get::<_, String>(1).map_err(storage_error)?,
+                    row.get::<_, String>(2).map_err(storage_error)?,
+                    row.get::<_, String>(3).map_err(storage_error)?,
+                    date,
+                    created,
+                    row.get::<_, bool>(5).map_err(storage_error)?,
+                    row.get::<_, bool>(6).map_err(storage_error)?,
+                    app,
+                    row.get::<_, Option<String>>(8).map_err(storage_error)?,
+                    row.get::<_, String>(9).map_err(storage_error)?
+                ])
+                .map_err(storage_error)?;
+        }
+    }
+    tx.execute_batch("INSERT INTO clipboard_contents(sequence,text,search_folded) SELECT sequence,text,search_folded FROM clipboard_records_v2;
+        DROP TABLE clipboard_records_v2;
+        CREATE INDEX clipboard_order ON clipboard_records(is_pinned DESC,created_at DESC,sequence DESC);
+        CREATE INDEX clipboard_favorites ON clipboard_records(is_favorite,is_pinned DESC,created_at DESC,sequence DESC);
+        CREATE INDEX clipboard_fingerprint ON clipboard_records(fingerprint);
+        CREATE VIRTUAL TABLE clipboard_search USING fts5(search_folded,content='clipboard_contents',content_rowid='sequence',tokenize='trigram case_sensitive 1');
+        INSERT INTO clipboard_search(clipboard_search) VALUES('rebuild');
+        CREATE TRIGGER clipboard_insert AFTER INSERT ON clipboard_contents BEGIN
+            INSERT INTO clipboard_search(rowid,search_folded) VALUES(new.sequence,new.search_folded);
+        END;
+        CREATE TRIGGER clipboard_delete AFTER DELETE ON clipboard_contents BEGIN
+            INSERT INTO clipboard_search(clipboard_search,rowid,search_folded) VALUES('delete',old.sequence,old.search_folded);
+        END;
+        PRAGMA user_version=3;").map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
 fn decode(row: &Row<'_>) -> rusqlite::Result<ClipboardRecord> {
     let source: Option<String> = row.get(7)?;
     let source_app = source
@@ -59,7 +126,7 @@ fn decode(row: &Row<'_>) -> rusqlite::Result<ClipboardRecord> {
 }
 
 const COLUMNS: &str =
-    "sequence,id,kind,text,date,is_favorite,is_pinned,source_app,image_path,fingerprint";
+    "r.sequence,r.id,r.kind,c.text,r.date,r.is_favorite,r.is_pinned,a.payload,r.image_path,r.fingerprint";
 
 impl HistoryDatabase {
     pub fn clipboard_page(
@@ -74,38 +141,62 @@ impl HistoryDatabase {
         }
         let needle = query.trim().to_lowercase();
         let indexed = needle.chars().count() >= 3 && !needle.contains('\0');
-        let search = if needle.is_empty() {
-            ""
-        } else if indexed {
-            " AND sequence IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match) AND instr(search_folded,:needle)>0"
-        } else {
-            " AND instr(search_folded,:needle)>0"
-        };
         let favorite = if favorites_only {
             " AND is_favorite=1"
         } else {
             ""
         };
-        let columns = COLUMNS.replace("kind,text,date", "kind,summary,date");
-        let sql = format!("SELECT {columns} FROM clipboard_records WHERE (is_pinned,date,sequence)<(:pinned,:date,:sequence){favorite}{search} ORDER BY is_pinned DESC,date DESC,sequence DESC LIMIT :limit");
+        let matched = format!("\"{}\"", needle.replace('"', "\"\""));
+        let broad = if indexed {
+            let mut probe = self
+                .connection
+                .prepare_cached(
+                    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?1 LIMIT 1024",
+                )
+                .map_err(storage_error)?;
+            let mut rows = probe.query([&matched]).map_err(storage_error)?;
+            let mut count = 0;
+            while rows.next().map_err(storage_error)?.is_some() {
+                count += 1;
+            }
+            count == 1024
+        } else {
+            false
+        };
+        let search = if needle.is_empty() {
+            ""
+        } else if indexed && !broad {
+            " AND sequence IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match) AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)"
+        } else {
+            " AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)"
+        };
+        let hint = if broad {
+            if favorites_only {
+                " INDEXED BY clipboard_favorites"
+            } else {
+                " INDEXED BY clipboard_order"
+            }
+        } else {
+            ""
+        };
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
             .map_err(storage_error)?;
         let pinned = cursor.map_or(2i64, |cursor| i64::from(cursor.pinned));
-        let date = cursor.map_or("~", |cursor| cursor.date.as_str());
+        let created = cursor.map_or(i64::MAX, |cursor| cursor.created_at);
         let sequence = cursor.map_or(i64::MAX, |cursor| cursor.sequence);
         let take = limit as i64 + 1;
-        let matched = format!("\"{}\"", needle.replace('"', "\"\""));
         let mut bindings: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
             (":pinned", &pinned),
-            (":date", &date),
+            (":created", &created),
             (":sequence", &sequence),
             (":limit", &take),
         ];
         if !needle.is_empty() {
             bindings.push((":needle", &needle));
-            if indexed {
+            if indexed && !broad {
                 bindings.push((":match", &matched));
             }
         }
@@ -120,32 +211,49 @@ impl HistoryDatabase {
                 has_more = true;
                 break;
             }
-            let record = decode(row).map_err(storage_error)?;
+            let record = crate::clipboard::ClipboardSummary {
+                id: row.get(1).map_err(storage_error)?,
+                kind: row.get(2).map_err(storage_error)?,
+                text: row.get(3).map_err(storage_error)?,
+                date: row.get(4).map_err(storage_error)?,
+                is_favorite: row.get(5).map_err(storage_error)?,
+                is_pinned: row.get(6).map_err(storage_error)?,
+                source_app_id: row.get(7).map_err(storage_error)?,
+            };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
-                date: record.date.clone(),
+                created_at: row.get(8).map_err(storage_error)?,
                 sequence: row.get(0).map_err(storage_error)?,
             });
             records.push(record);
         }
-        let total_records = self
-            .connection
-            .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map_err(storage_error)? as usize;
+        let mut sources = std::collections::BTreeMap::new();
+        for record in &records {
+            if let Some(id) = record.source_app_id {
+                if let std::collections::btree_map::Entry::Vacant(entry) = sources.entry(id) {
+                    let json: String = self
+                        .connection
+                        .query_row("SELECT payload FROM source_apps WHERE id=?1", [id], |row| {
+                            row.get(0)
+                        })
+                        .map_err(storage_error)?;
+                    entry.insert(serde_json::from_str(&json).map_err(|_| "storage_corrupt")?);
+                }
+            }
+        }
         Ok(ClipboardPage {
             records,
             cursor,
             has_more,
-            total_records,
+            total_records: self.clipboard_total_records,
+            sources,
         })
     }
 
     pub fn clipboard_record(&self, id: &str) -> Result<ClipboardRecord, String> {
         self.connection
             .query_row(
-                &format!("SELECT {COLUMNS} FROM clipboard_records WHERE id=?1"),
+                &format!("SELECT {COLUMNS} FROM clipboard_records r JOIN clipboard_contents c USING(sequence) LEFT JOIN source_apps a ON a.id=r.source_app_id WHERE r.id=?1"),
                 [id],
                 decode,
             )
@@ -199,24 +307,60 @@ impl HistoryDatabase {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|_| "invalid_argument")?;
+        let created = chrono::DateTime::parse_from_rfc3339(&record.date)
+            .map_err(|_| "invalid_argument")?
+            .timestamp_millis();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        let duplicate: Option<String> = transaction.query_row("SELECT id FROM clipboard_records WHERE fingerprint=?1 AND kind=?2 AND ((kind='image' AND image_path IS ?4) OR (kind!='image' AND text=?3)) LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path], |row| row.get(0)).optional().map_err(storage_error)?;
+        let source_id = if let Some(source) = source {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO source_apps(payload) VALUES(?1)",
+                    [&source],
+                )
+                .map_err(storage_error)?;
+            Some(
+                transaction
+                    .query_row(
+                        "SELECT id FROM source_apps WHERE payload=?1",
+                        [&source],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(storage_error)?,
+            )
+        } else {
+            None
+        };
+        let duplicate: Option<String> = transaction.query_row("SELECT id FROM clipboard_records WHERE fingerprint=?1 AND kind=?2 AND ((kind='image' AND image_path IS ?4) OR (kind!='image' AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND c.text=?3))) LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path], |row| row.get(0)).optional().map_err(storage_error)?;
+        let inserted = duplicate.is_none();
         let id = if let Some(id) = duplicate {
             transaction
                 .execute(
-                    "UPDATE clipboard_records SET date=?1,source_app=?2 WHERE id=?3",
-                    params![record.date, source, id],
+                    "UPDATE clipboard_records SET date=?1,source_app_id=?2,created_at=?4 WHERE id=?3",
+                    params![record.date, source_id, id, created],
                 )
                 .map_err(storage_error)?;
             id
         } else {
-            transaction.execute("INSERT INTO clipboard_records(id,kind,text,summary,search_folded,date,is_favorite,is_pinned,source_app,image_path,fingerprint) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![record.id,record.kind,record.text,summary,search_text.to_lowercase(),record.date,record.is_favorite,record.is_pinned,source,record.image_path,record.fingerprint]).map_err(storage_error)?;
+            transaction.execute("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,image_path,fingerprint) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![record.id,record.kind,summary,record.date,created,record.is_favorite,record.is_pinned,source_id,record.image_path,record.fingerprint]).map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?3)",
+                    params![
+                        transaction.last_insert_rowid(),
+                        record.text,
+                        search_text.to_lowercase()
+                    ],
+                )
+                .map_err(storage_error)?;
             record.id.clone()
         };
         transaction.commit().map_err(storage_error)?;
+        if inserted {
+            self.clipboard_total_records += 1;
+        }
         self.clipboard_record(&id)
     }
 
@@ -242,7 +386,11 @@ impl HistoryDatabase {
             _ => return Err("invalid_argument".into()),
         };
         transaction.execute(sql, [id]).map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)
+        transaction.commit().map_err(storage_error)?;
+        if action == "delete" {
+            self.clipboard_total_records -= 1;
+        }
+        Ok(())
     }
 
     pub fn clipboard_capture_enabled(&self) -> Result<bool, String> {
@@ -291,18 +439,354 @@ mod tests {
         }
     }
 
+    fn file_path(relative: &str) -> String {
+        let path = std::env::temp_dir().join("nami-synthetic").join(relative);
+        assert!(
+            path.is_absolute(),
+            "file fixtures require native absolute paths"
+        );
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn version_two_migration_preserves_all_content_and_rolls_back_on_bad_data() {
+        for corrupt in [false, true] {
+            let directory =
+                std::env::temp_dir().join(format!("nami-clipboard-v2-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("test.sqlite3");
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            db.connection.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
+            migrate(&mut db.connection).unwrap();
+            let source =
+                serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,test"})
+                    .to_string();
+            for (index, kind) in ["text", "image", "files"].into_iter().enumerate() {
+                let text = match kind {
+                    "files" => "[\"/synthetic/a.txt\"]",
+                    "image" => "",
+                    _ => "完整正文\0🌊\nlast",
+                };
+                let date = if corrupt && index == 2 {
+                    "invalid"
+                } else {
+                    "2026-11-15T08:00:00+08:00"
+                };
+                db.connection.execute("INSERT INTO clipboard_records(id,kind,text,summary,search_folded,date,is_favorite,is_pinned,source_app,image_path,fingerprint) VALUES(?1,?2,?3,?3,?3,?4,1,1,?5,?6,?7)",params![kind,kind,text,date,source,if kind=="image"{Some("origin/ab/abcdef.png")}else{None},kind]).unwrap();
+            }
+            db.connection
+                .execute(
+                    "UPDATE preferences SET value='true' WHERE key='clipboard_capture'",
+                    [],
+                )
+                .unwrap();
+            drop(db);
+            if corrupt {
+                assert!(
+                    matches!(HistoryDatabase::open(&path), Err(error) if error=="storage_corrupt")
+                );
+                let check = rusqlite::Connection::open(&path).unwrap();
+                assert_eq!(
+                    check
+                        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(
+                    check
+                        .query_row(
+                            "SELECT count(*) FROM clipboard_records WHERE source_app IS NOT NULL",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    3
+                );
+                assert_eq!(
+                    check
+                        .query_row(
+                            "SELECT count(*) FROM sqlite_master WHERE name='clipboard_contents'",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+            } else {
+                let mut db = HistoryDatabase::open(&path).unwrap();
+                assert!(db.clipboard_capture_enabled().unwrap());
+                let page = db.clipboard_page("", true, None, 100).unwrap();
+                assert_eq!(page.total_records, 3);
+                assert_eq!(page.sources.len(), 1);
+                assert_eq!(
+                    page.records
+                        .iter()
+                        .map(|r| r.id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["files", "image", "text"]
+                );
+                let restored = db.clipboard_record("text").unwrap();
+                assert_eq!(restored.text, "完整正文\0🌊\nlast");
+                assert!(restored.is_favorite && restored.is_pinned);
+                assert_eq!(restored.source_app.unwrap()["name"], "Synthetic");
+                assert_eq!(
+                    db.clipboard_record("image").unwrap().image_path.as_deref(),
+                    Some("origin/ab/abcdef.png")
+                );
+                assert_eq!(
+                    db.clipboard_record("files").unwrap().text,
+                    "[\"/synthetic/a.txt\"]"
+                );
+                db.clipboard_update("text", "favorite").unwrap();
+                db.clipboard_update("text", "pin").unwrap();
+                db.clipboard_update("text", "delete").unwrap();
+                assert_eq!(
+                    db.clipboard_page("", false, None, 100)
+                        .unwrap()
+                        .total_records,
+                    2
+                );
+                assert!(db
+                    .clipboard_page("last", false, None, 100)
+                    .unwrap()
+                    .records
+                    .is_empty());
+                assert_eq!(
+                    db.connection
+                        .query_row("SELECT count(*) FROM clipboard_contents", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    2
+                );
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn summary_pages_deduplicate_sources_and_count_only_successful_inserts() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let source = serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,".to_owned()+&"A".repeat(4096)});
+        for index in 0..100 {
+            let mut item = record(&format!("record-{index}"), &format!("synthetic {index}"));
+            item.source_app = Some(source.clone());
+            db.clipboard_insert(&item).unwrap();
+        }
+        let page = db.clipboard_page("", false, None, 100).unwrap();
+        assert_eq!(page.sources.len(), 1);
+        assert_eq!(
+            db.connection
+                .query_row("SELECT count(*) FROM source_apps", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let json = serde_json::to_string(&page).unwrap();
+        assert_eq!(json.matches("iconDataUrl").count(), 1);
+        assert!(!json.contains("fingerprint") && !json.contains("imagePath"));
+        assert!(json.len() < 35_000, "summary payload {}", json.len());
+        let mut duplicate = record("duplicate", "synthetic 0");
+        duplicate.source_app = Some(source);
+        assert_eq!(db.clipboard_insert(&duplicate).unwrap().id, "record-0");
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            100
+        );
+        let conflicting = record("record-0", "different text");
+        assert!(db.clipboard_insert(&conflicting).is_err());
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            100
+        );
+        db.clipboard_update("record-0", "delete").unwrap();
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            99
+        );
+    }
+
+    #[test]
+    fn integer_cursor_orders_timezones_and_pinned_pages_without_duplicates() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        for (id, date) in [
+            ("later", "2026-11-15T01:00:00Z"),
+            ("earlier", "2026-11-15T08:00:00+08:00"),
+        ] {
+            let mut item = record(id, id);
+            item.date = date.into();
+            db.clipboard_insert(&item).unwrap();
+        }
+        let first = db.clipboard_page("", false, None, 1).unwrap();
+        assert_eq!(first.records[0].id, "later");
+        let next = db
+            .clipboard_page("", false, first.cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(next.records[0].id, "earlier");
+        assert!(!next.has_more);
+    }
+
+    #[test]
+    fn broad_search_preserves_literal_matching_and_favorite_cursor_order() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        for index in 0..1100 {
+            let mut item = record(
+                &format!("broad-{index}"),
+                &format!("common literal %_ {index}"),
+            );
+            item.is_favorite = index % 3 == 0;
+            item.is_pinned = index % 17 == 0;
+            db.clipboard_insert(&item).unwrap();
+        }
+        let mut cursor = None;
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            let page = db
+                .clipboard_page("common", true, cursor.as_ref(), 100)
+                .unwrap();
+            for item in &page.records {
+                assert!(item.is_favorite);
+                assert!(ids.insert(item.id.clone()));
+            }
+            cursor = page.cursor;
+            if !page.has_more {
+                break;
+            }
+        }
+        assert_eq!(ids.len(), 367);
+        assert!(db
+            .clipboard_page("common%", false, None, 100)
+            .unwrap()
+            .records
+            .is_empty());
+        assert_eq!(
+            db.clipboard_page("%_", false, None, 100)
+                .unwrap()
+                .records
+                .len(),
+            100
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit isolated 10k/100k clipboard performance measurement"]
+    fn benchmark_large_clipboard() {
+        fn summary(mut times: Vec<f64>) -> serde_json::Value {
+            times.sort_by(f64::total_cmp);
+            serde_json::json!({"p50Ms":times[times.len()/2],"p95Ms":times[times.len()*95/100],"samples":times.len()})
+        }
+        let mut reports = Vec::new();
+        for size in [10_000, 100_000] {
+            let directory = std::env::temp_dir()
+                .join(format!("nami-clipboard-benchmark-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("test.sqlite3");
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            let source=serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,".to_owned()+&"A".repeat(4096)}).to_string();
+            {
+                let tx = db.connection.transaction().unwrap();
+                tx.execute("INSERT INTO source_apps(payload) VALUES(?1)", [&source])
+                    .unwrap();
+                let source_id = tx.last_insert_rowid();
+                let mut metadata=tx.prepare("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,fingerprint) VALUES(?1,'text',?2,'2026-11-15T00:00:00Z',?3,?4,?5,?6,?1)").unwrap();
+                let mut contents=tx.prepare("INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?2)").unwrap();
+                for index in 0..size {
+                    let text =
+                        format!("common synthetic clipboard {index:06} {}", "x".repeat(1000));
+                    metadata
+                        .execute(params![
+                            format!("item-{index}"),
+                            text.chars().take(256).collect::<String>(),
+                            index,
+                            index % 10 == 0,
+                            index % 1000 == 0,
+                            source_id
+                        ])
+                        .unwrap();
+                    contents
+                        .execute(params![tx.last_insert_rowid(), text])
+                        .unwrap();
+                }
+                drop(metadata);
+                drop(contents);
+                tx.commit().unwrap();
+            }
+            drop(db);
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            let mut measurements = serde_json::Map::new();
+            for (label, query, favorite) in [
+                ("all", "", false),
+                ("favorites", "", true),
+                ("sparse", "099999", false),
+                ("broad", "common", false),
+            ] {
+                let mut times = Vec::new();
+                for _ in 0..30 {
+                    let started = std::time::Instant::now();
+                    let page = db.clipboard_page(query, favorite, None, 100).unwrap();
+                    let _json = serde_json::to_vec(&page).unwrap();
+                    times.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                let stats = summary(times);
+                assert!(stats["p95Ms"].as_f64().unwrap() < 100.0, "{label}: {stats}");
+                measurements.insert(label.into(), stats);
+            }
+            let mut cursor = None;
+            for _ in 0..(size / 100 - 1) {
+                cursor = db
+                    .clipboard_page("", false, cursor.as_ref(), 100)
+                    .unwrap()
+                    .cursor;
+            }
+            let mut deep = Vec::new();
+            let mut writes = Vec::new();
+            for index in 0..30 {
+                let started = std::time::Instant::now();
+                db.clipboard_page("", false, cursor.as_ref(), 100).unwrap();
+                deep.push(started.elapsed().as_secs_f64() * 1000.0);
+                let started = std::time::Instant::now();
+                db.clipboard_insert(&record(
+                    &format!("write-{index}"),
+                    &format!("durable-{index}"),
+                ))
+                .unwrap();
+                writes.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let page = db.clipboard_page("", false, None, 100).unwrap();
+            let bytes = serde_json::to_vec(&page).unwrap().len();
+            assert!(bytes < 70_000, "page {bytes}");
+            measurements.insert("deepPage".into(), summary(deep));
+            measurements.insert("durableWrite".into(), summary(writes));
+            db.connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            reports.push(serde_json::json!({"records":size,"measurements":measurements,"pageBytes":bytes,"databaseBytes":std::fs::metadata(&path).unwrap().len()}));
+            drop(db);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        let report = serde_json::json!({"scope":"isolated synthetic clipboard; database+summary JSON, not click-to-frame or physical disk cold start","runs":reports});
+        let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/clipboard-benchmark.json");
+        std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        println!("{report}");
+    }
+
     #[test]
     fn file_count_limit_matches_capture_and_restore() {
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let paths: Vec<_> = (0..MAX_FILE_COUNT)
-            .map(|index| format!("/synthetic/{index}.txt"))
+            .map(|index| file_path(&format!("{index}.txt")))
             .collect();
         let mut item = record("files-limit", &serde_json::to_string(&paths).unwrap());
         item.kind = "files".into();
         database.clipboard_insert(&item).unwrap();
         assert_eq!(database.clipboard_record(&item.id).unwrap().text, item.text);
         let mut oversized = paths;
-        oversized.push("/synthetic/one-more.txt".into());
+        oversized.push(file_path("one-more.txt"));
         item.id = "too-many-files".into();
         item.text = serde_json::to_string(&oversized).unwrap();
         assert_eq!(
@@ -424,7 +908,7 @@ mod tests {
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let mut files = record(
             "files",
-            &serde_json::to_string(&["/synthetic/first.txt", "/synthetic/second.png"]).unwrap(),
+            &serde_json::to_string(&[file_path("first.txt"), file_path("second.png")]).unwrap(),
         );
         files.kind = "files".into();
         files.fingerprint = fingerprint("files", files.text.as_bytes());
@@ -432,7 +916,7 @@ mod tests {
         assert_eq!(database.clipboard_record("files").unwrap().text, files.text);
         let mut collision = record(
             "collision",
-            &serde_json::to_string(&["/synthetic/different.txt"]).unwrap(),
+            &serde_json::to_string(&[file_path("different.txt")]).unwrap(),
         );
         collision.fingerprint = files.fingerprint.clone();
         collision.kind = "files".into();
@@ -463,8 +947,8 @@ mod tests {
     fn files_summary_uses_names_while_details_keep_complete_json_paths() {
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let paths = [
-            "/synthetic/资料/第一行\n第二行.txt",
-            "/synthetic/世界🌊.png",
+            file_path("资料/第一行\n第二行.txt"),
+            file_path("世界🌊.png"),
         ];
         let mut files = record("files", &serde_json::to_string(&paths).unwrap());
         files.kind = "files".into();
@@ -501,9 +985,9 @@ mod tests {
     fn files_search_matches_decoded_names_with_json_escape_characters() {
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let paths = [
-            "/synthetic/hello\"world.txt",
-            "/synthetic/hello\\world.txt",
-            "/synthetic/hello\nworld.txt",
+            file_path("hello\"world.txt"),
+            file_path("hello\\world.txt"),
+            file_path("hello\nworld.txt"),
         ];
         let mut files = record("escaped-files", &serde_json::to_string(&paths).unwrap());
         files.kind = "files".into();
@@ -576,7 +1060,7 @@ mod tests {
             source_app: None,
         };
         database.insert(&translation, "edge", || true).unwrap();
-        database.connection.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
+        database.connection.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
         database
             .connection
             .execute(
@@ -604,7 +1088,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();

@@ -114,6 +114,20 @@ describe('paged database history', () => {
     expect(rows()[0].getAttribute('aria-label')).toBe('Translation: Synthetic record 0');
   });
 
+  it('keeps filter queries quiet while waiting for the database without disabling pagination guards', async () => {
+    populate(); const pending = deferred<HistorySnapshot>(); const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_query' ? pending.promise : original(name, args));
+    const view = renderHook(() => useHistory(true));
+    await waitFor(() => expect(view.result.current.loading).toBe(false));
+    act(() => { void view.result.current.setQuery('', true, true); void view.result.current.loadMore(); });
+    expect(view.result.current.loading).toBe(true);
+    expect(view.result.current.showLoading).toBe(false);
+    expect(calls('history_load_more')).toHaveLength(0);
+    await act(async () => pending.resolve({ ...bridge.history, generation: 1, revision: 1, records: [bridge.history.records[0]] }));
+    expect(view.result.current.loading).toBe(false);
+    expect(view.result.current.snapshot.records).toHaveLength(1);
+  });
+
   it('loads more from the pinned scroll region and coalesces repeated scroll events', async () => {
     populate(140); bridge.history.records.forEach((record) => { record.isPinned = true; });
     const pending = deferred<HistorySnapshot>(); const original = bridge.invoke.getMockImplementation()!;

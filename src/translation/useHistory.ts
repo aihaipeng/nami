@@ -8,6 +8,7 @@ export function useHistory(native: boolean) {
   const [error, setError] = useState(false);
   const [connecting, setConnecting] = useState(native);
   const [querying, setQuerying] = useState(false);
+  const [quietQuery, setQuietQuery] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const active = useRef(false);
   const lifecycle = useRef(0);
@@ -48,12 +49,12 @@ export function useHistory(native: boolean) {
     };
   }, [native, accept]);
 
-  const setQuery = useCallback(async (query: string, favoritesOnly: boolean) => {
+  const setQuery = useCallback(async (query: string, favoritesOnly: boolean, quiet = false) => {
     if (!native || !active.current) return;
     const request = ++queryRequest.current;
     const connection = lifecycle.current;
     queryPending.current = true;
-    setError(false); setQuerying(true);
+    setError(false); setQuietQuery(quiet); setQuerying(true);
     try {
       const next = await invoke<HistorySnapshot>('history_query', { query, favoritesOnly });
       if (active.current && lifecycle.current === connection && request === queryRequest.current) accept(next);
@@ -91,5 +92,5 @@ export function useHistory(native: boolean) {
     } catch { if (active.current && lifecycle.current === connection) setError(true); }
   }, [native, accept]);
 
-  return { snapshot, error, loading: connecting || querying || loadingMore, setQuery, loadMore, update };
+  return { snapshot, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, setQuery, loadMore, update };
 }

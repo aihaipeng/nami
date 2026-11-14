@@ -13,6 +13,38 @@ pub struct HistorySnapshot {
     pub generation: u64,
 }
 
+#[derive(Clone, Default)]
+pub struct HistoryPageCache {
+    pages: Vec<(crate::database::HistoryQuery, crate::database::HistoryPage)>,
+}
+
+impl HistoryPageCache {
+    pub fn get(
+        &self,
+        query: &crate::database::HistoryQuery,
+    ) -> Option<crate::database::HistoryPage> {
+        self.pages
+            .iter()
+            .find(|(key, _)| key == query)
+            .map(|(_, page)| page.clone())
+    }
+
+    pub fn insert(
+        &mut self,
+        query: crate::database::HistoryQuery,
+        page: crate::database::HistoryPage,
+    ) {
+        // Only retain the two first pages for the current search, never accumulated scroll pages.
+        self.pages
+            .retain(|(key, _)| key.text == query.text && key != &query);
+        self.pages.push((query, page));
+    }
+
+    pub fn clear(&mut self) {
+        self.pages.clear();
+    }
+}
+
 pub struct HistoryStore {
     records: Vec<HistoryRecord>,
     selected_id: Option<String>,
@@ -228,6 +260,41 @@ mod tests {
             is_pinned: false,
             source_app: None,
         }
+    }
+
+    #[test]
+    fn filter_cache_keeps_two_database_first_pages_and_invalidates_on_clear_or_search() {
+        let page = |id: &str, more| crate::database::HistoryPage {
+            records: vec![record(id)],
+            cursor: None,
+            has_more: more,
+            total_records: 101,
+        };
+        let all = crate::database::HistoryQuery::default();
+        let favorite = crate::database::HistoryQuery {
+            favorites_only: true,
+            ..all.clone()
+        };
+        let mut cache = HistoryPageCache::default();
+        cache.insert(all.clone(), page("newest", true));
+        assert!(cache.get(&favorite).is_none());
+        cache.insert(favorite.clone(), page("favorite-beyond-first-page", false));
+        assert_eq!(cache.get(&all).unwrap().records[0].id, "newest");
+        assert!(cache.get(&all).unwrap().has_more);
+        assert_eq!(
+            cache.get(&favorite).unwrap().records[0].id,
+            "favorite-beyond-first-page"
+        );
+        let search = crate::database::HistoryQuery {
+            text: "another search".into(),
+            favorites_only: false,
+        };
+        cache.insert(search.clone(), page("search-hit", false));
+        assert!(cache.get(&all).is_none());
+        assert!(cache.get(&favorite).is_none());
+        assert!(cache.get(&search).is_some());
+        cache.clear();
+        assert!(cache.get(&search).is_none());
     }
 
     #[test]
