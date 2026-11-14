@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { Image } from 'lucide-react';
 import type { ViewProps } from '../App';
 import type { ClipboardResult } from '../shared/contracts';
 import type { MessageKey } from '../shared/i18n';
@@ -14,38 +13,11 @@ import fallbackIcon from '../assets/history/reference-nami.png';
 import { useClipboard, type ClipboardRecord } from './useClipboard';
 import { HistoryList } from '../shared/HistoryList';
 import { HistoryFooter } from '../shared/HistoryFooter';
+import { ClipboardMedia } from './ClipboardMedia';
 import { ClipboardNotePreview } from './ClipboardNotePreview';
 import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import './clipboard.css';
-
-function ImagePreview({ recordId, native, label }: { recordId: string; native: boolean; label: string }) {
-  const element = useRef<HTMLSpanElement>(null);
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!native) return;
-    let disposed = false;
-    let requested = false;
-    let objectUrl: string | undefined;
-    async function load() {
-      if (requested) return;
-      requested = true;
-      try {
-        const image = await invoke<{ bytes: number[]; mime: string }>('clipboard_image', { recordId });
-        if (disposed) return;
-        objectUrl = URL.createObjectURL(new Blob([new Uint8Array(image.bytes)], { type: image.mime }));
-        setUrl(objectUrl);
-      } catch { /* Keep the image indicator when its saved preview is unavailable. */ }
-    }
-    const observer = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) { observer?.disconnect(); void load(); }
-    });
-    if (observer && element.current) observer.observe(element.current);
-    else void load();
-    return () => { disposed = true; observer?.disconnect(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [recordId, native]);
-  return <span ref={element} className="clipboard-image-preview">{url ? <img src={url} alt={label} /> : <Image aria-label={label} />}</span>;
-}
 
 export function Clipboard({ t, snapshot, command, native, activity }: ViewProps) {
   const [session, setSession] = useState(0);
@@ -138,7 +110,7 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
         <span className="history-row-heading">{record.sourceApp?.iconDataUrl
           ? <img className="history-origin" src={record.sourceApp.iconDataUrl} alt={record.sourceApp.name ?? 'Nami'} title={record.sourceApp.name ?? 'Nami'} />
           : <span className="history-origin history-symbol" role="img" aria-label={record.sourceApp?.name ?? 'Nami'} title={record.sourceApp?.name ?? 'Nami'} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0, background: '#fff' } as CSSProperties} />}<span className="history-languages">{kind}</span><time dateTime={record.date}>{time}</time></span>
-        {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} image={record.kind === 'image' ? <ImagePreview recordId={record.id} native={native} label={kind} /> : undefined} /> : record.kind === 'image' ? <ImagePreview recordId={record.id} native={native} label={kind} /> : <span className="history-preview">{historyPreview(record.text)}</span>}
+        {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : undefined} /> : record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : <span className="history-preview">{historyPreview(record.text)}</span>}
       </button>
       <div className="history-row-actions" role="group" aria-label={t('actions')}>
         <button className="icon-button" title={t('copy')} aria-label={t('copy')} disabled={!native || !snapshot.capabilities.clipboardWrite} onClick={() => void useRecord(record.id, 'copy')}><HistoryIcon name="doc.on.doc" /></button>

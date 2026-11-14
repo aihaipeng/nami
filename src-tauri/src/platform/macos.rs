@@ -331,20 +331,7 @@ pub fn target_app_info(target: Target) -> Option<serde_json::Value> {
             .unwrap_or_else(|| bundle.clone());
         let url: Option<Retained<AnyObject>> = msg_send![&*application, bundleURL];
         let path: Option<Retained<NSString>> = url.and_then(|url| msg_send![&*url, path]);
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let icon: Option<Retained<AnyObject>> =
-            path.and_then(|path| msg_send![workspace, iconForFile: &*path]);
-        let icon_data_url = icon.and_then(|icon| {
-            let tiff: Option<Retained<AnyObject>> = msg_send![&*icon, TIFFRepresentation];
-            let bitmap: Option<Retained<AnyObject>> =
-                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff?];
-            let properties: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
-            let png: Option<Retained<AnyObject>> =
-                msg_send![&*bitmap?, representationUsingType: 4usize, properties: properties];
-            let encoded: Retained<NSString> =
-                msg_send![&*png?, base64EncodedStringWithOptions: 0usize];
-            Some(format!("data:image/png;base64,{encoded}"))
-        });
+        let icon_data_url = path.and_then(|path| file_icon_data_url(&path.to_string()));
         Some(serde_json::json!({
             "bundleId": bundle,
             "name": name,
@@ -476,6 +463,26 @@ pub fn send_paste(target: Target, expected_version: i64) -> Result<(), &'static 
         CFRelease(up);
     }
     Ok(())
+}
+
+// NSWorkspace file icons may be queried on a worker; no window/view API is touched.
+pub fn file_icon_data_url(path: &str) -> Option<String> {
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let icon: Option<Retained<AnyObject>> =
+            msg_send![workspace, iconForFile: &*NSString::from_str(path)];
+        icon.and_then(|icon| {
+            let tiff: Option<Retained<AnyObject>> = msg_send![&*icon, TIFFRepresentation];
+            let bitmap: Option<Retained<AnyObject>> =
+                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff?];
+            let properties: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+            let png: Option<Retained<AnyObject>> =
+                msg_send![&*bitmap?, representationUsingType: 4usize, properties: properties];
+            let encoded: Retained<NSString> =
+                msg_send![&*png?, base64EncodedStringWithOptions: 0usize];
+            Some(format!("data:image/png;base64,{encoded}"))
+        })
+    })
 }
 
 #[cfg(test)]

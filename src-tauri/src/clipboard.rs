@@ -66,6 +66,79 @@ pub struct ClipboardDetail {
     pub kind: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub path: String,
+    pub name: String,
+    pub exists: bool,
+    pub is_dir: bool,
+    pub is_image: bool,
+    pub icon_data_url: Option<String>,
+}
+
+pub fn file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
+    let paths: Vec<String> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
+    if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
+        return Err("storage_corrupt".into());
+    }
+    paths
+        .into_iter()
+        .take(3)
+        .map(|path| {
+            let file = Path::new(&path);
+            if !file.is_absolute() || path.contains('\0') {
+                return Err("storage_corrupt".into());
+            }
+            let metadata = std::fs::metadata(file).ok();
+            let is_dir = metadata.as_ref().is_some_and(|value| value.is_dir());
+            let is_image = !is_dir
+                && file
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| {
+                        [
+                            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico",
+                            "heic", "heif", "avif", "svg", "apng",
+                        ]
+                        .contains(&extension.to_ascii_lowercase().as_str())
+                    });
+            Ok(FileEntry {
+                name: file
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&path)
+                    .to_owned(),
+                path,
+                exists: metadata.is_some(),
+                is_dir,
+                is_image,
+                icon_data_url: None,
+            })
+        })
+        .collect()
+}
+
+pub fn read_file_preview(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let metadata = std::fs::metadata(path).map_err(|_| "clipboard_file_missing")?;
+    if !metadata.is_file() {
+        return Err("invalid_argument".into());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err("clipboard_image_limit".into());
+    }
+    let file = std::fs::File::open(path).map_err(|_| "clipboard_file_missing")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "clipboard_file_missing")?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("clipboard_image_limit".into());
+    }
+    Ok(bytes)
+}
+
 pub fn fingerprint(kind: &str, bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(kind.as_bytes());
@@ -268,5 +341,68 @@ mod tests {
             "storage_path"
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod file_display_tests {
+    use super::*;
+    #[test]
+    fn file_list_limits_preserve_names_and_detect_missing_directories_and_images() {
+        let root = std::env::temp_dir().join(format!("nami-file-display-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("test image.PNG");
+        std::fs::write(&image, b"synthetic").unwrap();
+        let missing = root.join("missing.txt");
+        let paths = vec![image, root.clone(), missing, root.join("fourth.txt")];
+        let entries = file_entries(&serde_json::to_string(&paths).unwrap()).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "test image.PNG");
+        assert!(entries[0].exists && entries[0].is_image && !entries[0].is_dir);
+        assert!(entries[1].is_dir && !entries[1].is_image);
+        assert!(!entries[2].exists);
+        assert_eq!(entries[2].path, paths[2].to_string_lossy());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preview_reads_only_regular_bounded_files_and_reports_missing_references() {
+        let root = std::env::temp_dir().join(format!("nami-preview-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_file_preview(&root).unwrap_err(), "invalid_argument");
+        let path = root.join("image.png");
+        assert_eq!(
+            read_file_preview(&path).unwrap_err(),
+            "clipboard_file_missing"
+        );
+        std::fs::write(&path, b"synthetic image").unwrap();
+        assert_eq!(read_file_preview(&path).unwrap(), b"synthetic image");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            read_file_preview(&path).unwrap_err(),
+            "clipboard_image_limit"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn file_list_rejects_invalid_storage_without_interpreting_it_as_a_path() {
+        for text in [
+            "not json",
+            "[]",
+            "[1]",
+            "[\"relative.txt\"]",
+            "[\"/tmp/a\\u0000\"]",
+        ] {
+            assert_eq!(file_entries(text).unwrap_err(), "storage_corrupt");
+        }
+        let paths = vec![std::env::temp_dir().join("a"); MAX_FILE_COUNT + 1];
+        assert_eq!(
+            file_entries(&serde_json::to_string(&paths).unwrap()).unwrap_err(),
+            "storage_corrupt"
+        );
     }
 }

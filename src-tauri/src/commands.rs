@@ -817,18 +817,52 @@ pub struct ClipboardImage {
 }
 
 #[tauri::command]
+pub async fn clipboard_files(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<Vec<nami::clipboard::FileEntry>, String> {
+    authorize(&window, &["clipboard"])?;
+    let record = crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_record(&record_id)
+    })
+    .await?;
+    if record.kind != "files" {
+        return Err("invalid_argument".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut entries = nami::clipboard::file_entries(&record.text)?;
+        for entry in &mut entries {
+            entry.icon_data_url = platform::file_icon_data_url(&entry.path);
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|_| "storage_worker")?
+}
+
+#[tauri::command]
 pub async fn clipboard_image(
     window: Webview,
     app: AppHandle,
     record_id: String,
+    max_pixels: Option<u32>,
 ) -> Result<ClipboardImage, String> {
     authorize(&window, &["clipboard"])?;
-    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
-    let platform::ClipboardPayload::Image { bytes, .. } = payload else {
+    let max_pixels = max_pixels.unwrap_or(1024);
+    if !(128..=2048).contains(&max_pixels) {
         return Err("invalid_argument".into());
-    };
+    }
+    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        platform::clipboard_image_preview(&bytes).map_err(str::to_owned)
+        let bytes = match payload {
+            platform::ClipboardPayload::Image { bytes, .. } => bytes,
+            platform::ClipboardPayload::Files(paths) if paths.len() == 1 => {
+                nami::clipboard::read_file_preview(std::path::Path::new(&paths[0]))?
+            }
+            _ => return Err("invalid_argument".into()),
+        };
+        platform::clipboard_image_preview(&bytes, max_pixels).map_err(str::to_owned)
     })
     .await
     .map_err(|_| "storage_worker")??;

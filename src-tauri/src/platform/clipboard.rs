@@ -245,7 +245,7 @@ impl Drop for ImageHandle {
     }
 }
 
-pub fn clipboard_image_preview(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub fn clipboard_image_preview(bytes: &[u8], max_pixels: u32) -> Result<Vec<u8>, &'static str> {
     if bytes.is_empty() || bytes.len() > LIMIT {
         return Err("clipboard_capture_limit");
     }
@@ -260,7 +260,8 @@ pub fn clipboard_image_preview(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
         let source = ImageHandle(source);
         let options: Retained<AnyObject> = msg_send![class!(NSMutableDictionary), dictionary];
         let yes: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: true];
-        let maximum: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithInt: 320_i32];
+        let maximum: Retained<AnyObject> =
+            msg_send![class!(NSNumber), numberWithUnsignedInt: max_pixels];
         let _: () = msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailFromImageAlways];
         let _: () = msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailWithTransform];
         let _: () =
@@ -353,7 +354,7 @@ pub fn test_clipboard_history() -> Result<(), String> {
             ) {
                 return Err("jpeg_image_not_captured".into());
             }
-            let preview = clipboard_image_preview(image).map_err(str::to_string)?;
+            let preview = clipboard_image_preview(image, 320).map_err(str::to_string)?;
             if preview.len() < 24 || &preview[..8] != b"\x89PNG\r\n\x1a\n" {
                 return Err("preview_not_png".into());
             }
@@ -362,7 +363,7 @@ pub fn test_clipboard_history() -> Result<(), String> {
             if width == 0 || height == 0 || width.max(height) > 320 {
                 return Err("preview_dimensions".into());
             }
-            if clipboard_image_preview(b"invalid image") != Err("clipboard_image_invalid") {
+            if clipboard_image_preview(b"invalid image", 320) != Err("clipboard_image_invalid") {
                 return Err("invalid_preview_accepted".into());
             }
             let plain = ClipboardPayload::Text("Visible synthetic text".into());

@@ -62,6 +62,10 @@ pub fn write_clipboard(_: &super::ClipboardPayload) -> Result<i64, (&'static str
     Err((UNAVAILABLE, None))
 }
 
-pub fn clipboard_image_preview(_: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub fn clipboard_image_preview(_: &[u8], _: u32) -> Result<Vec<u8>, &'static str> {
     Err(UNAVAILABLE)
+}
+
+pub fn file_icon_data_url(_: &str) -> Option<String> {
+    None
 }

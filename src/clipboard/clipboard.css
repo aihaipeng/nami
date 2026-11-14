@@ -6,9 +6,17 @@
 .clipboard-empty p { margin: 0; }
 .clipboard-empty button, .clipboard-load-more { padding: 6px 10px; border-radius: 7px; font-size: 12px; }
 .clipboard-load-more { display: block; margin: 10px auto 0; color: hsl(var(--muted-foreground)); }
-.clipboard-image-preview { display: flex; align-items: center; justify-content: flex-start; height: 100px; margin-top: 6px; overflow: hidden; border-radius: 5px; }
-.clipboard-image-preview img { max-width: 100%; max-height: 100px; object-fit: contain; border-radius: 5px; }
-.clipboard-image-preview > svg { width: 28px; height: 28px; color: hsl(var(--muted-foreground)); stroke-width: 1.5; }
+.clipboard-image-preview { display: flex; align-items: flex-start; min-width: 0; margin-top: 6px; overflow: hidden; }
+.clipboard-image-preview > .clipboard-files { width: 100%; margin-top: 0; }
+.clipboard-image-preview img { display: block; max-width: 100%; max-height: 64px; width: auto; height: auto; object-fit: contain; pointer-events: none; }
+.clipboard-media-placeholder { position: relative; display: flex; align-items: center; min-height: 20px; margin-top: 6px; color: hsl(var(--muted-foreground)); }
+.clipboard-media-placeholder > svg { width: 20px; height: 20px; stroke-width: 1.5; }
+.clipboard-files { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin-top: 6px; }
+.clipboard-file { display: flex; align-items: center; gap: 4px; min-width: 0; text-align: left; }
+.clipboard-file > img, .clipboard-file > svg { width: 20px; height: 20px; flex: 0 0 20px; object-fit: contain; pointer-events: none; stroke-width: 1.5; }
+.clipboard-file-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
+.clipboard-file[data-missing=true] .clipboard-file-name { text-decoration: line-through; }
+.clipboard-record-body .clipboard-files, .clipboard-record-body .clipboard-media-placeholder { margin-top: 0; }
 
 .clipboard-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
 .clipboard-context-menu { z-index: 50; padding: 4px; }

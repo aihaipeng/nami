@@ -46,6 +46,7 @@ beforeEach(() => {
       const result = queryHandler ? await queryHandler(request) : page(request.query, request.favoritesOnly);
       return { page: encode(result), alternate: request.cursor ? null : encode(page(request.query, !request.favoritesOnly)) };
     }
+    if (name === 'clipboard_files') return [{ path: '/tmp/synthetic.txt', name: 'synthetic.txt', exists: true, isDir: false, isImage: false, iconDataUrl: null }];
     if (name === 'clipboard_record_detail') {
       const record = records.find(({ id }) => id === (args as { recordId: string }).recordId)!;
       return { title: record.title ?? '', text: record.text, kind: record.kind };
@@ -609,6 +610,157 @@ describe('database clipboard history', () => {
     expect(row('stale-page')).toBeNull();
   });
 
+  it('renders native file icons, basenames, full-path tooltips and missing states instead of path summaries', async () => {
+    records = [{ ...records[0], kind: 'files', text: 'truncated path summary' }];
+    const entries = [
+      { path: '/synthetic/report.pdf', name: 'report.pdf', exists: true, isDir: false, isImage: false, iconDataUrl: 'data:image/png;base64,aWNvbg==' },
+      { path: '/synthetic/folder', name: 'folder', exists: true, isDir: true, isImage: false, iconDataUrl: null },
+      { path: '/synthetic/missing.png', name: 'missing.png', exists: false, isDir: false, isImage: true, iconDataUrl: null },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_files' ? entries : original(name, args));
+    await mount('clipboard');
+    await screen.findByText('report.pdf');
+    expect(row('first').querySelectorAll('.clipboard-file')).toHaveLength(3);
+    expect(row('first').querySelector('[title="/synthetic/report.pdf"] img')?.getAttribute('src')).toBe(entries[0].iconDataUrl);
+    expect(screen.getByText('folder').parentElement?.title).toBe('/synthetic/folder');
+    expect(screen.getByText('missing.png').parentElement?.dataset.missing).toBe('true');
+    expect(screen.queryByText('truncated path summary')).toBeNull();
+    expect(calls('clipboard_image')).toHaveLength(0);
+  });
+
+  it('previews only a single existing image file and falls back to its filename when decoding fails', async () => {
+    records = [{ ...records[0], kind: 'files' }];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_files') return [{ path: '/synthetic/image.png', name: 'image.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }];
+      if (name === 'clipboard_image') throw new Error('invalid image');
+      return original(name, args);
+    });
+    await mount('clipboard');
+    await screen.findByText('image.png');
+    expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'first', maxPixels: 1024 });
+    expect(row('first').querySelector('.clipboard-file')?.getAttribute('title')).toBe('/synthetic/image.png');
+  });
+
+  it('keeps multiple images as a file list and shares the same media renderer with titled records', async () => {
+    records = [{ ...records[0], kind: 'files', title: 'Media note' }];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_files' ? ['a.png', 'b.png'].map((name) => ({ path: `/synthetic/${name}`, name, exists: true, isDir: false, isImage: true, iconDataUrl: null })) : original(name, args));
+    await mount('clipboard');
+    await screen.findByText('a.png');
+    fireEvent.mouseEnter(row('first'));
+    expect(row('first').querySelector('.clipboard-record-body')?.getAttribute('data-expanded')).toBe('true');
+    expect(row('first').querySelectorAll('.clipboard-file')).toHaveLength(2);
+    expect(calls('clipboard_image')).toHaveLength(0);
+    expect(calls('clipboard_record_detail')).toHaveLength(0);
+  });
+
+  it('does not request offscreen media, ignores late responses after unmount and disconnects observers', async () => {
+    records = [{ ...records[0], kind: 'files' }];
+    let intersect: IntersectionObserverCallback | undefined;
+    const disconnect = vi.fn();
+    const previousObserver = globalThis.IntersectionObserver;
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: IntersectionObserverCallback) { intersect = callback; }
+      observe() {} disconnect = disconnect;
+    });
+    try {
+      const view = await mount('clipboard');
+      await waitFor(() => expect(listRows()).toHaveLength(1));
+      expect(calls('clipboard_files')).toHaveLength(0);
+      let finish!: (entries: unknown[]) => void;
+      const original = bridge.invoke.getMockImplementation()!;
+      bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_files' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
+      act(() => intersect?.([{ isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+      await waitFor(() => expect(calls('clipboard_files')).toHaveLength(1));
+      view.unmount();
+      await act(async () => finish([]));
+      expect(disconnect).toHaveBeenCalled();
+    } finally { vi.stubGlobal('IntersectionObserver', previousObserver); }
+  });
+
+  it('requests Retina-sized previews, keeps the old bitmap while resizing, and caps pixel work', async () => {
+    const previousWidth = window.innerWidth, previousScale = window.devicePixelRatio;
+    records = [{ ...records[0], id: 'retina-image', kind: 'image', text: '' }];
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: (image: { bytes: number[]; mime: string }) => void;
+    let pending = false;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name !== 'clipboard_image') return original(name, args);
+      if (pending) return new Promise((resolve) => { finish = resolve; });
+      return { bytes: [137, 80, 78, 71], mime: 'image/png' };
+    });
+    const create = vi.fn().mockReturnValueOnce('blob:retina-first').mockReturnValue('blob:retina-upgraded');
+    const revoke = vi.fn();
+    Object.defineProperties(URL, { createObjectURL: { configurable: true, value: create }, revokeObjectURL: { configurable: true, value: revoke } });
+    Object.defineProperties(window, { innerWidth: { configurable: true, value: 420 }, devicePixelRatio: { configurable: true, value: 2 } });
+    try {
+      const view = await mount('clipboard');
+      const image = await screen.findByRole('img', { name: 'Image' });
+      expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 1024 });
+      pending = true;
+      Object.defineProperty(window, 'innerWidth', { value: 600 });
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 1280 }));
+      expect(image.getAttribute('src')).toBe('blob:retina-first');
+      expect(revoke).not.toHaveBeenCalled();
+      await act(async () => finish({ bytes: [137, 80, 78, 71], mime: 'image/png' }));
+      expect(image.getAttribute('src')).toBe('blob:retina-upgraded');
+      expect(revoke).toHaveBeenCalledWith('blob:retina-first');
+      Object.defineProperty(window, 'innerWidth', { value: 10000 });
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 2048 }));
+      const count = calls('clipboard_image').length;
+      view.unmount();
+      fireEvent(window, new Event('resize'));
+      expect(calls('clipboard_image')).toHaveLength(count);
+      await act(async () => finish({ bytes: [137, 80, 78, 71], mime: 'image/png' }));
+      expect(create).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.defineProperties(window, { innerWidth: { configurable: true, value: previousWidth }, devicePixelRatio: { configurable: true, value: previousScale } });
+    }
+  });
+
+  it('upgrades only intersecting images and reuses the cached bitmap when reentering at the same size', async () => {
+    records = [{ ...records[0], id: 'visible-image', kind: 'image', text: '' }];
+    const previousObserver = globalThis.IntersectionObserver, previousWidth = window.innerWidth;
+    let intersect!: IntersectionObserverCallback;
+    const disconnect = vi.fn();
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: IntersectionObserverCallback) { intersect = callback; }
+      observe() {} disconnect = disconnect;
+    });
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_image' ? { bytes: [137, 80, 78, 71], mime: 'image/png' } : original(name, args));
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:visible') });
+    const enter = (value: boolean) => act(() => intersect([{ isIntersecting: value }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+    try {
+      const view = await mount('clipboard');
+      await waitFor(() => expect(listRows()).toHaveLength(1));
+      enter(true);
+      await screen.findByRole('img', { name: 'Image' });
+      expect(calls('clipboard_image')).toHaveLength(1);
+      enter(false);
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1500 });
+      fireEvent(window, new Event('resize'));
+      expect(calls('clipboard_image')).toHaveLength(1);
+      expect(screen.getByRole('img', { name: 'Image' }).getAttribute('src')).toBe('blob:visible');
+      enter(true);
+      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'visible-image', maxPixels: 1536 }));
+      await act(async () => {});
+      const count = calls('clipboard_image').length;
+      enter(false); enter(true);
+      await act(async () => {});
+      expect(calls('clipboard_image')).toHaveLength(count);
+      view.unmount();
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      vi.stubGlobal('IntersectionObserver', previousObserver);
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
   it('loads saved image previews by record ID and releases their URLs on unmount', async () => {
     records = [{ ...records[0], id: 'image', kind: 'image', text: '' }];
     const original = bridge.invoke.getMockImplementation()!;
@@ -618,7 +770,7 @@ describe('database clipboard history', () => {
     Object.defineProperties(URL, { createObjectURL: { configurable: true, value: create }, revokeObjectURL: { configurable: true, value: revoke } });
     const result = await mount('clipboard');
     await screen.findByRole('img', { name: 'Image' });
-    expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'image' });
+    expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'image', maxPixels: 1024 });
     expect(create).toHaveBeenCalledTimes(1);
     result.unmount();
     expect(revoke).toHaveBeenCalledWith('blob:synthetic-image');

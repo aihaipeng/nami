@@ -180,6 +180,7 @@ fn main() {
             commands::clipboard_record_update,
             commands::clipboard_capture_set,
             commands::clipboard_image,
+            commands::clipboard_files,
             commands::locale_set,
             commands::permission_request,
         ])

@@ -3350,6 +3350,148 @@ const idle=read();row.querySelector('button').focus();const focused=row.matches(
     }
 }
 
+fn run_clipboard_media_layout(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let root = std::env::temp_dir().join(format!("nami-media-ui-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::create_dir_all(root.join("Folder")).map_err(|_| "fixture")?;
+        let image = root.join("Preview.JPG");
+        std::fs::write(
+            &image,
+            include_bytes!("../../tests/fixtures/clipboard-preview.jpg"),
+        )
+        .map_err(|_| "fixture")?;
+        let wide = root.join("Wide.png");
+        std::fs::write(
+            &wide,
+            include_bytes!("../../tests/fixtures/clipboard-wide.png"),
+        )
+        .map_err(|_| "fixture")?;
+        for (id, paths) in [
+            ("media-wide", vec![wide]),
+            ("media-image", vec![image.clone()]),
+            (
+                "media-files",
+                vec![
+                    image,
+                    root.join("Folder"),
+                    root.join("Missing.txt"),
+                    root.join("Hidden.txt"),
+                ],
+            ),
+        ] {
+            let text = serde_json::to_string(&paths).map_err(|_| "fixture")?;
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("missing test database")?
+                .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: id.into(),
+                    kind: "files".into(),
+                    text: text.clone(),
+                    date: "2099-01-01T00:00:00Z".into(),
+                    is_favorite: false,
+                    is_pinned: false,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: nami::clipboard::fingerprint("files", text.as_bytes()),
+                })?;
+        }
+        on_main(app, |app| {
+            create(app, "clipboard")?
+                .show()
+                .map_err(|_| "window_show")?;
+            Ok(())
+        })?;
+        for _ in 0..150 {
+            let sample = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+if(!window.__TAURI_INTERNALS__?.invoke)return {ready:false};
+if(!window.__namiPreviewBudgetCheck){
+  window.__namiPreviewBudgetCheck={done:false};
+  Promise.all([0,2049].map(maxPixels=>window.__TAURI_INTERNALS__.invoke('clipboard_image',{recordId:'media-wide',maxPixels}).then(()=>false,error=>error==='invalid_argument'))).then(results=>{window.__namiPreviewBudgetCheck={done:true,rejected:results.every(Boolean)};});
+}
+if(!window.__namiPreviewBudgetCheck.done)return {ready:false};
+const image=document.querySelector('[data-record-id="media-image"] .clipboard-image-preview > img');
+const files=document.querySelector('[data-record-id="media-files"] .clipboard-files');
+const wide=document.querySelector('[data-record-id="media-wide"] .clipboard-image-preview > img');
+if(!image?.naturalWidth||!wide?.naturalWidth||!files?.querySelector('img'))return {ready:false};
+const wideRect=wide.getBoundingClientRect();
+const rect=image.getBoundingClientRect(),style=getComputedStyle(files),rows=[...files.querySelectorAll('.clipboard-file')];
+return {ready:true,budgetRejected:window.__namiPreviewBudgetCheck.rejected,wide:{naturalWidth:wide.naturalWidth,naturalHeight:wide.naturalHeight,width:wideRect.width,height:wideRect.height,dpr:devicePixelRatio},csp:document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content??null,sourceScheme:image.src.split(':')[0],image:{width:rect.width,height:rect.height,maxHeight:getComputedStyle(image).maxHeight,ratio:image.naturalWidth/image.naturalHeight},gap:style.rowGap,rows:rows.map(row=>{const icon=row.querySelector('img,svg'),rect=icon.getBoundingClientRect(),name=row.querySelector('.clipboard-file-name');return {name:name.textContent,path:row.title,iconWidth:rect.width,iconHeight:rect.height,gap:getComputedStyle(row).columnGap,decoration:getComputedStyle(name).textDecorationLine,missing:row.dataset.missing};})};
+"#,
+            )?;
+            if sample["ready"] == true {
+                if sample["image"]["maxHeight"] != "64px"
+                    || sample["image"]["height"].as_f64().unwrap_or(100.) > 64.1
+                    || sample["gap"] != "4px"
+                    || sample["sourceScheme"] != "blob"
+                    || sample["image"]["ratio"] != 2
+                    || sample["budgetRejected"] != true
+                {
+                    return Err(format!("media image sizing: {sample}"));
+                }
+                let wide = &sample["wide"];
+                let required = (wide["width"].as_f64().unwrap() * wide["dpr"].as_f64().unwrap())
+                    .ceil()
+                    .min(2048.0);
+                if wide["naturalWidth"].as_f64().unwrap() < required
+                    || wide["naturalWidth"].as_f64().unwrap() > 2048.0
+                    || (wide["naturalWidth"].as_f64().unwrap()
+                        / wide["naturalHeight"].as_f64().unwrap()
+                        - 8.0)
+                        .abs()
+                        > 0.02
+                {
+                    return Err(format!("preview resolution below display pixels: {sample}"));
+                }
+                let image = &sample["image"];
+                if (image["width"].as_f64().unwrap() / image["height"].as_f64().unwrap()
+                    - image["ratio"].as_f64().unwrap())
+                .abs()
+                    > 0.02
+                {
+                    return Err(format!("image ratio: {sample}"));
+                }
+                let rows = sample["rows"].as_array().ok_or("file rows")?;
+                if rows.len() != 3
+                    || rows[0]["name"] != "Preview.JPG"
+                    || rows[1]["name"] != "Folder"
+                    || rows[2]["name"] != "Missing.txt"
+                    || rows[2]["decoration"] != "line-through"
+                    || rows[2]["missing"] != "true"
+                {
+                    return Err(format!("media file list: {sample}"));
+                }
+                for row in rows {
+                    if row["iconWidth"] != 20
+                        || row["iconHeight"] != 20
+                        || row["gap"] != "4px"
+                        || row["path"].as_str().unwrap_or_default().is_empty()
+                    {
+                        return Err(format!("media file row: {sample}"));
+                    }
+                }
+                samples.push(sample);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("clipboard media did not load".into())
+    })();
+    let _ = std::fs::remove_dir_all(&root);
+    DomCase {
+        name: "clipboard media layout",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_editor_layout(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -3500,13 +3642,15 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         .unwrap()
         .history_width_initialized = true;
     if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
-        if !["clipboard-actions", "clipboard-editor"].contains(&case.as_str()) {
+        if !["clipboard-actions", "clipboard-editor", "clipboard-media"].contains(&case.as_str()) {
             return Err("unknown native test case".into());
         }
         let app = app.clone();
         std::thread::spawn(move || {
             let result = if case == "clipboard-actions" {
                 run_clipboard_action_timing(&app)
+            } else if case == "clipboard-media" {
+                run_clipboard_media_layout(&app)
             } else {
                 run_clipboard_editor_layout(&app)
             };

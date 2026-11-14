@@ -26,6 +26,7 @@ fn main() {
             "clipboard_record_update",
             "clipboard_capture_set",
             "clipboard_image",
+            "clipboard_files",
             "locale_set",
             "permission_request",
         ]),
