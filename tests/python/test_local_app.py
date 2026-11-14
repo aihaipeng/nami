@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 import os
 
 import pytest
@@ -73,3 +74,17 @@ def test_local_install_cli_refuses_non_macos(local_app, monkeypatch, platform, m
     monkeypatch.setattr(local_app, 'identity', lambda: pytest.fail('Must not access local signing on another platform'))
     with pytest.raises(SystemExit, match='require macOS'):
         local_app.main([mode])
+
+
+def test_repository_name_is_lowercase_and_app_name_is_preserved(local_app):
+    root = local_app.ROOT
+    package = json.loads((root / 'package.json').read_text())
+    tauri = json.loads((root / 'src-tauri/tauri.conf.json').read_text())
+    assert package['name'] == 'nami'
+    assert package['repository'] == {'type': 'git', 'url': 'https://github.com/aihaipeng/nami.git'}
+    cargo = (root / 'src-tauri/Cargo.toml').read_text()
+    assert 'name = "nami"' in cargo
+    assert 'repository = "https://github.com/aihaipeng/nami.git"' in cargo
+    assert tauri['productName'] == 'Nami'
+    assert tauri['identifier'] == local_app.BUNDLE_ID == 'dev.local.nami'
+    assert local_app.PRODUCT.name == local_app.INSTALLED.name == 'Nami.app'
