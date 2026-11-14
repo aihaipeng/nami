@@ -15,13 +15,15 @@ def test_selection_fixture_payloads_without_clipboard_access():
                    cwd=ROOT, check=True, timeout=180)
 
 
-@pytest.mark.parametrize('mode,count', [('reference', 14), ('symbols', 10)])
+@pytest.mark.parametrize('mode,count', [('reference', 14), ('symbols', 10), ('tray', 1)])
 def test_icon_export_to_isolated_directory(tmp_path, mode, count):
     subprocess.run(CARGO + ['--features', 'ui-tests', '--bin', 'export-history-icons', '--',
                            '--' + mode, '--output', str(tmp_path)], cwd=ROOT, check=True, timeout=180)
     icons = list(tmp_path.glob('*.png'))
     assert len(icons) == count
     for icon in icons:
+        if mode == 'tray':
+            assert icon.read_bytes() == (ROOT / 'src-tauri/icons/tray-icon.png').read_bytes()
         header = icon.read_bytes()[:24]
         assert header[:8] == b'\x89PNG\r\n\x1a\n'
         assert struct.unpack('>II', header[16:24]) == (48, 48)

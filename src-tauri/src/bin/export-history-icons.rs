@@ -29,6 +29,10 @@ mod macos {
         svg.replace(prefix, &prefix.replacen("<path", "<path fill=\"black\"", 1))
     }
 
+    fn tray_svg() -> &'static str {
+        include_str!("../../../src/assets/history/reference/nami-menu-mark.svg")
+    }
+
     unsafe fn render(image: &AnyObject, fit: bool, output: &Path) -> Result<(), Box<dyn Error>> {
         let allocated: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
         let bitmap: *mut AnyObject = msg_send![allocated,
@@ -70,9 +74,11 @@ mod macos {
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src/assets/history");
         let mut output = assets.clone();
         let mut symbols = false;
+        let mut tray = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--tray" => tray = true,
                 "--symbols" => symbols = true,
                 "--reference" => symbols = false,
                 "--output" => {
@@ -80,7 +86,7 @@ mod macos {
                 }
                 _ => {
                     return Err(format!(
-                        "Unknown argument: {arg}; use --reference|--symbols [--output DIR]"
+                        "Unknown argument: {arg}; use --reference|--symbols|--tray [--output DIR]"
                     )
                     .into())
                 }
@@ -90,7 +96,15 @@ mod macos {
         unsafe {
             // Keep the AppKit framework linked for dynamically resolved classes.
             let _ = std::mem::size_of::<objc2_app_kit::NSView>();
-            if symbols {
+            if tray {
+                let svg = tray_svg();
+                let data: *mut AnyObject =
+                    msg_send![class!(NSData), dataWithBytes: svg.as_ptr(), length: svg.len()];
+                let allocated: *mut AnyObject = msg_send![class!(NSImage), alloc];
+                let image: *mut AnyObject = msg_send![allocated, initWithData: data];
+                let image = Retained::from_raw(image).ok_or("Cannot load tray SVG")?;
+                render(&image, true, &output.join("tray-icon.png"))?;
+            } else if symbols {
                 for name in [
                     "list.bullet",
                     "star",
@@ -158,6 +172,38 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn tray_uses_the_approved_n_without_background_or_fonts() {
+            let svg = tray_svg();
+            assert_eq!(svg.matches("<path").count(), 2);
+            assert!(svg.contains("viewBox=\"420 165 570 440\""));
+            assert!(!svg.contains("<text"));
+            assert!(!svg.contains("<rect"));
+            assert!(!svg.contains("font-"));
+        }
+
+        #[test]
+        fn tray_bitmap_keeps_transparent_margins_at_menu_bar_size() {
+            let icon = tauri::include_image!("icons/tray-icon.png");
+            assert_eq!((icon.width(), icon.height()), (48, 48));
+            let visible: Vec<_> = icon
+                .rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel[3] > 0)
+                .map(|(index, _)| (index % 48, index / 48))
+                .collect();
+            assert!(!visible.is_empty());
+            let left = visible.iter().map(|point| point.0).min().unwrap();
+            let right = visible.iter().map(|point| point.0).max().unwrap();
+            let top = visible.iter().map(|point| point.1).min().unwrap();
+            let bottom = visible.iter().map(|point| point.1).max().unwrap();
+            assert!(left > 0 && right < 47 && top > 0 && bottom < 47);
+            assert!(right - left < 46 && bottom - top < 36);
+        }
+
         #[test]
         fn reference_color_and_fill_preserve_paths() {
             let source = "<svg stroke=\"currentColor\"><path d=\"M11.525 2\"/></svg>";

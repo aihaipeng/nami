@@ -259,7 +259,6 @@ fn main() {
             let quit = MenuItem::with_id(app, "quit", "Quit Nami", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&translation, &clipboard, &settings, &quit])?;
             let tray = TrayIconBuilder::new()
-                .title("N")
                 .tooltip("Nami")
                 .menu(&menu)
                 .on_menu_event(|app, event| {
@@ -275,8 +274,14 @@ fn main() {
                             .push(code);
                     }
                 });
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .icon(tauri::include_image!("icons/tray-icon.png"))
+                .icon_as_template(true);
             #[cfg(not(target_os = "macos"))]
-            let tray = tray.icon(app.default_window_icon().ok_or("missing app icon")?.clone());
+            let tray = tray
+                .title("N")
+                .icon(app.default_window_icon().ok_or("missing app icon")?.clone());
             tray.build(app)?;
             if platform::capabilities().selection {
                 for shortcut in fixed_shortcuts() {
