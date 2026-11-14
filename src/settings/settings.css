@@ -31,8 +31,11 @@
 .settings-shell .settings-badge, .settings-shell .settings-badge.outline { display: inline-flex; align-items: center; justify-content: flex-end; flex-shrink: 0; gap: 5px; max-width: 45%; padding: 0; border: 0; border-radius: 0; background: transparent; color: hsl(var(--foreground) / .6); font-size: 11px; line-height: 1.6; text-align: right; }
 .settings-shell .settings-badge > svg { width: 12px; height: 12px; }
 .settings-shell .language-picker { max-width: 48%; flex-shrink: 0; font-weight: 400; }
-.settings-shell .settings-switch { appearance: none; position: relative; width: 32px; height: 18px; margin: 0; flex-shrink: 0; border: 0; border-radius: 9px; background: hsl(var(--foreground) / .18); opacity: .55; }
+.settings-shell .settings-switch { appearance: none; position: relative; width: 32px; height: 18px; margin: 0; flex-shrink: 0; border: 0; border-radius: 9px; background: hsl(var(--foreground) / .18); opacity: 1; cursor: pointer; }
 .settings-shell .settings-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: rgb(var(--settings-page)); box-shadow: 0 1px 3px hsl(var(--foreground) / .15); }
+.settings-shell .settings-switch:checked { background: hsl(var(--primary)); }
+.settings-shell .settings-switch:checked::after { transform: translateX(14px); }
+.settings-shell .settings-switch:disabled { opacity: .45; cursor: default; }
 .settings-shell .permission-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
 .settings-shell .settings-action { display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 0 14px; border: 0; border-radius: 14px; background: hsl(var(--foreground) / .045); color: inherit; font: inherit; white-space: nowrap; }
 .settings-shell .settings-action:not(:disabled):hover { background: hsl(var(--foreground) / .1); }

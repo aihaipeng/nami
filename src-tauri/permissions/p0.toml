@@ -10,10 +10,10 @@ commands.allow = ["window_pin", "history_visibility_set", "history_toggle", "his
 
 [[permission]]
 identifier = "allow-p0-clipboard"
-description = "Clipboard window may restore only built-in synthetic samples."
-commands.allow = ["window_pin", "clipboard_record_use"]
+description = "Clipboard window may query and restore local clipboard history."
+commands.allow = ["window_pin", "clipboard_record_use", "clipboard_query", "clipboard_record_update", "clipboard_image"]
 
 [[permission]]
 identifier = "allow-p0-settings"
 description = "Session locale and explicit Accessibility request."
-commands.allow = ["locale_set", "permission_request", "translation_engine_set"]
+commands.allow = ["locale_set", "permission_request", "translation_engine_set", "clipboard_capture_set"]

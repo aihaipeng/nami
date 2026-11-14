@@ -916,12 +916,18 @@ struct DomCase {
 }
 
 fn evaluate_dom(app: &AppHandle, script: &str) -> Result<serde_json::Value, String> {
+    evaluate_view_dom(app, "translation", script)
+}
+
+fn evaluate_view_dom(
+    app: &AppHandle,
+    label: &'static str,
+    script: &str,
+) -> Result<serde_json::Value, String> {
     let (send, receive) = mpsc::sync_channel(1);
     let script = format!("JSON.stringify((() => {{ {script} }})())");
     on_main(app, move |app| {
-        let view = app
-            .get_webview("translation")
-            .ok_or("missing_test_webview")?;
+        let view = app.get_webview(label).ok_or("missing_test_webview")?;
         view.with_webview(move |view| unsafe {
             let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut AnyObject| {
                 let result = if !error.is_null() {
@@ -1680,6 +1686,30 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             history_click(app, 202)
         })?;
         wait_history_query(app)?;
+        samples.push(on_main(app, |app| unsafe {
+            let window = app.get_window("translation").ok_or("missing_test_window")?;
+            let native = window.ns_window().map_err(|_| "window_geometry")?.cast::<AnyObject>();
+            let search = history_object(app, 205)?;
+            let container: *mut AnyObject = objc2::msg_send![search, superview];
+            let layer: *mut AnyObject = objc2::msg_send![container, layer];
+            let _: bool = objc2::msg_send![native, makeFirstResponder: std::ptr::null::<AnyObject>()];
+            let idle: f64 = objc2::msg_send![layer, borderWidth];
+            let _: () = objc2::msg_send![search, selectText: std::ptr::null::<AnyObject>()];
+            let focused: f64 = objc2::msg_send![layer, borderWidth];
+            let _: bool = objc2::msg_send![native, makeFirstResponder: std::ptr::null::<AnyObject>()];
+            let blurred: f64 = objc2::msg_send![layer, borderWidth];
+            equal(idle, 1.0, "idle search border")?;
+            equal(focused, 2.0, "search focus ring appears before typing")?;
+            equal(blurred, 1.0, "search focus ring clears after blur")?;
+            let delete = history_object(app, 1024)?;
+            let tint: *mut AnyObject = objc2::msg_send![delete, contentTintColor];
+            let red: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), systemRedColor];
+            let is_red: bool = !tint.is_null() && objc2::msg_send![tint, isEqual: red];
+            if !is_red {
+                return Err("history delete icon must use destructive red".into());
+            }
+            Ok(serde_json::json!({"searchIdleBorder":idle,"searchFocusedBorder":focused,"searchBlurredBorder":blurred,"deleteRed":is_red}))
+        })?);
         let initial = on_main(app, history_snapshot)?;
         if initial["pinnedCount"] != 2 || initial["ordinaryCount"] != 18 {
             return Err("native history did not load 20 samples with pinned records first".into());
@@ -2118,7 +2148,28 @@ fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
                 }
                 let root = stage.ivars().history_view.get() as *mut AnyObject;
                 let wordmark: *mut AnyObject = objc2::msg_send![root,viewWithTag:208isize];
+                let image_view: bool =
+                    objc2::msg_send![wordmark,isKindOfClass:objc2::class!(NSImageView)];
+                if !image_view {
+                    return Err(
+                        "history header wordmark must use outlined artwork, not a font label"
+                            .into(),
+                    );
+                }
+                let mark: *mut AnyObject = objc2::msg_send![wordmark, image];
+                let template: bool = !mark.is_null() && objc2::msg_send![mark, isTemplate];
+                if mark.is_null() || template {
+                    return Err("history header must use fixed white artwork without adaptive template recoloring".into());
+                }
+                let tint: *mut AnyObject = objc2::msg_send![wordmark, contentTintColor];
+                let white: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), whiteColor];
+                let bright_white: bool = !tint.is_null() && objc2::msg_send![tint, isEqual: white];
+                if !bright_white {
+                    return Err("history header wordmark must stay bright white".into());
+                }
                 let bounds: objc2_foundation::NSRect = objc2::msg_send![wordmark, bounds];
+                equal(bounds.size.width, 44.0, "history artwork width")?;
+                equal(bounds.size.height, 20.0, "history artwork height")?;
                 let center: objc2_foundation::NSPoint = objc2::msg_send![wordmark,convertPoint:objc2_foundation::NSPoint::new(bounds.size.width/2.0,bounds.size.height/2.0),toView:&*stage];
                 let hit: *mut AnyObject = objc2::msg_send![root,hitTest:center];
                 if hit != root {
@@ -2248,6 +2299,336 @@ fn run_runtime_history(app: &AppHandle) -> DomCase {
     })();
     DomCase {
         name: "runtime history: native append, source icon and WebView restoration",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_clipboard_history_view(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        let text = format!(
+            "Synthetic clipboard complete content {} tail-token",
+            "🌊".repeat(300)
+        );
+        let record = nami::clipboard::ClipboardRecord {
+            id: "clipboard-view-regression".into(),
+            kind: "text".into(),
+            text: text.clone(),
+            date: "2099-01-01T00:00:00.000Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+        };
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("missing_test_database")?
+            .clipboard_insert(&record)?;
+        for index in 0..24 {
+            let mut extra = record.clone();
+            extra.id = format!("clipboard-style-{index}");
+            extra.text = format!("Synthetic style record {index}");
+            extra.fingerprint = nami::clipboard::fingerprint("text", extra.text.as_bytes());
+            extra.is_pinned = index == 0;
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("missing_test_database")?
+                .clipboard_insert(&extra)?;
+        }
+        on_main(app, |app| {
+            // Create an isolated WebView without capturing a real paste target or reading general pasteboard.
+            create(app, "clipboard")?;
+            Ok(())
+        })?;
+        let script = r#"const wordmark=document.querySelector('.clipboard-panel .history-wordmark');const row=document.querySelector('[data-record-id="clipboard-view-regression"]');if(!wordmark||!row)return {ready:false};const style=getComputedStyle(wordmark);return {ready:true,width:wordmark.getBoundingClientRect().width,height:wordmark.getBoundingClientRect().height,background:style.backgroundColor,mask:style.maskImage||style.webkitMaskImage,text:wordmark.textContent,draggable:wordmark.hasAttribute('data-tauri-drag-region'),preview:row.querySelector('.history-preview').textContent};"#;
+        let mut value = serde_json::Value::Null;
+        for _ in 0..80 {
+            value = evaluate_view_dom(app, "clipboard", script)?;
+            if value["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if value["ready"] != true
+            || value["text"] != ""
+            || value["draggable"] != true
+            || value["background"] != "rgb(255, 255, 255)"
+            || !value["mask"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nami-wordmark")
+        {
+            return Err(format!(
+                "clipboard wordmark does not match the white native artwork: {value}"
+            ));
+        }
+        equal(
+            value["width"].as_f64().ok_or("wordmark width")?,
+            44.0,
+            "wordmark width",
+        )?;
+        equal(
+            value["height"].as_f64().ok_or("wordmark height")?,
+            20.0,
+            "wordmark height",
+        )?;
+        let chrome = evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const panel=document.querySelector('.clipboard-panel'), viewport=panel.querySelector('.history-viewport'), list=panel.querySelector('.history-list'), pinned=panel.querySelector('.history-pinned'), footer=panel.querySelector('.history-footer'), keyboard=footer.querySelector('button'), search=panel.querySelector('.history-search'), preview=panel.querySelector('.history-preview'), actions=panel.querySelector('.history-row-actions');
+const bounds=panel.getBoundingClientRect(), vr=viewport.getBoundingClientRect(), kr=keyboard.getBoundingClientRect(), fr=footer.getBoundingClientRect();
+const style=getComputedStyle(search), idle=style.borderTopColor; search.querySelector('input').focus();
+const focus=getComputedStyle(search).boxShadow; const focused=document.hasFocus(); search.querySelector('input').blur();
+const rules=(sheets)=>[...sheets].flatMap(sheet=>[...(sheet.cssRules||[])].flatMap(rule=>rule.selectorText?[rule]:rule.cssRules?rules([rule]):[]));
+const focusRule=rules(document.styleSheets).find(rule=>rule.selectorText==='.history-search:focus-within')?.style.boxShadow;
+keyboard.click();
+const color=(value)=>{const c=document.createElement('canvas');c.width=c.height=1;const ctx=c.getContext('2d');ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
+return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds.bottom-(fr.top+fr.height/2),keyboardCenter:bounds.bottom-(kr.top+kr.height/2),keyboardRight:bounds.right-kr.right,keyboardSize:[kr.width,kr.height],footerFont:getComputedStyle(footer).fontSize,mask:getComputedStyle(list).webkitMaskImage,pinnedMask:getComputedStyle(pinned).webkitMaskImage,scrollbars:panel.querySelectorAll('[role=scrollbar]').length,scrollbarTop:panel.querySelector('[role=scrollbar]')?.getBoundingClientRect().top-vr.top,searchRadius:style.borderRadius,idle,focus,focused,focusRule,caret:getComputedStyle(search.querySelector('input')).caretColor,previewFont:getComputedStyle(preview).fontSize,previewLine:getComputedStyle(preview).lineHeight,actionDuration:getComputedStyle(actions).transitionDuration,actionOffset:getComputedStyle(actions).transform,iconSize:[getComputedStyle(keyboard.firstElementChild).width,getComputedStyle(keyboard.firstElementChild).height],secondary:color(getComputedStyle(footer).color),delete:color(getComputedStyle(panel.querySelector('.history-delete')).color)};
+"#,
+        )?;
+        for (key, expected) in [
+            ("top", 48.0),
+            ("bottom", 28.0),
+            ("footerCenter", 16.0),
+            ("keyboardCenter", 16.0),
+            ("keyboardRight", 12.0),
+            ("scrollbarTop", 0.0),
+        ] {
+            equal(
+                chrome[key]
+                    .as_f64()
+                    .ok_or_else(|| format!("missing {key}: {chrome}"))?,
+                expected,
+                key,
+            )?;
+        }
+        if chrome["keyboardSize"] != serde_json::json!([24, 24])
+            || chrome["scrollbars"] != 1
+            || chrome["searchRadius"] != "10px"
+            || chrome["iconSize"] != serde_json::json!(["14px", "14px"])
+            || chrome["previewFont"] != "13px"
+            || chrome["previewLine"] != "20px"
+            || chrome["footerFont"] != "11px"
+            || !chrome["mask"].as_str().unwrap_or_default().contains("8px")
+            || !chrome["pinnedMask"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("8px")
+            || !chrome["focusRule"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("2px")
+            || (chrome["focused"] == true
+                && !chrome["focus"].as_str().unwrap_or_default().contains("2px"))
+            || !chrome["actionDuration"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("0.1s")
+        {
+            return Err(format!(
+                "clipboard chrome differs from native history: {chrome}"
+            ));
+        }
+        let colors = on_main(app, |_| unsafe {
+            let space: *mut AnyObject =
+                objc2::msg_send![objc2::class!(NSColorSpace), sRGBColorSpace];
+            let mut values = Vec::new();
+            for selector in [
+                objc2::sel!(secondaryLabelColor),
+                objc2::sel!(systemRedColor),
+            ] {
+                let color: *mut AnyObject =
+                    objc2::msg_send![objc2::class!(NSColor), performSelector: selector];
+                let color: *mut AnyObject = objc2::msg_send![color, colorUsingColorSpace: space];
+                let (mut r, mut g, mut b, mut a) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+                let _: () = objc2::msg_send![color, getRed: &mut r, green: &mut g, blue: &mut b, alpha: &mut a];
+                // Canvas resolves transparent system colors against transparent black.
+                values.push([r, g, b, a].map(|value| (value * 255.0).round() as i64));
+            }
+            Ok(values)
+        })?;
+        for (key, expected) in [("secondary", colors[0]), ("delete", colors[1])] {
+            let actual: Vec<i64> = chrome[key]
+                .as_array()
+                .ok_or("missing color")?
+                .iter()
+                .filter_map(|v| v.as_i64())
+                .collect();
+            if actual.len() != 4
+                || actual
+                    .iter()
+                    .zip(expected)
+                    .any(|(value, expected)| (value - expected).abs() > 2)
+            {
+                return Err(format!(
+                    "clipboard {key} token differs from AppKit {expected:?}: {chrome}"
+                ));
+            }
+        }
+        let mut help = serde_json::Value::Null;
+        for _ in 0..20 {
+            help = evaluate_view_dom(app, "clipboard", "const panel=document.querySelector('.history-shortcuts-panel');if(!panel)return {ready:false};const r=panel.getBoundingClientRect();return {ready:true,width:r.width,height:r.height};")?;
+            if help["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if help["width"] != 230 || help["height"] != 136 {
+            return Err(format!("shortcut panel size: {help}"));
+        }
+        evaluate_view_dom(app,"clipboard","document.querySelector('.history-shortcuts').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
+        let closed = evaluate_view_dom(
+            app,
+            "clipboard",
+            "return !document.querySelector('.history-shortcuts-panel');",
+        )?;
+        if closed != true {
+            return Err("shortcut help did not close with Escape".into());
+        }
+        samples.push(chrome);
+        samples.push(help);
+        let state = app.state::<AppState>();
+        let database_guard = state.database.lock().unwrap();
+        let database = database_guard.as_ref().ok_or("missing_test_database")?;
+        if database.clipboard_record(&record.id)?.text != text
+            || value["preview"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                > 256
+        {
+            return Err("clipboard summary replaced complete content".into());
+        }
+        samples.push(value);
+        drop(database_guard);
+        let state = app.state::<AppState>();
+        crate::clipboard_runtime::persist_capture(
+            state
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("missing_test_database")?,
+            &crate::clipboard_runtime::image_root(app)?,
+            crate::platform::ClipboardCapture {
+                version: 123,
+                payload: crate::platform::ClipboardPayload::Text(
+                    "Synthetic newly copied clipboard text".into(),
+                ),
+                source_app: None,
+            },
+        )?;
+        crate::clipboard_runtime::changed(app)?;
+        let mut updated = serde_json::Value::Null;
+        for _ in 0..80 {
+            updated = evaluate_view_dom(app, "clipboard", "const texts=[...document.querySelectorAll('.clipboard-panel .history-preview')].map(node=>node.textContent);return {ready:texts.includes('Synthetic newly copied clipboard text'),count:texts.length};")?;
+            if updated["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if updated["ready"] != true {
+            return Err(
+                "new clipboard capture did not appear through database event and WebView query"
+                    .into(),
+            );
+        }
+        samples.push(updated);
+        Ok::<(), String>(())
+    })();
+    DomCase {
+        name: "clipboard WebView: native history wordmark, complete content and new capture event",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        on_main(app, |app| {
+            create(app, "settings")?;
+            Ok(())
+        })?;
+        let mut ready = false;
+        for _ in 0..80 {
+            let value = evaluate_view_dom(app, "settings", "const button=[...document.querySelectorAll('.settings-sidebar nav button')].find(button=>button.textContent==='Clipboard');if(!button)return {ready:false};button.click();return {ready:true};")?;
+            if value["ready"] == true {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !ready {
+            return Err("settings clipboard navigation did not connect".into());
+        }
+        let mut previous_background = None;
+        for enabled in [true, false] {
+            let script = format!("const input=document.querySelector('#clipboard-capture');if(!input)return {{ready:false}};if(input.disabled)throw Error('capture switch is disabled');if(input.checked!=={enabled})input.click();return {{ready:true}};");
+            let mut sent = false;
+            for _ in 0..80 {
+                let value = evaluate_view_dom(app, "settings", &script)?;
+                if value["ready"] == true {
+                    sent = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if !sent {
+                return Err("missing capture switch".into());
+            }
+            let mut value = serde_json::Value::Null;
+            for _ in 0..80 {
+                value = evaluate_view_dom(app, "settings", &format!("const input=document.querySelector('#clipboard-capture');const style=getComputedStyle(input);const thumb=getComputedStyle(input,'::after');return {{ready:input.checked==={enabled},checked:input.checked,disabled:input.disabled,background:style.backgroundColor,opacity:style.opacity,transform:thumb.transform}};"))?;
+                if value["ready"] == true {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if value["ready"] != true || value["disabled"] != false || value["opacity"] != "1" {
+                return Err(format!("capture switch failed to change: {value}"));
+            }
+            let state = app.state::<AppState>();
+            if state
+                .clipboard_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != enabled
+                || state
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("missing_test_database")?
+                    .clipboard_capture_enabled()?
+                    != enabled
+            {
+                return Err("capture switch did not persist through IPC".into());
+            }
+            if enabled && value["transform"] == "none" {
+                return Err("capture switch thumb did not move".into());
+            }
+            if previous_background.as_ref() == Some(&value["background"]) {
+                return Err("capture switch states look identical".into());
+            }
+            previous_background = Some(value["background"].clone());
+            samples.push(value);
+        }
+        Ok::<(), String>(())
+    })();
+    DomCase {
+        name: "clipboard capture setting: clickable WebView switch, visible state and durable IPC",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -2430,6 +2811,15 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         dom_cases.push(run_history_pagination(&app));
         dom_cases.push(run_source_editing(&app));
         dom_cases.push(run_resize_hit_targets(&app));
+        dom_cases.push(run_clipboard_history_view(&app));
+        dom_cases.push(run_clipboard_capture_setting(&app));
+        let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());
+        dom_cases.push(DomCase {
+            name: "clipboard history: text, image, files, private exclusion, PNG thumbnail and missing-file protection",
+            passed: clipboard_history.is_ok(),
+            error: clipboard_history.err(),
+            samples: Vec::new(),
+        });
         let clipboard = on_main(&app, |_| crate::platform::test_selection_clipboard());
         dom_cases.push(DomCase {
             name: "selection clipboard: text-only classification, all-format restore, empty restore and newer-copy protection",

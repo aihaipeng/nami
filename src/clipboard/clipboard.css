@@ -1,35 +1,11 @@
-.clipboard-tools { display: flex; gap: 4px; }
-.clipboard-icon-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 28px; height: 28px; padding: 5px; border: 0; border-radius: 7px; background: transparent; color: inherit; }
-.clipboard-panel button:disabled { cursor: default; }
-.clipboard-panel button:not(:disabled):hover, .clipboard-icon-button[aria-pressed=true] { background: hsl(var(--accent)); }
-.clipboard-panel button:focus-visible, .clipboard-search-field:focus-within { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
-.clipboard-search-field { display: flex; align-items: center; flex-direction: row-reverse; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid hsl(var(--input)); border-radius: 7px; background: hsl(var(--card)); }
-.clipboard-search-field > input { min-width: 0; width: 100%; height: 100%; border: 0; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12px; }
-.clipboard-search-field > svg { color: hsl(var(--muted-foreground)); }
-.clipboard-count { display: inline-flex; align-items: center; padding: 0 5px; border-radius: 5px; background: hsl(var(--secondary)); font-size: 9px; }
-.clipboard-panel .record-body { border: 0; background: transparent; color: inherit; font-family: inherit; cursor: default; }
-.clipboard-panel .record-body:disabled { opacity: 1; }
-.clipboard-panel .record-copy:disabled { opacity: .5; }
-.clipboard-empty { display: flex; min-height: 160px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: hsl(var(--muted-foreground)); text-align: center; }
-.clipboard-empty p, .clipboard-empty small, .clipboard-notice h5, .clipboard-notice p { margin: 0; }
-.clipboard-empty > svg { width: 24px; height: 24px; margin-bottom: 8px; }
-.clipboard-empty small { font-size: 11px; }
-.clipboard-feedback, .clipboard-notice { border: 1px solid hsl(var(--border)); border-radius: 8px; padding: 12px; }
-.clipboard-feedback { font-size: 12px; line-height: 1.6; }
-.clipboard-notice { display: flex; gap: 8px; }
-.clipboard-notice > svg { flex-shrink: 0; margin-top: 2px; }
-.clipboard-notice h5 { margin-bottom: 4px; font-weight: 500; }
-.clipboard-panel .clipboard-toolbar { margin-bottom: 14px; }
-.clipboard-toolbar .clipboard-search { padding: 0 8px; }
-.clipboard-panel .clipboard-list { padding: 4px 10px 12px; }
-.clipboard-panel .clipboard-row { border: 0; margin-bottom: 4px; border-radius: 8px; }
-.clipboard-panel .clipboard-row.selected { background: hsl(var(--foreground) / .1); }
-.clipboard-panel .record-body { padding: 8px 34px 8px 8px; gap: 5px; font-weight: 400; }
-.clipboard-panel .record-icon { width: 16px; height: 18px; border: 0; border-radius: 0; background: transparent; padding-top: 1px; }
-.clipboard-panel .record-icon svg { width: 16px; height: 16px; }
-.clipboard-panel .record-meta { font-size: 10px; }
-.clipboard-panel .record-text { font-size: 13px; line-height: 19px; margin-top: 3px; }
-.clipboard-panel .clipboard-notice { display: block; border: 0; border-top: 1px solid hsl(var(--foreground) / .05); border-radius: 0; background: transparent; margin: 0 14px; padding: 9px 0; font-size: 10px; }
-.clipboard-panel .clipboard-notice summary { color: hsl(var(--muted-foreground)); cursor: default; }
-.clipboard-panel .clipboard-notice p { margin: 8px 0 0; font-size: 10px; line-height: 1.6; }
-.clipboard-panel button:not(:disabled):hover { background: hsl(var(--foreground) / .06); }
+.clipboard-panel.history-panel { position: relative; width: 100%; right: auto; }
+.clipboard-panel .history-row-select:disabled { opacity: 1; }
+.clipboard-panel .history-row-actions button:disabled { opacity: .4; }
+.clipboard-panel .clipboard-feedback { position: absolute; z-index: 3; bottom: 32px; left: 18px; right: 40px; pointer-events: none; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.clipboard-empty { flex-direction: column; gap: 10px; }
+.clipboard-empty p { margin: 0; }
+.clipboard-empty button, .clipboard-load-more { padding: 6px 10px; border-radius: 7px; font-size: 12px; }
+.clipboard-load-more { display: block; margin: 10px auto 0; color: hsl(var(--muted-foreground)); }
+.clipboard-image-preview { display: flex; align-items: center; justify-content: flex-start; height: 100px; margin-top: 6px; overflow: hidden; border-radius: 5px; }
+.clipboard-image-preview img { max-width: 100%; max-height: 100px; object-fit: contain; border-radius: 5px; }
+.clipboard-image-preview > svg { width: 28px; height: 28px; color: hsl(var(--muted-foreground)); stroke-width: 1.5; }

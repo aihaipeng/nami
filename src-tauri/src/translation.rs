@@ -77,7 +77,18 @@ pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Resul
 #[serde(rename_all = "camelCase")]
 pub struct TranslationReuse {
     pub record_id: String,
-    pub target_index: usize,
+    pub target_index: Option<usize>,
+}
+
+pub fn source_app_for_translation(
+    text: &str,
+    previous: Option<&crate::model::HistoryRecord>,
+    captured: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match previous.filter(|record| record.text == text) {
+        Some(record) => record.source_app.clone(),
+        None => captured,
+    }
 }
 
 pub fn reusable_results(
@@ -347,6 +358,38 @@ mod tests {
                 &record.target_languages,
                 Some(&record),
                 None
+            ),
+            vec![None, None]
+        );
+        let app = serde_json::json!({"bundleId": "synthetic.source", "name": "Synthetic Source", "iconDataUrl": "data:image/png;base64,c3ludGhldGlj"});
+        let mut sourced = record.clone();
+        sourced.source_app = Some(app.clone());
+        assert_eq!(
+            source_app_for_translation("Synthetic", Some(&sourced), None),
+            Some(app.clone())
+        );
+        assert_eq!(
+            source_app_for_translation("Edited", Some(&sourced), None),
+            None
+        );
+        assert_eq!(
+            source_app_for_translation("Synthetic", None, Some(app.clone())),
+            Some(app.clone())
+        );
+        assert_eq!(
+            source_app_for_translation("Synthetic", Some(&record), Some(app)),
+            None
+        );
+        let full_refresh: TranslationReuse =
+            serde_json::from_str(r#"{"recordId":"previous"}"#).unwrap();
+        assert_eq!(full_refresh.target_index, None);
+        assert_eq!(
+            reusable_results(
+                "Synthetic",
+                "auto",
+                &record.target_languages,
+                Some(&sourced),
+                full_refresh.target_index
             ),
             vec![None, None]
         );

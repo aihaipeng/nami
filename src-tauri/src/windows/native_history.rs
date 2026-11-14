@@ -1,5 +1,5 @@
 use super::*;
-use objc2_app_kit::{NSScrollView, NSView};
+use objc2_app_kit::{NSScrollView, NSTextField, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::{
     cell::RefCell,
@@ -34,6 +34,7 @@ struct HistoryState {
     favorite_icon_filled: Cell<bool>,
     pin_icon_filled: Cell<bool>,
     search: Cell<usize>,
+    search_focused: Cell<bool>,
     scroll: Cell<usize>,
     document: Cell<usize>,
     pinned_scroll: Cell<usize>,
@@ -66,6 +67,40 @@ struct DividerState {
 
 struct HistoryScrollState {
     top_inset: Cell<f64>,
+}
+
+objc2::define_class!(
+    #[unsafe(super = NSTextField)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = usize]
+    struct HistorySearchField;
+    impl HistorySearchField {
+        #[unsafe(method(becomeFirstResponder))]
+        fn focus(&self) -> objc2::runtime::Bool {
+            let accepted: objc2::runtime::Bool = unsafe { objc2::msg_send![super(self), becomeFirstResponder] };
+            if accepted.as_bool() { self.sync_focus(true); }
+            accepted
+        }
+        #[unsafe(method(selectText:))]
+        fn select_text(&self, sender: *mut AnyObject) {
+            unsafe { let _: () = objc2::msg_send![super(self), selectText: sender]; }
+            let editor: *mut AnyObject = unsafe { objc2::msg_send![self, currentEditor] };
+            self.sync_focus(!editor.is_null());
+        }
+        #[unsafe(method(textDidEndEditing:))]
+        fn end_editing(&self, notification: *mut AnyObject) {
+            unsafe { let _: () = objc2::msg_send![super(self), textDidEndEditing: notification]; }
+            self.sync_focus(false);
+        }
+    }
+);
+
+impl HistorySearchField {
+    fn sync_focus(&self, focused: bool) {
+        let root = unsafe { &*(*self.ivars() as *const NativeHistory) };
+        root.ivars().search_focused.set(focused);
+        root.update_search_appearance();
+    }
 }
 
 objc2::define_class!(
@@ -228,6 +263,8 @@ objc2::define_class!(
         }
         #[unsafe(method(controlTextDidBeginEditing:))]
         fn search_editing(&self, _: *mut AnyObject) {
+            self.ivars().search_focused.set(true);
+            self.update_search_appearance();
             unsafe {
                 let search = self.ivars().search.get() as *mut AnyObject;
                 let editor: *mut AnyObject = objc2::msg_send![search, currentEditor];
@@ -236,6 +273,11 @@ objc2::define_class!(
                     let _: () = objc2::msg_send![editor, setInsertionPointColor: gray];
                 }
             }
+        }
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn search_ended(&self, _: *mut AnyObject) {
+            self.ivars().search_focused.set(false);
+            self.update_search_appearance();
         }
         #[unsafe(method(controlTextDidChange:))]
         fn search_changed(&self, _: *mut AnyObject) { self.request_query(); }
@@ -446,8 +488,8 @@ unsafe fn set_symbol(button: &AnyObject, symbol: &str) {
         "xmark.circle.fill" => Some(include_bytes!(
             "../../../src/assets/history/reference-clear.png"
         )),
-        "arrow.clockwise" => Some(include_bytes!(
-            "../../../src/assets/history/reference-refresh.png"
+        "languages" => Some(include_bytes!(
+            "../../../src/assets/history/reference-languages.png"
         )),
         "doc.on.doc" => Some(include_bytes!(
             "../../../src/assets/history/reference-copy.png"
@@ -511,6 +553,18 @@ unsafe fn source_icon(record: &Record) -> Option<Retained<AnyObject>> {
     let data: Option<Retained<AnyObject>> = objc2::msg_send![allocated, initWithBase64EncodedString: &*NSString::from_str(encoded), options: 0usize];
     let image: objc2::rc::Allocated<AnyObject> = objc2::msg_send![objc2::class!(NSImage), alloc];
     objc2::msg_send![image, initWithData: &*data?]
+}
+
+unsafe fn default_source_icon() -> Retained<AnyObject> {
+    let bytes = include_bytes!("../../../src/assets/history/reference-nami.png");
+    let data: *mut AnyObject =
+        objc2::msg_send![objc2::class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+    let allocated: objc2::rc::Allocated<AnyObject> =
+        objc2::msg_send![objc2::class!(NSImage), alloc];
+    let image: Retained<AnyObject> = objc2::msg_send![allocated, initWithData: data];
+    let _: () = objc2::msg_send![&*image, setSize: NSSize::new(14.0, 14.0)];
+    let _: () = objc2::msg_send![&*image, setTemplate: false];
+    image
 }
 
 unsafe fn animate_actions(button: &AnyObject, showing: bool) {
@@ -695,7 +749,8 @@ impl NativeHistory {
             let container: *mut AnyObject = objc2::msg_send![search, superview];
             let layer: *mut AnyObject = objc2::msg_send![container, layer];
             let base: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), labelColor];
-            let border: *mut AnyObject = objc2::msg_send![base, colorWithAlphaComponent: 0.12_f64];
+            let focused = self.ivars().search_focused.get();
+            let border: *mut AnyObject = objc2::msg_send![base, colorWithAlphaComponent: if focused { 0.25_f64 } else { 0.12_f64 }];
             let background: *mut AnyObject =
                 objc2::msg_send![base, colorWithAlphaComponent: 0.04_f64];
             let border: *mut AnyObject = objc2::msg_send![border, CGColor];
@@ -703,6 +758,8 @@ impl NativeHistory {
             let _: () = objc2::msg_send![objc2::class!(CATransaction), begin];
             let _: () = objc2::msg_send![objc2::class!(CATransaction), setDisableActions: true];
             let _: () = objc2::msg_send![layer, setBorderColor: border];
+            let _: () =
+                objc2::msg_send![layer, setBorderWidth: if focused { 2.0_f64 } else { 1.0_f64 }];
             let _: () = objc2::msg_send![layer, setBackgroundColor: background];
             let _: () = objc2::msg_send![objc2::class!(CATransaction), commit];
         }
@@ -752,14 +809,8 @@ impl NativeHistory {
         let _: () = objc2::msg_send![&*row,addSubview:&*preview];
         row.ivars().preview.set(Retained::as_ptr(&preview) as usize);
         let image: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSImageView), new];
-        let app_icon: *mut AnyObject =
-            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
-        let app_icon: *mut AnyObject = objc2::msg_send![app_icon, applicationIconImage];
-        let source_icon = source_icon(record);
-        let icon = source_icon
-            .as_ref()
-            .map_or(app_icon, |icon| Retained::as_ptr(icon).cast_mut());
-        let _: () = objc2::msg_send![&*image,setImage:icon];
+        let icon = source_icon(record).unwrap_or_else(|| default_source_icon());
+        let _: () = objc2::msg_send![&*image,setImage:&*icon];
         if let Some(name) = record
             .source_app
             .as_ref()
@@ -775,7 +826,7 @@ impl NativeHistory {
         );
         let _: () = objc2::msg_send![&*row,addSubview:&*image];
         for (action, symbol, title) in [
-            (0, "arrow.clockwise", "Retranslate"),
+            (0, "languages", "Retranslate"),
             (1, "doc.on.doc", "Copy source text"),
             (2, "star", "Favorite"),
             (3, "pin", "Pin record"),
@@ -787,6 +838,10 @@ impl NativeHistory {
                 symbol,
                 title,
             );
+            if action == 4 {
+                let red: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), systemRedColor];
+                let _: () = objc2::msg_send![&*button, setContentTintColor: red];
+            }
             let _: () = objc2::msg_send![&*button,setWantsLayer:true];
             let _: () = objc2::msg_send![&*button,setEnabled:false];
             let _: () = objc2::msg_send![&*button,setAccessibilityElement:false];
@@ -1023,8 +1078,14 @@ impl NativeHistory {
             let id = self.ivars().records.borrow()[index].id.clone();
             let text = crate::history_runtime::history_record(&self.ivars().app, &id)
                 .map(|record| record.text);
-            if text.is_none_or(|text| platform::write_text(&text).is_err()) {
-                self.report_error();
+            match text.and_then(|text| platform::write_text(&text).ok()) {
+                Some(version) => self
+                    .ivars()
+                    .app
+                    .state::<AppState>()
+                    .clipboard_version
+                    .store(version, std::sync::atomic::Ordering::SeqCst),
+                None => self.report_error(),
             }
             return;
         }
@@ -1354,6 +1415,7 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         favorite_icon_filled: Cell::new(false),
         pin_icon_filled: Cell::new(false),
         search: Cell::new(0),
+        search_focused: Cell::new(false),
         scroll: Cell::new(0),
         document: Cell::new(0),
         pinned_scroll: Cell::new(0),
@@ -1374,17 +1436,27 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         let _: () = objc2::msg_send![&*root, setWantsLayer: true];
         let layer: *mut AnyObject = objc2::msg_send![&*root, layer];
         let _: () = objc2::msg_send![layer, setMasksToBounds: true];
-        let wordmark = label("Nami", 14.0, false);
-        let font_name = NSString::from_str("Didot-Italic");
-        let wordmark_font: *mut AnyObject =
-            objc2::msg_send![objc2::class!(NSFont), fontWithName: &*font_name, size: 14.0_f64];
-        if !wordmark_font.is_null() {
-            let _: () = objc2::msg_send![&*wordmark, setFont: wordmark_font];
-        }
+        let wordmark: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSImageView), new];
+        let bytes = include_bytes!("../../../src/assets/history/reference/nami-wordmark.svg");
+        let data: *mut AnyObject = objc2::msg_send![objc2::class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+        let allocated: objc2::rc::Allocated<AnyObject> =
+            objc2::msg_send![objc2::class!(NSImage), alloc];
+        let mark: Retained<AnyObject> = objc2::msg_send![allocated, initWithData: data];
+        let _: () = objc2::msg_send![&*mark, setSize: NSSize::new(44.0, 44.0 * 280.0 / 680.0)];
+        let _: () = objc2::msg_send![&*mark, setTemplate: false];
+        let _: () = objc2::msg_send![&*wordmark, setImage: &*mark];
+        let white: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), whiteColor];
+        let _: () = objc2::msg_send![&*wordmark, setContentTintColor: white];
+        let _: () = objc2::msg_send![&*wordmark, setImageScaling: 0usize];
+        let _: () = objc2::msg_send![&*wordmark, setAccessibilityLabel: objc2_foundation::ns_string!("Nami")];
         let _: () = objc2::msg_send![&*wordmark, setTag: WORDMARK_TAG];
-        let _: () = objc2::msg_send![&*wordmark, sizeToFit];
+        frame(
+            Retained::as_ptr(&wordmark).cast_mut(),
+            rect(10.0, 14.0, 44.0, 20.0),
+        );
         let _: () = objc2::msg_send![&*root, addSubview: &*wordmark];
-        let search: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSTextField), new];
+        let search = HistorySearchField::alloc(marker).set_ivars(Retained::as_ptr(&root) as usize);
+        let search: Retained<HistorySearchField> = objc2::msg_send![super(search), init];
         let container: Retained<NSView> = objc2::msg_send![objc2::class!(NSView), new];
         let _: () = objc2::msg_send![&*container, setWantsLayer: true];
         let _: () = objc2::msg_send![&*container, addSubview: &*search];

@@ -1,6 +1,6 @@
 use crate::{platform, windows, AppState};
 use serde::Serialize;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
@@ -13,7 +13,6 @@ pub struct SelectionContext {
 
 pub struct SelectionOrigin {
     target: Option<platform::Target>,
-    source_app: Option<serde_json::Value>,
 }
 
 pub fn prepare_selected(app: &AppHandle) {
@@ -31,10 +30,7 @@ pub fn prepare_selected(app: &AppHandle) {
         },
         None,
     );
-    *state.selection_origin.lock().unwrap() = Some(SelectionOrigin {
-        target,
-        source_app: target.and_then(platform::target_app_info),
-    });
+    *state.selection_origin.lock().unwrap() = Some(SelectionOrigin { target });
 }
 
 async fn on_main<T: Send + 'static>(
@@ -59,6 +55,33 @@ impl Drop for CaptureGuard {
     }
 }
 
+fn finish_owned_copy<T>(
+    handled: &AtomicI64,
+    current_version: impl FnOnce() -> i64,
+    finish: impl FnOnce() -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let result = finish()?;
+    handled.store(current_version(), Ordering::SeqCst);
+    Ok(result)
+}
+
+async fn restore_copy(
+    app: &AppHandle,
+    saved: platform::CopySnapshot,
+    expected: i64,
+    accept: bool,
+) -> Result<String, &'static str> {
+    let owned = app.clone();
+    on_main(app, move || {
+        finish_owned_copy(
+            &owned.state::<AppState>().clipboard_version,
+            platform::clipboard_version,
+            || platform::finish_selection_copy(&saved, expected, accept),
+        )
+    })
+    .await?
+}
+
 async fn copy_fallback(app: &AppHandle, target: platform::Target) -> Result<String, &'static str> {
     let saved = on_main(app, move || platform::begin_selection_copy(target)).await??;
     let owned = app.clone();
@@ -79,10 +102,7 @@ async fn copy_fallback(app: &AppHandle, target: platform::Target) -> Result<Stri
         .await?;
         if !focused {
             if observed != saved.version && observed == version {
-                on_main(app, move || {
-                    platform::finish_selection_copy(&saved, observed, false)
-                })
-                .await??;
+                restore_copy(app, saved, observed, false).await?;
             }
             // A changed clipboard after focus moved cannot safely be attributed to our copy.
             return Err("target_unavailable");
@@ -100,17 +120,11 @@ async fn copy_fallback(app: &AppHandle, target: platform::Target) -> Result<Stri
             stable = 0;
         }
         if stable >= 2 {
-            return on_main(app, move || {
-                platform::finish_selection_copy(&saved, version, true)
-            })
-            .await?;
+            return restore_copy(app, saved, version, true).await;
         }
     }
     if observed != saved.version {
-        on_main(app, move || {
-            platform::finish_selection_copy(&saved, observed, false)
-        })
-        .await??;
+        restore_copy(app, saved, observed, false).await?;
     }
     // No change means no selection: never reuse the old clipboard text.
     let owned = app.clone();
@@ -135,12 +149,9 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
         .take()
         .unwrap_or_else(|| {
             let target = platform::capture_target();
-            SelectionOrigin {
-                target,
-                source_app: target.and_then(platform::target_app_info),
-            }
+            SelectionOrigin { target }
         });
-    let SelectionOrigin { target, source_app } = origin;
+    let SelectionOrigin { target } = origin;
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let guard = CaptureGuard(app.clone());
@@ -186,6 +197,12 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
                 Err("selection_empty" | "selection_secure") => (String::new(), None),
                 Err(code) => (String::new(), Some(code.to_string())),
             };
+            // An ordinary summon has no source record: do not export an app icon for it.
+            let source_app = if text.is_empty() {
+                None
+            } else {
+                target.and_then(platform::target_app_info)
+            };
             *state.selection_source.lock().unwrap() = if text.is_empty() {
                 None
             } else {
@@ -208,4 +225,27 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
         });
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_successful_owned_restoration_suppresses_clipboard_capture() {
+        let handled = AtomicI64::new(7);
+        assert_eq!(
+            finish_owned_copy(
+                &handled,
+                || panic!("external version must not be suppressed"),
+                || Err::<(), _>("clipboard_changed")
+            ),
+            Err("clipboard_changed")
+        );
+        assert_eq!(handled.load(Ordering::SeqCst), 7);
+        assert_eq!(
+            finish_owned_copy(&handled, || 10, || Ok("synthetic restored text")),
+            Ok("synthetic restored text")
+        );
+        assert_eq!(handled.load(Ordering::SeqCst), 10);
+    }
 }

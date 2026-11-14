@@ -10,6 +10,14 @@ mod macos {
 
     fn reference_svg(source: &str, filled: bool, svg: &str) -> String {
         let svg = svg.replace("currentColor", "black");
+        if source.starts_with("nami-flowing") {
+            return svg
+                .replace(
+                    "width=\"1024\" height=\"1024\"",
+                    "width=\"680\" height=\"280\"",
+                )
+                .replace("viewBox=\"0 0 1024 1024\"", "viewBox=\"155 340 680 280\"");
+        }
         if !filled {
             return svg;
         }
@@ -114,6 +122,8 @@ mod macos {
                     ("reference-keyboard", "keyboard", false),
                     ("reference-list", "list", false),
                     ("reference-refresh", "refresh-cw", false),
+                    ("reference-languages", "languages", false),
+                    ("reference-nami", "nami-flowing-outlined", false),
                     ("reference-copy", "copy", false),
                     ("reference-trash", "trash", false),
                     ("reference-search", "search", false),
@@ -133,7 +143,11 @@ mod macos {
                     let image: *mut AnyObject = msg_send![allocated, initWithData: data];
                     let image = Retained::from_raw(image)
                         .ok_or_else(|| format!("Cannot load reference SVG: {source}"))?;
-                    render(&image, false, &output.join(format!("{name}.png")))?;
+                    render(
+                        &image,
+                        source.starts_with("nami-flowing"),
+                        &output.join(format!("{name}.png")),
+                    )?;
                 }
             }
         }
@@ -156,6 +170,34 @@ mod macos {
             );
             assert!(reference_svg("pin", true, "<path d=\"M9 10.76 0\"/>")
                 .contains("<path fill=\"black\""));
+        }
+
+        #[test]
+        fn flowing_wordmark_removes_canvas_padding_without_changing_artwork() {
+            let source =
+                include_str!("../../../src/assets/history/reference/nami-flowing-outlined.svg");
+            let prepared = reference_svg("nami-flowing-outlined", false, source);
+            assert!(
+                !source.contains("<text"),
+                "exported wordmark must not depend on font fallback"
+            );
+            assert_eq!(source.matches("<path").count(), 5);
+            let original = include_str!("../../../src/assets/history/reference/nami-flowing.svg");
+            assert!(source.replace("#FFFFFF", "#202020").contains(
+                original
+                    .split_once("<g")
+                    .unwrap()
+                    .1
+                    .split_once("    <text")
+                    .unwrap()
+                    .0
+            ));
+            assert!(prepared.contains("viewBox=\"155 340 680 280\""));
+            assert!(prepared.contains("width=\"680\" height=\"280\""));
+            assert_eq!(
+                prepared.split_once("<g").unwrap().1,
+                source.split_once("<g").unwrap().1
+            );
         }
     }
 }

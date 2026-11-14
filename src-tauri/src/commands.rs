@@ -1,5 +1,5 @@
 use crate::{
-    model::{sample, OperationResult, WindowState},
+    model::{OperationResult, WindowState},
     platform, windows, AppState,
 };
 use serde::Serialize;
@@ -23,6 +23,7 @@ pub struct Snapshot {
     shortcut_errors: Vec<String>,
     translation_engine: String,
     storage_error: Option<String>,
+    clipboard_capture_enabled: bool,
     window: WindowState,
 }
 
@@ -40,6 +41,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
         translation_engine: state.translation_engine.lock().unwrap().clone(),
         storage_error: state.storage_error.lock().unwrap().clone(),
+        clipboard_capture_enabled: state.clipboard_enabled.load(Ordering::SeqCst),
         window: state.windows.lock().unwrap().clone(),
     };
     Ok(snapshot)
@@ -101,7 +103,11 @@ pub fn translation_sample_copy(
     }
     .ok_or("invalid_argument")?;
     platform::write_text(&text)
-        .map(|_| ())
+        .map(|version| {
+            app.state::<AppState>()
+                .clipboard_version
+                .store(version, Ordering::SeqCst);
+        })
         .map_err(|(code, _)| code.into())
 }
 
@@ -402,11 +408,10 @@ pub(crate) async fn on_main<T: Send + 'static>(
 pub async fn clipboard_record_use(
     window: Webview,
     app: AppHandle,
-    sample_id: String,
+    record_id: String,
     action: String,
 ) -> Result<OperationResult, String> {
     authorize(&window, &["clipboard"])?;
-    let text = sample(&sample_id).ok_or("not_found")?;
     if !["copy", "paste"].contains(&action.as_str()) {
         return Err("invalid_argument".into());
     }
@@ -417,6 +422,7 @@ pub async fn clipboard_record_use(
             + 1
     })
     .await?;
+    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
     let initial = on_main(&app, move |app| {
         let state = app.state::<AppState>();
         if state.operation.load(Ordering::SeqCst) != operation {
@@ -426,7 +432,7 @@ pub async fn clipboard_record_use(
                 platform::clipboard_version(),
             ));
         }
-        let version = match platform::write_text(text) {
+        let version = match platform::write_clipboard(&payload) {
             Ok(version) => version,
             Err((code, version)) => {
                 return Err(OperationResult::failed(
@@ -436,6 +442,7 @@ pub async fn clipboard_record_use(
                 ))
             }
         };
+        state.clipboard_version.store(version, Ordering::SeqCst);
         if action == "copy" {
             if !state.windows.lock().unwrap().clipboard_pinned {
                 if let Some(window) = app.get_webview_window("clipboard") {
@@ -633,7 +640,7 @@ pub async fn translation_run(
         &source,
         &targets,
         previous.as_ref(),
-        reuse.as_ref().map(|reuse| reuse.target_index),
+        reuse.as_ref().and_then(|reuse| reuse.target_index),
     );
     let missing: Vec<String> = targets
         .iter()
@@ -641,11 +648,13 @@ pub async fn translation_run(
         .filter(|(_, result)| result.is_none())
         .map(|(target, _)| target.clone())
         .collect();
-    let source_app = if from_selection {
+    let captured = if from_selection {
         state.selection_source.lock().unwrap().clone()
     } else {
         None
     };
+    let source_app =
+        crate::translation::source_app_for_translation(&text, previous.as_ref(), captured);
     let translated = if missing.is_empty() {
         Vec::new()
     } else {
@@ -678,4 +687,116 @@ pub async fn translation_run(
         source_app,
     };
     crate::history_runtime::commit_translation(&app, record, engine, revision).await
+}
+
+#[tauri::command]
+pub async fn clipboard_query(
+    window: Webview,
+    app: AppHandle,
+    query: String,
+    favorites_only: bool,
+    cursor: Option<nami::clipboard::ClipboardCursor>,
+) -> Result<nami::clipboard::ClipboardPage, String> {
+    authorize(&window, &["clipboard"])?;
+    crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_page(
+            &query,
+            favorites_only,
+            cursor.as_ref(),
+            crate::database::PAGE_SIZE,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clipboard_record_update(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+    action: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard"])?;
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let root = crate::clipboard_runtime::image_root(&app)?;
+    let image = crate::clipboard_runtime::database(&app, move |database| {
+        let image = if action == "delete" {
+            database.clipboard_record(&record_id)?.image_path
+        } else {
+            None
+        };
+        database.clipboard_update(&record_id, &action)?;
+        Ok(image)
+    })
+    .await?;
+    crate::clipboard_runtime::changed(&app)?;
+    if let Some(path) = image {
+        tauri::async_runtime::spawn_blocking(move || nami::clipboard::remove_image(&root, &path))
+            .await
+            .map_err(|_| "storage_worker")?
+            .map_err(|_| "clipboard_cleanup_failed")?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clipboard_capture_set(
+    window: Webview,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_capture_set(enabled)
+    })
+    .await?;
+    on_main(&app, move |app| {
+        let state = app.state::<AppState>();
+        state
+            .clipboard_version
+            .store(platform::clipboard_version(), Ordering::SeqCst);
+        state.clipboard_enabled.store(enabled, Ordering::SeqCst);
+        for label in ["clipboard", "settings"] {
+            if let Some(view) = app.get_webview(label) {
+                view.emit("clipboard_capture_changed", enabled)
+                    .map_err(|_| "event_emit".to_string())?;
+            }
+        }
+        Ok(())
+    })
+    .await?
+}
+
+#[derive(Serialize)]
+pub struct ClipboardImage {
+    bytes: Vec<u8>,
+    mime: &'static str,
+}
+
+#[tauri::command]
+pub async fn clipboard_image(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<ClipboardImage, String> {
+    authorize(&window, &["clipboard"])?;
+    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
+    let platform::ClipboardPayload::Image { bytes, .. } = payload else {
+        return Err("invalid_argument".into());
+    };
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        platform::clipboard_image_preview(&bytes).map_err(str::to_owned)
+    })
+    .await
+    .map_err(|_| "storage_worker")??;
+    Ok(ClipboardImage {
+        bytes,
+        mime: "image/png",
+    })
 }

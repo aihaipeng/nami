@@ -33,11 +33,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 html-escape = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["sync", "time", "macros"] }
+sha2 = "0.10"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 uuid = { version = "1.29.2", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSScrollView", "NSButton", "NSControl", "NSCell", "NSButtonCell", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSScrollView", "NSButton", "NSControl", "NSCell", "NSButtonCell", "NSWindow", "NSTextField"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }

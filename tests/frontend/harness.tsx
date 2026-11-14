@@ -77,10 +77,10 @@ beforeEach(() => {
   bridge.invoke.mockReset().mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'selection_take') return null;
     if (name === 'translation_run') {
-      const request = args as { text: string; source: string; targets: string[]; reuse?: { recordId: string; targetIndex: number } };
+      const request = args as { text: string; source: string; targets: string[]; reuse?: { recordId: string; targetIndex?: number } };
       const previous = bridge.history.records.find(({ id }) => id === request.reuse?.recordId);
       const count = bridge.invoke.mock.calls.filter(([name]) => name === 'translation_run').length;
-      const record = { ...historySamples[0], id: count === 1 ? 'translation-test' : `translation-test-${count}`, text: request.text, sourceLanguage: request.source, targetLanguages: request.targets, translations: request.targets.map((target, index) => index !== request.reuse?.targetIndex && previous?.text === request.text && previous.sourceLanguage === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false };
+      const record = { ...historySamples[0], id: count === 1 ? 'translation-test' : `translation-test-${count}`, text: request.text, sourceLanguage: request.source, targetLanguages: request.targets, translations: request.targets.map((target, index) => request.reuse?.targetIndex !== undefined && index !== request.reuse.targetIndex && previous?.text === request.text && previous.sourceLanguage === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false, sourceApp: previous?.text === request.text ? previous.sourceApp : undefined };
       bridge.history.records = [...bridge.history.records.filter(({ id }) => id !== record.id), record];
       bridge.history.selectedId = record.id; ++bridge.history.revision;
       deliver('history_changed', historySnapshot());
@@ -161,7 +161,7 @@ export async function windowState(patch: Partial<WindowState>) {
   await emit('window_state', structuredClone(bridge.snapshot.window));
 }
 
-export async function mount(label: 'translation' | 'history' | 'settings' = 'translation') {
+export async function mount(label: 'translation' | 'history' | 'clipboard' | 'settings' = 'translation') {
   bridge.label = label;
   const previous = bridge.invoke.mock.calls.filter(([name]) => name === 'app_snapshot').length;
   const result = render(<App />);

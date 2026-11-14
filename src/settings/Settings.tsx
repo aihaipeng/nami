@@ -51,11 +51,11 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
       {page === 'clipboard' && <>
         <h2>{t('capture')}</h2>
         <div className="settings-group">
-          <div className="settings-field" data-slot="field" data-disabled><div className="settings-field-content" data-slot="field-content"><label data-slot="field-label" htmlFor="clipboard-capture">{t('capture')}</label><p data-slot="field-description">{t('captureDisabled')}</p></div><input className="settings-switch" id="clipboard-capture" type="checkbox" role="switch" checked={false} disabled /></div>
+          <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><label data-slot="field-label" htmlFor="clipboard-capture">{t('capture')}</label><p data-slot="field-description">{t('captureDescription')}</p></div><input className="settings-switch" id="clipboard-capture" type="checkbox" role="switch" checked={snapshot.clipboardCaptureEnabled} disabled={!native || !snapshot.capabilities.clipboardWrite || Boolean(snapshot.storageError)} onChange={(event) => void command('clipboard_capture_set', { enabled: event.target.checked })} /></div>
           <hr className="settings-separator" />
-          <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><span data-slot="field-label">{t('shortcut')}</span><p data-slot="field-description">{t('globalShortcut')}</p></div><span className="keycaps"><kbd>{snapshot.capabilities.platform === 'macos' ? '⌃' : 'Ctrl'}</kbd><kbd>{snapshot.capabilities.platform === 'macos' ? '⌥' : 'Alt'}</kbd><kbd>V</kbd></span></div>
+          <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><span data-slot="field-label">{t('shortcut')}</span><p data-slot="field-description">{t('globalShortcut')}</p></div><span className="keycaps"><kbd>{snapshot.capabilities.platform === 'macos' ? '⌃' : 'Ctrl'}</kbd><kbd>`</kbd></span></div>
         </div>
-        <div className="settings-note settings-callout" role="note"><Info aria-hidden="true" /><div><h5>{t('sampleMode')}</h5><p>{t('sampleNotice')}</p></div></div>
+        <div className="settings-note settings-callout" role="note"><Info aria-hidden="true" /><div><h5>{t('localPrivacy')}</h5><p>{t('clipboardStorageNotice')}</p></div></div>
       </>}
       {page === 'privacy' && <>
         <h2>{t('systemPermission')}</h2>

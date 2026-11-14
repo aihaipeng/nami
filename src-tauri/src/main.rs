@@ -1,3 +1,4 @@
+mod clipboard_runtime;
 mod commands;
 mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
@@ -14,7 +15,7 @@ mod windows;
 use model::WindowState;
 use std::io::Write;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64},
+    atomic::{AtomicBool, AtomicI64, AtomicU64},
     Mutex,
 };
 use tauri::{
@@ -25,6 +26,10 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 pub struct AppState {
+    clipboard_enabled: AtomicBool,
+    clipboard_version: AtomicI64,
+    clipboard_revision: AtomicU64,
+    clipboard_writes: tokio::sync::Mutex<()>,
     history: Mutex<history::HistoryStore>,
     database: Mutex<Option<database::HistoryDatabase>>,
     storage_error: Mutex<Option<String>>,
@@ -53,6 +58,10 @@ impl Default for AppState {
             windows.history_width_initialized = true;
         }
         Self {
+            clipboard_enabled: AtomicBool::new(false),
+            clipboard_version: AtomicI64::new(-1),
+            clipboard_revision: AtomicU64::new(0),
+            clipboard_writes: tokio::sync::Mutex::new(()),
             history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
             database: Mutex::new(None),
             storage_error: Mutex::new(None),
@@ -99,6 +108,13 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
     if let Err(error) = result {
         eprintln!("Nami lifecycle diagnostic: {error}");
     }
+}
+
+fn fixed_shortcuts() -> [Shortcut; 2] {
+    [
+        Shortcut::new(Some(Modifiers::SUPER), Code::KeyT),
+        Shortcut::new(Some(Modifiers::CONTROL), Code::Backquote),
+    ]
 }
 
 fn main() {
@@ -159,6 +175,10 @@ fn main() {
             commands::translation_columns_set,
             commands::translation_sample_copy,
             commands::clipboard_record_use,
+            commands::clipboard_query,
+            commands::clipboard_record_update,
+            commands::clipboard_capture_set,
+            commands::clipboard_image,
             commands::locale_set,
             commands::permission_request,
         ])
@@ -207,13 +227,18 @@ fn main() {
                     None,
                     database::PAGE_SIZE,
                 )?;
-                Ok((database, page))
+                let capture = database.clipboard_capture_enabled()?;
+                Ok((database, page, capture))
             })
             .join()
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|loaded| loaded);
             match loaded {
-                Ok((database, page)) => {
+                Ok((database, page, capture)) => {
+                    app.state::<AppState>().clipboard_enabled.store(
+                        capture && platform::capabilities().clipboard_write,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
                     *app.state::<AppState>().database.lock().unwrap() = Some(database);
                     app.state::<AppState>().history_page.lock().unwrap().cursor =
                         page.cursor.clone();
@@ -254,10 +279,7 @@ fn main() {
             let tray = tray.icon(app.default_window_icon().ok_or("missing app icon")?.clone());
             tray.build(app)?;
             if platform::capabilities().selection {
-                for shortcut in [
-                    Shortcut::new(Some(Modifiers::SUPER), Code::KeyT),
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV),
-                ] {
+                for shortcut in fixed_shortcuts() {
                     if app.global_shortcut().register(shortcut).is_err() {
                         app.state::<AppState>()
                             .shortcut_errors
@@ -267,6 +289,7 @@ fn main() {
                     }
                 }
             }
+            clipboard_runtime::start(app.handle());
             windows::show(app.handle(), "translation").map_err(std::io::Error::other)?;
             Ok(())
         })
@@ -292,4 +315,20 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_history_uses_control_backquote() {
+        let shortcuts = fixed_shortcuts();
+        assert_eq!(
+            shortcuts[0],
+            Shortcut::new(Some(Modifiers::SUPER), Code::KeyT)
+        );
+        assert_eq!(shortcuts[1].key, Code::Backquote);
+        assert_eq!(shortcuts[1].mods, Modifiers::CONTROL);
+    }
 }

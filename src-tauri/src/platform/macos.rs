@@ -22,6 +22,9 @@ unsafe extern "C" {
         value: *mut *const c_void,
     ) -> i32;
     fn AXUIElementGetTypeID() -> usize;
+    fn AXValueGetTypeID() -> usize;
+    fn AXValueGetType(value: *const c_void) -> u32;
+    fn AXValueGetValue(value: *const c_void, kind: u32, output: *mut c_void) -> bool;
     fn AXUIElementGetPid(element: *const c_void, pid: *mut i32) -> i32;
     fn AXUIElementCopyParameterizedAttributeValue(
         element: *const c_void,
@@ -107,9 +110,42 @@ unsafe fn ax_string(value: &AXValue) -> Option<String> {
 
 fn selection_result(text: String) -> Result<String, &'static str> {
     if text.trim().is_empty() {
-        Err("selection_empty")
+        Ok(String::new())
     } else {
         Ok(text)
+    }
+}
+
+unsafe fn ax_range_length(value: &AXValue) -> Option<isize> {
+    const CF_RANGE: u32 = 4;
+    if CFGetTypeID(value.0) != AXValueGetTypeID() || AXValueGetType(value.0) != CF_RANGE {
+        return None;
+    }
+    let mut range = CFRange {
+        location: 0,
+        length: 0,
+    };
+    (AXValueGetValue(value.0, CF_RANGE, (&mut range as *mut CFRange).cast())
+        && range.location >= 0
+        && range.length >= 0)
+        .then_some(range.length)
+}
+
+fn resolve_selection(
+    selected: Option<String>,
+    range_length: Option<isize>,
+    read_range: impl FnOnce() -> Option<String>,
+) -> Result<String, &'static str> {
+    if let Some(text) = selected.as_ref().filter(|text| !text.trim().is_empty()) {
+        return Ok(text.clone());
+    }
+    match range_length {
+        Some(0) => Ok(String::new()),
+        Some(length) if length > 0 => read_range()
+            .ok_or("selection_unavailable")
+            .and_then(selection_result),
+        None if selected.is_some() => Ok(String::new()),
+        _ => Err("selection_unavailable"),
     }
 }
 
@@ -256,26 +292,31 @@ pub fn selected_text(target: Target) -> Result<String, &'static str> {
         if role.as_deref() == Some("AXImage") {
             return Err("selection_non_text");
         }
-        let text = ax_attribute(focused.0, ns_string!("AXSelectedText"))
-            .and_then(|value| ax_string(&value))
-            .filter(|text| !text.trim().is_empty())
-            .or_else(|| {
-                let range = ax_attribute(focused.0, ns_string!("AXSelectedTextRange"))?;
-                let mut value = std::ptr::null();
-                let status = AXUIElementCopyParameterizedAttributeValue(
-                    focused.0,
-                    (ns_string!("AXStringForRange") as *const NSString).cast(),
-                    range.0,
-                    &mut value,
-                );
-                if value.is_null() {
-                    return None;
-                }
-                let value = AXValue(value);
-                (status == 0).then(|| ax_string(&value)).flatten()
-            })
-            .ok_or("selection_empty")?;
-        selection_result(text)
+        let selected = ax_attribute(focused.0, ns_string!("AXSelectedText"))
+            .and_then(|value| ax_string(&value));
+        if selected
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return Ok(selected.unwrap());
+        }
+        let range = ax_attribute(focused.0, ns_string!("AXSelectedTextRange"));
+        let range_length = range.as_ref().and_then(|value| ax_range_length(value));
+        resolve_selection(selected, range_length, || {
+            let range = range.as_ref()?;
+            let mut value = std::ptr::null();
+            let status = AXUIElementCopyParameterizedAttributeValue(
+                focused.0,
+                (ns_string!("AXStringForRange") as *const NSString).cast(),
+                range.0,
+                &mut value,
+            );
+            if value.is_null() {
+                return None;
+            }
+            let value = AXValue(value);
+            (status == 0).then(|| ax_string(&value)).flatten()
+        })
     }
 }
 
@@ -439,14 +480,90 @@ pub fn send_paste(target: Target, expected_version: i64) -> Result<(), &'static 
 
 #[cfg(test)]
 mod tests {
-    use super::selection_result;
+    use super::{ax_range_length, resolve_selection, selection_result, AXValue, CFRange};
 
     #[test]
-    fn selected_text_rejects_blank_content_and_preserves_nonblank_content() {
+    fn native_ax_range_distinguishes_empty_invalid_and_non_range_values() {
+        unsafe extern "C" {
+            fn AXValueCreate(kind: u32, value: *const std::ffi::c_void) -> *const std::ffi::c_void;
+        }
+        for (location, length, expected) in [
+            (0, 0, Some(0)),
+            (9, 3, Some(3)),
+            (-1, 0, None),
+            (0, -1, None),
+        ] {
+            let range = CFRange { location, length };
+            unsafe {
+                let value = AXValue(AXValueCreate(4, (&range as *const CFRange).cast()));
+                assert!(!value.0.is_null());
+                assert_eq!(ax_range_length(&value), expected);
+            }
+        }
+        let text = objc2_foundation::NSString::from_str("Synthetic non-range value");
+        unsafe {
+            let value = AXValue(objc2::rc::Retained::into_raw(text).cast());
+            assert_eq!(ax_range_length(&value), None);
+        }
+    }
+
+    #[test]
+    fn empty_selection_does_not_read_range_or_require_copy() {
+        for (selected, range) in [
+            (Some(String::new()), Some(0)),
+            (Some(" \n".into()), None),
+            (None, Some(0)),
+        ] {
+            assert_eq!(
+                resolve_selection(selected, range, || panic!(
+                    "empty selection must not read range text"
+                )),
+                Ok(String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn empty_selected_attribute_still_uses_a_nonempty_range() {
         assert_eq!(
-            selection_result(" \t\n\u{3000}".into()),
-            Err("selection_empty")
+            resolve_selection(Some(String::new()), Some(12), || Some("Range text".into())),
+            Ok("Range text".into())
         );
+        assert_eq!(
+            resolve_selection(None, Some(12), || Some(" \n".into())),
+            Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn unknown_or_failed_range_keeps_copy_fallback() {
+        assert_eq!(
+            resolve_selection(None, None, || panic!("no valid range")),
+            Err("selection_unavailable")
+        );
+        assert_eq!(
+            resolve_selection(None, Some(-1), || panic!("invalid range")),
+            Err("selection_unavailable")
+        );
+        assert_eq!(
+            resolve_selection(Some(String::new()), Some(10), || None),
+            Err("selection_unavailable")
+        );
+    }
+
+    #[test]
+    fn nonempty_selected_text_does_not_query_range() {
+        assert_eq!(
+            resolve_selection(Some("  Selected text\n".into()), None, || panic!(
+                "direct text must not read range"
+            )),
+            Ok("  Selected text\n".into())
+        );
+    }
+
+    #[test]
+    fn selected_text_accepts_an_explicit_empty_selection_without_copy_fallback() {
+        assert_eq!(selection_result(" \t\n\u{3000}".into()), Ok(String::new()));
         assert_eq!(
             selection_result("  Synthetic selection\n".into()),
             Ok("  Synthetic selection\n".into())

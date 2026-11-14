@@ -1,3 +1,21 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardPayload {
+    Text(String),
+    Image { bytes: Vec<u8>, extension: String },
+    Files(Vec<String>),
+}
+
+pub struct ClipboardCapture {
+    pub version: i64,
+    pub payload: ClipboardPayload,
+    pub source_app: Option<serde_json::Value>,
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+mod clipboard;
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub use clipboard::*;
+
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 mod macos;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]

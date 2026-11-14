@@ -54,3 +54,14 @@ pub fn begin_selection_copy(_: Target) -> Result<CopySnapshot, &'static str> {
 pub fn finish_selection_copy(_: &CopySnapshot, _: i64, _: bool) -> Result<String, &'static str> {
     Err(UNAVAILABLE)
 }
+
+pub fn read_clipboard() -> Result<Option<super::ClipboardCapture>, &'static str> {
+    Err(UNAVAILABLE)
+}
+pub fn write_clipboard(_: &super::ClipboardPayload) -> Result<i64, (&'static str, Option<i64>)> {
+    Err((UNAVAILABLE, None))
+}
+
+pub fn clipboard_image_preview(_: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Err(UNAVAILABLE)
+}

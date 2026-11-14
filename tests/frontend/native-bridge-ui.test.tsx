@@ -83,7 +83,8 @@ describe('native view connection and feedback', () => {
   it('unsubscribes all native listeners when a view is removed', async () => {
     const view = await mount();
     expect(bridge.listeners.get('storage_error')?.size).toBe(1);
-    expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(8);
+    expect(bridge.listeners.get('clipboard_capture_changed')?.size).toBe(1);
+    expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(9);
     view.unmount(); await act(async () => {});
     expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(0);
     const count = calls('window_show').length;

@@ -162,6 +162,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number) {
     if (snapshot.storageError) return;
+    const origin = reuse ?? completedRecord.current;
     cancelRequest();
     const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && reuse.sourceLanguage === sourceLanguage && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
     setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null);
@@ -172,7 +173,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (requestRevision.current !== revision) return;
     activity(1);
     try {
-      const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(reuse && refreshTarget !== undefined ? { reuse: { recordId: reuse.id, targetIndex: refreshTarget } } : {}) });
+      const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
       if (requestRevision.current !== revision) return;
       completedRecord.current = record;
       setCachedResults(record.translations); setSelectedId(record.id);
@@ -209,7 +210,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setSelectedId(record.id); setDraft(record.text);
     setSource(record.sourceLanguage); setPrimary(record.targetLanguages[0]);
     setSecondary(record.targetLanguages[1] ?? 'none');
-    completedRecord.current = retranslate ? null : record;
+    completedRecord.current = record;
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
     if (retranslate) void translateText(record.text, record.sourceLanguage, record.targetLanguages, false);

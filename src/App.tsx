@@ -38,6 +38,7 @@ export default function App() {
     let latestWindow: WindowState | undefined;
     let latestLocale: Locale | undefined;
     let latestEngine: AppSnapshot['translationEngine'] | undefined;
+    let latestCapture: boolean | undefined;
     async function connect() {
       for (const subscribe of [
         () => getCurrentWindow().onMoved(() => window.dispatchEvent(new Event('nami:window-moved'))),
@@ -45,6 +46,7 @@ export default function App() {
           latestEngine = payload;
           if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload }));
         }),
+        () => listen<boolean>('clipboard_capture_changed', ({ payload }) => { latestCapture = payload; if (!disposed) setSnapshot((current) => ({ ...current, clipboardCaptureEnabled: payload })); }),
         () => listen<string>('storage_error', ({ payload }) => { if (!disposed) setSnapshot((current) => ({ ...current, storageError: payload })); }),
         () => listen('layout_error', () => { if (!disposed) setError(true); }),
         () => listen<WindowState>('window_state', ({ payload }) => {
@@ -64,7 +66,7 @@ export default function App() {
       if (!disposed) {
         document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
         document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
-        setSnapshot({ ...data, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, window: latestWindow ?? data.window });
+        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, window: latestWindow ?? data.window });
         setConnected(true);
       }
     }
@@ -108,7 +110,7 @@ export default function App() {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, storageError: refreshed.storageError }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
       }
     } catch {
       setError(true);

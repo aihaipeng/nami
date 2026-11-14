@@ -32,6 +32,7 @@ export interface AppSnapshot {
   locale: Locale;
   translationEngine: 'edge' | 'google';
   storageError: string | null;
+  clipboardCaptureEnabled: boolean;
   accessibility: boolean;
   shortcutErrors: string[];
   window: WindowState;
@@ -48,6 +49,7 @@ export const initialSnapshot: AppSnapshot = {
   locale: 'en',
   translationEngine: 'edge',
   storageError: null,
+  clipboardCaptureEnabled: false,
   accessibility: false,
   shortcutErrors: [],
   window: {

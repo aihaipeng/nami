@@ -117,6 +117,21 @@ describe('live translation bridge', () => {
     expect(source().value).toBe('Runtime history');
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Translated Runtime history');
   });
+
+  it('references the original record when retranslating and drops its source after editing', async () => {
+    await mount();
+    const record = { ...result('Retranslate source', 'original-source'), sourceApp: { bundleId: 'test.source', name: 'Synthetic App', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } };
+    bridge.history.records.push(record);
+    await emit('history_sample_selected', { sampleId: record.id, retranslate: true, record });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]).toMatchObject({ reuse: { recordId: record.id } });
+    expect(calls('translation_run')[0][1]?.reuse).not.toHaveProperty('targetIndex');
+    await waitFor(() => expect(bridge.history.records.find(({ id }) => id === 'translation-test')?.sourceApp).toEqual(record.sourceApp));
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
+    submit('Edited source');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(calls('translation_run')[1][1]).not.toHaveProperty('reuse');
+  });
 });
 
 

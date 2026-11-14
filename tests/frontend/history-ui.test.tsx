@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, preferReducedMotion, releasePointerCapture, scrollTo, setPointerCapture, windowState } from './harness';
 import { historySamples } from '../../src/translation/history';
+import languagesSvg from '../../src/assets/history/reference/languages.svg?raw';
+import wordmarkSvg from '../../src/assets/history/reference/nami-wordmark.svg?raw';
 
 const records = () => screen.queryAllByRole('button', { name: /^Translation:/ });
 const row = (id: string) => {
@@ -74,7 +76,7 @@ describe('history list and session actions', () => {
     expect(screen.getByRole('button', { name: 'All history' }).querySelector('[data-symbol="list.bullet"]')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Pin history region' }).classList.contains('history-pin')).toBe(true);
     const target = row('sample-03');
-    expect(target.querySelector('[data-symbol="arrow.clockwise"]')).toBeTruthy();
+    expect(target.querySelector('[data-symbol="languages"]')).toBeTruthy();
     expect(target.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
     expect(target.querySelector('[data-symbol="trash"]')).toBeTruthy();
     await user.click(within(target).getByRole('button', { name: 'Favorite' }));
@@ -87,6 +89,60 @@ describe('history list and session actions', () => {
     expect(pin.classList.contains('history-pin')).toBe(false);
     await user.click(pin);
     expect(row('sample-03').classList.contains('pinned')).toBe(false);
+  });
+
+  it('uses the provided language icon for retranslation with the shared size and stroke', async () => {
+    await mount('history');
+    const button = within(row('sample-03')).getByRole('button', { name: 'Retranslate' });
+    const icon = button.querySelector<HTMLElement>('.history-symbol')!;
+    expect(icon.dataset.symbol).toBe('languages');
+    expect(icon.style.getPropertyValue('--symbol-url')).toContain('reference-languages.png');
+    const svg = new DOMParser().parseFromString(languagesSvg, 'image/svg+xml').documentElement;
+    expect([svg.getAttribute('width'), svg.getAttribute('height'), svg.getAttribute('stroke-width')]).toEqual(['14', '14', '1.5']);
+    expect(svg.querySelectorAll('path')).toHaveLength(6);
+    expect(svg.querySelector('path')?.getAttribute('d')).toBe('m5 8 6 6');
+  });
+
+  it('renders the toolbar wordmark as fixed outlines with the native dimensions and drag region', async () => {
+    await mount('history');
+    const wordmark = within(document.querySelector<HTMLElement>('.history-toolbar')!).getByRole('img', { name: 'Nami' });
+    expect(wordmark.classList.contains('history-wordmark')).toBe(true);
+    expect(wordmark.textContent).toBe('');
+    expect(wordmark.hasAttribute('data-tauri-drag-region')).toBe(true);
+    expect(wordmark.style.getPropertyValue('--wordmark-url')).toContain('nami-wordmark.svg');
+    expect(wordmark.style.width).toBe('44px');
+    expect(wordmark.style.height).toBe('20px');
+    expect(wordmark.style.background).toBe('rgb(255, 255, 255)');
+    expect(wordmark.style.fontFamily).toBe('');
+    const svg = new DOMParser().parseFromString(wordmarkSvg, 'image/svg+xml').documentElement;
+    expect(svg.getAttribute('viewBox')).toBe('155 340 680 280');
+    expect(svg.querySelector('g')?.getAttribute('fill')).toBe('#FFFFFF');
+    expect(wordmarkSvg).not.toContain('#202020');
+    expect(svg.querySelectorAll('path')).toHaveLength(5);
+    expect(svg.querySelector('text, tspan, foreignObject')).toBeNull();
+    expect(wordmarkSvg).not.toMatch(/font-family|font-size|Didot/);
+  });
+
+  it('uses the flowing Nami mark by default and preserves a real source app icon', async () => {
+    bridge.history.records = bridge.history.records.map((record) => ({ ...record, sourceApp: record.id === 'sample-03' ? { name: 'Synthetic Source', bundleId: 'test.source', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } : undefined }));
+    await mount('history');
+    const fallback = within(row('sample-01')).getByRole('img', { name: 'Nami' });
+    expect(fallback.classList.contains('history-symbol')).toBe(true);
+    expect(fallback.style.getPropertyValue('--symbol-url')).toContain('reference-nami.png');
+    expect(fallback.style.background).toBe('rgb(255, 255, 255)');
+    const source = within(row('sample-03')).getByRole('img', { name: 'Synthetic Source' });
+    expect(source.getAttribute('src')).toBe('data:image/png;base64,c3ludGhldGlj');
+    expect(source.classList.contains('history-symbol')).toBe(false);
+  });
+
+  it('renders the history header wordmark from outlined artwork instead of font text', async () => {
+    await mount('history');
+    const mark = document.querySelector<HTMLElement>('.history-toolbar .history-wordmark')!;
+    expect(mark.getAttribute('role')).toBe('img');
+    expect(mark.getAttribute('aria-label')).toBe('Nami');
+    expect(mark.textContent).toBe('');
+    expect(mark.style.getPropertyValue('--wordmark-url')).toContain('nami-wordmark.svg');
+    expect(mark.hasAttribute('data-tauri-drag-region')).toBe(true);
   });
 
   it('allows deleting only unprotected records and retains backend state on remount', async () => {
