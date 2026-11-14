@@ -1,0 +1,41 @@
+{
+  "name": "nami",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "signing:setup": "bash tools/setup-local-signing.sh",
+    "build:app": "python3 tools/local-app.py build",
+    "install:app": "python3 tools/local-app.py install",
+    "test:signing": "python3 -B tools/test-local-signing.py",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:ui": "vitest run tests/frontend",
+    "test:ui:native": "node tests/native/run-native-ui.mjs",
+    "verify:ui": "npm test && npm run check:rust && npm run test:rust && npm run test:ui:native && npm run test:ui:visible",
+    "test:ui:visible": "NAMI_UI_TEST_VISIBLE=1 node tests/native/run-native-ui.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "lucide-react": "^1.72.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.10",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "jsdom": "^31.0.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}

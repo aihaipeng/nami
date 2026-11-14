@@ -1,0 +1,316 @@
+[
+  {
+    "id": "sample-01",
+    "text": "Good morning. Let’s make something useful today.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "早上好。今天一起做些有用的事情。",
+      "Bonjour. Créons quelque chose d’utile aujourd’hui."
+    ],
+    "date": "2026-11-14T09:40:00+08:00",
+    "isFavorite": false,
+    "isPinned": true
+  },
+  {
+    "id": "sample-02",
+    "text": "Keep the interface simple, calm, and easy to understand.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "让界面保持简洁、克制、易于理解。",
+      "Gardez une interface simple, sobre et facile à comprendre."
+    ],
+    "date": "2026-11-14T09:37:00+08:00",
+    "isFavorite": true,
+    "isPinned": true
+  },
+  {
+    "id": "sample-03",
+    "text": "The next train leaves in ten minutes.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "下一班列车将在十分钟后出发。",
+      "Le prochain train part dans dix minutes."
+    ],
+    "date": "2026-11-14T09:34:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-04",
+    "text": "Please send me the updated design before Friday.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "请在周五之前把更新后的设计发给我。",
+      "Merci de m’envoyer la nouvelle version du design avant vendredi."
+    ],
+    "date": "2026-11-14T09:31:00+08:00",
+    "isFavorite": true,
+    "isPinned": false
+  },
+  {
+    "id": "sample-05",
+    "text": "A thoughtful tool stays out of the way. It helps people finish their work with fewer interruptions, clear feedback, and small details that feel natural. This longer synthetic example is used to check how the translation history preview wraps and truncates across several lines without changing the original text.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "贴心的工具不会喧宾夺主。它通过更少的打扰、清晰的反馈和自然的细节，帮助人们完成工作。这条较长的合成样例用于检查翻译历史预览的换行和截断，同时保持原文不变。",
+      "Un outil bien conçu sait se faire discret. Il aide chacun à travailler avec moins d’interruptions, des retours clairs et des détails naturels. Cet exemple synthétique permet de vérifier le retour à la ligne et la troncature de l’aperçu sans modifier le texte original."
+    ],
+    "date": "2026-11-14T09:28:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-06",
+    "text": "Meeting notes\n\n1. Review the prototype.\n2. Check keyboard navigation.\n3. Share the next steps.\n",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "会议记录\n\n1. 评审原型。\n2. 检查键盘导航。\n3. 分享后续步骤。\n",
+      "Notes de réunion\n\n1. Examiner le prototype.\n2. Vérifier la navigation au clavier.\n3. Partager les prochaines étapes.\n"
+    ],
+    "date": "2026-11-14T09:25:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-07",
+    "text": "Where can I find a quiet place to work?",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN"
+    ],
+    "translations": [
+      "哪里可以找到安静的工作场所？"
+    ],
+    "date": "2026-11-14T09:22:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-08",
+    "text": "Your changes have been saved successfully.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "你的修改已成功保存。",
+      "Vos modifications ont bien été enregistrées."
+    ],
+    "date": "2026-11-14T09:19:00+08:00",
+    "isFavorite": true,
+    "isPinned": false
+  },
+  {
+    "id": "sample-09",
+    "text": "The sea is calm this evening. 🌊",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "今晚海面平静。🌊",
+      "La mer est calme ce soir. 🌊"
+    ],
+    "date": "2026-11-14T09:16:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-10",
+    "text": "Could we move the meeting to tomorrow afternoon?",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "我们可以把会议改到明天下午吗？",
+      "Pourrions-nous déplacer la réunion à demain après-midi ?"
+    ],
+    "date": "2026-11-14T09:13:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-11",
+    "text": "Search should match both the source and the translation.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "搜索应同时匹配原文和译文。",
+      "La recherche doit porter à la fois sur le texte source et sur la traduction."
+    ],
+    "date": "2026-11-14T09:10:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-12",
+    "text": "Small details make everyday software feel better.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "细微之处让日常使用的软件更舒适。",
+      "Les petits détails rendent les logiciels du quotidien plus agréables."
+    ],
+    "date": "2026-11-14T09:07:00+08:00",
+    "isFavorite": true,
+    "isPinned": false
+  },
+  {
+    "id": "sample-13",
+    "text": "Thank you for taking the time to review this.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN"
+    ],
+    "translations": [
+      "感谢你抽出时间审阅。"
+    ],
+    "date": "2026-11-14T09:04:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-14",
+    "text": "The package will arrive between nine and eleven.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "包裹将在九点到十一点之间送达。",
+      "Le colis arrivera entre neuf heures et onze heures."
+    ],
+    "date": "2026-11-14T09:01:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-15",
+    "text": "Press Return to open the selected history record.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "按回车键打开选中的历史记录。",
+      "Appuyez sur Entrée pour ouvrir l’élément sélectionné dans l’historique."
+    ],
+    "date": "2026-11-14T08:58:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-16",
+    "text": "A fresh cup of coffee and a clear plan.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "一杯新煮的咖啡，一份清晰的计划。",
+      "Un café fraîchement préparé et un plan clair."
+    ],
+    "date": "2026-11-14T08:55:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-17",
+    "text": "This is a synthetic example, not a personal conversation.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "这是一条合成样例，不是个人对话。",
+      "Ceci est un exemple synthétique, pas une conversation personnelle."
+    ],
+    "date": "2026-11-14T08:52:00+08:00",
+    "isFavorite": true,
+    "isPinned": false
+  },
+  {
+    "id": "sample-18",
+    "text": "Numbers and symbols: 100%_literal, 42, €19.50, and C++ .",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "数字与符号：100%_literal、42、€19.50 和 C++。",
+      "Nombres et symboles : 100%_literal, 42, 19,50 € et C++."
+    ],
+    "date": "2026-11-14T08:49:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-19",
+    "text": "Take a short break and come back with fresh eyes.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN"
+    ],
+    "translations": [
+      "稍作休息，再以新的视角回来。"
+    ],
+    "date": "2026-11-14T08:46:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  },
+  {
+    "id": "sample-20",
+    "text": "Welcome to Nami. Your ideas can travel across languages.",
+    "sourceLanguage": "en",
+    "targetLanguages": [
+      "zh-CN",
+      "fr"
+    ],
+    "translations": [
+      "欢迎使用 Nami。让你的想法跨越语言。",
+      "Bienvenue dans Nami. Vos idées peuvent traverser les langues."
+    ],
+    "date": "2026-11-14T08:43:00+08:00",
+    "isFavorite": false,
+    "isPinned": false
+  }
+]

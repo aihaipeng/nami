@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-p0-common"
+description = "P0 snapshots and window navigation; no files, network or shell."
+commands.allow = ["app_snapshot", "window_show", "window_hide"]
+
+[[permission]]
+identifier = "allow-p0-translation"
+description = "Translation host layout only."
+commands.allow = ["window_pin", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take"]
+
+[[permission]]
+identifier = "allow-p0-clipboard"
+description = "Clipboard window may restore only built-in synthetic samples."
+commands.allow = ["window_pin", "clipboard_record_use"]
+
+[[permission]]
+identifier = "allow-p0-settings"
+description = "Session locale and explicit Accessibility request."
+commands.allow = ["locale_set", "permission_request", "translation_engine_set"]

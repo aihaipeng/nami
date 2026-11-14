@@ -1,0 +1,57 @@
+.settings-shell {
+  --settings-sidebar: 243 243 243;
+  --settings-page: 255 255 255;
+  --settings-card: 249 249 249;
+  display: flex;
+  height: 100%;
+  color: hsl(var(--foreground));
+  font-size: 12.9px;
+  letter-spacing: .1px;
+}
+.settings-shell .settings-sidebar { width: 232px; flex: 0 0 232px; display: flex; flex-direction: column; padding: 28px 10px 16px; border-right: 1px solid hsl(var(--foreground) / .05); background: rgb(var(--settings-sidebar) / .85); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
+.settings-shell .settings-brand { padding: 4px 8px 30px; font-size: 19px; font-weight: 500; letter-spacing: -.17px; }
+.settings-shell .settings-brand small { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; letter-spacing: .1px; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-sidebar nav { display: flex; flex-direction: column; gap: 2px; }
+.settings-shell .settings-sidebar nav button { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; font: inherit; font-weight: 400; }
+.settings-shell .settings-sidebar nav button[aria-current=page] { background: hsl(var(--foreground) / .1); color: inherit; font-weight: 400; }
+.settings-shell .settings-sidebar nav button:not([aria-current]):hover { background: hsl(var(--foreground) / .045); }
+.settings-shell .settings-sidebar nav svg { width: 16px; height: 16px; }
+.settings-shell .settings-stage { display: flex; margin-top: auto; padding: 12px 8px 0; color: hsl(var(--foreground) / .6); font-size: 10px; }
+.settings-shell .settings-content { flex: 1; min-width: 0; overflow: auto; padding: 34px 24px 24px; background: rgb(var(--settings-page) / .7); }
+.settings-shell .settings-page-heading { margin-bottom: 28px; }
+.settings-shell .settings-content h1 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.17px; }
+.settings-shell .settings-intro { margin: 6px 0 0; font-size: 12.9px; line-height: 1.6; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-content h2 { display: flex; align-items: center; min-height: 32px; margin: 0; padding: 0 12px; font-size: 12.9px; font-weight: 400; color: inherit; }
+.settings-shell .settings-group { padding: 0 12px; border: 0; border-radius: 12px; background: rgb(var(--settings-card) / .7); box-shadow: none; }
+.settings-shell .settings-field { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 12px 0; }
+.settings-shell .settings-field-content { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.settings-shell .settings-field [data-slot=field-label] { font-size: 12.9px; line-height: 18px; font-weight: 400; }
+.settings-shell .settings-field-content p { margin: 0; font-size: 11px; line-height: 1.6; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-separator { margin: 0; height: 1px; border: 0; background: hsl(var(--foreground) / .05); }
+.settings-shell .settings-badge, .settings-shell .settings-badge.outline { display: inline-flex; align-items: center; justify-content: flex-end; flex-shrink: 0; gap: 5px; max-width: 45%; padding: 0; border: 0; border-radius: 0; background: transparent; color: hsl(var(--foreground) / .6); font-size: 11px; line-height: 1.6; text-align: right; }
+.settings-shell .settings-badge > svg { width: 12px; height: 12px; }
+.settings-shell .language-picker { max-width: 48%; flex-shrink: 0; font-weight: 400; }
+.settings-shell .settings-switch { appearance: none; position: relative; width: 32px; height: 18px; margin: 0; flex-shrink: 0; border: 0; border-radius: 9px; background: hsl(var(--foreground) / .18); opacity: .55; }
+.settings-shell .settings-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: rgb(var(--settings-page)); box-shadow: 0 1px 3px hsl(var(--foreground) / .15); }
+.settings-shell .permission-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.settings-shell .settings-action { display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 0 14px; border: 0; border-radius: 14px; background: hsl(var(--foreground) / .045); color: inherit; font: inherit; white-space: nowrap; }
+.settings-shell .settings-action:not(:disabled):hover { background: hsl(var(--foreground) / .1); }
+.settings-shell .settings-action:not(:disabled):active { background: hsl(var(--foreground) / .14); }
+.settings-shell .settings-action:disabled { opacity: .45; cursor: default; }
+.settings-shell button:focus-visible { outline: 2px solid hsl(var(--foreground) / .55); outline-offset: 2px; }
+.settings-shell .settings-callout { display: flex; align-items: flex-start; gap: 8px; margin-top: 18px; padding: 0 12px; border: 0; border-radius: 0; background: transparent; font-size: 11px; line-height: 1.65; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-callout > svg { flex-shrink: 0; width: 14px; height: 14px; margin-top: 2px; }
+.settings-shell .settings-callout h5, .settings-shell .settings-callout p { margin: 0; font-size: inherit; color: inherit; }
+.settings-shell .settings-callout h5 { margin-bottom: 3px; font-weight: 500; }
+.settings-shell .settings-error { color: hsl(var(--destructive)); }
+.settings-shell .settings-footnote { display: flex; align-items: flex-start; gap: 6px; margin: 22px 12px 0; font-size: 10px; line-height: 1.7; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-footnote > svg { width: 12px; height: 12px; margin-top: 2px; }
+.settings-shell .version-row { display: flex; justify-content: space-between; margin: 20px 12px 0; font-size: 11px; color: hsl(var(--foreground) / .6); }
+@media (prefers-color-scheme: dark) {
+  .settings-shell { --settings-sidebar: 30 24 27; --settings-page: 20 18 19; --settings-card: 26 24 25; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .settings-shell .settings-sidebar, .settings-shell .settings-content, .settings-shell .settings-group { background: rgb(var(--settings-page)); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .settings-shell .settings-sidebar { background: rgb(var(--settings-sidebar)); }
+  .settings-shell .settings-group { background: rgb(var(--settings-card)); }
+}

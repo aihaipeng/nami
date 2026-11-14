@@ -1,0 +1,445 @@
+use reqwest::{Client, Response};
+use serde_json::{json, Value};
+use std::time::Duration;
+
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const LANGUAGES: &[&str] = &[
+    "ar", "zh-CN", "zh-TW", "nl", "en", "fr", "de", "id", "it", "ja", "ko", "pl", "pt", "ru", "es",
+    "tr", "vi",
+];
+
+struct Lines<'a> {
+    texts: Vec<&'a str>,
+    endings: Vec<&'a str>,
+}
+
+fn split_lines(text: &str) -> Lines<'_> {
+    let bytes = text.as_bytes();
+    let mut texts = Vec::new();
+    let mut endings = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' || bytes[index] == b'\n' {
+            let end = index;
+            index += 1;
+            if bytes[end] == b'\r' && bytes.get(index) == Some(&b'\n') {
+                index += 1;
+            }
+            texts.push(&text[start..end]);
+            endings.push(&text[end..index]);
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    texts.push(&text[start..]);
+    endings.push("");
+    Lines { texts, endings }
+}
+
+pub fn validate_text(text: &str) -> Result<(), String> {
+    if text.encode_utf16().count() > 100_000 {
+        return Err("Text exceeds 100,000 UTF-16 characters.".into());
+    }
+    let lines = split_lines(text);
+    if lines.texts.len() > 2_000 {
+        return Err("Text exceeds 2,000 lines.".into());
+    }
+    if lines
+        .texts
+        .iter()
+        .any(|line| line.encode_utf16().count() > 5_000)
+    {
+        return Err("A line exceeds 5,000 UTF-16 characters. Split it into shorter lines.".into());
+    }
+    Ok(())
+}
+
+fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
+    if !matches!(engine, "edge" | "google") {
+        return Err("Choose a supported translation engine.".into());
+    }
+    if source != "auto" && !LANGUAGES.contains(&source) {
+        return Err("Choose a supported source language.".into());
+    }
+    if !(1..=2).contains(&targets.len())
+        || targets
+            .iter()
+            .any(|target| !LANGUAGES.contains(&target.as_str()))
+    {
+        return Err("Choose one or two supported target languages.".into());
+    }
+    Ok(())
+}
+
+fn language_code<'a>(engine: &str, code: &'a str) -> &'a str {
+    match (engine, code.to_ascii_lowercase().as_str()) {
+        ("edge", "auto") => "",
+        ("edge", "zh" | "zh-cn" | "zh-hans") => "zh-Hans",
+        ("edge", "zh-tw" | "zh-hant") => "zh-Hant",
+        (_, "zh" | "zh-cn" | "zh-hans") => "zh-CN",
+        (_, "zh-tw" | "zh-hant") => "zh-TW",
+        _ => code,
+    }
+}
+
+fn batches(lines: &[&str]) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    let mut batch = Vec::new();
+    let mut units = 0;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let next = line.encode_utf16().count();
+        if batch.len() == 64 || units + next > 12_000 {
+            result.push(std::mem::take(&mut batch));
+            units = 0;
+        }
+        batch.push(index);
+        units += next;
+    }
+    if !batch.is_empty() {
+        result.push(batch);
+    }
+    result
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn parse_response(
+    engine: &str,
+    data: &[u8],
+    count: usize,
+    source: &str,
+) -> Result<Vec<String>, String> {
+    let malformed = || "The translation service returned an invalid response.".to_string();
+    let root: Value = serde_json::from_slice(data).map_err(|_| malformed())?;
+    if engine == "edge" {
+        let rows = root
+            .as_array()
+            .filter(|rows| rows.len() == count)
+            .ok_or_else(malformed)?;
+        rows.iter()
+            .map(|row| {
+                if source == "auto" && row["detectedLanguage"]["language"].as_str().is_none() {
+                    return Err(malformed());
+                }
+                row["translations"]
+                    .as_array()
+                    .and_then(|translations| translations.first())
+                    .and_then(|translation| translation["text"].as_str())
+                    .map(String::from)
+                    .ok_or_else(malformed)
+            })
+            .collect()
+    } else {
+        let root = root.as_array().ok_or_else(malformed)?;
+        let texts = root
+            .first()
+            .and_then(Value::as_array)
+            .filter(|texts| texts.len() == count)
+            .ok_or_else(malformed)?;
+        if source == "auto" {
+            let detected = root
+                .get(1)
+                .and_then(Value::as_array)
+                .filter(|codes| codes.len() == count)
+                .ok_or_else(malformed)?;
+            if detected.iter().any(|code| code.as_str().is_none()) {
+                return Err(malformed());
+            }
+        }
+        texts
+            .iter()
+            .map(|text| {
+                text.as_str()
+                    .map(|text| html_escape::decode_html_entities(text).into_owned())
+                    .ok_or_else(malformed)
+            })
+            .collect()
+    }
+}
+
+fn network_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "The translation request timed out. Try again.".into()
+    } else {
+        "Unable to connect to the translation service. Check your network.".into()
+    }
+}
+
+async fn response_bytes(mut response: Response) -> Result<Vec<u8>, String> {
+    match response.status().as_u16() {
+        200..=299 => {}
+        429 => return Err("Too many translation requests. Try again later.".into()),
+        401 | 403 => return Err("The translation service is temporarily unavailable.".into()),
+        code => {
+            return Err(format!(
+                "The translation service request failed (HTTP {code}). Try again."
+            ))
+        }
+    }
+    let oversized = || "The translation response exceeds the supported size.".to_string();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(oversized());
+    }
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+        if chunk.len() > MAX_RESPONSE_BYTES - data.len() {
+            return Err(oversized());
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
+}
+
+fn join_lines(translations: &[String], endings: &[&str]) -> String {
+    let mut result = String::new();
+    for (translation, ending) in translations.iter().zip(endings) {
+        result.push_str(translation);
+        result.push_str(ending);
+    }
+    result
+}
+
+fn request(
+    client: &Client,
+    engine: &str,
+    active: &[&str],
+    source: &str,
+    target: &str,
+) -> reqwest::RequestBuilder {
+    if engine == "edge" {
+        client
+            .post("https://edge.microsoft.com/translate/translatetext")
+            .query(&[
+                ("from", language_code(engine, source)),
+                ("to", language_code(engine, target)),
+                ("isEnterpriseClient", "false"),
+            ])
+            .json(&active)
+    } else {
+        let escaped: Vec<String> = active.iter().map(|text| escape_html(text)).collect();
+        client
+            .post("https://translate-pa.googleapis.com/v1/translateHtml")
+            .header("Content-Type", "application/json+protobuf")
+            .json(&json!([
+                [
+                    escaped,
+                    language_code(engine, source),
+                    language_code(engine, target)
+                ],
+                "te_lib"
+            ]))
+            // Public Translate Element frontend key used by the reference client.
+            .header("X-Goog-Api-Key", "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520")
+    }
+}
+
+pub async fn translate(
+    engine: &str,
+    text: &str,
+    source: &str,
+    targets: &[String],
+) -> Result<Vec<String>, String> {
+    validate_text(text)?;
+    validate_options(engine, source, targets)?;
+    let lines = split_lines(text);
+    let batches = batches(&lines.texts);
+    if batches.is_empty() {
+        return Ok(targets.iter().map(|_| text.to_string()).collect());
+    }
+    let client = Client::builder()
+        .user_agent("Nami/0.1")
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Unable to initialize the translation service.".to_string())?;
+    let mut results = Vec::with_capacity(targets.len());
+    for target in targets {
+        let mut translations: Vec<String> =
+            lines.texts.iter().map(|text| text.to_string()).collect();
+        for batch in &batches {
+            let active: Vec<&str> = batch.iter().map(|index| lines.texts[*index]).collect();
+            let response = request(&client, engine, &active, source, target)
+                .send()
+                .await
+                .map_err(network_error)?;
+            let data = response_bytes(response).await?;
+            let translated = parse_response(engine, &data, batch.len(), source)?;
+            for (index, translated) in batch.iter().zip(translated) {
+                translations[*index] = translated;
+            }
+        }
+        results.push(join_lines(&translations, &lines.endings));
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_fixed_provider_requests_with_one_content_type() {
+        let client = Client::builder().user_agent("Nami/0.1").build().unwrap();
+        let active = ["A & B <world>", "Second line"];
+        let edge = request(&client, "edge", &active, "auto", "zh-CN")
+            .build()
+            .unwrap();
+        assert_eq!(edge.method(), reqwest::Method::POST);
+        assert_eq!(edge.url().scheme(), "https");
+        assert_eq!(edge.url().host_str(), Some("edge.microsoft.com"));
+        assert_eq!(edge.url().path(), "/translate/translatetext");
+        assert_eq!(
+            edge.url().as_str(),
+            "https://edge.microsoft.com/translate/translatetext?from=&to=zh-Hans&isEnterpriseClient=false"
+        );
+        assert_eq!(edge.headers().get_all("Content-Type").iter().count(), 1);
+        assert_eq!(edge.headers()["Content-Type"], "application/json");
+        let edge_body: Value =
+            serde_json::from_slice(edge.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(edge_body, json!(active));
+
+        let google = request(&client, "google", &active, "zh-Hans", "zh-Hant")
+            .build()
+            .unwrap();
+        assert_eq!(google.method(), reqwest::Method::POST);
+        assert_eq!(
+            google.url().as_str(),
+            "https://translate-pa.googleapis.com/v1/translateHtml"
+        );
+        assert_eq!(google.headers().get_all("Content-Type").iter().count(), 1);
+        assert_eq!(
+            google.headers()["Content-Type"],
+            "application/json+protobuf"
+        );
+        assert!(google.headers().contains_key("X-Goog-Api-Key"));
+        let google_body: Value =
+            serde_json::from_slice(google.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(
+            google_body,
+            json!([
+                [["A &amp; B &lt;world&gt;", "Second line"], "zh-CN", "zh-TW"],
+                "te_lib"
+            ])
+        );
+    }
+
+    #[test]
+    fn validates_utf16_lines_and_existing_language_catalog() {
+        assert!(validate_text(&"😀".repeat(2_500)).is_ok());
+        assert!(validate_text(&"😀".repeat(2_501)).is_err());
+        assert!(validate_text(&"\n".repeat(2_000)).is_err());
+        assert!(validate_text(&format!("{}\n", "x".repeat(4_999)).repeat(20)).is_ok());
+        assert!(validate_text(&format!("{}\n", "x".repeat(5_000)).repeat(20)).is_err());
+        assert!(validate_options("edge", "auto", &["zh-CN".into()]).is_ok());
+        assert!(validate_options("google", "en", &["ja".into(), "zh-TW".into()]).is_ok());
+        assert!(validate_options("other", "auto", &["en".into()]).is_err());
+        assert!(validate_options("edge", "none", &["en".into()]).is_err());
+        assert!(validate_options("edge", "auto", &[]).is_err());
+        assert!(validate_options("edge", "auto", &["auto".into()]).is_err());
+        assert!(
+            validate_options("edge", "auto", &["en".into(), "en".into(), "en".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn batches_at_row_and_utf16_limits_without_blank_requests() {
+        let lines = vec!["hello"; 65];
+        assert_eq!(
+            batches(&lines).iter().map(Vec::len).collect::<Vec<_>>(),
+            [64, 1]
+        );
+        let long = "😀".repeat(2_500);
+        assert_eq!(batches(&[&long, "  ", &long, &long]), [vec![0, 2], vec![3]]);
+        assert!(batches(&["", "  ", "\t"]).is_empty());
+    }
+
+    #[test]
+    fn maps_chinese_aliases_per_provider() {
+        assert_eq!(language_code("edge", "auto"), "");
+        for code in ["zh", "ZH-cn", "zh-Hans"] {
+            assert_eq!(language_code("edge", code), "zh-Hans");
+            assert_eq!(language_code("google", code), "zh-CN");
+        }
+        for code in ["zh-TW", "zh-Hant"] {
+            assert_eq!(language_code("edge", code), "zh-Hant");
+            assert_eq!(language_code("google", code), "zh-TW");
+        }
+        assert_eq!(language_code("google", "auto"), "auto");
+    }
+
+    #[test]
+    fn parses_strict_provider_responses_and_html_once() {
+        let edge = br#"[{"detectedLanguage":{"language":"en"},"translations":[{"text":"Hello"}]}]"#;
+        assert_eq!(parse_response("edge", edge, 1, "auto").unwrap(), ["Hello"]);
+        assert!(parse_response("edge", edge, 2, "auto").is_err());
+        assert!(
+            parse_response("edge", br#"[{"translations":[{"text":"x"}]}]"#, 1, "auto").is_err()
+        );
+        assert!(parse_response("edge", br#"[{"translations":[{"text":2}]}]"#, 1, "en").is_err());
+        assert_eq!(escape_html("A & B < C > D"), "A &amp; B &lt; C &gt; D");
+        let google = br#"[["&lt;b&gt;&amp; &#39; &#x1F600; &amp;lt;"],["en"]]"#;
+        assert_eq!(
+            parse_response("google", google, 1, "auto").unwrap(),
+            ["<b>& ' 😀 &lt;"]
+        );
+        assert!(parse_response("google", google, 2, "auto").is_err());
+        assert!(parse_response("google", br#"[["x"],["en","ja"]]"#, 1, "auto").is_err());
+        assert!(parse_response("google", br#"[[2]]"#, 1, "en").is_err());
+        assert!(parse_response("google", b"invalid", 1, "en").is_err());
+    }
+
+    #[test]
+    fn preserves_mixed_newlines_trailing_lines_and_blank_whitespace() {
+        let text = "First\r\n \t\nSecond\rThird\n";
+        let lines = split_lines(text);
+        assert_eq!(lines.texts, ["First", " \t", "Second", "Third", ""]);
+        assert_eq!(lines.endings, ["\r\n", "\n", "\r", "\n", ""]);
+        let mut translated: Vec<String> = lines.texts.iter().map(|line| line.to_string()).collect();
+        for index in batches(&lines.texts).into_iter().flatten() {
+            translated[index] = "译文".into();
+        }
+        assert_eq!(
+            join_lines(&translated, &lines.endings),
+            "译文\r\n \t\n译文\r译文\n"
+        );
+        let empty = split_lines("");
+        assert_eq!(empty.texts, [""]);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit synthetic network smoke"]
+    async fn live_services_translate_synthetic_text() {
+        let input = "Nami synthetic test.\n\nHello & <world>\r\n";
+        let targets = vec!["zh-CN".to_string(), "ja".to_string()];
+        for engine in ["edge", "google"] {
+            let results = translate(engine, input, "auto", &targets)
+                .await
+                .unwrap_or_else(|error| panic!("{engine} synthetic smoke failed: {error}"));
+            assert_eq!(results.len(), targets.len());
+            for output in results {
+                let lines = split_lines(&output);
+                assert_eq!(lines.texts.len(), 4);
+                assert_eq!(lines.endings, ["\n", "\n", "\r\n", ""]);
+                assert!(lines.texts[1].is_empty() && lines.texts[3].is_empty());
+                assert!(!lines.texts[0].trim().is_empty());
+                let special = lines.texts[2];
+                assert!(!special.trim().is_empty());
+                assert!(special.contains('<') && special.contains('>'));
+                assert!(!special.contains("&amp;") && !special.contains("&lt;"));
+            }
+            println!("{engine} PASS");
+        }
+    }
+}
