@@ -46,7 +46,18 @@ def test_native_ui():
     })
     assert report.is_file(), 'Native test process did not produce its report'
     result = json.loads(report.read_text())
-    check_report(result, run_id, visible)
+    selected = os.environ.get('NAMI_UI_TEST_CASE')
+    if selected:
+        names = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout'}
+        assert selected in names, 'Unknown targeted native test'
+        assert result['runId'] == run_id
+        assert result['testCase'] == selected
+        assert result['passed'] is True, result['domCases']
+        assert result['cases'] == []
+        assert [item['name'] for item in result['domCases']] == [names[selected]]
+        assert all(item['passed'] for item in result['domCases'])
+    else:
+        check_report(result, run_id, visible)
     assert run.returncode == 0, f'Native test process exited with {run.returncode}'
     for item in result['cases'] + result['domCases']:
         print(f"PASS {item['name']} ({len(item['samples'])} samples)")

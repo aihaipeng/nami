@@ -621,6 +621,8 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
                     .clipboard_pinned
             {
                 if let Some(window) = handle.get_window("clipboard") {
+                    // Losing focus also follows an automatic paste; keep its operation token valid.
+                    let _ = crate::clipboard_runtime::visibility(&handle, false);
                     let _ = window.hide();
                 }
             }
@@ -1158,6 +1160,9 @@ pub fn show(app: &AppHandle, target: &str) -> Result<(), String> {
         }
         apply_translation(app)?;
     }
+    if target == "clipboard" && !window.is_visible().map_err(|_| "window_visibility")? {
+        crate::clipboard_runtime::visibility(app, true)?;
+    }
     window.show().map_err(|_| "window_show")?;
     window.set_focus().map_err(|_| "window_focus")?;
     // An accessory (menu bar) application is not brought forward by
@@ -1211,6 +1216,9 @@ pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
                     .fetch_add(1, Ordering::SeqCst);
             }
             if let Some(window) = app.get_window(region) {
+                if region == "clipboard" {
+                    crate::clipboard_runtime::visibility(app, false)?;
+                }
                 window.hide().map_err(|_| "window_hide")?;
             }
             Ok(())

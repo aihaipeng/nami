@@ -2522,7 +2522,7 @@ const rules=(sheets)=>[...sheets].flatMap(sheet=>[...(sheet.cssRules||[])].flatM
 const focusRule=rules(document.styleSheets).find(rule=>rule.selectorText==='.history-search:focus-within')?.style.boxShadow;
 keyboard.click();
 const color=(value)=>{const c=document.createElement('canvas');c.width=c.height=1;const ctx=c.getContext('2d');ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
-return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds.bottom-(fr.top+fr.height/2),keyboardCenter:bounds.bottom-(kr.top+kr.height/2),keyboardRight:bounds.right-kr.right,keyboardSize:[kr.width,kr.height],footerFont:getComputedStyle(footer).fontSize,mask:getComputedStyle(list).webkitMaskImage,pinnedMask:getComputedStyle(pinned).webkitMaskImage,scrollbars:panel.querySelectorAll('[role=scrollbar]').length,scrollbarTop:panel.querySelector('[role=scrollbar]')?.getBoundingClientRect().top-vr.top,searchRadius:style.borderRadius,idle,focus,focused,focusRule,caret:getComputedStyle(search.querySelector('input')).caretColor,previewFont:getComputedStyle(preview).fontSize,previewLine:getComputedStyle(preview).lineHeight,actionDuration:getComputedStyle(actions).transitionDuration,actionOffset:getComputedStyle(actions).transform,iconSize:[getComputedStyle(keyboard.firstElementChild).width,getComputedStyle(keyboard.firstElementChild).height],secondary:color(getComputedStyle(footer).color),delete:color(getComputedStyle(panel.querySelector('.history-delete')).color)};
+return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds.bottom-(fr.top+fr.height/2),keyboardCenter:bounds.bottom-(kr.top+kr.height/2),keyboardRight:bounds.right-kr.right,keyboardSize:[kr.width,kr.height],footerFont:getComputedStyle(footer).fontSize,mask:getComputedStyle(list).webkitMaskImage,pinnedMask:getComputedStyle(pinned).webkitMaskImage,scrollbars:panel.querySelectorAll('[role=scrollbar]').length,scrollbarTop:panel.querySelector('[role=scrollbar]')?.getBoundingClientRect().top-vr.top,searchRadius:style.borderRadius,idle,focus,focused,focusRule,caret:getComputedStyle(search.querySelector('input')).caretColor,previewFont:getComputedStyle(preview).fontSize,previewLine:getComputedStyle(preview).lineHeight,actionDuration:getComputedStyle(actions).transitionDuration,actionOffset:getComputedStyle(actions).transform,actionDelay:getComputedStyle(actions).transitionDelay,actionEasing:getComputedStyle(actions).transitionTimingFunction,timeDuration:getComputedStyle(panel.querySelector('time')).transitionDuration,iconSize:[getComputedStyle(keyboard.firstElementChild).width,getComputedStyle(keyboard.firstElementChild).height],secondary:color(getComputedStyle(footer).color),delete:color(getComputedStyle(panel.querySelector('.history-delete')).color)};
 "#,
         )?;
         for (key, expected) in [
@@ -2559,10 +2559,10 @@ return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds
                 .contains("2px")
             || (chrome["focused"] == true
                 && !chrome["focus"].as_str().unwrap_or_default().contains("2px"))
-            || !chrome["actionDuration"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("0.1s")
+            || chrome["actionDuration"] != "0.15s, 0.15s, 0.15s"
+            || chrome["actionDelay"] != "0s, 0s, 0s"
+            || chrome["actionEasing"] != "ease-out, ease-out, ease"
+            || chrome["timeDuration"] != "0.15s, 0.15s"
         {
             return Err(format!(
                 "clipboard chrome differs from native history: {chrome}"
@@ -2766,6 +2766,219 @@ window.__clipboardSwitch={done:false};
             return Err(format!("clipboard switch p95 exceeded 100ms: {switching}"));
         }
         samples.push(switching);
+        let visible_note = std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1");
+        if visible_note {
+            on_main(app, |app| {
+                let window = app
+                    .get_window("clipboard")
+                    .ok_or("missing clipboard window")?;
+                window
+                    .set_always_on_top(true)
+                    .map_err(|_| "clipboard test visibility")?;
+                window.show().map_err(|_| "clipboard test visibility")?;
+                app.get_webview("clipboard")
+                    .ok_or("missing clipboard view")?
+                    .set_focus()
+                    .map_err(|_| "clipboard test focus")?;
+                Ok(())
+            })?;
+        }
+        if visible_note {
+            let action_hover = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const panel=document.querySelector('.clipboard-panel'),row=panel.querySelector('.history-row'),button=row.querySelector('button');
+button.focus();const actions=getComputedStyle(row.querySelector('.history-row-actions')),time=getComputedStyle(row.querySelector('time'));
+const result={focused:row.matches(':focus-within'),duration:actions.transitionDuration,delay:actions.transitionDelay,timeDuration:time.transitionDuration};
+button.blur();return result;
+"#,
+            )?;
+            if action_hover["focused"] != true
+                || action_hover["duration"] != "0.15s"
+                || action_hover["delay"] != "0s, 0s, 0s"
+                || action_hover["timeDuration"] != "0.15s, 0.15s"
+            {
+                return Err(format!(
+                    "clipboard hover action timing regression: {action_hover}"
+                ));
+            }
+            samples.push(action_hover);
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
+row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:innerWidth-2,clientY:innerHeight-2}));return true;
+"#,
+        )?;
+        let mut menu = serde_json::Value::Null;
+        for _ in 0..80 {
+            menu = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+ const menu=document.querySelector('.clipboard-context-menu');
+ if(!menu)return {done:false};
+ const rect=menu.getBoundingClientRect(),items=[...menu.querySelectorAll('[role=menuitem]')];
+ const icons=items.map(item=>{const rect=item.firstElementChild.getBoundingClientRect();return [rect.width,rect.height];});
+ return {done:true,labels:items.map(item=>item.textContent),icons,inside:rect.left>=7&&rect.right<=innerWidth-7&&rect.top>=7&&rect.bottom<=innerHeight-7,deleteColor:getComputedStyle(items[4]).color};
+"#,
+            )?;
+            if menu["done"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-context-menu')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));return true;")?;
+        if menu["done"] != true
+            || menu.get("error").is_some()
+            || menu["inside"] != true
+            || menu["labels"]
+                != serde_json::json!(["Paste", "Favorite", "Pin record", "Note", "Delete"])
+            || menu["icons"]
+                != serde_json::json!([[14, 14], [14, 14], [14, 14], [14, 14], [14, 14]])
+            || menu["deleteColor"] != "rgb(255, 95, 87)"
+        {
+            return Err(format!("clipboard context menu regression: {menu}"));
+        }
+        samples.push(menu);
+        evaluate_view_dom(app, "clipboard", "document.querySelector('[data-record-id=\"clipboard-view-regression\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:60}));return true;")?;
+        for _ in 0..80 {
+            let opened = evaluate_view_dom(app, "clipboard", "const button=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');if(!button)return false;button.click();return true;")?;
+            if opened == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut editor = serde_json::Value::Null;
+        for _ in 0..80 {
+            editor = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const card=document.querySelector('.clipboard-editor'),title=card?.querySelector('input'),content=card?.querySelector('textarea');
+if(!title||!content||title.disabled)return {ready:false};const style=getComputedStyle(card);
+const actions=card.querySelector('.clipboard-editor-actions');
+return {ready:true,title:title.value,content:content.value,readOnly:content.readOnly,transition:style.transitionDuration,background:style.backgroundColor,radius:style.borderRadius,height:card.offsetHeight,contentHeight:content.offsetHeight,footerGap:actions.offsetTop-content.offsetTop-content.offsetHeight};
+"#,
+            )?;
+            if editor["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if editor["ready"] != true
+            || editor["title"] != ""
+            || editor["content"] != text
+            || editor["readOnly"] != false
+            || editor["transition"] != "0.18s, 0.18s"
+            || editor["radius"] != "12px"
+            || editor["height"]
+                .as_f64()
+                .is_none_or(|height| height > 290.0)
+            || editor["contentHeight"]
+                .as_f64()
+                .is_none_or(|height| height > 120.0)
+            || editor["footerGap"]
+                .as_f64()
+                .is_none_or(|gap| !(6.0..=16.0).contains(&gap))
+        {
+            return Err(format!("clipboard note card regression: {editor}"));
+        }
+        evaluate_view_dom(app,"clipboard", "const input=document.querySelector('.clipboard-editor input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Synthetic title');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            "document.querySelector('.clipboard-editor button[type=submit]').click();return true;",
+        )?;
+        let mut saved = false;
+        for _ in 0..100 {
+            let result = evaluate_view_dom(app, "clipboard", "return !document.querySelector('.clipboard-editor')&&document.querySelector('[data-record-id=\"clipboard-view-regression\"] .clipboard-record-title')?.textContent==='Synthetic title';")?;
+            if result == true {
+                saved = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !saved {
+            return Err("clipboard note did not save through real IPC".into());
+        }
+        samples.push(editor);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            if visible_note {
+                "window.__noteFinishTransitions=false;return true;"
+            } else {
+                "window.__noteFinishTransitions=true;return true;"
+            },
+        )?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
+let next=row.nextElementSibling;while(next?.hidden)next=next.nextElementSibling;
+window.__noteGeometry={height:row.offsetHeight,next:next?.offsetTop};
+row.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return true;
+"#,
+        )?;
+        let mut expansion = serde_json::Value::Null;
+        for _ in 0..100 {
+            expansion = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
+let next=row.nextElementSibling;while(next?.hidden)next=next.nextElementSibling;
+const content=row.querySelector('.clipboard-record-content'),body=row.querySelector('.clipboard-record-body');
+// Hidden WK views pause transitions; assert final geometry there, and natural pacing in the visible run.
+getComputedStyle(content).opacity;
+if(window.__noteFinishTransitions&&body.dataset.expanded==='true')for(const animation of row.getAnimations({subtree:true}))animation.finish();
+return {revealed:row.dataset.noteRevealed,expanded:body.dataset.expanded,opacity:getComputedStyle(content).opacity,duration:getComputedStyle(content).transitionDuration,easing:getComputedStyle(content).transitionTimingFunction,loading:!!row.querySelector('[role=progressbar]'),ready:body.dataset.expanded==='true'&&getComputedStyle(content).opacity==='1'&&!content.getAnimations().some(animation=>animation.playState==='running'),heightDelta:row.offsetHeight-window.__noteGeometry.height,nextDelta:next?.offsetTop-window.__noteGeometry.next,text:content.textContent,clamp:getComputedStyle(content.querySelector('.history-preview')).webkitLineClamp};
+"#,
+            )?;
+            if expansion["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let growth = expansion["heightDelta"].as_f64().unwrap_or_default();
+        let movement = expansion["nextDelta"].as_f64().unwrap_or_default();
+        if expansion["ready"] != true
+            || growth < 30.0
+            || (growth - movement).abs() > 1.0
+            || expansion["text"] != text
+            || expansion["clamp"] != "none"
+            || expansion["duration"] != "0.18s, 0.18s"
+            || expansion["easing"] != "ease-out, ease-out"
+        {
+            return Err(format!("clipboard note expansion regression: {expansion}"));
+        }
+        evaluate_view_dom(app,"clipboard","document.querySelector('[data-record-id=\"clipboard-view-regression\"]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true,relatedTarget:document.body}));return true;")?;
+        let mut collapsed = false;
+        for _ in 0..100 {
+            let done = evaluate_view_dom(app,"clipboard","const row=document.querySelector('[data-record-id=\"clipboard-view-regression\"]');getComputedStyle(row.querySelector('.clipboard-record-content')).opacity;if(window.__noteFinishTransitions)for(const animation of row.getAnimations({subtree:true}))animation.finish();return row.querySelector('.clipboard-record-body').dataset.expanded==='false'&&Math.abs(row.offsetHeight-window.__noteGeometry.height)<=1;")?;
+            if done == true {
+                collapsed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !collapsed {
+            return Err("clipboard note did not restore collapsed height".into());
+        }
+        samples.push(serde_json::json!({"noteExpanded":true,"heightDelta":growth,"followingRowDelta":movement,"collapsed":collapsed,"naturalTransitions":visible_note}));
+        if visible_note {
+            on_main(app, |app| {
+                app.get_window("clipboard")
+                    .ok_or("missing clipboard window")?
+                    .hide()
+                    .map_err(|_| "clipboard test visibility".into())
+            })?;
+        }
         let state = app.state::<AppState>();
         let database_guard = state.database.lock().unwrap();
         let database = database_guard.as_ref().ok_or("missing_test_database")?;
@@ -3082,6 +3295,196 @@ fn run_history_pagination(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_clipboard_action_timing(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        on_main(app, |app| {
+            let window = create(app, "clipboard")?;
+            window.show().map_err(|_| "window_show")?;
+            app.get_webview("clipboard")
+                .ok_or("missing clipboard view")?
+                .set_focus()
+                .map_err(|_| "window_focus")?;
+            Ok(())
+        })?;
+        for _ in 0..100 {
+            let sample = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const panel=document.querySelector('.clipboard-panel');if(!panel)return {ready:false};
+const row=document.createElement('article');row.className='history-row';
+row.innerHTML='<button class="history-row-select">Synthetic timing fixture</button><time>12:00</time><div class="history-row-actions"><button>Copy</button></div>';
+panel.append(row);const actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
+const read=()=>({duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,easing:getComputedStyle(actions).transitionTimingFunction,timeDuration:getComputedStyle(time).transitionDuration});
+const idle=read();row.querySelector('button').focus();const focused=row.matches(':focus-within'),active=read();row.remove();return {ready:true,idle,active,focused};
+"#,
+            )?;
+            if sample["ready"] == true {
+                if sample["idle"]["duration"] != "0.15s, 0.15s, 0.15s"
+                    || sample["active"]["duration"] != "0.15s"
+                    || sample["focused"] != true
+                {
+                    return Err(format!("clipboard action timing: {sample}"));
+                }
+                for state in ["idle", "active"] {
+                    if sample[state]["delay"] != "0s, 0s, 0s"
+                        || sample[state]["easing"] != "ease-out, ease-out, ease"
+                        || sample[state]["timeDuration"] != "0.15s, 0.15s"
+                    {
+                        return Err(format!("clipboard action transition: {sample}"));
+                    }
+                }
+                samples.push(sample);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("clipboard action test did not load".into())
+    })();
+    DomCase {
+        name: "clipboard action timing",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_clipboard_editor_layout(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        let paths = serde_json::to_string(&vec![std::env::temp_dir()
+            .join("nami-synthetic-layout.png")
+            .to_string_lossy()
+            .into_owned()])
+        .map_err(|_| "fixture")?;
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("missing test database")?
+            .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: "editor-layout".into(),
+                kind: "files".into(),
+                text: paths.clone(),
+                date: "2099-01-01T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: None,
+                fingerprint: nami::clipboard::fingerprint("files", paths.as_bytes()),
+            })?;
+        on_main(app, |app| {
+            create(app, "clipboard")?
+                .show()
+                .map_err(|_| "window_show")?;
+            app.get_webview("clipboard")
+                .ok_or("missing clipboard view")?
+                .set_focus()
+                .map_err(|_| "window_focus")?;
+            Ok(())
+        })?;
+        for _ in 0..100 {
+            let sample = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const row=document.querySelector('[data-record-id="editor-layout"]');if(!row)return {ready:false};
+const card=document.querySelector('.clipboard-editor');
+if(!card){const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');if(note)note.click();else row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:60}));return {ready:false};}
+const input=card.querySelector('input'),content=card.querySelector('textarea');if(!content||input.disabled)return {ready:false};
+const labels=[...card.querySelectorAll('.clipboard-editor-label')],style=getComputedStyle(content);
+return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.querySelectorAll('.clipboard-editor-hint').length,labels:labels.map(label=>label.textContent),weights:labels.map(label=>getComputedStyle(label).fontWeight),fontStyle:style.fontStyle,contentWeight:style.fontWeight,labelStyle:getComputedStyle(labels[1]).fontStyle,value:content.value,disabled:content.disabled,readonly:content.readOnly,color:style.color,editableColor:getComputedStyle(input).color,resize:style.resize,alignment:labels.map((label,index)=>{const a=label.getBoundingClientRect(),b=[input,content][index].getBoundingClientRect();return {left:Math.abs(a.left-b.left),right:Math.abs(a.right-b.right)};})};
+"#,
+            )?;
+            if sample["ready"] == true {
+                if sample["headings"] != 0
+                    || sample["hints"] != 0
+                    || sample["labels"] != serde_json::json!(["Title", "Content"])
+                    || sample["weights"] != serde_json::json!(["600", "600"])
+                    || sample["fontStyle"] != "italic"
+                    || sample["contentWeight"] != "600"
+                    || sample["labelStyle"] != "normal"
+                    || sample["value"] != "Non-editable content"
+                    || sample["disabled"] != true
+                    || sample["readonly"] != true
+                    || sample["color"] == sample["editableColor"]
+                    || sample["resize"] != "none"
+                {
+                    return Err(format!("clipboard editor styling: {sample}"));
+                }
+                for gap in sample["alignment"]
+                    .as_array()
+                    .ok_or("missing editor alignment")?
+                {
+                    if gap["left"].as_f64().unwrap_or(99.0) > 0.5
+                        || gap["right"].as_f64().unwrap_or(99.0) > 0.5
+                    {
+                        return Err(format!("clipboard editor label alignment: {sample}"));
+                    }
+                }
+                samples.push(sample);
+                let operation_before_blur =
+                    app.state::<AppState>().operation.load(Ordering::SeqCst);
+                on_main(app, |app| {
+                    // Match copy/paste's direct hide; focus loss must not cancel the active paste.
+                    crate::clipboard_runtime::visibility(app, false)?;
+                    app.get_window("clipboard")
+                        .ok_or("missing clipboard window")?
+                        .hide()
+                        .map_err(|_| "window_hide")?;
+                    Ok(())
+                })?;
+                for _ in 0..80 {
+                    let dismissed = evaluate_view_dom(
+                        app,
+                        "clipboard",
+                        "return !document.querySelector('.clipboard-editor');",
+                    )?;
+                    if dismissed == true {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if app.state::<AppState>().operation.load(Ordering::SeqCst) != operation_before_blur
+                {
+                    return Err("clipboard focus loss cancelled the automatic paste token".into());
+                }
+                samples.push(serde_json::json!({"automaticHidePreservesPasteToken":true}));
+                on_main(app, |app| {
+                    crate::clipboard_runtime::visibility(app, true)?;
+                    app.get_window("clipboard")
+                        .ok_or("missing clipboard window")?
+                        .show()
+                        .map_err(|_| "window_show")?;
+                    Ok(())
+                })?;
+                let restored = evaluate_view_dom(app,"clipboard", "return {editor:!!document.querySelector('.clipboard-editor'),menu:!!document.querySelector('.clipboard-context-menu'),search:document.querySelector('.history-search input').value,all:document.querySelector('[aria-label=\"All clipboard records\"]').getAttribute('aria-pressed')};")?;
+                if restored["editor"] != false
+                    || restored["menu"] != false
+                    || restored["search"] != ""
+                    || restored["all"] != "true"
+                {
+                    return Err(format!(
+                        "clipboard reopen did not restore defaults: {restored}"
+                    ));
+                }
+                samples.push(restored);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("clipboard editor did not load".into())
+    })();
+    DomCase {
+        name: "clipboard editor layout",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 pub fn start(app: &AppHandle) -> Result<(), String> {
     if app.config().identifier != "dev.local.nami.ui-tests" {
         return Err(
@@ -3096,6 +3499,24 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         .lock()
         .unwrap()
         .history_width_initialized = true;
+    if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
+        if !["clipboard-actions", "clipboard-editor"].contains(&case.as_str()) {
+            return Err("unknown native test case".into());
+        }
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let result = if case == "clipboard-actions" {
+                run_clipboard_action_timing(&app)
+            } else {
+                run_clipboard_editor_layout(&app)
+            };
+            let passed = result.passed;
+            let report = serde_json::json!({"runId":run_id,"testCase":case,"passed":passed,"cases":[],"domCases":[result],"scope":"selected isolated clipboard UI case only; no translation or geometry suite"});
+            let saved = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
+            app.exit(if passed && saved.is_ok() { 0 } else { 1 });
+        });
+        return Ok(());
+    }
     let window = create(app, "translation")?;
     let visible = std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1");
     if visible {

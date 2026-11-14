@@ -24,6 +24,17 @@ pub(crate) async fn database<T: Send + 'static>(
     .map_err(|_| "storage_worker")?
 }
 
+pub(crate) fn visibility(app: &AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(view) = app.get_webview("clipboard") {
+        view.emit(
+            "window://visibility",
+            serde_json::json!({"label":"clipboard","visible":visible}),
+        )
+        .map_err(|_| "event_emit")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
     let revision = app
         .state::<AppState>()

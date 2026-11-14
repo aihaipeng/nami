@@ -22,6 +22,7 @@ fn main() {
             "translation_sample_copy",
             "clipboard_record_use",
             "clipboard_query",
+            "clipboard_record_detail",
             "clipboard_record_update",
             "clipboard_capture_set",
             "clipboard_image",

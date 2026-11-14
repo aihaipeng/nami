@@ -176,6 +176,7 @@ fn main() {
             commands::translation_sample_copy,
             commands::clipboard_record_use,
             commands::clipboard_query,
+            commands::clipboard_record_detail,
             commands::clipboard_record_update,
             commands::clipboard_capture_set,
             commands::clipboard_image,
@@ -301,30 +302,17 @@ fn main() {
                 }
             }
             clipboard_runtime::start(app.handle());
-            windows::show(app.handle(), "translation").map_err(std::io::Error::other)?;
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build Nami")
-        .run(|app, event| {
-            match &event {
-                tauri::RunEvent::Ready => record_lifecycle(app, "ready", None),
-                tauri::RunEvent::ExitRequested { code, .. } => {
-                    record_lifecycle(app, "exit_requested", *code)
-                }
-                tauri::RunEvent::Exit => record_lifecycle(app, "exit", None),
-                _ => {}
+        .run(|app, event| match &event {
+            tauri::RunEvent::Ready => record_lifecycle(app, "ready", None),
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                record_lifecycle(app, "exit_requested", *code)
             }
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Err(code) = windows::show(app, "translation") {
-                    app.state::<AppState>()
-                        .shortcut_errors
-                        .lock()
-                        .unwrap()
-                        .push(code);
-                }
-            }
+            tauri::RunEvent::Exit => record_lifecycle(app, "exit", None),
+            _ => {}
         });
 }
 

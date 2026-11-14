@@ -31,6 +31,7 @@ pub struct ClipboardCursor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardSummary {
+    pub title: String,
     pub id: String,
     pub kind: String,
     pub text: String,
@@ -55,6 +56,14 @@ pub struct ClipboardPage {
 pub struct ClipboardQueryResult {
     pub page: ClipboardPage,
     pub alternate: Option<ClipboardPage>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardDetail {
+    pub title: String,
+    pub text: String,
+    pub kind: String,
 }
 
 pub fn fingerprint(kind: &str, bytes: &[u8]) -> String {

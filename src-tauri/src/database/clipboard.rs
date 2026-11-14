@@ -179,7 +179,7 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -212,6 +212,7 @@ impl HistoryDatabase {
                 break;
             }
             let record = crate::clipboard::ClipboardSummary {
+                title: row.get(9).map_err(storage_error)?,
                 id: row.get(1).map_err(storage_error)?,
                 kind: row.get(2).map_err(storage_error)?,
                 text: row.get(3).map_err(storage_error)?,
@@ -364,6 +365,82 @@ impl HistoryDatabase {
         self.clipboard_record(&id)
     }
 
+    pub fn clipboard_detail(&self, id: &str) -> Result<crate::clipboard::ClipboardDetail, String> {
+        let record = self.clipboard_record(id)?;
+        let title = self
+            .connection
+            .query_row(
+                "SELECT title FROM clipboard_records WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        Ok(crate::clipboard::ClipboardDetail {
+            title,
+            text: record.text,
+            kind: record.kind,
+        })
+    }
+
+    pub fn clipboard_edit(
+        &mut self,
+        id: &str,
+        title: &str,
+        text: Option<&str>,
+    ) -> Result<(), String> {
+        if title.chars().count() > 200
+            || title.contains('\0')
+            || text.is_some_and(|text| text.len() > MAX_TEXT_BYTES)
+        {
+            return Err("invalid_argument".into());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let (sequence, kind): (i64, String) = tx
+            .query_row(
+                "SELECT sequence,kind FROM clipboard_records WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or("not_found")?;
+        if let Some(text) = text {
+            if kind != "text" {
+                return Err("invalid_argument".into());
+            }
+            // Delete/insert fires the existing external-content FTS triggers atomically.
+            tx.execute(
+                "DELETE FROM clipboard_contents WHERE sequence=?1",
+                [sequence],
+            )
+            .map_err(storage_error)?;
+            tx.execute(
+                "INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?3)",
+                params![sequence, text, text.to_lowercase()],
+            )
+            .map_err(storage_error)?;
+            let summary: String = text.chars().take(256).collect();
+            tx.execute(
+                "UPDATE clipboard_records SET summary=?2,fingerprint=?3 WHERE id=?1",
+                params![
+                    id,
+                    summary,
+                    crate::clipboard::fingerprint("text", text.as_bytes())
+                ],
+            )
+            .map_err(storage_error)?;
+        }
+        tx.execute(
+            "UPDATE clipboard_records SET title=?2 WHERE id=?1",
+            params![id, title],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn clipboard_update(&mut self, id: &str, action: &str) -> Result<(), String> {
         let transaction = self
             .connection
@@ -437,6 +514,113 @@ mod tests {
             image_path: None,
             fingerprint: fingerprint("text", text.as_bytes()),
         }
+    }
+
+    #[test]
+    fn clipboard_editor_migrates_v3_and_preserves_full_content_flags_and_identity() {
+        let root = std::env::temp_dir().join(format!("nami-editor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        let original = record("edit", &"Original text ".repeat(100));
+        db.clipboard_insert(&original).unwrap();
+        db.clipboard_update("edit", "favorite").unwrap();
+        db.connection
+            .execute_batch(
+                "ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
+            )
+            .unwrap();
+        drop(db);
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        let detail = db.clipboard_detail("edit").unwrap();
+        assert!(detail.title.is_empty());
+        assert_eq!(detail.text, original.text);
+        let edited = "Updated 🌊\ncomplete content ".repeat(100);
+        db.clipboard_edit("edit", "My title", Some(&edited))
+            .unwrap();
+        assert!(db
+            .clipboard_page("Original", false, None, 100)
+            .unwrap()
+            .records
+            .is_empty());
+        let page = db.clipboard_page("Updated", true, None, 100).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].title, "My title");
+        assert_eq!(page.records[0].text.chars().count(), 256);
+        assert_eq!(page.total_records, 1);
+        assert!(db.clipboard_record("edit").unwrap().is_favorite);
+        // Re-copying edited text reuses the record and its title.
+        assert_eq!(
+            db.clipboard_insert(&record("recopy", &edited)).unwrap().id,
+            "edit"
+        );
+        drop(db);
+        let db = HistoryDatabase::open(&path).unwrap();
+        assert_eq!(db.clipboard_detail("edit").unwrap().text, edited);
+        assert_eq!(db.clipboard_detail("edit").unwrap().title, "My title");
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clipboard_editor_rejects_invalid_edits_and_rolls_back_content_and_search() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        db.clipboard_insert(&record("edit", "Original text"))
+            .unwrap();
+        assert_eq!(
+            db.clipboard_edit("missing", "", None).unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            db.clipboard_edit("edit", &"x".repeat(201), None)
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_edit("edit", "bad\0title", None).unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_edit("edit", "", Some(&"x".repeat(MAX_TEXT_BYTES + 1)))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        db.connection.execute_batch("CREATE TRIGGER reject_title BEFORE UPDATE OF title ON clipboard_records BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        assert!(db
+            .clipboard_edit("edit", "New title", Some("Replacement text"))
+            .is_err());
+        assert_eq!(db.clipboard_record("edit").unwrap().text, "Original text");
+        assert_eq!(
+            db.clipboard_page("Original", false, None, 100)
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        assert!(db
+            .clipboard_page("Replacement", false, None, 100)
+            .unwrap()
+            .records
+            .is_empty());
+        db.connection
+            .execute_batch("DROP TRIGGER reject_title")
+            .unwrap();
+        let mut files = record(
+            "files",
+            &serde_json::to_string(&vec![file_path("test.txt")]).unwrap(),
+        );
+        files.kind = "files".into();
+        db.clipboard_insert(&files).unwrap();
+        assert_eq!(
+            db.clipboard_edit("files", "", Some("new text"))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        db.clipboard_edit("files", "Files title", None).unwrap();
+        assert_eq!(db.clipboard_record("files").unwrap().text, files.text);
+        assert_eq!(db.clipboard_detail("files").unwrap().title, "Files title");
+        db.clipboard_update("files", "delete").unwrap();
+        assert!(db.clipboard_detail("files").is_err());
     }
 
     fn file_path(relative: &str) -> String {
@@ -1088,7 +1272,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            super::super::VERSION
         );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();

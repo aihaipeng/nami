@@ -11,7 +11,7 @@ commands.allow = ["window_pin", "history_visibility_set", "history_toggle", "his
 [[permission]]
 identifier = "allow-p0-clipboard"
 description = "Clipboard window may query and restore local clipboard history."
-commands.allow = ["window_pin", "clipboard_record_use", "clipboard_query", "clipboard_record_update", "clipboard_image"]
+commands.allow = ["window_pin", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_record_update", "clipboard_image"]
 
 [[permission]]
 identifier = "allow-p0-settings"

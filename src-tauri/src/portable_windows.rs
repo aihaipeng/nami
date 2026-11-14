@@ -257,6 +257,9 @@ pub fn show(app: &AppHandle, target: &str) -> Result<(), String> {
             .show_translation();
         apply_translation(app)?;
     }
+    if target == "clipboard" && !window.is_visible().map_err(|_| "window_visibility")? {
+        crate::clipboard_runtime::visibility(app, true)?;
+    }
     window.show().map_err(|_| "window_show")?;
     #[cfg(feature = "ui-tests")]
     if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
@@ -296,6 +299,9 @@ pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
                     .fetch_add(1, Ordering::SeqCst);
             }
             if let Some(window) = app.get_window(region) {
+                if region == "clipboard" {
+                    crate::clipboard_runtime::visibility(app, false)?;
+                }
                 window.hide().map_err(|_| "window_hide")?;
             }
             Ok(())

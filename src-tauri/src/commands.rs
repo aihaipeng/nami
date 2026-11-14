@@ -446,6 +446,7 @@ pub async fn clipboard_record_use(
         if action == "copy" {
             if !state.windows.lock().unwrap().clipboard_pinned {
                 if let Some(window) = app.get_webview_window("clipboard") {
+                    let _ = crate::clipboard_runtime::visibility(&app, false);
                     let _ = window.hide();
                 }
             }
@@ -474,6 +475,7 @@ pub async fn clipboard_record_use(
         }
         if !state.windows.lock().unwrap().clipboard_pinned {
             if let Some(window) = app.get_webview_window("clipboard") {
+                let _ = crate::clipboard_runtime::visibility(&app, false);
                 let _ = window.hide();
             }
         }
@@ -721,11 +723,24 @@ pub async fn clipboard_query(
 }
 
 #[tauri::command]
+pub async fn clipboard_record_detail(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<nami::clipboard::ClipboardDetail, String> {
+    authorize(&window, &["clipboard"])?;
+    crate::clipboard_runtime::database(&app, move |database| database.clipboard_detail(&record_id))
+        .await
+}
+
+#[tauri::command]
 pub async fn clipboard_record_update(
     window: Webview,
     app: AppHandle,
     record_id: String,
     action: String,
+    title: Option<String>,
+    text: Option<String>,
 ) -> Result<(), String> {
     authorize(&window, &["clipboard"])?;
     let state = app.state::<AppState>();
@@ -737,7 +752,18 @@ pub async fn clipboard_record_update(
         } else {
             None
         };
-        database.clipboard_update(&record_id, &action)?;
+        if action == "edit" {
+            database.clipboard_edit(
+                &record_id,
+                title.as_deref().ok_or("invalid_argument")?,
+                text.as_deref(),
+            )?;
+        } else {
+            if title.is_some() || text.is_some() {
+                return Err("invalid_argument".into());
+            }
+            database.clipboard_update(&record_id, &action)?;
+        }
         Ok(image)
     })
     .await?;
