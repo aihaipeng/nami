@@ -1,7 +1,10 @@
 use super::*;
 use objc2_app_kit::{NSScrollView, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 const ROOT_TAG: isize = 201;
 const SEARCH_TAG: isize = 205;
@@ -17,7 +20,16 @@ use crate::model::HistoryRecord as Record;
 struct HistoryState {
     app: AppHandle,
     records: RefCell<Vec<Record>>,
+    order: RefCell<HashMap<String, usize>>,
     selected: RefCell<Option<String>>,
+    generation: Cell<u64>,
+    total_records: Cell<usize>,
+    has_more: Cell<bool>,
+    query_pending: Cell<bool>,
+    load_pending: Cell<bool>,
+    query_serial: Cell<u64>,
+    requested_query: RefCell<Option<(String, bool)>>,
+    suppress_load: Cell<bool>,
     favorites_only: Cell<bool>,
     favorite_icon_filled: Cell<bool>,
     pin_icon_filled: Cell<bool>,
@@ -27,6 +39,7 @@ struct HistoryState {
     pinned_scroll: Cell<usize>,
     pinned_document: Cell<usize>,
     record_count: Cell<usize>,
+    progress: Cell<usize>,
     shortcuts: Cell<usize>,
     rows: RefCell<Vec<Retained<HistoryRow>>>,
     size: Cell<NSSize>,
@@ -85,6 +98,7 @@ objc2::define_class!(
         fn reflect_scrolled_clip_view(&self, clip: *mut AnyObject) {
             unsafe { let _: () = objc2::msg_send![super(self), reflectScrolledClipView: clip]; }
             self.update_edge_fade();
+            self.request_more_if_needed();
         }
         #[unsafe(method(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> *mut AnyObject {
@@ -109,6 +123,35 @@ objc2::define_class!(
 );
 
 impl HistoryScrollView {
+    fn request_more_if_needed(&self) {
+        unsafe {
+            let parent: *mut AnyObject = objc2::msg_send![self, superview];
+            if parent.is_null() {
+                return;
+            }
+            let tag: isize = objc2::msg_send![parent, tag];
+            if tag != ROOT_TAG {
+                return;
+            }
+            let hidden: bool = objc2::msg_send![self, isHiddenOrHasHiddenAncestor];
+            if hidden {
+                return;
+            }
+            let clip: *mut AnyObject = objc2::msg_send![self, contentView];
+            let document: *mut AnyObject = objc2::msg_send![self, documentView];
+            if clip.is_null() || document.is_null() {
+                return;
+            }
+            let viewport: NSRect = objc2::msg_send![clip, bounds];
+            let content: NSRect = objc2::msg_send![document, bounds];
+            if viewport.size.height > 0.0
+                && viewport.origin.y + viewport.size.height >= content.size.height - 180.0
+            {
+                (&*(parent as *const NativeHistory)).request_more();
+            }
+        }
+    }
+
     fn update_edge_fade(&self) {
         unsafe {
             let clip: *mut AnyObject = objc2::msg_send![self, contentView];
@@ -195,7 +238,7 @@ objc2::define_class!(
             }
         }
         #[unsafe(method(controlTextDidChange:))]
-        fn search_changed(&self, _: *mut AnyObject) { self.reload(true); }
+        fn search_changed(&self, _: *mut AnyObject) { self.request_query(); }
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: *mut AnyObject) {
             unsafe {
@@ -770,7 +813,6 @@ impl NativeHistory {
         }
     }
     fn indices(&self, pinned: bool) -> Vec<usize> {
-        let needle = self.query();
         let records = self.ivars().records.borrow();
         let mut indices: Vec<usize> = records
             .iter()
@@ -779,15 +821,16 @@ impl NativeHistory {
                 r.is_pinned == pinned
                     && (!self.ivars().favorites_only.get() || r.is_favorite)
                     && !r.id.is_empty()
-                    && (needle.is_empty()
-                        || r.text.to_lowercase().contains(&needle)
-                        || r.translations
-                            .iter()
-                            .any(|s| s.to_lowercase().contains(&needle)))
             })
             .map(|(i, _)| i)
             .collect();
-        indices.sort_by(|&a, &b| records[b].date.cmp(&records[a].date).then(b.cmp(&a)));
+        let order = self.ivars().order.borrow();
+        indices.sort_by(|&a, &b| {
+            records[b]
+                .date
+                .cmp(&records[a].date)
+                .then_with(|| order.get(&records[a].id).cmp(&order.get(&records[b].id)))
+        });
         indices
     }
 
@@ -821,6 +864,103 @@ impl NativeHistory {
         drop(records);
         self.select(visible[next], false);
     }
+    fn update_loading(&self) {
+        let loading = self.ivars().query_pending.get() || self.ivars().load_pending.get();
+        unsafe {
+            let progress = self.ivars().progress.get() as *mut AnyObject;
+            if !progress.is_null() {
+                if loading {
+                    let _: () =
+                        objc2::msg_send![progress, startAnimation: std::ptr::null::<AnyObject>()];
+                } else {
+                    let _: () =
+                        objc2::msg_send![progress, stopAnimation: std::ptr::null::<AnyObject>()];
+                }
+            }
+            let label = self.ivars().empty_label.get() as *mut AnyObject;
+            if !label.is_null() {
+                let empty = self.indices(true).is_empty() && self.indices(false).is_empty();
+                let _: () = objc2::msg_send![label, setHidden: loading || !empty];
+            }
+        }
+    }
+
+    fn request_query(&self) {
+        let query = self.query();
+        let favorites_only = self.ivars().favorites_only.get();
+        if *self.ivars().requested_query.borrow() == Some((query.clone(), favorites_only)) {
+            self.reload(true);
+            return;
+        }
+        *self.ivars().requested_query.borrow_mut() = Some((query.clone(), favorites_only));
+        let serial = self.ivars().query_serial.get().wrapping_add(1);
+        self.ivars().query_serial.set(serial);
+        self.ivars().query_pending.set(true);
+        self.ivars().load_pending.set(false);
+        self.ivars().has_more.set(false);
+        self.reload(true);
+        self.update_loading();
+        let app = self.ivars().app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = crate::history_runtime::query_history(&app, query, favorites_only).await;
+            let owned = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(window) = owned.get_window("translation") else {
+                    return;
+                };
+                let Ok(root) = root(&window) else {
+                    return;
+                };
+                if root.ivars().query_serial.get() != serial {
+                    return;
+                }
+                root.ivars().query_pending.set(false);
+                root.update_loading();
+                if let Err(code) = result {
+                    if code != "cancelled" {
+                        *root.ivars().requested_query.borrow_mut() = None;
+                        root.report_error();
+                    }
+                }
+            });
+        });
+    }
+
+    fn request_more(&self) {
+        if self.ivars().suppress_load.get()
+            || self.ivars().query_pending.get()
+            || !self.ivars().has_more.get()
+            || self.ivars().load_pending.replace(true)
+        {
+            return;
+        }
+        self.update_loading();
+        let serial = self.ivars().query_serial.get();
+        let app = self.ivars().app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = crate::history_runtime::load_more(&app).await;
+            let owned = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(window) = owned.get_window("translation") else {
+                    return;
+                };
+                let Ok(root) = root(&window) else {
+                    return;
+                };
+                if root.ivars().query_serial.get() != serial {
+                    return;
+                }
+                root.ivars().load_pending.set(false);
+                root.update_loading();
+                if let Err(code) = result {
+                    if code != "cancelled" {
+                        root.report_error();
+                    }
+                }
+            });
+        });
+    }
+
     fn report_error(&self) {
         if let Some(view) = self.ivars().app.get_webview("translation") {
             let _ = view.emit("layout_error", "native_history_action");
@@ -835,7 +975,7 @@ impl NativeHistory {
                 let window: *mut AnyObject = objc2::msg_send![self, window];
                 let _: bool = objc2::msg_send![window, makeFirstResponder: search];
             }
-            self.reload(true);
+            self.request_query();
             return;
         }
         if tag == SHORTCUTS_TAG {
@@ -852,7 +992,7 @@ impl NativeHistory {
         }
         if tag == 202 || tag == 203 {
             self.ivars().favorites_only.set(tag == 203);
-            self.reload(true);
+            self.request_query();
             return;
         }
         if tag == 204 {
@@ -880,8 +1020,10 @@ impl NativeHistory {
             return;
         }
         if action == 1 {
-            let text = self.ivars().records.borrow()[index].text.clone();
-            if platform::write_text(&text).is_err() {
+            let id = self.ivars().records.borrow()[index].id.clone();
+            let text = crate::history_runtime::history_record(&self.ivars().app, &id)
+                .map(|record| record.text);
+            if text.is_none_or(|text| platform::write_text(&text).is_err()) {
                 self.report_error();
             }
             return;
@@ -893,11 +1035,16 @@ impl NativeHistory {
             _ => return,
         };
         let id = self.ivars().records.borrow()[index].id.clone();
-        if let Err(code) = crate::commands::update_history_record(&self.ivars().app, &id, action) {
-            if code != "history_protected" {
-                self.report_error();
+        let app = self.ivars().app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(code) = crate::commands::update_history_record(&app, &id, action).await {
+                if code != "history_protected" {
+                    if let Some(view) = app.get_webview("translation") {
+                        let _ = view.emit("layout_error", &code);
+                    }
+                }
             }
-        }
+        });
     }
     fn update_toolbar(&self) {
         self.setNeedsDisplay(true);
@@ -942,6 +1089,7 @@ impl NativeHistory {
         }
     }
     fn reload(&self, top: bool) {
+        self.ivars().suppress_load.set(true);
         unsafe {
             let clear: *mut AnyObject = objc2::msg_send![self, viewWithTag: CLEAR_SEARCH_TAG];
             let _: () = objc2::msg_send![clear, setHidden: self.query().is_empty()];
@@ -950,13 +1098,7 @@ impl NativeHistory {
         let pinned = self.indices(true);
         let ordinary = self.indices(false);
         unsafe {
-            let count = self
-                .ivars()
-                .records
-                .borrow()
-                .iter()
-                .filter(|record| !record.id.is_empty())
-                .count();
+            let count = self.ivars().total_records.get();
             let count_text = NSString::from_str(&format!(
                 "{} {}",
                 count,
@@ -1036,11 +1178,13 @@ impl NativeHistory {
             };
             let value = NSString::from_str(message);
             let _: () = objc2::msg_send![label, setStringValue: &*value];
-            let _: () = objc2::msg_send![label, setHidden: !empty];
+            let loading = self.ivars().query_pending.get() || self.ivars().load_pending.get();
+            let _: () = objc2::msg_send![label, setHidden: loading || !empty];
         }
         self.ivars().size.set(NSSize::ZERO);
         self.layout_content();
         self.update_toolbar();
+        self.ivars().suppress_load.set(false);
     }
     fn layout_content(&self) {
         if self.ivars().divider.get() == 0 {
@@ -1146,6 +1290,10 @@ impl NativeHistory {
                 self.ivars().document.get() as *mut AnyObject,
                 rect(0.0, 0.0, size.width, heights[1].max(ordinary_height)),
             );
+            frame(
+                self.ivars().progress.get() as *mut AnyObject,
+                rect(size.width - 52.0, size.height - 24.0, 16.0, 16.0),
+            );
             let count = self.ivars().record_count.get() as *mut AnyObject;
             let _: () = objc2::msg_send![count, sizeToFit];
             let count_frame: NSRect = objc2::msg_send![count, frame];
@@ -1183,10 +1331,25 @@ impl NativeHistory {
 pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
     let marker = objc2::MainThreadMarker::new().ok_or("window_geometry")?;
     let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();
+    let order = snapshot
+        .records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.id.clone(), i))
+        .collect();
     let root = NativeHistory::alloc(marker).set_ivars(HistoryState {
         app: app.clone(),
         records: RefCell::new(snapshot.records),
+        order: RefCell::new(order),
         selected: RefCell::new(snapshot.selected_id),
+        generation: Cell::new(snapshot.generation),
+        total_records: Cell::new(snapshot.total_records),
+        has_more: Cell::new(snapshot.has_more),
+        query_pending: Cell::new(false),
+        load_pending: Cell::new(false),
+        query_serial: Cell::new(0),
+        requested_query: RefCell::new(Some((String::new(), false))),
+        suppress_load: Cell::new(false),
         favorites_only: Cell::new(false),
         favorite_icon_filled: Cell::new(false),
         pin_icon_filled: Cell::new(false),
@@ -1196,6 +1359,7 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         pinned_scroll: Cell::new(0),
         pinned_document: Cell::new(0),
         record_count: Cell::new(0),
+        progress: Cell::new(0),
         shortcuts: Cell::new(0),
         rows: RefCell::new(Vec::new()),
         size: Cell::new(NSSize::ZERO),
@@ -1334,6 +1498,17 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         root.ivars()
             .record_count
             .set(Retained::as_ptr(&count) as usize);
+        let progress: Retained<AnyObject> =
+            objc2::msg_send![objc2::class!(NSProgressIndicator), new];
+        let _: () = objc2::msg_send![&*progress, setStyle: 1usize];
+        let _: () = objc2::msg_send![&*progress, setControlSize: 1usize];
+        let _: () = objc2::msg_send![&*progress, setIndeterminate: true];
+        let _: () = objc2::msg_send![&*progress, setDisplayedWhenStopped: false];
+        let _: () = objc2::msg_send![&*progress, setAccessibilityLabel: objc2_foundation::ns_string!("Loading history")];
+        let _: () = objc2::msg_send![&*root, addSubview: &*progress];
+        root.ivars()
+            .progress
+            .set(Retained::as_ptr(&progress) as usize);
         let keyboard = symbol_button(&root, SHORTCUTS_TAG, "keyboard", "Keyboard shortcuts");
         let color: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), secondaryLabelColor];
         let _: () = objc2::msg_send![&*keyboard, setContentTintColor: color];
@@ -1403,50 +1578,74 @@ pub(super) fn apply_snapshot(
 ) -> Result<(), String> {
     let marker = objc2::MainThreadMarker::new().ok_or("window_geometry")?;
     let root = root(window)?;
-    let mut changed = false;
+    *root.ivars().order.borrow_mut() = snapshot
+        .records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.id.clone(), i))
+        .collect();
+    let reset = root.ivars().generation.replace(snapshot.generation) != snapshot.generation;
+    let count_changed =
+        root.ivars().total_records.replace(snapshot.total_records) != snapshot.total_records;
+    root.ivars().has_more.set(snapshot.has_more);
+    root.ivars().suppress_load.set(true);
+    if reset {
+        for row in root.ivars().rows.borrow().iter() {
+            unsafe {
+                let _: () = objc2::msg_send![&**row, removeFromSuperview];
+            }
+        }
+        root.ivars().rows.borrow_mut().clear();
+        root.ivars().records.borrow_mut().clear();
+    }
+    let incoming: HashMap<&str, &Record> = snapshot
+        .records
+        .iter()
+        .map(|record| (record.id.as_str(), record))
+        .collect();
+    let mut changed = reset || count_changed;
+    let mut known = HashSet::new();
     {
         let mut records = root.ivars().records.borrow_mut();
         for projected in records.iter_mut().filter(|record| !record.id.is_empty()) {
-            if let Some(record) = snapshot
-                .records
-                .iter()
-                .find(|record| record.id == projected.id)
-            {
+            if let Some(record) = incoming.get(projected.id.as_str()) {
                 changed |= projected.is_favorite != record.is_favorite
                     || projected.is_pinned != record.is_pinned;
-                *projected = record.clone();
+                // Translation content is immutable; flag/selection updates do not clone its text or icon.
+                projected.is_favorite = record.is_favorite;
+                projected.is_pinned = record.is_pinned;
+                known.insert(projected.id.clone());
             } else {
-                // Keep row indices and native instances stable after deleting a record.
+                // Preserve row indices and native instances within the loaded query.
                 projected.id.clear();
                 changed = true;
             }
         }
     }
-    let mut added = false;
     for record in &snapshot.records {
-        if !root
-            .ivars()
-            .records
-            .borrow()
-            .iter()
-            .any(|item| item.id == record.id)
-        {
+        if known.insert(record.id.clone()) {
             let index = root.ivars().records.borrow().len();
             root.ivars().records.borrow_mut().push(record.clone());
             unsafe {
                 root.add_row(marker, index, record);
             }
-            added = true;
+            changed = true;
         }
     }
-    *root.ivars().selected.borrow_mut() = snapshot.selected_id.clone();
-    if changed || added {
-        root.reload(added);
-    } else {
-        for row in root.ivars().rows.borrow().iter() {
-            row.setNeedsDisplay(true);
+    let previous = root.ivars().selected.replace(snapshot.selected_id.clone());
+    if changed {
+        root.reload(reset);
+    } else if previous != snapshot.selected_id {
+        let records = root.ivars().records.borrow();
+        for (record, row) in records.iter().zip(root.ivars().rows.borrow().iter()) {
+            if previous.as_deref() == Some(record.id.as_str())
+                || snapshot.selected_id.as_deref() == Some(record.id.as_str())
+            {
+                row.setNeedsDisplay(true);
+            }
         }
     }
+    root.ivars().suppress_load.set(false);
     Ok(())
 }
 
@@ -1543,6 +1742,6 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
             objc2::msg_send![root.ivars().shortcuts.get() as *mut AnyObject, isHidden];
     }
     Ok(
-        serde_json::json!({"toolbar":toolbar,"rootPointer":Retained::as_ptr(&root) as usize,"layoutCount":root.ivars().layout_count.get(),"scrollY":scroll_y,"scrollbarY":scrollbar_y,"pinnedY":pinned_y,"countText":count_text,"shortcutsHidden":shortcuts_hidden,"query":root.query(),"favoritesOnly":root.ivars().favorites_only.get(),"selected":root.ivars().selected.borrow().clone(),"pinnedCount":pinned.len(),"ordinaryCount":ordinary.len(),"rows":rows}),
+        serde_json::json!({"generation":root.ivars().generation.get(),"hasMore":root.ivars().has_more.get(),"totalRecords":root.ivars().total_records.get(),"suppressLoad":root.ivars().suppress_load.get(),"queryPending":root.ivars().query_pending.get(),"loadPending":root.ivars().load_pending.get(),"toolbar":toolbar,"rootPointer":Retained::as_ptr(&root) as usize,"layoutCount":root.ivars().layout_count.get(),"scrollY":scroll_y,"scrollbarY":scrollbar_y,"pinnedY":pinned_y,"countText":count_text,"shortcutsHidden":shortcuts_hidden,"query":root.query(),"favoritesOnly":root.ivars().favorites_only.get(),"selected":root.ivars().selected.borrow().clone(),"pinnedCount":pinned.len(),"ordinaryCount":ordinary.len(),"rows":rows}),
     )
 }

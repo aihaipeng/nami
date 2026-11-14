@@ -15,6 +15,8 @@ fn main() {
             "translation_chrome_update",
             "history_sample_select",
             "history_snapshot",
+            "history_query",
+            "history_load_more",
             "history_record_update",
             "translation_columns_set",
             "translation_sample_copy",

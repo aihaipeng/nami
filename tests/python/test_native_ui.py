@@ -67,6 +67,7 @@ def valid_report():
     }
 
 
+@pytest.mark.dfx_diagnostics
 def test_report_accepts_current_success():
     check_report(valid_report(), 'current', True)
 
@@ -76,6 +77,7 @@ def test_report_accepts_current_success():
     ('domCases', [{'name': 'failed interaction', 'passed': False}]),
     ('visiblePacedPresentation', {}),
 ])
+@pytest.mark.dfx_diagnostics
 def test_report_rejects_stale_failed_or_incomplete_results(field, value):
     result = valid_report()
     result[field] = value
@@ -88,6 +90,7 @@ def test_report_rejects_stale_failed_or_incomplete_results(field, value):
     ('postPresentationSamples', 0), ('observedLayerSamples', 0),
     ('maxModelPresentationDelta', 2), ('visibleLiveResizeVerified', True),
 ])
+@pytest.mark.dfx_diagnostics
 def test_report_rejects_invalid_presentation(field, value):
     result = copy.deepcopy(valid_report())
     result['visiblePacedPresentation'][field] = value

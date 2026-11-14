@@ -45,6 +45,7 @@ export default function App() {
           latestEngine = payload;
           if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload }));
         }),
+        () => listen<string>('storage_error', ({ payload }) => { if (!disposed) setSnapshot((current) => ({ ...current, storageError: payload })); }),
         () => listen('layout_error', () => { if (!disposed) setError(true); }),
         () => listen<WindowState>('window_state', ({ payload }) => {
           latestWindow = payload;
@@ -107,7 +108,7 @@ export default function App() {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, storageError: refreshed.storageError }));
       }
     } catch {
       setError(true);
@@ -123,6 +124,7 @@ export default function App() {
       <span className="preview-brand"><Waves /><strong>Nami</strong><span>{t('preview')}</span></span>
       <div className="preview-navigation">{(['translation', 'clipboard', 'settings'] as const).map((name) => <button key={name} aria-pressed={target === name} onClick={() => setTarget(name)}>{t(name)}</button>)}</div>
     </nav>}
+    {snapshot.storageError && <div role="alert" className="global-error">{t('historyStorageError')}</div>}
     {error && <div role="alert" className="global-error">{t('nativeError')}</div>}
     <main className={cn('app-surface', target)}>
       {(!connected || pending > 0) && <ActivityBeam label={t('working')} />}

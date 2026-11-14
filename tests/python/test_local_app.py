@@ -3,6 +3,8 @@ import os
 
 import pytest
 
+pytestmark = [pytest.mark.dfx_security, pytest.mark.dfx_compatibility]
+
 
 def test_setup_keeps_existing_identity(local_app, tmp_path, monkeypatch):
     monkeypatch.setattr(local_app, 'ROOT', tmp_path)

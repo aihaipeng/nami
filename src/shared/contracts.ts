@@ -31,6 +31,7 @@ export interface AppSnapshot {
   capabilities: PlatformCapabilities;
   locale: Locale;
   translationEngine: 'edge' | 'google';
+  storageError: string | null;
   accessibility: boolean;
   shortcutErrors: string[];
   window: WindowState;
@@ -46,6 +47,7 @@ export const initialSnapshot: AppSnapshot = {
   capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   translationEngine: 'edge',
+  storageError: null,
   accessibility: false,
   shortcutErrors: [],
   window: {

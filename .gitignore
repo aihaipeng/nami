@@ -36,3 +36,8 @@ __pycache__/
 *.key
 *.pem
 *.mobileprovision
+
+# Local database files
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

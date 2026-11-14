@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { HistoryIcon } from './HistoryIcon';
 import type { ViewProps } from '../App';
 import { cn } from '../lib/utils';
@@ -24,10 +24,26 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
   const state = snapshot.window;
-  const filtered = filterHistory(records, query, favoritesOnly);
+  const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite).sort((a,b) => Number(b.isPinned)-Number(a.isPinned) || Date.parse(b.date)-Date.parse(a.date)) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
+  const lastQuery = useRef({ query: '', favoritesOnly: false });
   const name = (code: string) => languages.find(([id]) => id === code)?.[1] ?? code;
 
   useEffect(() => { list.current?.scrollTo(0, 0); pinnedList.current?.scrollTo(0, 0); }, [query, favoritesOnly]);
+  useEffect(() => {
+    if (!native || (lastQuery.current.query === query && lastQuery.current.favoritesOnly === favoritesOnly)) return;
+    const favoriteChanged = lastQuery.current.favoritesOnly !== favoritesOnly;
+    const submit = () => {
+      lastQuery.current = { query, favoritesOnly };
+      void history.setQuery(query, favoritesOnly);
+    };
+    if (favoriteChanged) { submit(); return; }
+    const timer = window.setTimeout(submit, 150);
+    return () => window.clearTimeout(timer);
+  }, [query, favoritesOnly, native, history.setQuery]);
+
+  function loadNearEnd(element: HTMLDivElement) {
+    if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 240) void history.loadMore();
+  }
 
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
@@ -79,8 +95,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       <button className="icon-button history-pin" title={state.historyPinned ? t('unpin') : t('pinHistory')} aria-label={state.historyPinned ? t('unpin') : t('pinHistory')} aria-pressed={state.historyPinned} onClick={() => void command('window_pin', { region: 'history', pinned: !state.historyPinned })}><HistoryIcon name={state.historyPinned ? 'pin.fill' : 'pin'} /></button>
     </header>
     {history.error && <p role="alert" className="history-error">{t('nativeError')}</p>}
-    <div ref={pinnedList} className={cn('history-pinned', !filtered.some((record) => record.isPinned) && 'empty')}>{filtered.filter((record) => record.isPinned).map(row)}</div>
-    <div ref={list} className="history-list">
+    <div ref={pinnedList} onScroll={(event) => loadNearEnd(event.currentTarget)} className={cn('history-pinned', !filtered.some((record) => record.isPinned) && 'empty')}>{filtered.filter((record) => record.isPinned).map(row)}</div>
+    <div ref={list} className="history-list" onScroll={(event) => loadNearEnd(event.currentTarget)}>
       {filtered.filter((record) => !record.isPinned).map(row)}
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </div>

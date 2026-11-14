@@ -2,7 +2,7 @@ mod commands;
 mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
-use nami::{history, model, translation};
+use nami::{database, history, model, translation};
 mod platform;
 mod selection;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
@@ -26,6 +26,12 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 pub struct AppState {
     history: Mutex<history::HistoryStore>,
+    database: Mutex<Option<database::HistoryDatabase>>,
+    storage_error: Mutex<Option<String>>,
+    history_writes: tokio::sync::Mutex<()>,
+    history_page: Mutex<history_runtime::PageState>,
+    history_query_revision: AtomicU64,
+    history_loading_more: AtomicBool,
     windows: Mutex<WindowState>,
     locale: Mutex<String>,
     shortcut_errors: Mutex<Vec<String>>,
@@ -48,6 +54,12 @@ impl Default for AppState {
         }
         Self {
             history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
+            database: Mutex::new(None),
+            storage_error: Mutex::new(None),
+            history_writes: tokio::sync::Mutex::new(()),
+            history_page: Mutex::new(history_runtime::PageState::default()),
+            history_query_revision: AtomicU64::new(0),
+            history_loading_more: AtomicBool::new(false),
             windows: Mutex::new(windows),
             locale: Mutex::new("en".into()),
             shortcut_errors: Mutex::new(Vec::new()),
@@ -141,6 +153,8 @@ fn main() {
             commands::translation_chrome_update,
             commands::history_sample_select,
             commands::history_snapshot,
+            commands::history_query,
+            commands::history_load_more,
             commands::history_record_update,
             commands::translation_columns_set,
             commands::translation_sample_copy,
@@ -149,6 +163,21 @@ fn main() {
             commands::permission_request,
         ])
         .setup(|app| {
+            #[cfg(feature = "ui-tests")]
+            if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
+                let database = std::thread::spawn(|| -> Result<_, String> {
+                    let mut database =
+                        database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+                    for record in model::initial_history_records() {
+                        database.insert(&record, "edge", || true)?;
+                    }
+                    Ok(database)
+                })
+                .join()
+                .map_err(|_| std::io::Error::other("storage_worker"))?
+                .map_err(std::io::Error::other)?;
+                *app.state::<AppState>().database.lock().unwrap() = Some(database);
+            }
             #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 portable_ui_tests::start(app.handle()).map_err(std::io::Error::other)?;
@@ -162,6 +191,39 @@ fn main() {
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 windows::start_ui_regression(app.handle()).map_err(std::io::Error::other)?;
                 return Ok(());
+            }
+            let directory = app.path().app_data_dir()?;
+            let loaded = std::thread::spawn(move || -> Result<_, String> {
+                std::fs::create_dir_all(&directory).map_err(|_| "storage_unavailable")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|_| "storage_unavailable")?;
+                }
+                let database = database::HistoryDatabase::open(&directory.join("nami.sqlite3"))?;
+                let page = database.page(
+                    &database::HistoryQuery::default(),
+                    None,
+                    database::PAGE_SIZE,
+                )?;
+                Ok((database, page))
+            })
+            .join()
+            .map_err(|_| "storage_worker".to_owned())
+            .and_then(|loaded| loaded);
+            match loaded {
+                Ok((database, page)) => {
+                    *app.state::<AppState>().database.lock().unwrap() = Some(database);
+                    app.state::<AppState>().history_page.lock().unwrap().cursor =
+                        page.cursor.clone();
+                    app.state::<AppState>()
+                        .history
+                        .lock()
+                        .unwrap()
+                        .apply_page(page, true);
+                }
+                Err(error) => *app.state::<AppState>().storage_error.lock().unwrap() = Some(error),
             }
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

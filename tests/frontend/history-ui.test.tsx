@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, preferReducedMotion, releasePointerCapture, scrollTo, setPointerCapture, windowState } from './harness';
@@ -21,23 +21,27 @@ describe('history list and session actions', () => {
     expect(screen.getByRole('button', { name: 'All history' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('searches cached translations and clears the query back to all records', async () => {
+  it('searches complete translations through the backend and clears the query back to all records', async () => {
     const user = userEvent.setup(); await mount('history');
     await user.type(screen.getByRole('searchbox'), '安静');
-    expect(records()).toHaveLength(1);
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: '安静', favoritesOnly: false }));
+    await waitFor(() => expect(records()).toHaveLength(1));
     expect(records()[0].getAttribute('aria-label')).toContain(historySamples[6].text);
     await user.click(screen.getByRole('button', { name: 'Clear history search' }));
-    expect(records()).toHaveLength(20);
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false }));
+    await waitFor(() => expect(records()).toHaveLength(20));
     expect(document.activeElement).toBe(screen.getByRole('searchbox'));
   });
 
   it('treats search symbols literally and shows a useful empty state', async () => {
     await mount('history');
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: '100%_literal' } });
-    expect(records()).toHaveLength(1);
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: '100%_literal', favoritesOnly: false }));
+    await waitFor(() => expect(records()).toHaveLength(1));
     expect(records()[0].getAttribute('aria-label')).toContain('Numbers and symbols');
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'never present in these samples' } });
-    expect(records()).toHaveLength(0);
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: 'never present in these samples', favoritesOnly: false }));
+    await waitFor(() => expect(records()).toHaveLength(0));
     expect(screen.getByRole('status').textContent).toBe('No matching translations');
   });
 
@@ -118,6 +122,8 @@ describe('history list and session actions', () => {
   it('retains query and session favorites while hidden and shown again', async () => {
     const user = userEvent.setup(); await mount('history');
     await user.type(screen.getByRole('searchbox'), 'train');
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: 'train', favoritesOnly: false }));
+    await waitFor(() => expect(records()).toHaveLength(1));
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Favorite' }));
     await windowState({ historyVisible: false, historyExtent: 0 });
     expect(records()).toHaveLength(0);

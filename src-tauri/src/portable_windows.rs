@@ -5,9 +5,7 @@ use tauri::{
     Window, WindowEvent,
 };
 
-pub(crate) use crate::history_runtime::{
-    history_add, history_record, publish_history, select_native_history,
-};
+pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
 // The shared React view consumes history_changed; this host owns no native list.
 pub(crate) fn refresh_history(_: &AppHandle) -> Result<(), String> {

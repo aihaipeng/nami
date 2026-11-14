@@ -1196,6 +1196,11 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
     let result = (|| {
         on_main(app, |app| reset(app, 360.0, 920.0))?;
         wait_dom(app, "return { ready: document.fonts.status === 'loaded' && document.querySelector('[data-native-chrome=true]') !== null, fonts:document.fonts.status, chrome:document.querySelector('.translation-panel')?.dataset.nativeChrome, error:document.querySelector('.global-error')?.textContent };")?;
+        evaluate_dom(app,"const input=document.querySelector('.source-input');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
+        wait_dom(
+            app,
+            "return {ready:document.querySelector('.source-input').value===''};",
+        )?;
         click_native_chrome(app, 101)?;
         wait_dom(
             app,
@@ -1241,7 +1246,14 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             app,
             "return { ready: !document.querySelector('.action-menu') };",
         )?;
-        let blank = on_main(app, native_chrome_sample)?;
+        let mut blank = serde_json::Value::Null;
+        for _ in 0..40 {
+            blank = on_main(app, native_chrome_sample)?;
+            if blank["buttons"][1]["enabled"] == false {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
         if blank["buttons"][1]["enabled"] != false {
             return Err("native Translate enabled for empty source".into());
         }
@@ -1505,11 +1517,12 @@ fn run_history_native_resize(app: &AppHandle) -> DomCase {
 fn run_history_driver(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
-        let baseline = on_main(app, |app| {
+        on_main(app, |app| {
             reset(app, 360.0, 920.0)?;
-            history_search(app, "quiet")?;
-            history_snapshot(app)
+            history_search(app, "quiet")
         })?;
+        wait_history_query(app)?;
+        let baseline = on_main(app, history_snapshot)?;
         let initial_layout = baseline["layoutCount"].clone();
         for (delay, open) in [
             (0, false),
@@ -1610,6 +1623,7 @@ fn run_history_driver(app: &AppHandle) -> DomCase {
             history_search(app, "")?;
             reset(app, 360.0, 920.0)
         })?;
+        wait_history_query(app)?;
         Ok::<(), String>(())
     })();
     DomCase {
@@ -1646,6 +1660,17 @@ fn assert_history_store_projection(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn wait_history_query(app: &AppHandle) -> Result<(), String> {
+    for _ in 0..200 {
+        let snapshot = on_main(app, history_snapshot)?;
+        if snapshot["queryPending"] == false && snapshot["loadPending"] == false {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err("native history query timed out".into())
+}
+
 fn run_history_native_actions(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -1654,6 +1679,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             history_search(app, "")?;
             history_click(app, 202)
         })?;
+        wait_history_query(app)?;
         let initial = on_main(app, history_snapshot)?;
         if initial["pinnedCount"] != 2 || initial["ordinaryCount"] != 18 {
             return Err("native history did not load 20 samples with pinned records first".into());
@@ -1804,10 +1830,9 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             ("100%_literal", 1),
             ("not in synthetic examples", 0),
         ] {
-            let value = on_main(app, move |app| {
-                history_search(app, query)?;
-                history_snapshot(app)
-            })?;
+            on_main(app, move |app| history_search(app, query))?;
+            wait_history_query(app)?;
+            let value = on_main(app, history_snapshot)?;
             let count = value["pinnedCount"].as_u64().unwrap_or(0)
                 + value["ordinaryCount"].as_u64().unwrap_or(0);
             if count != expected {
@@ -1817,11 +1842,12 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             }
             samples.push(value);
         }
-        let favorites = on_main(app, |app| {
+        on_main(app, |app| {
             history_search(app, "")?;
-            history_click(app, 203)?;
-            history_snapshot(app)
+            history_click(app, 203)
         })?;
+        wait_history_query(app)?;
+        let favorites = on_main(app, history_snapshot)?;
         if favorites["pinnedCount"].as_u64().unwrap_or(0)
             + favorites["ordinaryCount"].as_u64().unwrap_or(0)
             != 5
@@ -1830,21 +1856,30 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
         }
         samples.push(favorites);
         on_main(app, |app| history_click(app, 202))?;
+        wait_history_query(app)?;
+        let all_nodes = on_main(app, history_snapshot)?;
         for (tag, field, expected) in [
             (1022, "favorite", true),
             (1023, "pinned", true),
             (1023, "pinned", false),
             (1022, "favorite", false),
         ] {
-            let value = on_main(app, move |app| {
-                history_click(app, tag)?;
-                assert_history_store_projection(app)?;
-                history_snapshot(app)
-            })?;
+            on_main(app, move |app| history_click(app, tag))?;
+            let mut value = serde_json::Value::Null;
+            for _ in 0..100 {
+                value = on_main(app, |app| {
+                    assert_history_store_projection(app)?;
+                    history_snapshot(app)
+                })?;
+                if value["rows"][2][field] == expected {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             if value["rows"][2][field] != expected {
                 return Err(format!("native flag {field} did not toggle"));
             }
-            assert_same_history_nodes(&initial, &value)?;
+            assert_same_history_nodes(&all_nodes, &value)?;
             samples.push(value);
         }
         on_main(app, |app| {
@@ -1968,14 +2003,24 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             return Err("pinned sample deletion was not protected".into());
         }
         samples.push(protected);
-        let deleted = on_main(app, |app| {
-            history_click(app, 1024)?;
-            assert_history_store_projection(app)?;
-            if history_record(app, "sample-03").is_some() {
-                return Err("deleted record remained in shared history".into());
+        on_main(app, |app| history_click(app, 1024))?;
+        let mut deleted = serde_json::Value::Null;
+        for _ in 0..100 {
+            deleted = on_main(app, |app| {
+                assert_history_store_projection(app)?;
+                history_snapshot(app)
+            })?;
+            if deleted["rows"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().all(|row| row["id"] != "sample-03"))
+            {
+                break;
             }
-            history_snapshot(app)
-        })?;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if on_main(app, |app| Ok(history_record(app, "sample-03").is_some()))? {
+            return Err("deleted record remained in shared history".into());
+        }
         if deleted["ordinaryCount"] != 17 {
             return Err("unprotected sample was not deleted".into());
         }
@@ -1983,6 +2028,34 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             return Err("history footer did not update after deletion".into());
         }
         samples.push(deleted);
+        let expected = {
+            let state = app.state::<AppState>();
+            let store = state.history.lock().unwrap();
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|record| store.record(&record.id).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let saved = app
+            .state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("test_database")?
+            .load()?;
+        let mut saved = saved;
+        let mut expected = expected;
+        saved.sort_by(|a, b| a.id.cmp(&b.id));
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        if serde_json::to_value(saved).map_err(|_| "serialize")?
+            != serde_json::to_value(&expected).map_err(|_| "serialize")?
+        {
+            return Err("SQLite commit differs from native history".into());
+        }
+        samples.push(serde_json::json!({"sqliteCommitVerified":true,"records":expected.len()}));
         on_main(app, |app| reset(app, 360.0, 920.0))?;
         Ok::<(), String>(())
     })();
@@ -2140,7 +2213,10 @@ fn run_runtime_history(app: &AppHandle) -> DomCase {
         on_main(app, |app| {
             reset(app, 360.0, 920.0)?;
             history_search(app, "")?;
-            history_click(app, 202)?;
+            history_click(app, 202)
+        })?;
+        wait_history_query(app)?;
+        on_main(app, |app| {
             let record = crate::model::HistoryRecord {
                 id: "runtime-native-test".into(),
                 text: "Synthetic runtime selection".into(),
@@ -2172,6 +2248,136 @@ fn run_runtime_history(app: &AppHandle) -> DomCase {
     })();
     DomCase {
         name: "runtime history: native append, source icon and WebView restoration",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_history_pagination(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let mut original_store = None;
+    let original_database = app.state::<AppState>().database.lock().unwrap().take();
+    let original_page = app.state::<AppState>().history_page.lock().unwrap().clone();
+    let result = (|| {
+        let mut db = crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        for index in 0..250 {
+            let record = crate::model::HistoryRecord {
+                id: format!("pagination-{index}"),
+                text: format!("Synthetic page token-{index:04}"),
+                source_language: "en".into(),
+                target_languages: vec!["fr".into()],
+                translations: vec!["Synthetic output".into()],
+                date: "2099-01-01T00:00:00.000Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+            };
+            db.insert(&record, "edge", || true)?;
+        }
+        let page = db.page(&crate::database::HistoryQuery::default(), None, 100)?;
+        *app.state::<AppState>().database.lock().unwrap() = Some(db);
+        app.state::<AppState>().history_page.lock().unwrap().cursor = page.cursor.clone();
+        let mut store = crate::history::HistoryStore::new(Vec::new());
+        store.apply_page(page, true);
+        original_store = Some(on_main(app, move |app| {
+            let previous =
+                std::mem::replace(&mut *app.state::<AppState>().history.lock().unwrap(), store);
+            refresh_history(app)?;
+            Ok(previous)
+        })?);
+        let first = on_main(app, history_snapshot)?;
+        if first["rows"].as_array().map(|rows| rows.len()) != Some(100)
+            || first["totalRecords"] != 250
+            || first["hasMore"] != true
+        {
+            return Err("native history loaded beyond the first page".into());
+        }
+        let before = on_main(app, |app| {
+            unsafe {
+                let row = history_object(app, 3099)?;
+                let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
+                let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
+                let document: *mut AnyObject = objc2::msg_send![scroll, documentView];
+                let viewport: objc2_foundation::NSRect = objc2::msg_send![clip, bounds];
+                let content: objc2_foundation::NSRect = objc2::msg_send![document, bounds];
+                let _: () = objc2::msg_send![clip,scrollToPoint:objc2_foundation::NSPoint::new(0.0,(content.size.height-viewport.size.height).max(0.0))];
+                let _: () = objc2::msg_send![scroll,reflectScrolledClipView:clip];
+            }
+            let mut snapshot = history_snapshot(app)?;
+            unsafe {
+                let row = history_object(app, 3099)?;
+                let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
+                let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
+                let document: *mut AnyObject = objc2::msg_send![scroll, documentView];
+                let viewport: objc2_foundation::NSRect = objc2::msg_send![clip, bounds];
+                let content: objc2_foundation::NSRect = objc2::msg_send![document, bounds];
+                let hidden: bool = objc2::msg_send![scroll, isHiddenOrHasHiddenAncestor];
+                let parent: *mut AnyObject = objc2::msg_send![scroll, superview];
+                let tag: isize = objc2::msg_send![parent, tag];
+                snapshot["paginationGeometry"] = serde_json::json!({"hidden":hidden,"parentTag":tag,"viewportY":viewport.origin.y,"viewportHeight":viewport.size.height,"documentHeight":content.size.height});
+            }
+            Ok(snapshot)
+        })?;
+        let visible = on_main(app, |app| {
+            app.get_window("translation")
+                .ok_or_else(|| "window_unavailable".to_owned())?
+                .is_visible()
+                .map_err(|_| "window_visible".to_owned())
+        })?;
+        if !visible {
+            tauri::async_runtime::block_on(crate::history_runtime::load_more(app))?;
+        }
+        wait_history_query(app)?;
+        let second = on_main(app, history_snapshot)?;
+        samples.extend([first.clone(), before.clone(), second.clone()]);
+        if second["rows"].as_array().map(|rows| rows.len()) != Some(200) {
+            return Err(format!("native pagination expected 200 rows, got {}; visible={visible}, pending={}, more={}",second["rows"].as_array().map_or(0,Vec::len),second["loadPending"],second["hasMore"]));
+        }
+        if first["rootPointer"] != second["rootPointer"]
+            || first["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(second["rows"].as_array().unwrap())
+                .any(|(a, b)| a["pointer"] != b["pointer"])
+        {
+            return Err("native append replaced existing row instances".into());
+        }
+        equal(
+            before["scrollY"].as_f64().ok_or("scrollY")?,
+            second["scrollY"].as_f64().ok_or("scrollY")?,
+            "pagination preserves scroll position",
+        )?;
+        samples.extend([
+            first,
+            before,
+            second,
+            serde_json::json!({"nativeScrollTriggerVerified":visible}),
+        ]);
+        on_main(app, |app| history_search(app, "token-0000"))?;
+        wait_history_query(app)?;
+        let found = on_main(app, history_snapshot)?;
+        if found["rows"].as_array().map(|rows| rows.len()) != Some(1)
+            || found["rows"][0]["id"] != "pagination-0"
+            || found["totalRecords"] != 250
+        {
+            return Err("native query did not find an unloaded database record".into());
+        }
+        samples.push(found);
+        Ok::<(), String>(())
+    })();
+    *app.state::<AppState>().database.lock().unwrap() = original_database;
+    *app.state::<AppState>().history_page.lock().unwrap() = original_page;
+    if let Some(store) = original_store {
+        let _ = on_main(app, move |app| {
+            *app.state::<AppState>().history.lock().unwrap() = store;
+            refresh_history(app)
+        });
+    }
+    DomCase {
+        name:
+            "native database pagination: bounded first page, stable scroll append and global search",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -2221,6 +2427,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             dom_cases.push(run_history_driver(&app));
         }
         dom_cases.push(run_runtime_history(&app));
+        dom_cases.push(run_history_pagination(&app));
         dom_cases.push(run_source_editing(&app));
         dom_cases.push(run_resize_hit_targets(&app));
         let clipboard = on_main(&app, |_| crate::platform::test_selection_clipboard());

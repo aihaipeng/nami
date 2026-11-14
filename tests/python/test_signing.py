@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-pytestmark = [pytest.mark.signing, pytest.mark.skipif(sys.platform != 'darwin', reason='macOS codesign required')]
+pytestmark = [pytest.mark.dfx_security, pytest.mark.signing, pytest.mark.skipif(sys.platform != 'darwin', reason='macOS codesign required')]
 
 
 def test_certificate_pinned_identity_accepts_updates_and_rejects_replacements(local_app, tmp_path):

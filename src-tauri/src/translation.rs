@@ -56,7 +56,7 @@ pub fn validate_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
+pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
     if !matches!(engine, "edge" | "google") {
         return Err("Choose a supported translation engine.".into());
     }
@@ -71,6 +71,34 @@ fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<()
         return Err("Choose one or two supported target languages.".into());
     }
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationReuse {
+    pub record_id: String,
+    pub target_index: usize,
+}
+
+pub fn reusable_results(
+    text: &str,
+    source: &str,
+    targets: &[String],
+    previous: Option<&crate::model::HistoryRecord>,
+    refresh_target: Option<usize>,
+) -> Vec<Option<String>> {
+    targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            previous
+                .filter(|_| refresh_target.is_some_and(|changed| index != changed))
+                .filter(|record| record.text == text && record.source_language == source)
+                .filter(|record| record.target_languages.get(index) == Some(target))
+                .and_then(|record| record.translations.get(index))
+                .cloned()
+        })
+        .collect()
 }
 
 fn language_code<'a>(engine: &str, code: &'a str) -> &'a str {
@@ -288,6 +316,72 @@ pub async fn translate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_switch_reuses_only_unchanged_columns() {
+        let record = crate::model::HistoryRecord {
+            id: "previous".into(),
+            text: "Synthetic".into(),
+            source_language: "auto".into(),
+            target_languages: vec!["en".into(), "zh-CN".into()],
+            translations: vec!["English".into(), "Chinese".into()],
+            date: "test".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+        };
+        assert_eq!(
+            reusable_results(
+                "Synthetic",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                Some(0)
+            ),
+            vec![None, Some("Chinese".into())]
+        );
+        assert_eq!(
+            reusable_results(
+                "Synthetic",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                None
+            ),
+            vec![None, None]
+        );
+        let targets = vec!["de".into(), "zh-CN".into()];
+        assert_eq!(
+            reusable_results("Synthetic", "auto", &targets, Some(&record), Some(0)),
+            vec![None, Some("Chinese".into())]
+        );
+        assert_eq!(
+            reusable_results("Synthetic", "de", &targets, Some(&record), Some(0)),
+            vec![None, None]
+        );
+        assert_eq!(
+            reusable_results("Edited", "auto", &targets, Some(&record), Some(0)),
+            vec![None, None]
+        );
+        assert_eq!(
+            reusable_results("Synthetic", "auto", &targets, None, Some(0)),
+            vec![None, None]
+        );
+        assert_eq!(
+            reusable_results("Synthetic", "auto", &["en".into()], Some(&record), Some(1)),
+            vec![Some("English".into())]
+        );
+        assert_eq!(
+            reusable_results(
+                "Synthetic",
+                "auto",
+                &["en".into(), "fr".into()],
+                Some(&record),
+                Some(1)
+            ),
+            vec![Some("English".into()), None]
+        );
+    }
 
     #[test]
     fn builds_fixed_provider_requests_with_one_content_type() {

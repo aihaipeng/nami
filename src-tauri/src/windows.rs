@@ -24,9 +24,9 @@ mod native_history;
 #[path = "windows/native_resize.rs"]
 mod native_resize;
 
-pub(crate) use crate::history_runtime::{
-    history_add, history_record, publish_history, select_native_history,
-};
+#[cfg(feature = "ui-tests")]
+pub(crate) use crate::history_runtime::history_add;
+pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
 pub(crate) fn refresh_history(app: &AppHandle) -> Result<(), String> {
     let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();

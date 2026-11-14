@@ -4,6 +4,7 @@ export const messages = {
   working: ['正在处理', 'Working'],
   searchLanguage: ['搜索语言或代码…', 'Search languages or codes…'],
   selected: ['已选中', 'Selected'],
+  historyStorageError: ['历史数据库暂时无法打开。原文件已保留，历史写入已停用；请排查存储问题后重启 Nami。', 'History storage could not be opened. Existing files are preserved and history writes are disabled. Resolve the storage issue, then restart Nami.'],
   noHistory: ['还没有翻译记录', 'No translations yet'],
   tryAnotherSearch: ['试试其他关键词', 'Try a different search'],
   translateHint: ['输入文本，按 ⌘ Return 开始翻译', 'Enter text, then press ⌘ Return'],

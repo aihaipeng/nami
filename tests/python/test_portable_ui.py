@@ -52,6 +52,8 @@ def test_portable_shared_history_in_real_webview():
 
 
 @pytest.mark.parametrize('change', ['old-run', 'failed', 'missing-case'])
+@pytest.mark.dfx_diagnostics
+@pytest.mark.dfx_compatibility
 def test_portable_report_rejects_stale_failed_or_missing_coverage(change):
     result = {
         'runId': 'current', 'passed': True, 'scope': 'real Tauri IPC',

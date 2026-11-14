@@ -14,6 +14,9 @@ export interface HistorySnapshot {
   revision: number;
   records: HistoryRecord[];
   selectedId: string | null;
+  totalRecords: number;
+  hasMore: boolean;
+  generation: number;
 }
 
 export interface HistorySelection {

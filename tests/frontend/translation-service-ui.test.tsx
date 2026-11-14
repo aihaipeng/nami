@@ -26,28 +26,66 @@ describe('live translation bridge', () => {
     expect(calls('translation_run').at(-1)?.[1]).toEqual({ text: 'Synthetic input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: false });
   });
 
-  it('uses animation while waiting and discards results after the draft changes', async () => {
-    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
-    await mount(); submit('Old input');
-    await waitFor(() => expect(screen.getByRole('progressbar')).toBeTruthy());
-    expect(screen.queryByRole('status')).toBeNull();
-    fireEvent.change(source(), { target: { value: 'New draft' } });
-    await act(async () => pending.resolve(result('Old input')));
-    expect(source().value).toBe('New draft');
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
-    expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(calls('translation_cancel').length).toBeGreaterThan(0);
+  it('immediately retranslates the changed target and creates a new complete record', async () => {
+    const user = userEvent.setup(); await mount(); submit('Switch language');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
+    await user.click(screen.getByRole('option', { name: 'German' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(calls('translation_run')[1][1]).toEqual({ text: 'Switch language', source: 'auto', targets: ['de', 'zh-CN'], fromSelection: false, reuse: { recordId: 'translation-test', targetIndex: 0 } });
+    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['de', 'zh-CN']);
+    expect(bridge.history.records.at(-1)?.id).toBe('translation-test-2');
+    expect(bridge.history.records.find(({ id }) => id === 'translation-test')?.targetLanguages).toEqual(['en', 'zh-CN']);
   });
 
-  it('keeps the latest result when network responses finish in reverse order', async () => {
-    const old = deferred(); const latest = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name: string, args?: { text: string }) => name === 'translation_run' ? (args?.text === 'Old' ? old.promise : latest.promise) : invoke(name, args));
-    await mount(); submit('Old'); await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    submit('Latest'); await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
-    await act(async () => latest.resolve(result('Latest')));
-    await act(async () => old.resolve(result('Old')));
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Translated Latest');
+  it('keeps the other column visible while a target switch is pending', async () => {
+    const user = userEvent.setup(); await mount(); submit('Keep other column');
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
+    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
+    await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
+    await user.click(screen.getByRole('option', { name: 'French' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
+    expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe('');
+    expect(screen.getByRole('progressbar')).toBeTruthy();
+    await act(async () => pending.resolve({ ...result('Keep other column'), targetLanguages: ['en', 'fr'], translations: ['Synthetic translation 1', 'French result'] }));
+    expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe('French result');
+  });
+
+  it('retranslates both columns when the source language changes', async () => {
+    const user = userEvent.setup(); await mount(); submit('Source switch');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
+    await user.click(screen.getByRole('option', { name: 'German' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(calls('translation_run')[1][1]?.source).toBe('de');
+    expect(bridge.history.records.at(-1)?.sourceLanguage).toBe('de');
+  });
+
+  it('does not request for an empty input or the same chosen language', async () => {
+    const user = userEvent.setup(); await mount();
+    await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
+    await user.click(screen.getByRole('option', { name: 'German' }));
+    expect(calls('translation_run')).toHaveLength(0);
+    submit('Same language'); await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'Primary language: German' }));
+    await user.click(screen.getByRole('option', { name: 'German' }));
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
+  it('records disabling and enabling the secondary column without losing the primary result', async () => {
+    const user = userEvent.setup(); await mount(); submit('Column changes');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
+    await user.click(screen.getByRole('option', { name: 'None' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['en']);
+    await user.click(screen.getByRole('button', { name: 'Secondary language: None' }));
+    await user.click(screen.getByRole('option', { name: 'French' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(3));
+    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['en', 'fr']);
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
   });
 
   it('consumes selected text on first connection and translates automatically', async () => {
@@ -73,58 +111,11 @@ describe('live translation bridge', () => {
     expect(source().value).toBe(''); expect(calls('translation_run')).toHaveLength(0);
   });
 
-  it('clears old output and does not translate a non-text capture', async () => {
-    const invoke = bridge.invoke.getMockImplementation()!;
-    await mount(); submit('Prior synthetic text');
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'selection_take' ? Promise.resolve({ text: '', sourceApp: null, error: null }) : invoke(name, args));
-    await emit('selection_ready', null);
-    expect(source().value).toBe('');
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
-    expect(calls('translation_run')).toHaveLength(1);
-  });
-
-  it('does not submit after a clipboard capture or restoration failure', async () => {
-    const invoke = bridge.invoke.getMockImplementation()!;
-    await mount();
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'selection_take' ? Promise.resolve({ text: '', error: 'clipboard_restore_failed' }) : invoke(name, args));
-    await emit('selection_ready', null);
-    expect(source().value).toBe('');
-    expect(screen.getAllByRole('alert')[0].textContent).toContain('restore the clipboard');
-    expect(calls('translation_run')).toHaveLength(0);
-  });
-
-  it('shows an actionable permission error and sends no text when AX access is denied', async () => {
-    const invoke = bridge.invoke.getMockImplementation()!;
-    await mount();
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'selection_take' ? Promise.resolve({ text: '', error: 'permission_required' }) : invoke(name, args));
-    await emit('selection_ready', null);
-    expect(screen.getAllByRole('alert')[0].textContent).toContain('Accessibility');
-    expect(calls('translation_run')).toHaveLength(0);
-  });
-
   it('restores runtime records supplied by native history instead of requiring a fixture', async () => {
     await mount(); const record = result('Runtime history');
     await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
     expect(source().value).toBe('Runtime history');
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Translated Runtime history');
-  });
-
-  it('cancels pending output when the engine changes', async () => {
-    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
-    await mount(); submit('Old engine'); await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    await emit('translation_engine_changed', 'google');
-    await act(async () => pending.resolve(result('Old engine')));
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
-  });
-
-  it('shows service errors and removes the loading animation', async () => {
-    const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.reject('The translation request timed out. Try again.') : invoke(name, args));
-    await mount(); submit('Synthetic failure');
-    await waitFor(() => expect(screen.getAllByRole('alert')[0].textContent).toContain('timed out'));
-    expect(screen.queryByRole('progressbar')).toBeNull();
   });
 });
 

@@ -22,6 +22,7 @@ pub struct Snapshot {
     accessibility: bool,
     shortcut_errors: Vec<String>,
     translation_engine: String,
+    storage_error: Option<String>,
     window: WindowState,
 }
 
@@ -38,6 +39,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         accessibility: platform::accessibility(),
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
         translation_engine: state.translation_engine.lock().unwrap().clone(),
+        storage_error: state.storage_error.lock().unwrap().clone(),
         window: state.windows.lock().unwrap().clone(),
     };
     Ok(snapshot)
@@ -236,33 +238,51 @@ pub fn history_snapshot(
     app: AppHandle,
 ) -> Result<crate::history::HistorySnapshot, String> {
     authorize(&window, &["translation", "history"])?;
-    Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
+    let state = app.state::<AppState>();
+    if let Some(error) = state.storage_error.lock().unwrap().clone() {
+        return Err(error);
+    }
+    let snapshot = state.history.lock().unwrap().snapshot();
+    Ok(snapshot)
 }
 
 #[tauri::command]
-pub fn history_record_update(
+pub async fn history_query(
+    window: Webview,
+    app: AppHandle,
+    query: String,
+    favorites_only: bool,
+) -> Result<crate::history::HistorySnapshot, String> {
+    authorize(&window, &["translation", "history"])?;
+    crate::history_runtime::query_history(&app, query, favorites_only).await
+}
+
+#[tauri::command]
+pub async fn history_load_more(
+    window: Webview,
+    app: AppHandle,
+) -> Result<crate::history::HistorySnapshot, String> {
+    authorize(&window, &["translation", "history"])?;
+    crate::history_runtime::load_more(&app).await
+}
+
+#[tauri::command]
+pub async fn history_record_update(
     window: Webview,
     app: AppHandle,
     record_id: String,
     action: String,
 ) -> Result<crate::history::HistorySnapshot, String> {
     authorize(&window, &["translation", "history"])?;
-    update_history_record(&app, &record_id, &action)
+    update_history_record(&app, &record_id, &action).await
 }
 
-pub(crate) fn update_history_record(
+pub(crate) async fn update_history_record(
     app: &AppHandle,
     id: &str,
     action: &str,
 ) -> Result<crate::history::HistorySnapshot, String> {
-    app.state::<AppState>()
-        .history
-        .lock()
-        .unwrap()
-        .update(id, action)?;
-    windows::refresh_history(app)?;
-    windows::publish_history(app)?;
-    Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
+    crate::history_runtime::update_record(app, id.to_owned(), action.to_owned()).await
 }
 
 #[tauri::command]
@@ -292,8 +312,8 @@ pub(crate) fn select_history_sample(
         .history
         .lock()
         .unwrap()
-        .snapshot()
-        .selected_id
+        .selected_id()
+        .map(str::to_owned)
         == sample_id;
     windows::select_native_history(app, sample_id.as_deref())?;
     if sample_id.is_some() {
@@ -365,7 +385,7 @@ pub fn permission_request(window: Webview) -> Result<bool, String> {
     Ok(platform::request_accessibility())
 }
 
-async fn on_main<T: Send + 'static>(
+pub(crate) async fn on_main<T: Send + 'static>(
     app: &AppHandle,
     f: impl FnOnce(AppHandle) -> T + Send + 'static,
 ) -> Result<T, String> {
@@ -584,19 +604,52 @@ pub async fn translation_run(
     source: String,
     targets: Vec<String>,
     from_selection: bool,
+    reuse: Option<crate::translation::TranslationReuse>,
 ) -> Result<crate::model::HistoryRecord, String> {
     authorize(&window, &["translation"])?;
+    if let Some(error) = app
+        .state::<AppState>()
+        .storage_error
+        .lock()
+        .unwrap()
+        .clone()
+    {
+        return Err(error);
+    }
     crate::translation::validate_text(&text)?;
+    #[cfg(feature = "ui-tests")]
+    if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
+        return Err("translation_network_disabled_in_tests".into());
+    }
     let state = app.state::<AppState>();
     let revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let engine = state.translation_engine.lock().unwrap().clone();
+    crate::translation::validate_options(&engine, &source, &targets)?;
+    let previous = reuse
+        .as_ref()
+        .and_then(|reuse| state.history.lock().unwrap().record(&reuse.record_id));
+    let retained = crate::translation::reusable_results(
+        &text,
+        &source,
+        &targets,
+        previous.as_ref(),
+        reuse.as_ref().map(|reuse| reuse.target_index),
+    );
+    let missing: Vec<String> = targets
+        .iter()
+        .zip(&retained)
+        .filter(|(_, result)| result.is_none())
+        .map(|(target, _)| target.clone())
+        .collect();
     let source_app = if from_selection {
         state.selection_source.lock().unwrap().clone()
     } else {
         None
     };
-    let translated = {
-        let request = crate::translation::translate(&engine, &text, &source, &targets);
+    let translated = if missing.is_empty() {
+        Vec::new()
+    } else {
+        let request = crate::translation::translate(&engine, &text, &source, &missing);
         tokio::pin!(request);
         let translated = loop {
             tokio::select! {
@@ -608,30 +661,21 @@ pub async fn translation_run(
         };
         translated
     };
-    on_main(&app, move |app| {
-        if app
-            .state::<AppState>()
-            .translation_revision
-            .load(Ordering::SeqCst)
-            != revision
-        {
-            return Err("cancelled".into());
-        }
-        let date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let record = crate::model::HistoryRecord {
-            id: format!("translation-{revision}"),
-            text,
-            source_language: source,
-            target_languages: targets,
-            translations: translated,
-            date,
-            is_favorite: false,
-            is_pinned: false,
-            source_app,
-        };
-        windows::history_add(&app, record.clone())?;
-        windows::select_native_history(&app, Some(&record.id))?;
-        Ok(record)
-    })
-    .await?
+    let mut fresh = translated.into_iter();
+    let translated = retained
+        .into_iter()
+        .map(|cached| cached.or_else(|| fresh.next()).ok_or("translation_result"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let record = crate::model::HistoryRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        text,
+        source_language: source,
+        target_languages: targets,
+        translations: translated,
+        date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        is_favorite: false,
+        is_pinned: false,
+        source_app,
+    };
+    crate::history_runtime::commit_translation(&app, record, engine, revision).await
 }
