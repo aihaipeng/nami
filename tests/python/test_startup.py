@@ -13,7 +13,7 @@ def test_resident_startup_does_not_open_translation():
     assert 'windows::show' not in setup_tail, 'Resident startup must not show a product window'
     assert 'RunEvent::Reopen' not in source, 'macOS launch/reopen must not auto-open translation'
     assert 'tray.build(app)?;' in source
-    assert 'app.global_shortcut().register(shortcut)' in source
+    assert 'app.global_shortcut().register(*shortcut)' in source
 
 
 def test_clipboard_image_policy_allows_blob_previews_without_remote_images():
