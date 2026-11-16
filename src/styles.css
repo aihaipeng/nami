@@ -192,8 +192,9 @@
   .history-scrollbar:hover .history-scrollbar-thumb, .history-scrollbar:focus-visible .history-scrollbar-thumb { background: var(--history-secondary); }
   .history-footer { position: absolute; bottom: 4px; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 14px; color: var(--history-secondary); font-size: 11px; }
   .history-footer .history-shortcuts { color: var(--history-secondary); margin-left: auto; }
-  .history-footer .history-favorites { position: absolute; left: 50%; transform: translateX(-50%); color: var(--history-secondary); background: transparent; }
-  .history-footer .history-favorites[aria-pressed=true] { color: var(--history-label); }
+  .history-footer .history-filters { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; }
+  .history-footer .history-filters .icon-button { color: var(--history-secondary); background: transparent; }
+  .history-footer .history-filters .icon-button[aria-pressed=true] { color: var(--history-label); }
   .history-footer .history-favorites:hover, .history-footer .history-favorites:active { background: transparent; }
   .history-panel .history-toolbar > .records-details[aria-expanded=true] { color: var(--history-label); }
   .records-details:disabled { opacity: .35; }

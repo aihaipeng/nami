@@ -100,7 +100,7 @@ export const messages = {
   service: ['翻译服务', 'Translation service'],
   notConnected: ['尚未接入', 'Not connected'],
   capture: ['剪贴板记录', 'Clipboard recording'],
-  captureDescription: ['默认关闭。开启后在本机保存复制的文本、图片和文件路径，排除选字翻译的临时复制。', 'Off by default. When enabled, copied text, images, and file paths stay on this device. Temporary copies for selection translation are excluded.'],
+  captureDescription: ['默认关闭。开启后在本机保存复制的文本、图片和文件路径。选字翻译不读写系统剪贴板。', 'Off by default. When enabled, copied text, images, and file paths stay on this device. Selection translation does not read or write the clipboard.'],
   clipboardStorageNotice: ['文本保存在数据库，图片单独保存在本机；文件仅保存路径，原文件移动或删除后无法恢复。', 'Text stays in the database and images are saved on this device. Files are path references; moved or deleted originals cannot be restored.'],
   captureDisabled: ['未启用，P0 不采集个人剪贴板', 'Disabled. P0 does not capture personal clipboard data'],
   accessibility: ['辅助功能', 'Accessibility'],
@@ -108,7 +108,7 @@ export const messages = {
   required: ['尚未授权；选字翻译和自动粘贴需要此权限', 'Not granted; required for selection translation and automatic paste'],
   requestPermission: ['请求授权', 'Request permission'],
   refreshPermission: ['刷新权限状态', 'Refresh permission status'],
-  privacyDetail: ['主动翻译或按 ⌘T 选字翻译时，文本发送至所选的 Edge 或 Google 服务。选字优先直接读取，必要时临时复制并恢复剪贴板，不加入剪贴板历史。历史保存在本机；剪贴板后台采集默认关闭，仅在设置中开启后记录。', 'Translating or pressing ⌘T sends text to Edge or Google. Selection uses Accessibility first, with temporary copy and clipboard restoration when needed. It is excluded from clipboard history. History stays on this device. Background clipboard recording is off until enabled in settings.'],
+  privacyDetail: ['主动翻译或按 ⌘T 选字翻译时，文本发送至所选的 Edge 或 Google 服务。选字仅通过辅助功能读取，不模拟复制、不读写系统剪贴板；无可读选区时打开空白翻译。历史保存在本机；剪贴板后台采集默认关闭，仅在设置中开启后记录。', 'Translating or pressing ⌘T sends text to Edge or Google. Selection is read through Accessibility without copying or accessing the clipboard. No readable selection opens a blank translation. History stays on this device. Background clipboard recording is off until enabled in settings.'],
   version: ['开发版本', 'Development version'],
   backTranslation: ['返回翻译', 'Back to translation'],
 } as const;

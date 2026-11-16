@@ -134,6 +134,10 @@ mod macos {
                 }
             } else {
                 for (name, source, filled) in [
+                    ("reference-text", "text", false),
+                    ("reference-image", "image", false),
+                    ("reference-file", "file", false),
+                    ("reference-ocr", "ocr", false),
                     ("reference-clock", "clock", false),
                     ("reference-keyboard", "keyboard", false),
                     ("reference-list", "list", false),

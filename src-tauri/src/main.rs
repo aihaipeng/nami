@@ -1,4 +1,5 @@
 mod clipboard_runtime;
+mod clipboard_text;
 mod commands;
 mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
@@ -34,6 +35,9 @@ pub struct AppState {
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
     clipboard_writes: tokio::sync::Mutex<()>,
+    image_text: tokio::sync::Mutex<clipboard_text::ImageTextCache>,
+    image_text_operation: AtomicU64,
+    clipboard_translation: Mutex<Option<selection::SelectionContext>>,
     history: Mutex<history::HistoryStore>,
     database: Mutex<Option<database::HistoryDatabase>>,
     storage_error: Mutex<Option<String>>,
@@ -68,6 +72,9 @@ impl Default for AppState {
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
             clipboard_writes: tokio::sync::Mutex::new(()),
+            image_text: tokio::sync::Mutex::new(clipboard_text::ImageTextCache::default()),
+            image_text_operation: AtomicU64::new(0),
+            clipboard_translation: Mutex::new(None),
             history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
             database: Mutex::new(None),
             storage_error: Mutex::new(None),
@@ -187,6 +194,9 @@ fn main() {
             commands::clipboard_record_use,
             commands::clipboard_query,
             commands::clipboard_record_detail,
+            commands::clipboard_record_has_text,
+            commands::clipboard_record_process,
+            commands::clipboard_translation_take,
             commands::clipboard_record_update,
             commands::clipboard_capture_set,
             commands::clipboard_image,
@@ -301,6 +311,9 @@ fn main() {
                 .title("N")
                 .icon(app.default_window_icon().ok_or("missing app icon")?.clone());
             tray.build(app)?;
+            if let Err(error) = windows::prewarm_records(app.handle()) {
+                eprintln!("Nami records prewarm: {error}");
+            }
             if platform::capabilities().selection {
                 for shortcut in fixed_shortcuts() {
                     if app.global_shortcut().register(shortcut).is_err() {

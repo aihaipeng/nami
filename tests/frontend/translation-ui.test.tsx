@@ -12,6 +12,59 @@ const select = (id = sample.id, retranslate = false) => act(async () => { await 
 // These tests exercise DOM behavior and the native bridge contract. AppKit geometry,
 // glass rendering and frame pacing are covered by the separate native checks.
 describe('translation input and shortcuts', () => {
+  it('consumes clipboard text once and translates without requiring selection capability', async () => {
+    bridge.snapshot.capabilities.selection = false;
+    const original = bridge.invoke.getMockImplementation()!;
+    let pending: { text: string; error: null } | null = null;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_translation_take') { const context = pending; pending = null; return context; }
+      return original(name, args);
+    });
+    await mount();
+    pending = { text: 'Complete clipboard text\nSecond line', error: null };
+    await emit('clipboard_translation_ready', null);
+    await waitFor(() => expect(source().value).toBe('Complete clipboard text Second line'));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]).toMatchObject({ text: 'Complete clipboard text\nSecond line', fromSelection: true });
+    await emit('clipboard_translation_ready', null);
+    expect(calls('translation_run')).toHaveLength(1);
+    expect(calls('selection_take')).toHaveLength(0);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+  });
+
+  it('receives pending clipboard translation after the translation view subscribes', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    let pending = true;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_translation_take') { if (!pending) return null; pending = false; return { text: 'Queued clipboard content', error: null }; }
+      return original(name, args);
+    });
+    await mount();
+    await waitFor(() => expect(source().value).toBe('Queued clipboard content'));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+  });
+
+  it.each(['edit', 'hide', 'history'] as const)('rejects a clipboard handoff arriving after a newer %s action', async (action) => {
+    const original = bridge.invoke.getMockImplementation()!;
+    let intercept = false;
+    let deliver!: (context: { text: string; error: null }) => void;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_translation_take') return intercept ? new Promise((resolve) => { deliver = resolve; }) : null;
+      return original(name, args);
+    });
+    await mount();
+    intercept = true;
+    await emit('clipboard_translation_ready', null);
+    const editor = source();
+    if (action === 'edit') fireEvent.change(source(), { target: { value: 'Keep newer draft' } });
+    else if (action === 'hide') await windowState({ translationVisible: false, translationExtent: 0 });
+    else await select();
+    const retained = editor.value;
+    await act(async () => deliver({ text: 'Outdated clipboard text', error: null }));
+    expect(editor.value).toBe(retained);
+    expect(calls('translation_run')).toHaveLength(0);
+  });
+
   it('dismisses transient actions on hide and preserves the translation draft', async () => {
     await mount();
     fireEvent.change(source(), { target: { value: 'Preserved draft' } });

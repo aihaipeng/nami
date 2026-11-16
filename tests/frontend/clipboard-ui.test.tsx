@@ -6,13 +6,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import { ClipboardNotePreview } from '../../src/clipboard/ClipboardNotePreview';
 import { useClipboard } from '../../src/clipboard/useClipboard';
-import type { ClipboardPage, ClipboardRecord } from '../../src/clipboard/useClipboard';
+import { HistoryFooter } from '../../src/shared/HistoryFooter';
+import { useRecordBrowser } from '../../src/shared/useRecordBrowser';
+import type { ClipboardKind, ClipboardPage, ClipboardRecord } from '../../src/clipboard/useClipboard';
 
 let records: ClipboardRecord[];
-let queryHandler: ((args: { query: string; favoritesOnly: boolean; cursor: unknown }) => Promise<ClipboardPage>) | undefined;
+let queryHandler: ((args: { query: string; favoritesOnly: boolean; kind?: ClipboardKind; cursor: unknown }) => Promise<ClipboardPage>) | undefined;
 const cursor = { pinned: false, createdAt: 1794650400000, sequence: 100 };
-function page(query = '', favoritesOnly = false): ClipboardPage {
-  return { records: structuredClone(records.filter((record) => (!favoritesOnly || record.isFavorite) && record.text.toLowerCase().includes(query.toLowerCase()))), cursor: null, hasMore: false, totalRecords: records.length };
+function page(query = '', favoritesOnly = false, kind?: ClipboardKind): ClipboardPage {
+  const matches = records.filter((record) => (!favoritesOnly || record.isFavorite) && (!kind || record.kind === kind) && record.text.toLowerCase().includes(query.toLowerCase()));
+  return { records: structuredClone(matches), cursor: null, hasMore: false, totalRecords: matches.length };
 }
 const row = (id: string) => document.querySelector<HTMLElement>(`[data-record-id="${id}"]`)!;
 function scrollNearEnd() {
@@ -34,7 +37,7 @@ beforeEach(() => {
   let revision = 0;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_query') {
-      const request = args as { query: string; favoritesOnly: boolean; cursor: unknown };
+      const request = args as { query: string; favoritesOnly: boolean; kind?: ClipboardKind; cursor: unknown };
       const encode = (page: ClipboardPage) => {
         const sources: Record<string, NonNullable<ClipboardRecord['sourceApp']>> = {};
         const records = page.records.map(({ sourceApp, ...record }) => {
@@ -44,8 +47,8 @@ beforeEach(() => {
         });
         return { ...page, records, sources };
       };
-      const result = queryHandler ? await queryHandler(request) : page(request.query, request.favoritesOnly);
-      return { page: encode(result), alternate: request.cursor ? null : encode(page(request.query, !request.favoritesOnly)) };
+      const result = queryHandler ? await queryHandler(request) : page(request.query, request.favoritesOnly, request.kind);
+      return { page: encode(result), alternate: request.cursor ? null : encode(page(request.query, !request.favoritesOnly, request.kind)) };
     }
     if (name === 'clipboard_files') return [{ path: '/tmp/synthetic.txt', name: 'synthetic.txt', exists: true, isDir: false, isImage: false, iconDataUrl: null }];
     if (name === 'clipboard_record_detail') {
@@ -64,6 +67,322 @@ beforeEach(() => {
     }
     if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
     return original(name, args);
+  });
+});
+
+describe('clipboard type filters', () => {
+  it('filters the actual list by type with Favorites and resets the category on a new records session', async () => {
+    records.push({ ...records[0], id: 'picture', kind: 'image', isFavorite: true });
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(3));
+    fireEvent.click(screen.getByRole('button', { name: 'File clipboard records' }));
+    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['pinned']));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(listRows()).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
+    await waitFor(() => expect(listRows()).toHaveLength(0));
+    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['first']));
+    expect(document.querySelector('.history-record-count')?.textContent).toBe('1 record');
+    fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
+    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['picture']));
+    await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
+    await waitFor(() => expect(listRows()).toHaveLength(3));
+    for (const name of ['Text clipboard records', 'Image clipboard records', 'File clipboard records', 'Favorite clipboard records']) expect(screen.getByRole('button', { name }).getAttribute('aria-pressed')).toBe('false');
+    expect(document.querySelector('.history-record-count')?.textContent).toBe('3 records');
+  });
+
+  it('places mutually exclusive, cancellable type buttons after Favorites without changing translation controls', () => {
+    const onKindChange = vi.fn();
+    const view = render(<HistoryFooter total={42} clipboard onFavorites={vi.fn()} kind="text" onKindChange={onKindChange} primaryModifier="meta" />);
+    const filters = view.container.querySelector('.history-filters')!;
+    expect(within(filters as HTMLElement).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(['Favorite clipboard records', 'Text clipboard records', 'Image clipboard records', 'File clipboard records']);
+    expect(screen.getByRole('button', { name: 'Text clipboard records' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
+    expect(onKindChange).toHaveBeenLastCalledWith(null);
+    fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
+    expect(onKindChange).toHaveBeenLastCalledWith('image');
+    fireEvent.click(screen.getByRole('button', { name: 'File clipboard records' }));
+    expect(onKindChange).toHaveBeenLastCalledWith('files');
+    view.rerender(<HistoryFooter total={5} onFavorites={vi.fn()} primaryModifier="meta" />);
+    expect(view.container.querySelectorAll('.history-kind')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Favorite history' })).toBeTruthy();
+  });
+
+  it('queries authoritative type counts and isolates cached favorite pages by type without switch activity', async () => {
+    records.push({ ...records[0], id: 'picture', kind: 'image', isFavorite: true, text: 'Saved image' });
+    const hook = renderHook(({ kind, favorites }) => useClipboard(true, '', favorites, undefined, kind), { initialProps: { kind: null as ClipboardKind | null, favorites: false } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(3));
+    hook.rerender({ kind: 'image', favorites: false });
+    expect(hook.result.current.showActivity).toBe(false);
+    await waitFor(() => expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['picture']));
+    await waitFor(() => {
+      expect(hook.result.current.loading).toBe(false);
+      expect(hook.result.current.page.totalRecords).toBe(1);
+    });
+    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false, kind: 'image', cursor: null });
+    const queries = calls('clipboard_query').length;
+    hook.rerender({ kind: 'image', favorites: true });
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['picture']);
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    hook.rerender({ kind: 'files', favorites: true });
+    expect(hook.result.current.showActivity).toBe(false);
+    await waitFor(() => expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['pinned']));
+    expect(hook.result.current.page.totalRecords).toBe(1);
+    hook.rerender({ kind: 'image', favorites: false });
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['picture']);
+    expect(calls('clipboard_query')).toHaveLength(queries + 1);
+    hook.rerender({ kind: null, favorites: false });
+    expect(hook.result.current.page.records).toHaveLength(3);
+    expect(calls('clipboard_query')).toHaveLength(queries + 1);
+  });
+
+  it('patches cached type totals independently when a favorite changes during deferred scrolling', async () => {
+    records.push({ ...records[0], id: 'picture', kind: 'image', isFavorite: true, text: 'Saved image' });
+    const hook = renderHook(({ kind }) => useClipboard(true, '', false, () => true, kind), { initialProps: { kind: null as ClipboardKind | null } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(3));
+    hook.rerender({ kind: 'files' });
+    await waitFor(() => expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['pinned']));
+    hook.rerender({ kind: 'image' });
+    await waitFor(() => expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['picture']));
+    await act(async () => hook.result.current.update('picture', 'favorite'));
+    expect(hook.result.current.page.totalRecords).toBe(1);
+    hook.rerender({ kind: 'files' });
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['pinned']);
+    expect(hook.result.current.page.totalRecords).toBe(1);
+    hook.rerender({ kind: null });
+    expect(hook.result.current.page.totalRecords).toBe(3);
+    expect(hook.result.current.page.records.find(({ id }) => id === 'picture')?.isFavorite).toBe(false);
+  });
+
+  it('rejects late type responses and uses the current type in search and cursor requests', async () => {
+    records.push({ ...records[0], id: 'picture', kind: 'image', text: 'Saved image' });
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async (request) => request.kind === 'image' ? new Promise((resolve) => { finish = resolve; }) : { ...page(request.query, request.favoritesOnly, request.kind), cursor, hasMore: !request.cursor };
+    const hook = renderHook(({ kind, query }) => useClipboard(true, query, false, undefined, kind), { initialProps: { kind: null as ClipboardKind | null, query: '' } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(3));
+    hook.rerender({ kind: 'image', query: '' });
+    await waitFor(() => expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ kind: 'image' }));
+    hook.rerender({ kind: 'text', query: 'Saved' });
+    await waitFor(() => expect(hook.result.current.displayReady).toBe(true));
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['first']);
+    await act(async () => finish(page('', false, 'image')));
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['first']);
+    await act(async () => hook.result.current.loadMore());
+    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: 'Saved', favoritesOnly: false, kind: 'text', cursor });
+  });
+
+  it('preserves independent scroll positions for type and favorite combinations and resets them per session', () => {
+    const element = document.createElement('div');
+    Object.defineProperties(element, { clientHeight: { value: 100 }, scrollHeight: { value: 2000 } });
+    element.scrollTo = vi.fn((options?: ScrollToOptions | number, y?: number) => { element.scrollTop = typeof options === 'number' ? y ?? 0 : options?.top ?? 0; });
+    const hook = renderHook(({ kind, session }) => useRecordBrowser(session, true, { current: element }, { current: null }, () => true, () => undefined, kind), { initialProps: { kind: null as ClipboardKind | null, session: 1 } });
+    element.scrollTop = 320;
+    act(() => hook.result.current.remember());
+    hook.rerender({ kind: 'image', session: 1 });
+    expect(element.scrollTop).toBe(0);
+    element.scrollTop = 120;
+    act(() => hook.result.current.toggleFavorites());
+    expect(element.scrollTop).toBe(0);
+    element.scrollTop = 45;
+    act(() => hook.result.current.remember());
+    hook.rerender({ kind: null, session: 1 });
+    expect(element.scrollTop).toBe(0);
+    act(() => hook.result.current.toggleFavorites());
+    expect(element.scrollTop).toBe(320);
+    hook.rerender({ kind: 'image', session: 1 });
+    expect(element.scrollTop).toBe(120);
+    hook.rerender({ kind: 'image', session: 2 });
+    expect(element.scrollTop).toBe(0);
+    hook.rerender({ kind: null, session: 2 });
+    expect(element.scrollTop).toBe(0);
+  });
+});
+
+describe('clipboard text processing', () => {
+  it('shows translation and OCR for eligible records regardless of favorite status in copy / translate / OCR order', async () => {
+    records = [
+      { ...records[0], isFavorite: true },
+      { ...records[0], id: 'ordinary' },
+      { ...records[0], id: 'blank', text: '   ', isFavorite: true },
+      { ...records[0], id: 'text-image', kind: 'image', isFavorite: true },
+      { ...records[0], id: 'empty-image', kind: 'image', isFavorite: true },
+      { ...records[0], id: 'ordinary-image', kind: 'image' },
+      { ...records[1] },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? ['text-image', 'ordinary-image'].includes((args as { recordId: string }).recordId) : original(name, args));
+    await mount('clipboard');
+    await waitFor(() => expect(within(row('text-image')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
+    expect(actions('first')).toEqual(['Copy', 'Translate', 'Remove favorite', 'Pin record']);
+    expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Remove favorite', 'Pin record']);
+    expect(actions('ordinary')).toEqual(['Copy', 'Translate', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    for (const id of ['blank', 'empty-image', 'pinned']) {
+      expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
+      expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    }
+    expect(calls('clipboard_record_has_text').map(([, args]) => args)).toEqual([{ recordId: 'text-image' }, { recordId: 'empty-image' }, { recordId: 'ordinary-image' }, { recordId: 'pinned' }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(within(row('first')).getByRole('button', { name: 'Translate' })).toBeTruthy();
+    expect(calls('clipboard_record_has_text').filter(([, args]) => (args as { recordId: string }).recordId !== 'pinned')).toHaveLength(3);
+  });
+
+  it('offers image text actions for a single image file without treating ordinary file paths as text', async () => {
+    records = ['image-file', 'blank-file', 'document-file', 'multiple-files'].map((id) => ({ ...records[0], id, kind: 'files' }));
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? (args as { recordId: string }).recordId === 'image-file' : original(name, args));
+    await mount('clipboard');
+    await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    expect(within(row('image-file')).getByRole('button', { name: 'Translate' })).toBeTruthy();
+    for (const id of ['blank-file', 'document-file', 'multiple-files']) {
+      expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
+      expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    }
+    for (const label of ['Translate', 'Extract text']) await act(async () => fireEvent.click(within(row('image-file')).getByRole('button', { name: label })));
+    expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'image-file', action: 'translate' }, { recordId: 'image-file', action: 'ocr' }]);
+  });
+
+  it('rechecks image files after reopening and removes actions when the referenced file changes or disappears', async () => {
+    records = [{ ...records[0], id: 'image-file', kind: 'files' }];
+    let hasText = true, missing = false;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_record_has_text') { if (missing) throw new Error('clipboard_file_missing'); return hasText; }
+      return original(name, args);
+    });
+    await mount('clipboard');
+    await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    const switchView = async (view: 'translation' | 'clipboard') => {
+      fireEvent.click(within(document.querySelector<HTMLElement>(view === 'translation' ? '.clipboard-panel .history-toolbar' : '#translation-history .history-toolbar')!).getByRole('button', { name: view === 'translation' ? 'Translations' : 'Clipboard' }));
+      await waitFor(() => expect(bridge.snapshot.window.recordView).toBe(view));
+    };
+    await switchView('translation'); hasText = false; await switchView('clipboard');
+    await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Extract text' })).toBeNull());
+    await switchView('translation'); hasText = true; await switchView('clipboard');
+    await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    await switchView('translation'); missing = true; await switchView('clipboard');
+    await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Translate' })).toBeNull());
+    expect(calls('clipboard_record_has_text')).toHaveLength(4);
+  });
+
+  it('keeps text translation available without image OCR capability and does not probe images', async () => {
+    bridge.snapshot.capabilities.imageOcr = false;
+    records = [{ ...records[0], isFavorite: true }, { ...records[0], id: 'picture', kind: 'image', isFavorite: true }];
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    expect(within(row('first')).getByRole('button', { name: 'Translate' })).toBeTruthy();
+    expect(within(row('picture')).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(within(row('picture')).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
+  });
+
+  it('serializes image detection, stops after leaving the view, and retries the discarded result on reopening', async () => {
+    records = [1, 2].map((index) => ({ ...records[0], id: `picture-${index}`, kind: 'image', isFavorite: true }));
+    let finish: (hasText: boolean) => void = () => {};
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? new Promise<boolean>((resolve) => { finish = resolve; }) : original(name, args));
+    await mount('clipboard'); await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    expect(calls('clipboard_record_has_text')[0][1]).toEqual({ recordId: 'picture-1' });
+    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
+    await act(async () => finish(true));
+    expect(calls('clipboard_record_has_text')).toHaveLength(1);
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? true : original(name, args));
+    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
+    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(3));
+    expect(calls('clipboard_record_has_text').map(([, args]) => args)).toEqual([{ recordId: 'picture-1' }, { recordId: 'picture-1' }, { recordId: 'picture-2' }]);
+    expect(within(row('picture-2')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
+  });
+
+  it('does not cache recognition failures and retries them when the clipboard view is reopened', async () => {
+    records = [{ ...records[0], id: 'picture', kind: 'image', isFavorite: true }];
+    let fail = true;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_record_has_text') { if (fail) throw new Error('ocr_failed'); return true; }
+      return original(name, args);
+    });
+    await mount('clipboard'); await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    expect(within(row('picture')).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    fail = false;
+    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
+    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
+    await waitFor(() => expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    expect(calls('clipboard_record_has_text')).toHaveLength(2);
+  });
+
+  it('dispatches text/image translation and OCR by record ID without invoking copy or paste', async () => {
+    records = [{ ...records[0] }, { ...records[0], id: 'picture', kind: 'image' }];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? true : original(name, args));
+    await mount('clipboard'); await waitFor(() => expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    for (const [id, label] of [['first', 'Translate'], ['picture', 'Translate'], ['picture', 'Extract text']]) {
+      await act(async () => fireEvent.click(within(row(id)).getByRole('button', { name: label })));
+    }
+    expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'translate' }, { recordId: 'picture', action: 'translate' }, { recordId: 'picture', action: 'ocr' }]);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    expect(document.querySelector('.record-feedback')).toBeNull();
+  });
+
+  it.each([['text', 'Translate', 'Unable to open this text for translation. Try again.'], ['image', 'Extract text', 'Unable to extract and copy text. Try again.']] as const)('reports %s processing failures in English and allows another attempt', async (kind, label, message) => {
+    records = [{ ...records[0], kind, isFavorite: true }];
+    let fail = true;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_record_has_text') return true;
+      if (name === 'clipboard_record_process') { if (fail) throw new Error('synthetic_failure'); return; }
+      return original(name, args);
+    });
+    await mount('clipboard');
+    const button = await within(row('first') ?? document.body).findByRole('button', { name: label });
+    await act(async () => fireEvent.click(button));
+    expect(screen.getByRole('status').textContent).toBe(message);
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fail = false;
+    await act(async () => fireEvent.click(button));
+    expect(document.querySelector('.record-feedback')).toBeNull();
+    expect(calls('clipboard_record_process')).toHaveLength(2);
+  });
+
+  it('releases processing controls after another allowed clipboard operation while OCR is pending', async () => {
+    records = [{ ...records[0], kind: 'image', isFavorite: true }];
+    let finish: () => void = () => {};
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_record_has_text') return true;
+      if (name === 'clipboard_record_process') return new Promise<void>((resolve) => { finish = resolve; });
+      return original(name, args);
+    });
+    await mount('clipboard');
+    const process = await within(row('first') ?? document.body).findByRole('button', { name: 'Extract text' }) as HTMLButtonElement;
+    fireEvent.click(process);
+    await act(async () => fireEvent.click(within(row('first')).getByRole('button', { name: 'Copy' })));
+    await act(async () => finish());
+    expect(process.disabled).toBe(false);
+    expect(document.querySelector('.record-feedback')).toBeNull();
+  });
+
+  it('blocks repeat processing while pending and clears stale feedback when leaving the view', async () => {
+    records = [{ ...records[0], isFavorite: true }];
+    let reject: (reason: Error) => void = () => {};
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_process' ? new Promise((_, rejectRequest) => { reject = rejectRequest; }) : original(name, args));
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(1));
+    const button = within(row('first')).getByRole('button', { name: 'Translate' }) as HTMLButtonElement;
+    fireEvent.click(button);
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(calls('clipboard_record_process')).toHaveLength(1);
+    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
+    await act(async () => reject(new Error('late_failure')));
+    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('clipboard'));
+    expect(document.querySelector('.record-feedback')).toBeNull();
+    expect((within(row('first')).getByRole('button', { name: 'Translate' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
@@ -511,7 +830,7 @@ describe('database clipboard history', () => {
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name !== 'clipboard_query') return original(name, args);
-      const request = args as { favoritesOnly: boolean; cursor: unknown };
+      const request = args as { favoritesOnly: boolean; kind?: ClipboardKind; cursor: unknown };
       const wire = (rows: ClipboardRecord[], more: boolean) => ({ records: rows.map((record) => ({ ...record, sourceAppId: null })), sources: {}, totalRecords: request.favoritesOnly ? records.filter((record) => record.isFavorite).length : records.length, hasMore: more, cursor: more ? cursor : null });
       return request.favoritesOnly
         ? { page: wire(records.filter((record) => record.isFavorite), false), alternate: { ...wire(records.slice(0, 100), true), totalRecords: records.length } }
@@ -648,7 +967,7 @@ describe('database clipboard history', () => {
     expect(document.activeElement).toBe(screen.getByRole('searchbox'));
     await user.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     await waitFor(() => expect(listRows()).toHaveLength(1));
-    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false, cursor: null });
+    expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: true, cursor: null });
   });
 
   it('switches cached filters immediately without an activity beam or another database round trip', async () => {
@@ -690,7 +1009,7 @@ describe('database clipboard history', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     expect(listRows()).toHaveLength(0);
     expect(calls('clipboard_query')).toHaveLength(queries);
-    expect(row('pinned')).toBeNull();
+    expect(row('pinned').hidden).toBe(true);
   });
 
   it('prefetches favorites outside the first all page and keeps native image nodes mounted across switches', async () => {
@@ -752,10 +1071,158 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('first')).toBeNull());
   });
 
+  it('retains default first-page row instances through search and restores them immediately without another query', async () => {
+    const sample = records[0];
+    records = Array.from({ length: 100 }, (_, index) => ({ ...sample, id: `home-${index}`, text: `Home text ${index}` }));
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    const first = row('home-0'); const last = row('home-99');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Home text 99' } });
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    expect(row('home-0')).toBe(first);
+    expect(first.hidden).toBe(true);
+    expect(row('home-99')).toBe(last);
+    const queries = calls('clipboard_query').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Clear clipboard search' }));
+    expect(listRows()).toHaveLength(100);
+    expect(row('home-0')).toBe(first);
+    expect(row('home-99')).toBe(last);
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('restores only the authoritative default first page with its original pagination cursor', async () => {
+    const sample = records[0];
+    records = Array.from({ length: 202 }, (_, index) => ({ ...sample, id: `home-${index}`, text: `Home text ${index}` }));
+    const secondCursor = { ...cursor, sequence: 200 };
+    queryHandler = async (request) => request.query ? { ...page(request.query), records: [records[99]] } : request.cursor ? { records: records.slice(100, 200), totalRecords: records.length, hasMore: true, cursor: secondCursor } : { records: records.slice(0, 100), totalRecords: records.length, hasMore: true, cursor };
+    const hook = renderHook(({ query }) => useClipboard(true, query, false), { initialProps: { query: '' } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(100));
+    await act(async () => hook.result.current.loadMore());
+    expect(hook.result.current.page.records).toHaveLength(200);
+    hook.rerender({ query: 'Home text 99' });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(1));
+    const queried = calls('clipboard_query').length;
+    hook.rerender({ query: '' });
+    expect(hook.result.current.page.records).toHaveLength(100);
+    expect(hook.result.current.page.cursor).toEqual(cursor);
+    expect(hook.result.current.page.hasMore).toBe(true);
+    expect(hook.result.current.retainedRecords).toHaveLength(100);
+    expect(calls('clipboard_query')).toHaveLength(queried);
+    await act(async () => hook.result.current.loadMore());
+    expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ cursor });
+  });
+
+  it('invalidates the default page on data events and does not restore a stale default after search', async () => {
+    const hook = renderHook(({ query }) => useClipboard(true, query, false), { initialProps: { query: '' } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(2));
+    hook.rerender({ query: 'Saved' });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(1));
+    records = records.filter(({ id }) => id !== 'first');
+    await emit('clipboard_changed', 1);
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(0));
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async () => new Promise((resolve) => { finish = resolve; });
+    const queried = calls('clipboard_query').length;
+    hook.rerender({ query: '' });
+    expect(calls('clipboard_query')).toHaveLength(queried + 1);
+    expect(hook.result.current.page.records).toHaveLength(0);
+    expect(hook.result.current.showActivity).toBe(false);
+    await act(async () => finish(page()));
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['pinned']);
+  });
+
+  it('keeps current record fields ahead of retained defaults and removes explicitly deleted cached rows', async () => {
+    const hook = renderHook(({ query }) => useClipboard(true, query, false), { initialProps: { query: '' } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(2));
+    records[0] = { ...records[0], title: 'Current title', text: 'Saved current text' };
+    hook.rerender({ query: 'Saved' });
+    await waitFor(() => expect(hook.result.current.page.records[0]?.title).toBe('Current title'));
+    expect(hook.result.current.retainedRecords.find(({ id }) => id === 'first')?.text).toBe('Saved current text');
+    expect(hook.result.current.retainedRecords.find(({ id }) => id === 'first')?.title).toBe('Current title');
+    await act(async () => hook.result.current.update('first', 'delete'));
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(0));
+    expect(hook.result.current.retainedRecords.some(({ id }) => id === 'first')).toBe(false);
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async () => new Promise((resolve) => { finish = resolve; });
+    const queried = calls('clipboard_query').length;
+    hook.rerender({ query: '' });
+    expect(calls('clipboard_query')).toHaveLength(queried + 1);
+    expect(hook.result.current.page.records.some(({ id }) => id === 'first')).toBe(false);
+    await act(async () => finish(page()));
+    expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['pinned']);
+  });
+
+  it('invalidates the default page for local edits and keeps the edited row fields while hidden', async () => {
+    const hook = renderHook(({ query }) => useClipboard(true, query, false), { initialProps: { query: '' } });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(2));
+    hook.rerender({ query: 'Saved' });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(1));
+    records[0] = { ...records[0], title: 'Edited title', text: 'Changed content' };
+    act(() => hook.result.current.applyEdit('first', { title: 'Edited title', text: 'Changed content' }));
+    expect(hook.result.current.page.records).toHaveLength(0);
+    expect(hook.result.current.retainedRecords.find(({ id }) => id === 'first')).toMatchObject({ title: 'Edited title', text: 'Changed content' });
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async () => new Promise((resolve) => { finish = resolve; });
+    const queried = calls('clipboard_query').length;
+    hook.rerender({ query: '' });
+    expect(calls('clipboard_query')).toHaveLength(queried + 1);
+    expect(hook.result.current.page.records).toHaveLength(0);
+    await act(async () => finish(page()));
+    expect(hook.result.current.page.records[0]).toMatchObject({ title: 'Edited title', text: 'Changed content' });
+  });
+
+  it('does not revalidate a default response that raced a deferred data-change event', async () => {
+    let finish: (value: ClipboardPage) => void = () => {};
+    queryHandler = async () => new Promise((resolve) => { finish = resolve; });
+    const hook = renderHook(({ query }) => useClipboard(true, query, false, () => true), { initialProps: { query: '' } });
+    await waitFor(() => expect(calls('clipboard_query')).toHaveLength(1));
+    await emit('clipboard_changed', 1);
+    await act(async () => finish(page()));
+    expect(hook.result.current.page.records).toHaveLength(2);
+    queryHandler = undefined;
+    hook.rerender({ query: 'Saved' });
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(1));
+    const queried = calls('clipboard_query').length;
+    hook.rerender({ query: '' });
+    expect(calls('clipboard_query')).toHaveLength(queried + 1);
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(2));
+  });
+
+  it('restores the default query immediately without a clear-search debounce or activity and rejects late search results', async () => {
+    const hook = renderHook(({ query }) => useClipboard(true, query, false), { initialProps: { query: 'Saved' } });
+    await waitFor(() => expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['first']));
+    let finishSearch: (value: ClipboardPage) => void = () => {};
+    let finishDefault: (value: ClipboardPage) => void = () => {};
+    queryHandler = (request) => new Promise((resolve) => { if (request.query) finishSearch = resolve; else finishDefault = resolve; });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const initialQueries = calls('clipboard_query').length;
+      hook.rerender({ query: 'slow' });
+      expect(calls('clipboard_query')).toHaveLength(initialQueries);
+      act(() => vi.advanceTimersByTime(149));
+      expect(calls('clipboard_query')).toHaveLength(initialQueries);
+      act(() => vi.advanceTimersByTime(1));
+      expect(calls('clipboard_query')).toHaveLength(initialQueries + 1);
+      expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: 'slow', favoritesOnly: false, cursor: null });
+      hook.rerender({ query: '' });
+      expect(calls('clipboard_query')).toHaveLength(initialQueries + 2);
+      expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false, cursor: null });
+      expect(hook.result.current.showActivity).toBe(false);
+      await act(async () => finishDefault(page()));
+      expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['first', 'pinned']);
+      expect(hook.result.current.loading).toBe(false);
+      await act(async () => finishSearch({ records: [], totalRecords: 0, hasMore: false, cursor: null }));
+      expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['first', 'pinned']);
+      expect(hook.result.current.showActivity).toBe(false);
+      act(() => vi.advanceTimersByTime(150));
+      expect(calls('clipboard_query')).toHaveLength(initialQueries + 2);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('keeps a newer search when an older result finishes late and refreshes current filters on capture', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     let stale: (value: ClipboardPage) => void = () => {};
-    queryHandler = async (request) => request.query === 'slow' ? new Promise((resolve) => { stale = resolve; }) : page(request.query, request.favoritesOnly);
+    queryHandler = async (request) => request.query === 'slow' ? new Promise((resolve) => { stale = resolve; }) : page(request.query, request.favoritesOnly, request.kind);
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'slow' } });
     await waitFor(() => expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ query: 'slow' }));
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Saved' } });

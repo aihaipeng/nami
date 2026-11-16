@@ -12,7 +12,8 @@ import { cn } from '../lib/utils';
 import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
-import { useClipboard, type ClipboardRecord } from './useClipboard';
+import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
+import { useClipboardImageText } from './useClipboardImageText';
 import { HistoryList } from '../shared/HistoryList';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
@@ -23,21 +24,26 @@ import './clipboard.css';
 
 export function Clipboard({ t, snapshot, command, native, activity, active = true }: ViewProps & { active?: boolean }) {
   const [session, setSession] = useState(0);
+  const [kindFilter, setKindFilter] = useState<ClipboardKind | null>(null);
+  const [processing, setProcessing] = useState<string | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
   const operation = useRef(0);
+  const processingRevision = useRef(0);
   const mounted = useRef(true);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
-  const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, pinnedList, () => clipboard.displayReady, () => clipboard.page.records);
+  const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, pinnedList, () => clipboard.displayReady, () => clipboard.page.records, kindFilter);
   const { query, setQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember } = browser;
-  const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0);
+  const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0, kindFilter);
   const records = clipboard.page.records;
+  const imageText = useClipboardImageText(records, active && native && snapshot.capabilities.imageOcr);
   const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
   const visibleIds = new Set(records.map(({ id }) => id));
   const ordered = [...records.filter((record) => record.isPinned), ...records.filter((record) => !record.isPinned)];
@@ -48,8 +54,9 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
     void listen<{ label: string; visible: boolean }>('window://visibility', ({ payload }) => {
       if (disposed || payload.label !== 'clipboard' || snapshot.window.recordsSession !== undefined) return;
       ++operation.current;
+      ++processingRevision.current;
       setEditing(null); setMenu(null); setRevealed(null); setSelected(null); setFeedback(null);
-      setQuery(''); setFavoritesOnly(false); setSession((value) => value + 1);
+      setQuery(''); setFavoritesOnly(false); setKindFilter(null); setProcessing(null); setProcessingError(null); setSession((value) => value + 1);
       list.current?.scrollTo(0, 0); pinnedList.current?.scrollTo(0, 0);
       if (!payload.visible) (document.activeElement as HTMLElement | null)?.blur();
     }).then((unlisten) => { if (disposed) unlisten(); else remove = unlisten; }).catch(() => { if (!disposed) setFeedback('nativeError'); });
@@ -65,7 +72,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
     return () => { disposed = true; void subscription.then((remove) => remove()); };
   }, [native]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; ++operation.current; }; }, []);
-  useEffect(() => { setMenu(null); setRevealed(null); }, [query, favoritesOnly]);
+  useEffect(() => { setMenu(null); setRevealed(null); }, [query, favoritesOnly, kindFilter]);
   useEffect(() => {
     const dismiss = () => setMenu(null);
     window.addEventListener('scroll', dismiss, true);
@@ -73,9 +80,11 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   }, []);
   useEffect(() => {
     ++operation.current;
+    ++processingRevision.current;
+    setKindFilter(null); setProcessing(null); setProcessingError(null);
     setEditing(null); setMenu(null); setRevealed(null); setSelected(null); setFeedback(null); setSession((value) => value + 1);
   }, [snapshot.window.recordsSession]);
-  useEffect(() => { if (!active) { ++operation.current; setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setSession((value) => value + 1); } }, [active]);
+  useEffect(() => { if (!active) { ++operation.current; ++processingRevision.current; setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setProcessing(null); setProcessingError(null); setSession((value) => value + 1); } }, [active]);
   useEffect(() => {
     if (active && snapshot.window.recordsFocus !== undefined) search.current?.focus({ preventScroll: true });
   }, [active, snapshot.window.recordsFocus]);
@@ -97,6 +106,22 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
     finally { activity(-1); }
   }
 
+  async function processRecord(recordId: string, action: 'translate' | 'ocr') {
+    const current = ++operation.current;
+    const revision = ++processingRevision.current;
+    activity(1); setProcessing(recordId); setProcessingError(null); setFeedback(null);
+    try {
+      await invoke('clipboard_record_process', { recordId, action });
+    } catch (error) {
+      if (mounted.current && operation.current === current && String(error) !== 'cancelled') {
+        setProcessingError(action === 'ocr' ? 'Unable to extract and copy text. Try again.' : 'Unable to open this text for translation. Try again.');
+      }
+    } finally {
+      activity(-1);
+      if (mounted.current && processingRevision.current === revision) setProcessing(null);
+    }
+  }
+
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (!active || event.defaultPrevented || event.isComposing || event.keyCode === 229 || (editing && event.key === 'Escape')) return;
@@ -114,9 +139,11 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   }
   function row(record: ClipboardRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
+    const canTranslate = record.kind === 'text' ? !!record.text.trim() : (record.kind === 'image' || record.kind === 'files') && snapshot.capabilities.imageOcr && imageText.get(record.id) === true;
+    const canOcr = canTranslate && record.kind !== 'text' && snapshot.capabilities.clipboardWrite;
     const kind = record.kind === 'image' ? t('clipboardImage') : record.kind === 'files' ? t('clipboardFiles') : t('text');
     const index = ordered.findIndex(({ id }) => id === record.id);
-    return <article data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setSelected(record.id); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selected === record.id && 'selected', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${canDelete ? 99 : 74}px` } as CSSProperties}>
+    return <article data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setSelected(record.id); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selected === record.id && 'selected', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${(canDelete ? 99 : 74) + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
       <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" disabled={!native || !snapshot.capabilities.autoPaste} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-pressed={selected === record.id} onFocus={() => setSelected(record.id)} onClick={() => void useRecord(record.id, 'paste')} onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'ArrowDown' && ordered[index + 1]) { event.preventDefault(); focusRow(ordered[index + 1].id); }
@@ -126,6 +153,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : undefined} /> : record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : <span className="history-preview">{historyPreview(record.text)}</span>}
       </button>
       <RecordActions t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
+        busy={processing !== null} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
         onCopy={() => { void useRecord(record.id, 'copy'); }} onUpdate={(action) => { void clipboard.update(record.id, action); }} />
     </article>;
   }
@@ -138,7 +166,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
       {clipboard.retainedRecords.filter((record) => !record.isPinned).map(row)}
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status"><p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardCaptureOff')}</p>{!query && !favoritesOnly && !snapshot.clipboardCaptureEnabled && <button onClick={() => void command('window_show', { target: 'settings' })}>{t('openSettings')}</button>}</div>}
     </HistoryList>
-    <HistoryFooter key={session} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
+    <HistoryFooter key={session} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} kind={kindFilter} onKindChange={(next) => { remember(); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
     {menu && menuRecord && <ClipboardMenu record={menuRecord} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
       if (action === 'paste') void useRecord(menuRecord.id, 'paste');
@@ -146,6 +174,6 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
       else void clipboard.update(menuRecord.id, action);
     }} />}
     {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} onSaved={(detail) => clipboard.applyEdit(editing, detail)} onReturnFocus={() => focusRow(editing)} />}
-    <RecordFeedback message={active && feedback ? t(feedback) : null} />
+    <RecordFeedback message={active ? processingError ?? (feedback ? t(feedback) : null) : null} />
   </section>;
 }

@@ -50,6 +50,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
   useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
   const capabilities = snapshot.capabilities;
+  const currentWindow = useRef(state);
+  currentWindow.current = state;
   const primaryKey = capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl';
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
   const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, {
@@ -100,6 +102,20 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read selected text.'); });
     return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
   }, [native, capabilities.selection]);
+
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const take = async () => {
+      const revision = requestRevision.current;
+      const session = currentWindow.current.recordsSession;
+      const context = await invoke<{ text: string; error: string | null } | null>('clipboard_translation_take');
+      if (!disposed && context && requestRevision.current === revision && currentWindow.current.recordsSession === session && currentWindow.current.translationVisible) receiveSelection.current(context);
+    };
+    const remove = listen('clipboard_translation_ready', () => { void take().catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); }); });
+    void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); });
+    return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
+  }, [native]);
 
   useEffect(() => {
     completedRecord.current = null;
@@ -194,7 +210,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     cancelRequest(); normalizedCaret.current = null;
     setDraft(context.text); setSource('auto'); setCachedResults([]); setNotice(null); clearSelection();
     fromSelection.current = true;
-    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error?.startsWith('clipboard_') ? 'Unable to safely capture the selection and restore the clipboard. Try again or paste text manually.' : context.error ? 'Selected text is unavailable in this application.' : null);
+    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error ? 'Selected text is unavailable in this application.' : null);
     if (context.text.trim()) void translateText(context.text, 'auto', [primary, ...(secondary === 'none' ? [] : [secondary])], true);
     input.current?.focus({ preventScroll: true });
   };

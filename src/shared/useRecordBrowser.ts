@@ -1,18 +1,18 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 
-export function useRecordBrowser(session: number | undefined, active: boolean, list: RefObject<HTMLDivElement | null>, pinnedList: RefObject<HTMLDivElement | null>, dataReady: () => boolean = () => true, contentVersion: () => unknown = () => undefined) {
+export function useRecordBrowser(session: number | undefined, active: boolean, list: RefObject<HTMLDivElement | null>, pinnedList: RefObject<HTMLDivElement | null>, dataReady: () => boolean = () => true, contentVersion: () => unknown = () => undefined, filterKey: string | null = null) {
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const positions = useRef(new Map<boolean, { top: number }>());
+  const positions = useRef(new Map<string, { top: number }>());
   const restoring = useRef<{ top: number } | null>(null);
-  const previous = useRef({ query, favoritesOnly, active, session });
+  const previous = useRef({ query, favoritesOnly, active, session, filterKey });
   const anchor = useRef<{ id: string; offset: number } | null>(null);
   const previousContent = useRef<unknown>(undefined);
   function remember() {
     if (restoring.current && !dataReady()) return;
     restoring.current = null;
     const element = list.current;
-    positions.current.set(favoritesOnly, { top: element?.scrollTop ?? 0 });
+    positions.current.set(`${filterKey ?? ''}:${favoritesOnly}`, { top: element?.scrollTop ?? 0 });
     const row = element && [...element.querySelectorAll<HTMLElement>('.history-items > .history-row:not([hidden])')].find((row) => row.offsetTop + row.offsetHeight > element.scrollTop + (pinnedList.current?.offsetHeight ?? 0));
     anchor.current = element && element.scrollTop > 0 && row ? { id: row.dataset.recordId!, offset: row.offsetTop - element.scrollTop } : null;
   }
@@ -22,8 +22,8 @@ export function useRecordBrowser(session: number | undefined, active: boolean, l
     const changedQuery = old.query !== query;
     if (reset || changedQuery) { positions.current.clear(); anchor.current = null; restoring.current = null; }
     if (reset) { setQuery(''); setFavoritesOnly(false); }
-    if (active && (reset || changedQuery || old.favoritesOnly !== favoritesOnly || !old.active)) {
-      const saved = reset || changedQuery ? undefined : positions.current.get(favoritesOnly);
+    if (active && (reset || changedQuery || old.favoritesOnly !== favoritesOnly || old.filterKey !== filterKey || !old.active)) {
+      const saved = reset || changedQuery ? undefined : positions.current.get(`${filterKey ?? ''}:${favoritesOnly}`);
       restoring.current = saved ?? { top: 0 };
       anchor.current = null;
     } else if (active && previousContent.current !== contentVersion() && anchor.current && list.current) {
@@ -35,7 +35,7 @@ export function useRecordBrowser(session: number | undefined, active: boolean, l
       list.current?.scrollTo({ top: saved.top });
       if (dataReady() && (list.current?.scrollHeight ?? 0) - (list.current?.clientHeight ?? 0) >= saved.top) restoring.current = null;
     }
-    previous.current = { query, favoritesOnly, active, session };
+    previous.current = { query, favoritesOnly, active, session, filterKey };
     previousContent.current = contentVersion();
   });
   function changeQuery(value: string) { remember(); setQuery(value); }

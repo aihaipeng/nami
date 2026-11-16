@@ -35,7 +35,6 @@ unsafe extern "C" {
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
     static kAXTrustedCheckOptionPrompt: *const c_void;
     fn CGEventCreateKeyboardEvent(source: *const c_void, key: u16, down: bool) -> *mut c_void;
-    fn CGEventSourceCreate(state: i32) -> *mut c_void;
     fn CGEventSetFlags(event: *mut c_void, flags: u64);
     fn CGEventPostToPid(pid: i32, event: *const c_void);
 }
@@ -344,47 +343,6 @@ pub fn secure_input() -> bool {
     unsafe { IsSecureEventInputEnabled() }
 }
 
-pub fn send_copy(target: Target) -> Result<(), &'static str> {
-    if !accessibility() {
-        return Err("permission_required");
-    }
-    if secure_input() {
-        return Err("selection_secure");
-    }
-    if !target_focused(target) {
-        return Err("target_unavailable");
-    }
-    unsafe {
-        let source = CGEventSourceCreate(-1);
-        if source.is_null() {
-            return Err("event_creation");
-        }
-        let keys = [
-            (55, true, 1 << 20),
-            (8, true, 1 << 20),
-            (8, false, 1 << 20),
-            (55, false, 0),
-        ];
-        let events: Vec<_> = keys
-            .iter()
-            .map(|(key, down, _)| CGEventCreateKeyboardEvent(source, *key, *down))
-            .collect();
-        CFRelease(source);
-        if events.iter().any(|event| event.is_null()) {
-            for event in events.into_iter().filter(|event| !event.is_null()) {
-                CFRelease(event);
-            }
-            return Err("event_creation");
-        }
-        for (event, (_, _, flags)) in events.iter().zip(keys) {
-            CGEventSetFlags(*event, flags);
-            CGEventPostToPid(target.pid, *event);
-            CFRelease(*event);
-        }
-    }
-    Ok(())
-}
-
 pub fn request_accessibility() -> bool {
     unsafe {
         let key = kAXTrustedCheckOptionPrompt;
@@ -515,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_selection_does_not_read_range_or_require_copy() {
+    fn empty_selection_does_not_read_range() {
         for (selected, range) in [
             (Some(String::new()), Some(0)),
             (Some(" \n".into()), None),
@@ -543,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_failed_range_keeps_copy_fallback() {
+    fn unknown_or_failed_range_reports_unavailable() {
         assert_eq!(
             resolve_selection(None, None, || panic!("no valid range")),
             Err("selection_unavailable")
@@ -569,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_text_accepts_an_explicit_empty_selection_without_copy_fallback() {
+    fn selected_text_accepts_an_explicit_empty_selection() {
         assert_eq!(selection_result(" \t\n\u{3000}".into()), Ok(String::new()));
         assert_eq!(
             selection_result("  Synthetic selection\n".into()),

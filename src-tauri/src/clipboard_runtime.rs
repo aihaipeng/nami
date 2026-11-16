@@ -97,11 +97,10 @@ fn record_payload(
 fn observe_pending(
     handled: &AtomicI64,
     version: i64,
-    busy: bool,
     read: impl FnOnce() -> Result<Option<platform::ClipboardCapture>, &'static str>,
 ) -> Result<Option<(i64, platform::ClipboardCapture)>, &'static str> {
     let previous = handled.load(Ordering::SeqCst);
-    if busy || previous == version {
+    if previous == version {
         return Ok(None);
     }
     let capture = match read() {
@@ -172,7 +171,6 @@ pub(crate) fn start(app: &AppHandle) {
                 observe_pending(
                     &state.clipboard_version,
                     platform::clipboard_version(),
-                    state.selection_busy.load(Ordering::SeqCst),
                     platform::read_clipboard,
                 )
                 .map_err(str::to_owned)
@@ -325,8 +323,8 @@ mod tests {
     #[test]
     fn read_failure_remains_pending_for_the_same_version() {
         let handled = AtomicI64::new(7);
-        assert!(observe_pending(&handled, 8, false, || Err("clipboard_read")).is_err());
-        let next = observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8)))).unwrap();
+        assert!(observe_pending(&handled, 8, || Err("clipboard_read")).is_err());
+        let next = observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8)))).unwrap();
         assert!(
             next.is_some(),
             "a transient read failure must not consume the copy"
@@ -336,7 +334,7 @@ mod tests {
     #[test]
     fn persistence_failure_leaves_capture_pending() {
         let handled = AtomicI64::new(7);
-        let first = observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8)))).unwrap();
+        let first = observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8)))).unwrap();
         assert!(first.is_some());
         assert_eq!(
             handled.load(Ordering::SeqCst),
@@ -344,25 +342,50 @@ mod tests {
             "reading is not a database commit"
         );
         assert!(
-            observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8))))
+            observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8))))
                 .unwrap()
                 .is_some()
         );
     }
 
     #[test]
-    fn ax_selection_pause_does_not_consume_an_external_copy() {
-        let handled = AtomicI64::new(7);
-        assert!(observe_pending(&handled, 8, true, || panic!(
-            "must not read while selecting"
-        ))
+    fn ax_busy_does_not_pause_an_external_copy_or_consume_it_before_commit() {
+        let state = AppState::default();
+        state.selection_busy.store(true, Ordering::SeqCst);
+        state.clipboard_version.store(7, Ordering::SeqCst);
+        let (baseline, capture) = observe_pending(&state.clipboard_version, 8, || {
+            Ok(Some(synthetic_capture(8)))
+        })
         .unwrap()
-        .is_none());
-        assert!(
-            observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8))))
-                .unwrap()
-                .is_some()
-        );
+        .expect("AX reads cannot block an independent external copy");
+        assert_eq!(state.clipboard_version.load(Ordering::SeqCst), 7);
+        assert!(state.selection_busy.load(Ordering::SeqCst));
+        let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        persist_capture(&mut database, Path::new("unused-for-text-capture"), capture).unwrap();
+        acknowledge(&state.clipboard_version, baseline, 8);
+        assert_eq!(state.clipboard_version.load(Ordering::SeqCst), 8);
+        assert!(state.selection_busy.load(Ordering::SeqCst));
+        let records = database
+            .clipboard_page("", false, None, 100)
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, "Synthetic new copy");
+    }
+
+    #[test]
+    fn ax_only_activity_neither_reads_nor_acknowledges_an_unchanged_clipboard() {
+        let state = AppState::default();
+        state.clipboard_version.store(7, Ordering::SeqCst);
+        for busy in [true, false] {
+            state.selection_busy.store(busy, Ordering::SeqCst);
+            assert!(observe_pending(&state.clipboard_version, 7, || panic!(
+                "AX activity did not change the clipboard"
+            ))
+            .unwrap()
+            .is_none());
+            assert_eq!(state.clipboard_version.load(Ordering::SeqCst), 7);
+        }
     }
 
     #[test]
@@ -373,9 +396,9 @@ mod tests {
             "clipboard_file_url",
         ] {
             let handled = AtomicI64::new(7);
-            assert!(observe_pending(&handled, 8, false, || Err(error)).is_err());
+            assert!(observe_pending(&handled, 8, || Err(error)).is_err());
             assert_eq!(handled.load(Ordering::SeqCst), 8);
-            assert!(observe_pending(&handled, 8, false, || panic!(
+            assert!(observe_pending(&handled, 8, || panic!(
                 "permanent payload failure must not loop"
             ))
             .unwrap()
@@ -397,7 +420,7 @@ mod tests {
         let lock = rusqlite::Connection::open(&path).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         let handled = AtomicI64::new(7);
-        let (_, capture) = observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8))))
+        let (_, capture) = observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8))))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -406,10 +429,9 @@ mod tests {
         );
         assert_eq!(handled.load(Ordering::SeqCst), 7);
         lock.execute_batch("ROLLBACK").unwrap();
-        let (baseline, capture) =
-            observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8))))
-                .unwrap()
-                .unwrap();
+        let (baseline, capture) = observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8))))
+            .unwrap()
+            .unwrap();
         let version = capture.version;
         persist_capture(&mut database, &root, capture).unwrap();
         acknowledge(&handled, baseline, version);
@@ -430,13 +452,12 @@ mod tests {
     #[test]
     fn successful_commit_acknowledges_only_its_baseline() {
         let handled = AtomicI64::new(7);
-        let (baseline, capture) =
-            observe_pending(&handled, 8, false, || Ok(Some(synthetic_capture(8))))
-                .unwrap()
-                .unwrap();
+        let (baseline, capture) = observe_pending(&handled, 8, || Ok(Some(synthetic_capture(8))))
+            .unwrap()
+            .unwrap();
         acknowledge(&handled, baseline, capture.version);
         assert_eq!(handled.load(Ordering::SeqCst), 8);
-        assert!(observe_pending(&handled, 8, false, || panic!(
+        assert!(observe_pending(&handled, 8, || panic!(
             "committed copy must not be read again"
         ))
         .unwrap()
@@ -453,9 +474,7 @@ mod tests {
     #[test]
     fn excluded_content_is_acknowledged_without_persistence() {
         let handled = AtomicI64::new(7);
-        assert!(observe_pending(&handled, 8, false, || Ok(None))
-            .unwrap()
-            .is_none());
+        assert!(observe_pending(&handled, 8, || Ok(None)).unwrap().is_none());
         assert_eq!(handled.load(Ordering::SeqCst), 8);
     }
 

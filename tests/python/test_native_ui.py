@@ -9,6 +9,17 @@ import uuid
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'AX-only empty selection summon'}
+
+
+def check_selected_report(result, run_id, selected):
+    assert selected in CASE_NAMES, 'Unknown targeted native test'
+    assert result['runId'] == run_id
+    assert result['testCase'] == selected
+    assert result['passed'] is True, result['domCases']
+    assert result['cases'] == []
+    assert [item['name'] for item in result['domCases']] == [CASE_NAMES[selected]]
+    assert all(item['passed'] for item in result['domCases'])
 
 
 def check_report(result, run_id, visible):
@@ -48,14 +59,7 @@ def test_native_ui():
     result = json.loads(report.read_text())
     selected = os.environ.get('NAMI_UI_TEST_CASE')
     if selected:
-        names = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC'}
-        assert selected in names, 'Unknown targeted native test'
-        assert result['runId'] == run_id
-        assert result['testCase'] == selected
-        assert result['passed'] is True, result['domCases']
-        assert result['cases'] == []
-        assert [item['name'] for item in result['domCases']] == [names[selected]]
-        assert all(item['passed'] for item in result['domCases'])
+        check_selected_report(result, run_id, selected)
     else:
         check_report(result, run_id, visible)
     assert run.returncode == 0, f'Native test process exited with {run.returncode}'
@@ -76,6 +80,22 @@ def valid_report():
             'maxModelPresentationDelta': 0, 'visibleLiveResizeVerified': False,
         },
     }
+
+
+@pytest.mark.dfx_diagnostics
+@pytest.mark.parametrize('selected', ['clipboard-kind-text', 'records-open', 'selection-open'])
+def test_selected_report_accepts_only_its_current_complete_case(selected):
+    name = CASE_NAMES[selected]
+    result = {'runId': 'current', 'testCase': selected, 'passed': True,
+              'cases': [], 'domCases': [{'name': name, 'passed': True}]}
+    check_selected_report(result, 'current', selected)
+    for field, value in [('runId', 'old'), ('testCase', 'clipboard-media'), ('passed', False),
+                         ('cases', [{}]), ('domCases', []),
+                         ('domCases', [{'name': 'clipboard media layout', 'passed': True}]),
+                         ('domCases', [{'name': name, 'passed': False}])]:
+        altered = {**result, field: value}
+        with pytest.raises(AssertionError):
+            check_selected_report(altered, 'current', selected)
 
 
 @pytest.mark.dfx_diagnostics

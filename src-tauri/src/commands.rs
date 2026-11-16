@@ -70,6 +70,11 @@ pub fn window_hide(
     } else {
         return Err("invalid_argument".into());
     }
+    if region != "settings" {
+        app.state::<AppState>()
+            .image_text_operation
+            .fetch_add(1, Ordering::SeqCst);
+    }
     if region == "translation" && keep_history == Some(true) {
         {
             let state = app.state::<AppState>();
@@ -145,6 +150,9 @@ pub fn window_pin(
 #[tauri::command]
 pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
+    app.state::<AppState>()
+        .image_text_operation
+        .fetch_add(1, Ordering::SeqCst);
     windows::set_record_view(&app, &view)
 }
 
@@ -751,20 +759,23 @@ pub async fn clipboard_query(
     app: AppHandle,
     query: String,
     favorites_only: bool,
+    kind: Option<String>,
     cursor: Option<nami::clipboard::ClipboardCursor>,
 ) -> Result<nami::clipboard::ClipboardQueryResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
     crate::clipboard_runtime::database(&app, move |database| {
-        let page = database.clipboard_page(
+        let page = database.clipboard_page_filtered(
             &query,
             favorites_only,
+            kind.as_deref(),
             cursor.as_ref(),
             crate::database::PAGE_SIZE,
         )?;
         let alternate = if cursor.is_none() {
-            Some(database.clipboard_page(
+            Some(database.clipboard_page_filtered(
                 &query,
                 !favorites_only,
+                kind.as_deref(),
                 None,
                 crate::database::PAGE_SIZE,
             )?)
@@ -785,6 +796,41 @@ pub async fn clipboard_record_detail(
     authorize(&window, &["clipboard", "translation"])?;
     crate::clipboard_runtime::database(&app, move |database| database.clipboard_detail(&record_id))
         .await
+}
+
+#[tauri::command]
+pub async fn clipboard_record_has_text(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<bool, String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    crate::clipboard_text::has_text(&app, record_id).await
+}
+
+#[tauri::command]
+pub async fn clipboard_record_process(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+    action: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    crate::clipboard_text::process(&app, record_id, action).await
+}
+
+#[tauri::command]
+pub fn clipboard_translation_take(
+    window: Webview,
+    app: AppHandle,
+) -> Result<Option<crate::selection::SelectionContext>, String> {
+    authorize(&window, &["translation"])?;
+    let state = app.state::<AppState>();
+    let context = state.clipboard_translation.lock().unwrap().take();
+    if let Some(context) = &context {
+        *state.selection_source.lock().unwrap() = context.source_app.clone();
+    }
+    Ok(context)
 }
 
 #[tauri::command]

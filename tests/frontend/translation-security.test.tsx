@@ -20,13 +20,13 @@ describe('translation security', () => {
     expect(calls('translation_run')).toHaveLength(1);
   });
 
-  it('does not submit after a clipboard capture or restoration failure', async () => {
+  it('does not submit when the selection handoff reports unavailable text', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     await mount();
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'selection_take' ? Promise.resolve({ text: '', error: 'clipboard_restore_failed' }) : invoke(name, args));
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'selection_take' ? Promise.resolve({ text: '', error: 'selection_unavailable' }) : invoke(name, args));
     await emit('selection_ready', null);
     expect(source().value).toBe('');
-    expect(screen.getAllByRole('alert')[0].textContent).toContain('restore the clipboard');
+    expect(screen.getAllByRole('alert')[0].textContent).toContain('Selected text is unavailable');
     expect(calls('translation_run')).toHaveLength(0);
   });
 

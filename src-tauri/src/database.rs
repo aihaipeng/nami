@@ -158,6 +158,7 @@ impl HistoryDatabase {
             tx.execute_batch("ALTER TABLE clipboard_records ADD COLUMN title TEXT NOT NULL DEFAULT ''; PRAGMA user_version=4;").map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
         }
+        clipboard::ensure_filter_indexes(&connection)?;
         let clipboard_total_records = connection
             .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
                 row.get::<_, i64>(0)

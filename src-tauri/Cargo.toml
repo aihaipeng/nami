@@ -8,18 +8,12 @@ rust-version = "1.100"
 default-run = "nami"
 
 [[bin]]
-name = "selection-fixture"
-path = "src/bin/selection-fixture.rs"
-required-features = ["selection-fixture"]
-
-[[bin]]
 name = "export-history-icons"
 path = "src/bin/export-history-icons.rs"
 required-features = ["ui-tests"]
 
 [features]
 portable-ui = []
-selection-fixture = []
 ui-tests = ["dep:block2"]
 
 [build-dependencies]
@@ -42,4 +36,7 @@ uuid = { version = "1.29.2", features = ["v4"] }
 objc2 = "0.6"
 block2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSScrollView", "NSButton", "NSControl", "NSCell", "NSButtonCell", "NSWindow", "NSTextField"] }
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-image-io = { version = "0.3", default-features = false, features = ["std", "CGImageSource", "CGImageProperties"] }
+objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNTypes", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "objc2-image-io"] }

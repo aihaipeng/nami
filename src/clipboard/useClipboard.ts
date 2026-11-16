@@ -13,6 +13,9 @@ export interface ClipboardRecord {
   sourceApp?: { name: string; iconDataUrl?: string | null } | null;
   imagePath?: string | null;
 }
+export type ClipboardKind = ClipboardRecord['kind'];
+const cacheKey = (kind: ClipboardKind | null, favorites: boolean) => `${kind ?? 'all'}:${favorites}`;
+const matchesCache = (record: ClipboardRecord, key: string) => key === cacheKey(record.kind, false) || (record.isFavorite && key === cacheKey(record.kind, true)) || key === cacheKey(null, false) || (record.isFavorite && key === cacheKey(null, true));
 export interface ClipboardCursor { pinned: boolean; createdAt: number; sequence: number }
 export interface ClipboardPage { records: ClipboardRecord[]; cursor: ClipboardCursor | null; hasMore: boolean; totalRecords: number }
 interface ClipboardWirePage extends Omit<ClipboardPage, 'records'> {
@@ -24,7 +27,7 @@ function hydrate(page: ClipboardWirePage): ClipboardPage {
 }
 const emptyPage: ClipboardPage = { records: [], cursor: null, hasMore: false, totalRecords: 0 };
 
-export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean) {
+export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean, kind: ClipboardKind | null = null) {
   const [page, setPage] = useState(emptyPage);
   const [loading, setLoading] = useState(native);
   const [showActivity, setShowActivity] = useState(native);
@@ -36,11 +39,13 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const lifecycle = useRef(0);
   const request = useRef(0);
   const latest = useRef(page);
-  const filters = useRef({ query, favoritesOnly });
-  const loadedFilters = useRef({ query, favoritesOnly });
+  const filters = useRef({ query, favoritesOnly, kind });
+  const loadedFilters = useRef({ query, favoritesOnly, kind });
   const morePending = useRef(false);
   const resetPending = useRef(false);
-  const pages = useRef(new Map<boolean, ClipboardPage>());
+  const pages = useRef(new Map<string, ClipboardPage>());
+  const defaultPage = useRef<{ page: ClipboardPage; revision: number } | null>(null);
+  const defaultRevision = useRef(0);
   const deferred = useRef(false);
   const localWrites = useRef(0);
   const writeQueue = useRef(Promise.resolve());
@@ -48,27 +53,30 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   shouldDefer.current = deferRefresh;
 
   const fetchPage = useCallback(async (append = false, animate = true) => {
-    if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || !latest.current.hasMore))) return;
+    if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || loadedFilters.current.kind !== filters.current.kind || !latest.current.hasMore))) return;
     const current = append ? request.current : ++request.current;
     const cursor = append ? latest.current.cursor : null;
     const queryFilters = { ...filters.current };
+    const cacheRevision = defaultRevision.current;
     if (append) morePending.current = true;
     else { resetPending.current = true; morePending.current = false; }
     setLoading(true); setShowActivity(animate); setError(false);
     try {
-      const result = await invoke<{ page: ClipboardWirePage; alternate: ClipboardWirePage | null }>('clipboard_query', { ...queryFilters, cursor });
+      const result = await invoke<{ page: ClipboardWirePage; alternate: ClipboardWirePage | null }>('clipboard_query', { query: queryFilters.query, favoritesOnly: queryFilters.favoritesOnly, ...(queryFilters.kind ? { kind: queryFilters.kind } : {}), cursor });
       const next = hydrate(result.page);
       if (!active.current || current !== request.current) return;
       const merged = append ? { ...next, records: [...latest.current.records, ...next.records.filter((record) => !latest.current.records.some(({ id }) => id === record.id))] } : next;
       if (!append) {
         loadedFilters.current = queryFilters;
-        if (result.alternate) {
-          const alternate = hydrate(result.alternate);
-          const retained = pages.current.get(!queryFilters.favoritesOnly);
-          if (!retained || retained.records.length <= alternate.records.length) pages.current.set(!queryFilters.favoritesOnly, alternate);
+        const alternate = result.alternate ? hydrate(result.alternate) : null;
+        if (alternate) {
+          const retained = pages.current.get(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly));
+          if (!retained || retained.records.length <= alternate.records.length) pages.current.set(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly), alternate);
         }
+        const home = queryFilters.favoritesOnly ? alternate : next;
+        if (!queryFilters.query && !queryFilters.kind && home && home.records.length <= 100 && cacheRevision === defaultRevision.current) defaultPage.current = { page: home, revision: cacheRevision };
       }
-      pages.current.set(queryFilters.favoritesOnly, merged);
+      pages.current.set(cacheKey(queryFilters.kind, queryFilters.favoritesOnly), merged);
       setCaptureError(false);
       latest.current = merged;
       setPage(merged);
@@ -91,7 +99,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const removers: (() => void)[] = [];
     if (native) void (async () => {
       for (const subscribe of [
-        () => listen<number>('clipboard_changed', () => { if (!disposed) { setCaptureError(false); if (localWrites.current || shouldDefer.current?.()) deferred.current = true; else { pages.current.clear(); deferred.current = false; void fetchPage(false, false); } } }),
+        () => listen<number>('clipboard_changed', () => { if (!disposed) { ++defaultRevision.current; setCaptureError(false); if (localWrites.current || shouldDefer.current?.()) deferred.current = true; else { pages.current.clear(); deferred.current = false; void fetchPage(false, false); } } }),
         () => listen<string>('clipboard_capture_error', () => { if (!disposed) setCaptureError(true); }),
       ]) {
         const remove = await subscribe();
@@ -101,42 +109,48 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       ready.current = true;
       await fetchPage();
     })().catch(() => { if (!disposed) { setError(true); setLoading(false); setShowActivity(false); } });
-    return () => { disposed = true; active.current = false; ready.current = false; pages.current.clear(); ++request.current; removers.forEach((remove) => remove()); };
+    return () => { disposed = true; active.current = false; ready.current = false; pages.current.clear(); defaultPage.current = null; ++defaultRevision.current; ++request.current; removers.forEach((remove) => remove()); };
   }, [native, fetchPage, connection]);
 
   useEffect(() => {
     const favoritesChanged = filters.current.favoritesOnly !== favoritesOnly;
-    if (filters.current.query === query && !favoritesChanged) return;
+    const kindChanged = filters.current.kind !== kind;
+    const queryChanged = filters.current.query !== query;
+    if (filters.current.query === query && !favoritesChanged && !kindChanged) return;
     if (filters.current.query !== query) pages.current.clear();
-    filters.current = { query, favoritesOnly };
+    filters.current = { query, favoritesOnly, kind };
     resetPending.current = true;
     ++request.current;
     if (!ready.current) return;
-    if (favoritesChanged) {
-      const cached = pages.current.get(favoritesOnly);
-      if (cached) {
-        latest.current = cached;
-        loadedFilters.current = { query, favoritesOnly };
-        resetPending.current = false;
-        morePending.current = false;
-        setPage(cached); setLoading(false); setShowActivity(false); setError(false);
-        return;
-      }
+    const cached = (!queryChanged ? pages.current.get(cacheKey(kind, favoritesOnly)) : undefined)
+      ?? (!query && !kind && !favoritesOnly && defaultPage.current?.revision === defaultRevision.current ? defaultPage.current.page : undefined);
+    if (cached) {
+      latest.current = cached;
+      loadedFilters.current = { query, favoritesOnly, kind };
+      pages.current.set(cacheKey(kind, favoritesOnly), cached);
+      resetPending.current = false;
+      morePending.current = false;
+      setPage(cached); setLoading(false); setShowActivity(false); setError(false);
+      return;
+    }
+    if (!queryChanged && (favoritesChanged || kindChanged)) {
       // Show known matches immediately; the database still supplies the complete first page.
-      const preview = { ...latest.current, records: latest.current.records.filter((record) => !favoritesOnly || record.isFavorite), cursor: null, hasMore: false };
+      const preview = { ...latest.current, records: latest.current.records.filter((record) => (!favoritesOnly || record.isFavorite) && (!kind || record.kind === kind)), cursor: null, hasMore: false };
       latest.current = preview;
       setPage(preview);
       void fetchPage(false, false);
       return;
     }
+    if (!query) { void fetchPage(false, false); return; }
     setLoading(true); setShowActivity(false);
     const timer = window.setTimeout(() => { void fetchPage(); }, 150);
     return () => window.clearTimeout(timer);
-  }, [query, favoritesOnly, fetchPage]);
+  }, [query, favoritesOnly, kind, fetchPage]);
 
   const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
     if (!native || !active.current) return;
     const session = lifecycle.current;
+    ++defaultRevision.current;
     const pending = writeQueue.current;
     let release!: () => void;
     writeQueue.current = new Promise<void>((resolve) => { release = resolve; });
@@ -148,22 +162,23 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     try {
       await invoke('clipboard_record_update', { recordId, action });
       if (!active.current || session !== lifecycle.current) return;
+      if (action === 'delete' && defaultPage.current) defaultPage.current.page = { ...defaultPage.current.page, records: defaultPage.current.page.records.filter((record) => record.id !== recordId) };
       if (!shouldDefer.current?.()) {
         pages.current.clear(); deferred.current = false; void fetchPage(false, false);
       } else if (previous) {
         const updated = action === 'delete' ? null : { ...previous, ...(action === 'favorite' ? { isFavorite: !previous.isFavorite } : { isPinned: !previous.isPinned }) };
-        for (const [favorites, cached] of pages.current) {
-          const before = !favorites || previous.isFavorite;
-          const after = updated !== null && (!favorites || updated.isFavorite);
+        for (const [key, cached] of pages.current) {
+          const before = matchesCache(previous, key);
+          const after = updated !== null && matchesCache(updated, key);
           let records = cached.records.filter((record) => record.id !== recordId);
           if (after && updated) {
             const oldIndex = cached.records.findIndex((record) => record.id === recordId);
             records.splice(oldIndex < 0 ? records.length : oldIndex, 0, updated);
             records = records.sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || Date.parse(b.date) - Date.parse(a.date));
           }
-          pages.current.set(favorites, { ...cached, records, totalRecords: cached.totalRecords + Number(after) - Number(before) });
+          pages.current.set(key, { ...cached, records, totalRecords: cached.totalRecords + Number(after) - Number(before) });
         }
-        const next = pages.current.get(filters.current.favoritesOnly);
+        const next = pages.current.get(cacheKey(filters.current.kind, filters.current.favoritesOnly));
         if (next) { latest.current = next; setPage(next); }
       }
     } catch { if (active.current && session === lifecycle.current) setError(true); }
@@ -171,23 +186,29 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   }, [native, fetchPage]);
 
   function applyEdit(recordId: string, detail: { title: string; text: string }) {
+    ++defaultRevision.current;
     const previous = latest.current.records.find((record) => record.id === recordId);
     if (!active.current || !previous) return;
     const matches = detail.text.toLowerCase().includes(filters.current.query.trim().toLowerCase());
     const updated = { ...previous, title: detail.title, text: [...detail.text].slice(0, 256).join('') };
-    const patch = (cached: ClipboardPage, favorites: boolean): ClipboardPage => {
-      const before = !favorites || previous.isFavorite;
+    if (defaultPage.current) defaultPage.current.page = { ...defaultPage.current.page, records: defaultPage.current.page.records.map((record) => record.id === recordId ? updated : record) };
+    const patch = (cached: ClipboardPage, key: string): ClipboardPage => {
+      const before = matchesCache(previous, key);
       const after = before && matches;
       const records = cached.records.flatMap((record) => record.id !== recordId ? [record] : after ? [updated] : []);
       const totalRecords = cached.totalRecords + Number(after) - Number(before);
       return { ...cached, records, totalRecords, hasMore: cached.hasMore && records.length < totalRecords };
     };
-    for (const [favorites, cached] of pages.current) pages.current.set(favorites, patch(cached, favorites));
-    latest.current = pages.current.get(filters.current.favoritesOnly) ?? patch(latest.current, filters.current.favoritesOnly);
+    for (const [key, cached] of pages.current) pages.current.set(key, patch(cached, key));
+    latest.current = pages.current.get(cacheKey(filters.current.kind, filters.current.favoritesOnly)) ?? patch(latest.current, cacheKey(filters.current.kind, filters.current.favoritesOnly));
     setPage(latest.current);
   }
 
-  const displayedPage = filters.current.query === query && loadedFilters.current.favoritesOnly !== favoritesOnly ? pages.current.get(favoritesOnly) ?? page : page;
-  const retainedRecords = [...new Map(displayedPage.records.concat([...pages.current.values()].flatMap((cached) => cached.records)).map((record) => [record.id, record])).values()];
-  return { applyEdit, page: displayedPage, displayReady: loadedFilters.current.query === query && (loadedFilters.current.favoritesOnly === favoritesOnly || pages.current.has(favoritesOnly)), retainedRecords, loading, showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  const restoringDefault = !query && !kind && !favoritesOnly && (loadedFilters.current.query !== query || loadedFilters.current.favoritesOnly !== favoritesOnly || loadedFilters.current.kind !== kind);
+  const home = defaultPage.current?.revision === defaultRevision.current ? defaultPage.current.page : null;
+  const displayedPage = restoringDefault ? home ?? emptyPage : filters.current.query === query && (loadedFilters.current.favoritesOnly !== favoritesOnly || loadedFilters.current.kind !== kind) ? pages.current.get(cacheKey(kind, favoritesOnly)) ?? page : page;
+  const displayedIds = new Set(displayedPage.records.map(({ id }) => id));
+  const retained = [...(defaultPage.current?.page.records ?? []), ...[...pages.current.values()].flatMap((cached) => cached.records)];
+  const retainedRecords = [...displayedPage.records, ...new Map(retained.filter(({ id }) => !displayedIds.has(id)).map((record) => [record.id, record])).values()];
+  return { applyEdit, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

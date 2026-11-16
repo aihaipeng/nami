@@ -4,10 +4,6 @@ const UNAVAILABLE: &str = "platform_unavailable";
 #[derive(Clone, Copy, Debug)]
 pub struct Target;
 
-pub struct CopySnapshot {
-    pub version: i64,
-}
-
 pub fn capture_target() -> Option<Target> {
     None
 }
@@ -48,13 +44,6 @@ pub fn write_text(_: &str) -> Result<i64, (&'static str, Option<i64>)> {
 pub fn send_paste(_: Target, _: i64) -> Result<(), &'static str> {
     Err(UNAVAILABLE)
 }
-pub fn begin_selection_copy(_: Target) -> Result<CopySnapshot, &'static str> {
-    Err(UNAVAILABLE)
-}
-pub fn finish_selection_copy(_: &CopySnapshot, _: i64, _: bool) -> Result<String, &'static str> {
-    Err(UNAVAILABLE)
-}
-
 pub fn read_clipboard() -> Result<Option<super::ClipboardCapture>, &'static str> {
     Err(UNAVAILABLE)
 }

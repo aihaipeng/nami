@@ -88,7 +88,9 @@ describe('unified records workspace', () => {
     expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
     expect(document.activeElement).toBe(search('translation'));
     const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
-    expect(icons(translationRow)).toEqual(icons(clipboardRow));
+    expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages'));
+    expect(clipboardRow.querySelector('[data-action=translate] .history-symbol')?.getAttribute('data-symbol')).toBe('languages');
+    expect(translationRow.querySelector('[data-action=translate]')).toBeNull();
     expect(translationRow.querySelector('time')?.textContent).toBe(clipboardRow.querySelector('time')?.textContent);
     expect(translationRow.querySelector('.history-origin')?.getAttribute('style')).toBe(clipboardRow.querySelector('.history-origin')?.getAttribute('style'));
     fireEvent.contextMenu(translationRow);

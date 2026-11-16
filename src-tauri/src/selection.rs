@@ -1,6 +1,6 @@
 use crate::{platform, windows, AppState};
 use serde::Serialize;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
@@ -33,18 +33,6 @@ pub fn prepare_selected(app: &AppHandle) {
     *state.selection_origin.lock().unwrap() = Some(SelectionOrigin { target });
 }
 
-async fn on_main<T: Send + 'static>(
-    app: &AppHandle,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, &'static str> {
-    let (send, receive) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let _ = send.send(work());
-    })
-    .map_err(|_| "selection_unavailable")?;
-    receive.await.map_err(|_| "selection_unavailable")
-}
-
 struct CaptureGuard(AppHandle);
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
@@ -55,84 +43,12 @@ impl Drop for CaptureGuard {
     }
 }
 
-fn finish_owned_copy<T>(
-    handled: &AtomicI64,
-    current_version: impl FnOnce() -> i64,
-    finish: impl FnOnce() -> Result<T, &'static str>,
-) -> Result<T, &'static str> {
-    let result = finish()?;
-    handled.store(current_version(), Ordering::SeqCst);
-    Ok(result)
-}
-
-async fn restore_copy(
-    app: &AppHandle,
-    saved: platform::CopySnapshot,
-    expected: i64,
-    accept: bool,
-) -> Result<String, &'static str> {
-    let owned = app.clone();
-    on_main(app, move || {
-        finish_owned_copy(
-            &owned.state::<AppState>().clipboard_version,
-            platform::clipboard_version,
-            || platform::finish_selection_copy(&saved, expected, accept),
-        )
-    })
-    .await?
-}
-
-async fn copy_fallback(app: &AppHandle, target: platform::Target) -> Result<String, &'static str> {
-    let saved = on_main(app, move || platform::begin_selection_copy(target)).await??;
-    let owned = app.clone();
-    on_main(app, move || {
-        crate::record_lifecycle(&owned, "selection_copy_sent", None)
-    })
-    .await?;
-    let mut observed = saved.version;
-    let mut stable = 0;
-    for _ in 0..60 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let (version, focused) = on_main(app, move || {
-            (
-                platform::clipboard_version(),
-                platform::target_focused(target),
-            )
-        })
-        .await?;
-        if !focused {
-            if observed != saved.version && observed == version {
-                restore_copy(app, saved, observed, false).await?;
-            }
-            // A changed clipboard after focus moved cannot safely be attributed to our copy.
-            return Err("target_unavailable");
-        }
-        if version == saved.version {
-            continue;
-        }
-        if observed != saved.version && version != observed {
-            return Err("clipboard_changed");
-        }
-        if observed == version {
-            stable += 1;
-        } else {
-            observed = version;
-            stable = 0;
-        }
-        if stable >= 2 {
-            return restore_copy(app, saved, version, true).await;
-        }
+fn readable_selection(result: Result<String, &'static str>) -> Result<String, &'static str> {
+    match result {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Err("permission_required") => Err("permission_required"),
+        _ => Ok(String::new()),
     }
-    if observed != saved.version {
-        restore_copy(app, saved, observed, false).await?;
-    }
-    // No change means no selection: never reuse the old clipboard text.
-    let owned = app.clone();
-    on_main(app, move || {
-        crate::record_lifecycle(&owned, "selection_copy_no_change", None)
-    })
-    .await?;
-    Ok(String::new())
 }
 
 pub fn show_selected(app: &AppHandle) -> Result<(), String> {
@@ -167,13 +83,9 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
                     Err(code) => format!("selection_ax_{code}"),
                 };
                 let owned = app.clone();
-                let _ = on_main(&app, move || crate::record_lifecycle(&owned, &phase, None)).await;
-                match direct {
-                    Ok(text) => Ok(text),
-                    Err("selection_secure" | "selection_non_text") => Ok(String::new()),
-                    Err("permission_required") => Err("permission_required"),
-                    Err(_) => copy_fallback(&app, target).await,
-                }
+                let _ =
+                    app.run_on_main_thread(move || crate::record_lifecycle(&owned, &phase, None));
+                readable_selection(direct)
             }
         };
         let owned = app.clone();
@@ -229,25 +141,46 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(all(
+    feature = "ui-tests",
+    target_os = "macos",
+    not(feature = "portable-ui")
+))]
+pub(crate) fn test_empty_summon(app: &AppHandle) -> Result<(), String> {
+    if app.config().identifier != "dev.local.nami.ui-tests" {
+        return Err("permission_denied".into());
+    }
+    *app.state::<AppState>().selection_origin.lock().unwrap() =
+        Some(SelectionOrigin { target: None });
+    show_selected(app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn only_successful_owned_restoration_suppresses_clipboard_capture() {
-        let handled = AtomicI64::new(7);
+    fn unreadable_or_empty_selection_opens_blank_without_clipboard_work() {
+        for result in [
+            Ok(String::new()),
+            Ok(" \n\t".into()),
+            Err("selection_unavailable"),
+            Err("selection_non_text"),
+            Err("selection_secure"),
+            Err("selection_empty"),
+            Err("target_unavailable"),
+        ] {
+            assert_eq!(readable_selection(result), Ok(String::new()));
+        }
+    }
+
+    #[test]
+    fn direct_selected_text_and_permission_errors_keep_their_meaning() {
+        let text = "  Synthetic selected text\n第二行";
+        assert_eq!(readable_selection(Ok(text.into())), Ok(text.into()));
         assert_eq!(
-            finish_owned_copy(
-                &handled,
-                || panic!("external version must not be suppressed"),
-                || Err::<(), _>("clipboard_changed")
-            ),
-            Err("clipboard_changed")
+            readable_selection(Err("permission_required")),
+            Err("permission_required")
         );
-        assert_eq!(handled.load(Ordering::SeqCst), 7);
-        assert_eq!(
-            finish_owned_copy(&handled, || 10, || Ok("synthetic restored text")),
-            Ok("synthetic restored text")
-        );
-        assert_eq!(handled.load(Ordering::SeqCst), 10);
     }
 }

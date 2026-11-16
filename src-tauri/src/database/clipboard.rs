@@ -128,6 +128,11 @@ fn decode(row: &Row<'_>) -> rusqlite::Result<ClipboardRecord> {
 const COLUMNS: &str =
     "r.sequence,r.id,r.kind,c.text,r.date,r.is_favorite,r.is_pinned,a.payload,r.image_path,r.fingerprint";
 
+pub(super) fn ensure_filter_indexes(connection: &rusqlite::Connection) -> Result<(), String> {
+    connection.execute_batch("CREATE INDEX IF NOT EXISTS clipboard_kind_order ON clipboard_records(kind,is_pinned DESC,created_at DESC,sequence DESC);
+        CREATE INDEX IF NOT EXISTS clipboard_kind_favorites ON clipboard_records(kind,is_favorite,is_pinned DESC,created_at DESC,sequence DESC);").map_err(storage_error)
+}
+
 impl HistoryDatabase {
     pub fn clipboard_page(
         &self,
@@ -136,9 +141,28 @@ impl HistoryDatabase {
         cursor: Option<&ClipboardCursor>,
         limit: usize,
     ) -> Result<ClipboardPage, String> {
+        self.clipboard_page_filtered(query, favorites_only, None, cursor, limit)
+    }
+
+    pub fn clipboard_page_filtered(
+        &self,
+        query: &str,
+        favorites_only: bool,
+        kind: Option<&str>,
+        cursor: Option<&ClipboardCursor>,
+        limit: usize,
+    ) -> Result<ClipboardPage, String> {
         if query.chars().count() > 4096 || !(1..=200).contains(&limit) {
             return Err("invalid_argument".into());
         }
+        if kind.is_some_and(|kind| !["text", "image", "files"].contains(&kind)) {
+            return Err("invalid_argument".into());
+        }
+        let kind_filter = if kind.is_some() {
+            " AND kind=:kind"
+        } else {
+            ""
+        };
         let needle = query.trim().to_lowercase();
         let indexed = needle.chars().count() >= 3 && !needle.contains('\0');
         let favorite = if favorites_only {
@@ -171,7 +195,11 @@ impl HistoryDatabase {
             " AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)"
         };
         let hint = if broad {
-            if favorites_only {
+            if kind.is_some() && favorites_only {
+                " INDEXED BY clipboard_kind_favorites"
+            } else if kind.is_some() {
+                " INDEXED BY clipboard_kind_order"
+            } else if favorites_only {
                 " INDEXED BY clipboard_favorites"
             } else {
                 " INDEXED BY clipboard_order"
@@ -179,7 +207,7 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -188,18 +216,35 @@ impl HistoryDatabase {
         let created = cursor.map_or(i64::MAX, |cursor| cursor.created_at);
         let sequence = cursor.map_or(i64::MAX, |cursor| cursor.sequence);
         let take = limit as i64 + 1;
+        let mut filters: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(kind) = &kind {
+            filters.push((":kind", kind));
+        }
+        if !needle.is_empty() {
+            filters.push((":needle", &needle));
+            if indexed && !broad {
+                filters.push((":match", &matched));
+            }
+        }
+        let total_records = if needle.is_empty() && !favorites_only && kind.is_none() {
+            self.clipboard_total_records
+        } else {
+            let sql = format!(
+                "SELECT count(*) FROM clipboard_records WHERE 1=1{favorite}{kind_filter}{search}"
+            );
+            self.connection
+                .prepare_cached(&sql)
+                .map_err(storage_error)?
+                .query_row(filters.as_slice(), |row| row.get::<_, i64>(0))
+                .map_err(storage_error)? as usize
+        };
         let mut bindings: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
             (":pinned", &pinned),
             (":created", &created),
             (":sequence", &sequence),
             (":limit", &take),
         ];
-        if !needle.is_empty() {
-            bindings.push((":needle", &needle));
-            if indexed && !broad {
-                bindings.push((":match", &matched));
-            }
-        }
+        bindings.extend(filters);
         let mut rows = statement
             .query(bindings.as_slice())
             .map_err(storage_error)?;
@@ -246,7 +291,7 @@ impl HistoryDatabase {
             records,
             cursor,
             has_more,
-            total_records: self.clipboard_total_records,
+            total_records,
             sources,
         })
     }
@@ -903,16 +948,22 @@ mod tests {
             drop(db);
             let mut db = HistoryDatabase::open(&path).unwrap();
             let mut measurements = serde_json::Map::new();
-            for (label, query, favorite) in [
-                ("all", "", false),
-                ("favorites", "", true),
-                ("sparse", "099999", false),
-                ("broad", "common", false),
+            for (label, query, favorite, kind) in [
+                ("all", "", false, None),
+                ("favorites", "", true, None),
+                ("sparse", "099999", false, None),
+                ("broad", "common", false, None),
+                ("text", "", false, Some("text")),
+                ("favoriteText", "", true, Some("text")),
+                ("image", "", false, Some("image")),
+                ("broadText", "common", false, Some("text")),
             ] {
                 let mut times = Vec::new();
                 for _ in 0..30 {
                     let started = std::time::Instant::now();
-                    let page = db.clipboard_page(query, favorite, None, 100).unwrap();
+                    let page = db
+                        .clipboard_page_filtered(query, favorite, kind, None, 100)
+                        .unwrap();
                     let _json = serde_json::to_vec(&page).unwrap();
                     times.push(started.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -1085,6 +1136,105 @@ mod tests {
             1
         );
         assert!(database.clipboard_page("", false, None, 201).is_err());
+    }
+
+    #[test]
+    fn kind_filters_combine_with_search_favorites_and_cursor_totals() {
+        let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        for kind in ["text", "image", "files"] {
+            for index in 0..9 {
+                let id = format!("{kind}-{index}");
+                let text = format!("{} {id}", if index < 6 { "common" } else { "other" });
+                let mut item = record(&id, &text);
+                item.kind = kind.into();
+                item.is_favorite = index % 2 == 0;
+                item.is_pinned = index == 0;
+                if kind == "image" {
+                    item.image_path = Some(format!("origin/ab/{id}.png"));
+                } else if kind == "files" {
+                    item.text =
+                        serde_json::to_string(&[file_path(&format!("{text}.txt"))]).unwrap();
+                }
+                item.fingerprint = fingerprint(kind, item.text.as_bytes());
+                database.clipboard_insert(&item).unwrap();
+            }
+        }
+        for kind in ["text", "image", "files"] {
+            for (query, favorite, expected) in [
+                ("", false, 9),
+                ("", true, 5),
+                ("common", false, 6),
+                ("common", true, 3),
+                ("co", true, 3),
+                ("unmatched", false, 0),
+            ] {
+                let mut cursor = None;
+                let mut ids = std::collections::HashSet::new();
+                loop {
+                    let page = database
+                        .clipboard_page_filtered(query, favorite, Some(kind), cursor.as_ref(), 2)
+                        .unwrap();
+                    assert_eq!(page.total_records, expected, "{query}/{favorite}/{kind}");
+                    for row in page.records {
+                        assert_eq!(row.kind, kind);
+                        assert!(!favorite || row.is_favorite);
+                        assert!(ids.insert(row.id));
+                    }
+                    cursor = page.cursor;
+                    if !page.has_more {
+                        break;
+                    }
+                }
+                assert_eq!(ids.len(), expected);
+            }
+        }
+        assert_eq!(
+            database
+                .clipboard_page("common", false, None, 100)
+                .unwrap()
+                .total_records,
+            18
+        );
+        assert_eq!(
+            database
+                .clipboard_page("", true, None, 100)
+                .unwrap()
+                .total_records,
+            15
+        );
+        assert_eq!(
+            database
+                .clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            27
+        );
+        for invalid in ["", "folder", "TEXT", "text' OR 1=1 --"] {
+            assert!(
+                matches!(database.clipboard_page_filtered("", false, Some(invalid), None, 100), Err(error) if error == "invalid_argument")
+            );
+        }
+    }
+
+    #[test]
+    fn kind_filter_indexes_cover_both_sort_orders_and_existing_databases() {
+        let database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        ensure_filter_indexes(&database.connection).unwrap();
+        for (favorite, index) in [
+            ("", "clipboard_kind_order"),
+            (" AND is_favorite=1", "clipboard_kind_favorites"),
+        ] {
+            let sql = format!("EXPLAIN QUERY PLAN SELECT sequence FROM clipboard_records WHERE kind='text'{favorite} AND (is_pinned,created_at,sequence)<(2,9223372036854775807,9223372036854775807) ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT 101");
+            let mut statement = database.connection.prepare(&sql).unwrap();
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(plan.contains(index), "{plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        }
     }
 
     #[test]

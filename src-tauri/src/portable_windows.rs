@@ -22,6 +22,10 @@ pub fn update_translation_chrome(
     Err("platform_unavailable".into())
 }
 
+pub fn prewarm_records(app: &AppHandle) -> Result<(), String> {
+    create(app, "translation").map(|_| ())
+}
+
 fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
     if label == "clipboard" {
         return create(app, "translation");
@@ -35,7 +39,6 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         "settings" => (840.0, 640.0),
         _ => return Err("invalid_argument".into()),
     };
-    let focused = !cfg!(feature = "ui-tests") || std::env::var_os("NAMI_UI_TEST_REPORT").is_none();
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(if label == "settings" {
             "Nami · Settings"
@@ -47,7 +50,7 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         .decorations(true)
         .transparent(false)
         .visible(false)
-        .focused(focused)
+        .focused(false)
         .center()
         .build()
         .map_err(|_| "window_create")?;

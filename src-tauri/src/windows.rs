@@ -497,7 +497,8 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
     let clipboard = window
         .add_child(
             tauri::webview::WebviewBuilder::new("clipboard", WebviewUrl::App("index.html".into()))
-                .transparent(true),
+                .transparent(true)
+                .focused(false),
             tauri::LogicalPosition::new(-360.0, 0.0),
             LogicalSize::new(360.0, 620.0),
         )
@@ -595,6 +596,10 @@ fn observe_translation_resize(app: &AppHandle, window: &Window) -> Result<(), St
     Ok(())
 }
 
+pub fn prewarm_records(app: &AppHandle) -> Result<(), String> {
+    create(app, "translation").map(|_| ())
+}
+
 fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
     if label == "clipboard" {
         return create(app, "translation");
@@ -637,6 +642,7 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         )
         .accept_first_mouse(true)
         .visible(false)
+        .focused(false)
         .center()
         .build()
         .map_err(|_| "window_create")?;

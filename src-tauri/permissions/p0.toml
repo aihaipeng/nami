@@ -6,12 +6,12 @@ commands.allow = ["app_snapshot", "window_show", "window_hide"]
 [[permission]]
 identifier = "allow-p0-translation"
 description = "Translation host layout only."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take", "clipboard_translation_take"]
 
 [[permission]]
 identifier = "allow-p0-clipboard"
 description = "Clipboard window may query and restore local clipboard history."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_record_update", "clipboard_image", "clipboard_files"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_record_has_text", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files"]
 
 [[permission]]
 identifier = "allow-p0-settings"

@@ -20,10 +20,8 @@ pub use clipboard::*;
 mod macos;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 pub use macos::*;
-#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-mod selection_copy;
-#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-pub use selection_copy::*;
+mod ocr;
+pub use ocr::recognize_image_text;
 
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
 mod unsupported;
@@ -39,6 +37,7 @@ pub struct Capabilities {
     pub native_chrome: bool,
     pub native_material: bool,
     pub selection: bool,
+    pub image_ocr: bool,
     pub clipboard_write: bool,
     pub auto_paste: bool,
     pub accessibility_permission: bool,
@@ -62,6 +61,7 @@ pub fn capabilities() -> Capabilities {
         native_chrome: native,
         native_material: native,
         selection: native,
+        image_ocr: native,
         clipboard_write: native,
         auto_paste: native,
         accessibility_permission: native,
