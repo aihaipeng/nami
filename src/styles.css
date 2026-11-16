@@ -179,11 +179,14 @@
   .history-search button:hover, .history-search button:active, .history-footer .icon-button:hover, .history-footer .icon-button:active { background: transparent; }
   .history-search button .history-symbol { width: 14px; height: 14px; }
   .history-viewport { position: absolute; inset: 48px 0 28px; display: flex; flex-direction: column; min-height: 0; }
-  .history-pinned { position: sticky; top: 0; z-index: 1; margin: -4px -10px 4px; padding: 4px 10px 8px; background: hsl(var(--background)); }
-  .history-pinned[data-overflow=true] { position: relative; }
+  .history-list-frame { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .history-pinned { position: relative; flex: 0 0 auto; padding: 4px 10px 8px; background: transparent; }
+  .history-pinned:not(.empty)::after { content: ''; position: absolute; pointer-events: none; left: 3%; width: 94%; bottom: 0; height: 1px; background: linear-gradient(to right, transparent, hsl(var(--foreground) / .28) 25%, hsl(var(--foreground) / .28) 75%, transparent); }
   .history-pinned.empty { height: 0; padding: 0; }
-  .history-pinned.empty { margin: 0; }
+  .history-list-frame[data-overflow=true] { display: block; padding: 0; }
+  .history-list-frame[data-overflow=true] > .history-unpinned { overflow: visible; padding: 4px 10px 8px; }
   .history-list { position: relative; flex: 1; min-height: 0; padding: 4px 10px 8px; overflow: auto; scrollbar-width: none; -webkit-mask-image: var(--history-edge-mask); mask-image: var(--history-edge-mask); }
+  .history-unpinned { min-width: 0; }
   .history-list::-webkit-scrollbar { display: none; }
   .history-scrollbar { position: absolute; z-index: 2; right: 0; top: 0; bottom: 0; width: 12px; touch-action: none; }
   .history-scrollbar-thumb { opacity: 0; transition: opacity 180ms ease-out; position: absolute; top: 0; right: 3px; width: 6px; border-radius: 3px; background: var(--history-scroll-thumb); }
@@ -212,7 +215,6 @@
   .history-row:last-child { margin-bottom: 0; }
   .history-row:hover { background: hsl(var(--foreground) / .04); }
   .history-row.selected { background: hsl(var(--foreground) / .09); }
-  .history-row.pinned { border-color: hsl(var(--foreground) / .3); }
   .history-row-select { display: block; width: 100%; padding: 7px; border-radius: 9px; text-align: left; font-weight: 400; }
   .history-row-select:hover:not(:disabled), .history-row-select:active:not(:disabled) { background: transparent; }
   .history-row-heading { display: flex; align-items: center; gap: 6px; height: 16px; padding-left: 1px; color: hsl(var(--muted-foreground)); }

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 
-export function useRecordBrowser(session: number | undefined, active: boolean, list: RefObject<HTMLDivElement | null>, pinnedList: RefObject<HTMLDivElement | null>, dataReady: () => boolean = () => true, contentVersion: () => unknown = () => undefined, filterKey: string | null = null) {
+export function useRecordBrowser(session: number | undefined, active: boolean, list: RefObject<HTMLDivElement | null>, dataReady: () => boolean = () => true, contentVersion: () => unknown = () => undefined, filterKey: string | null = null) {
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const positions = useRef(new Map<string, { top: number }>());
@@ -13,7 +13,7 @@ export function useRecordBrowser(session: number | undefined, active: boolean, l
     restoring.current = null;
     const element = list.current;
     positions.current.set(`${filterKey ?? ''}:${favoritesOnly}`, { top: element?.scrollTop ?? 0 });
-    const row = element && [...element.querySelectorAll<HTMLElement>('.history-items > .history-row:not([hidden])')].find((row) => row.offsetTop + row.offsetHeight > element.scrollTop + (pinnedList.current?.offsetHeight ?? 0));
+    const row = element && [...element.querySelectorAll<HTMLElement>('.history-items > .history-row:not([hidden])')].find((row) => row.offsetTop + row.offsetHeight > element.scrollTop);
     anchor.current = element && element.scrollTop > 0 && row ? { id: row.dataset.recordId!, offset: row.offsetTop - element.scrollTop } : null;
   }
   useLayoutEffect(() => {
@@ -38,7 +38,12 @@ export function useRecordBrowser(session: number | undefined, active: boolean, l
     previous.current = { query, favoritesOnly, active, session, filterKey };
     previousContent.current = contentVersion();
   });
+  function restoreScroll() {
+    const saved = restoring.current ?? positions.current.get(`${filterKey ?? ''}:${favoritesOnly}`) ?? { top: 0 };
+    restoring.current = saved;
+    list.current?.scrollTo({ top: saved.top });
+  }
   function changeQuery(value: string) { remember(); setQuery(value); }
   function toggleFavorites() { remember(); setFavoritesOnly((value) => !value); }
-  return { query, setQuery: changeQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember };
+  return { query, setQuery: changeQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember, restoreScroll };
 }

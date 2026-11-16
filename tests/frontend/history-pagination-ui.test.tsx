@@ -53,7 +53,7 @@ describe('paged database history', () => {
   });
 
   it.each(['select', 'copy', 'favorite', 'delete', 'retranslate'] as const)('waits for the cached page query before executing %s on a record outside the backend projection', async (action) => {
-    populate(3); bridge.snapshot.window.recordView = 'translation'; await mount('clipboard');
+    populate(3); await mount('clipboard'); await windowState({ recordView: 'translation' });
     const favorite = screen.getByRole('button', { name: 'Favorite history' });
     fireEvent.click(favorite);
     await waitFor(() => expect(rows()).toHaveLength(1));
@@ -72,7 +72,7 @@ describe('paged database history', () => {
   });
 
   it.each(['query', 'view', 'failure'] as const)('cancels a cached record action after %s changes while its query is pending', async (change) => {
-    populate(3); bridge.snapshot.window.recordView = 'translation'; await mount('clipboard');
+    populate(3); await mount('clipboard'); await windowState({ recordView: 'translation' });
     const favorite = screen.getByRole('button', { name: 'Favorite history' });
     fireEvent.click(favorite); await waitFor(() => expect(rows()).toHaveLength(1));
     const pending = deferred<HistorySnapshot>(); const original = bridge.invoke.getMockImplementation()!;

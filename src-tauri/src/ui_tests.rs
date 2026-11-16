@@ -2084,6 +2084,224 @@ fn run_records_geometry(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_records_pinned(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let root = std::env::temp_dir().join(format!("nami-pinned-ui-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::create_dir_all(&root).map_err(|_| "fixture")?;
+        let image = root.join("Preview.jpg");
+        std::fs::write(
+            &image,
+            include_bytes!("../../tests/fixtures/clipboard-preview.jpg"),
+        )
+        .map_err(|_| "fixture")?;
+        for index in 0..24 {
+            let kind = if index == 2 { "files" } else { "text" };
+            let text = if kind == "files" {
+                serde_json::to_string(&[&image]).map_err(|_| "fixture")?
+            } else {
+                format!("Synthetic pinned boundary record {index}\n").repeat(5)
+            };
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("isolated database")?
+                .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: format!("pinned-boundary-{index}"),
+                    kind: kind.into(),
+                    text: text.clone(),
+                    date: format!("2099-01-01T00:00:{:02}Z", 24 - index),
+                    is_favorite: false,
+                    is_pinned: index < 2,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: nami::clipboard::fingerprint(kind, text.as_bytes()),
+                })?;
+        }
+        for mode in ["clipboard", "translation"] {
+            records_mode(app, mode)?;
+            if mode == "clipboard" {
+                wait_records(app, "return {ready:!!document.querySelector('[data-record-id=\"pinned-boundary-2\"] img')?.naturalWidth};")?;
+            }
+            for top in [0, 80, 160, 100_000] {
+                evaluate_view_dom(
+                    app,
+                    "clipboard",
+                    &format!(
+                        r#"
+const p=[...document.querySelectorAll('.record-view:not([hidden]) .history-panel')][0];
+p.querySelector('.history-list').scrollTop={top};
+window.__pinnedFrame=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.__pinnedFrame=true));return true;
+"#
+                    ),
+                )?;
+                let sample = wait_records(
+                    app,
+                    r#"
+if(!window.__pinnedFrame)return {ready:false};
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),list=p.querySelector('.history-list'),pinned=p.querySelector('.history-pinned'),items=p.querySelector('.history-items');
+const a=p.querySelector('.history-viewport').getBoundingClientRect(),b=pinned.getBoundingClientRect(),c=list.getBoundingClientRect(),style=getComputedStyle(pinned),line=getComputedStyle(pinned,'::after');
+const rows=[...pinned.querySelectorAll('.history-row:not([hidden])')],first=rows[0].getBoundingClientRect(),last=rows.at(-1).getBoundingClientRect();
+const ys=[a.top+1,first.bottom+1,last.bottom+1,b.bottom-1];
+return {ready:rows.length>1,mode:p.id==='translation-history'?'translation':'clipboard',scroll:list.scrollTop,maximum:list.scrollHeight-list.clientHeight,topGap:b.top-a.top,leftGap:b.left-a.left,rightGap:a.right-b.right,
+covered:ys.map(y=>pinned.contains(document.elementFromPoint(a.left+a.width/2,y))),
+position:style.position,background:style.backgroundColor,ordinaryBackground:getComputedStyle(items.querySelector('.history-row')).backgroundColor,opacity:style.opacity,blur:style.webkitBackdropFilter,clipped:c.top>=b.bottom&&getComputedStyle(list).overflowY==='auto',
+borders:rows.map(row=>getComputedStyle(row).borderTopColor),line:{content:line.content,height:line.height,bottom:line.bottom,gradient:line.backgroundImage},
+singleOwner:pinned.parentElement===list.parentElement&&items.parentElement===list,fullTrack:Math.abs(p.querySelector('.history-scrollbar').getBoundingClientRect().height-a.height)<1};
+"#,
+                )?;
+                samples.push(sample.clone());
+                if sample["topGap"].as_f64().unwrap_or(100.0) > 0.5
+                    || sample["leftGap"].as_f64().unwrap_or(100.0) > 0.5
+                    || sample["rightGap"].as_f64().unwrap_or(100.0) > 0.5
+                    || sample["covered"]
+                        .as_array()
+                        .is_none_or(|hits| hits.iter().any(|hit| hit != true))
+                {
+                    return Err(format!(
+                        "{mode}: ordinary text or images can escape around pinned rows: {sample}"
+                    ));
+                }
+                if sample["opacity"] != "1"
+                    || sample["blur"] != "none"
+                    || sample["background"] != "rgba(0, 0, 0, 0)"
+                    || sample["ordinaryBackground"] != sample["background"]
+                {
+                    return Err(format!(
+                        "{mode}: pinned region no longer shares the ordinary glass background: {sample}"
+                    ));
+                }
+                if sample["position"] != "relative"
+                    || sample["clipped"] != true
+                    || sample["singleOwner"] != true
+                    || sample["fullTrack"] != true
+                {
+                    return Err(format!(
+                        "{mode}: pinned or scrollbar geometry changed: {sample}"
+                    ));
+                }
+                if sample["borders"]
+                    .as_array()
+                    .is_none_or(|colors| colors.iter().any(|color| color != "rgba(0, 0, 0, 0)"))
+                {
+                    return Err(format!(
+                        "{mode}: pinned row still has a visible border: {sample}"
+                    ));
+                }
+                if sample["line"]["height"] != "1px"
+                    || sample["line"]["bottom"] != "0px"
+                    || !sample["line"]["gradient"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .starts_with("linear-gradient(to right,")
+                    || !sample["line"]["gradient"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("0.28) 25%")
+                    || !sample["line"]["gradient"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("0.28) 75%")
+                {
+                    return Err(format!(
+                        "{mode}: pinned divider is missing or misplaced: {sample}"
+                    ));
+                }
+            }
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),list=p.querySelector('.history-list');
+list.scrollTop=80;requestAnimationFrame(()=>requestAnimationFrame(()=>p.querySelector('.history-pinned').style.height=`${p.querySelector('.history-viewport').clientHeight+100}px`));return true;
+"#,
+            )?;
+            let overflow = wait_records(
+                app,
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),list=p.querySelector('.history-list'),pinned=p.querySelector('.history-pinned');
+return {ready:pinned.dataset.overflow==='true',scroll:list.scrollTop,position:getComputedStyle(pinned).position,singleOwner:list.contains(pinned)&&p.querySelectorAll('.history-list').length===1};
+"#,
+            )?;
+            if overflow["position"] != "relative"
+                || overflow["singleOwner"] != true
+                || overflow["scroll"] != 80
+            {
+                return Err(format!("oversized pins became inaccessible: {overflow}"));
+            }
+            samples.push(overflow);
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel');p.querySelector('.history-pinned').style.height=`${p.querySelector('.history-viewport').clientHeight-1}px`;return true;
+"#,
+            )?;
+            let narrow = wait_records(
+                app,
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),list=p.querySelector('.history-list');
+return {ready:p.querySelector('.history-pinned').dataset.overflow==='true',singleOwner:list.contains(p.querySelector('.history-pinned'))};
+"#,
+            )?;
+            if narrow["singleOwner"] != true {
+                return Err(format!(
+                    "near-full pins clipped the ordinary viewport: {narrow}"
+                ));
+            }
+            samples.push(narrow);
+            evaluate_view_dom(app, "clipboard", "document.querySelector('.record-view:not([hidden]) .history-pinned').style.height='';return true;")?;
+            let restored = wait_records(
+                app,
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),list=p.querySelector('.history-list');
+return {ready:p.querySelector('.history-pinned').dataset.overflow==='false',scroll:list.scrollTop};
+"#,
+            )?;
+            if restored["scroll"] != 80 {
+                return Err(format!("scroll owner change lost position: {restored}"));
+            }
+            samples.push(restored);
+
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+window.__unpinnedAll=false;(async()=>{
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),translation=p.id==='translation-history';
+p.querySelector('.history-list').scrollTop=0;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+const ids=[...p.querySelectorAll('.history-pinned .history-row:not([hidden])')].map(row=>row.dataset.recordId);
+for(const recordId of ids)await window.__TAURI_INTERNALS__.invoke(translation?'history_record_update':'clipboard_record_update',{recordId,action:'pin'});
+window.__unpinnedAll=true;})();return true;
+"#,
+            )?;
+            let empty = wait_records(
+                app,
+                r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),pinned=p.querySelector('.history-pinned');
+return {ready:window.__unpinnedAll&&pinned.classList.contains('empty'),divider:getComputedStyle(pinned,'::after').content,height:pinned.offsetHeight};
+"#,
+            )?;
+            if empty["divider"] != "none" || empty["height"] != 0 {
+                return Err(format!(
+                    "{mode}: empty pinned section left a divider or gap: {empty}"
+                ));
+            }
+            samples.push(empty);
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(root);
+    DomCase {
+        name: "shared pinned boundary coverage",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_unified_records(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -3912,6 +4130,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "translation-actions",
             "unified-records",
             "records-geometry",
+            "records-pinned",
             "records-pagination",
             "records-open",
             "selection-open",
@@ -3934,6 +4153,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_history_pagination(&app)
             } else if case == "records-geometry" {
                 run_records_geometry(&app)
+            } else if case == "records-pinned" {
+                run_records_pinned(&app)
             } else if case == "unified-records" {
                 run_unified_records(&app)
             } else if case == "translation-actions" {
@@ -3986,6 +4207,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         dom_cases.push(run_clipboard_kind_text(&app));
         dom_cases.push(run_clipboard_details(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
+        dom_cases.push(run_records_pinned(&app));
         let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());
         dom_cases.push(DomCase {
             name: "clipboard history: text, image, files, private exclusion, PNG thumbnail and missing-file protection",

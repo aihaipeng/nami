@@ -275,28 +275,28 @@ const SCRIPT: &str = r#"
 
       currentCase = 'single record scroll owner and protected action exit';
       const scroller=historyPanel.querySelector('.history-list'),pinned=historyPanel.querySelector('.history-pinned');
-      assert(pinned.parentElement===scroller && historyPanel.querySelector('.history-items').parentElement===scroller,'records still have split scroll owners');
-      assert(getComputedStyle(pinned).position==='sticky' && !['auto','scroll'].includes(getComputedStyle(pinned).overflowY),'pinned records still scroll independently');
-      const assertOpaquePinned=(layer,view)=>{
+      assert(pinned.parentElement===scroller.parentElement && historyPanel.querySelector('.history-items').parentElement===scroller,'pinned and ordinary clip layout changed');
+      assert(getComputedStyle(scroller).overflowY==='auto' && scroller.getBoundingClientRect().top>=pinned.getBoundingClientRect().bottom,'ordinary records are not clipped below the pinned divider');
+      const assertGlassPinned=(layer,view)=>{
         const style=getComputedStyle(layer),color=style.backgroundColor;
-        assert(color.startsWith('rgb(')||/rgba\([^)]*,\s*1\)$/.test(color),'ordinary records can show through '+view+' pinned background: '+color);
-        assert(Number(style.opacity)===1,'pinned layer is translucent in '+view);
-        assert((style.backdropFilter||style.webkitBackdropFilter)==='none','ordinary records still feed the '+view+' pinned blur');
+        assert(color==='rgba(0, 0, 0, 0)','pinned background hides the shared glass in '+view+': '+color);
+        assert(Number(style.opacity)===1,'pinned row content is translucent in '+view);
+        assert((style.backdropFilter||style.webkitBackdropFilter)==='none','pinned region adds a separate blur in '+view);
       };
-      assertOpaquePinned(pinned,'translation');
+      assertGlassPinned(pinned,'translation');
       assert(scroller.scrollHeight>scroller.clientHeight,'scroll fixture does not overflow');
       const pinnedTop=pinned.getBoundingClientRect().top,ordinary=historyPanel.querySelector('.history-items .history-row'),ordinaryTop=ordinary.getBoundingClientRect().top;
       scroller.scrollTop=80;
       await new Promise(requestAnimationFrame);
       const track=historyPanel.querySelector('.history-scrollbar');
-      assert(track && Math.abs(track.getBoundingClientRect().height-scroller.clientHeight)<=1,'scrollbar does not span the scroll viewport');
+      assert(track && Math.abs(track.getBoundingClientRect().height-historyPanel.querySelector('.history-viewport').clientHeight)<=1,'scrollbar does not span the scroll viewport');
       assert(Math.abs(pinned.getBoundingClientRect().top-pinnedTop)<=1,'ordinary scrolling moved pinned records');
       assert(Math.abs(ordinary.getBoundingClientRect().top-ordinaryTop+80)<=1,'ordinary records did not follow the shared scroll position');
       scroller.scrollTop=0;
       await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
       await invoke('records_view_set',{view:'clipboard'});
       await waitFor(()=>!clipboardPanel.closest('.record-view').hidden&&clipboardPanel.querySelector('.history-pinned [data-record-id="portable-clipboard-sample"]'),'clipboard pin fixture did not appear');
-      assertOpaquePinned(clipboardPanel.querySelector('.history-pinned'),'clipboard');
+      assertGlassPinned(clipboardPanel.querySelector('.history-pinned'),'clipboard');
       await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
       await invoke('records_view_set',{view:'translation'});
       await waitFor(()=>!historyPanel.closest('.record-view').hidden,'translation view did not restore');
@@ -419,7 +419,7 @@ const SCRIPT: &str = r#"
       const sharedWidth = (await invoke('app_snapshot')).window.historyWidth;
       await invoke('records_view_set', {view:'clipboard'});
       await waitFor(async () => (await invoke('app_snapshot')).window.recordView === 'clipboard' && !document.querySelector('.clipboard-panel').closest('.record-view').hidden, 'clipboard view did not appear in shared host');
-      assert(document.querySelector('.clipboard-panel [aria-label="Details unavailable"]').disabled, 'clipboard detail placeholder must be disabled');
+      assert(!document.querySelector('.clipboard-panel .records-details').disabled, 'clipboard details must be available');
       assert(document.querySelector('.clipboard-panel [aria-label="Clipboard"]').getAttribute('aria-pressed') === 'true', 'clipboard mode not highlighted');
       assert((await invoke('app_snapshot')).window.translationVisible === false, 'clipboard switch kept translation details open');
       assert((await invoke('app_snapshot')).window.historyWidth === sharedWidth, 'mode switch changed shared list width');

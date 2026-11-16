@@ -305,9 +305,19 @@ describe('history list and session actions', () => {
     expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', retranslate: false });
   });
 
+  it('selects a pinned row without moving the ordinary records scroll region', async () => {
+    const user = userEvent.setup(); await mount('history');
+    const list = document.querySelector<HTMLElement>('.history-list')!;
+    list.scrollTop = 100; scrollTo.mockClear();
+    await user.click(within(row('sample-01')).getByRole('button', { name: /^Translation:/ }));
+    expect(list.scrollTop).toBe(100);
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-01', retranslate: false });
+  });
+
   it('does not scroll a fully visible row and respects reduced motion for clipped rows', async () => {
     const user = userEvent.setup(); await mount('history');
-    const article = row('sample-01'); const list = article.closest<HTMLElement>('.history-list')!;
+    const article = row('sample-03'); const list = article.closest<HTMLElement>('.history-list')!;
     vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 300 } as DOMRect);
     const measure = vi.spyOn(article, 'getBoundingClientRect').mockReturnValue({ top: 110, bottom: 200 } as DOMRect);
     scrollTo.mockClear();

@@ -176,7 +176,7 @@ describe('clipboard type filters', () => {
     const element = document.createElement('div');
     Object.defineProperties(element, { clientHeight: { value: 100 }, scrollHeight: { value: 2000 } });
     element.scrollTo = vi.fn((options?: ScrollToOptions | number, y?: number) => { element.scrollTop = typeof options === 'number' ? y ?? 0 : options?.top ?? 0; });
-    const hook = renderHook(({ kind, session }) => useRecordBrowser(session, true, { current: element }, { current: null }, () => true, () => undefined, kind), { initialProps: { kind: null as ClipboardKind | null, session: 1 } });
+    const hook = renderHook(({ kind, session }) => useRecordBrowser(session, true, { current: element }, () => true, () => undefined, kind), { initialProps: { kind: null as ClipboardKind | null, session: 1 } });
     element.scrollTop = 320;
     act(() => hook.result.current.remember());
     hook.rerender({ kind: 'image', session: 1 });

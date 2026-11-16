@@ -37,7 +37,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const pinnedList = useRef<HTMLDivElement>(null);
   const state = snapshot.window;
   const lastQuery = useRef({ query: '', favoritesOnly: false });
-  const { query, setQuery, favoritesOnly, toggleFavorites, remember } = useRecordBrowser(state.recordsSession, active, list, pinnedList, () => !native || history.displayReady(query, favoritesOnly), () => history.snapshot.records);
+  const { query, setQuery, favoritesOnly, toggleFavorites, remember, restoreScroll } = useRecordBrowser(state.recordsSession, active, list, () => !native || history.displayReady(query, favoritesOnly), () => history.snapshot.records);
   const displayed = history.displaySnapshot(query, favoritesOnly);
   const records = displayed.records;
   const selection = snapshot.window.translationVisible ? native ? history.snapshot.selectedId : selectedId : null;
@@ -71,9 +71,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (!active || !selection) return;
     const row = [...(pinnedList.current?.querySelectorAll<HTMLElement>('.history-row') ?? []), ...(list.current?.querySelectorAll<HTMLElement>('.history-row') ?? [])].find((row) => row.dataset.recordId === selection);
     const scroller = list.current;
-    if (!row || !scroller) return;
+    if (!row || !scroller || !scroller.contains(row)) return;
     const viewport = scroller.getBoundingClientRect();
-    const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + (row.closest('.history-pinned') || pinnedList.current?.dataset.overflow === 'true' ? 0 : Math.min(pinnedList.current?.offsetHeight ?? 0, (viewport.bottom - viewport.top))) + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
+    const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
     if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }, [active, selection]);
   useEffect(() => {
@@ -122,9 +122,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       }} aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
         const row = event.currentTarget.closest<HTMLElement>('.history-row');
         const scroller = list.current;
-        if (row && scroller) {
+        if (row && scroller?.contains(row)) {
           const viewport = scroller.getBoundingClientRect();
-          const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + (row.closest('.history-pinned') || pinnedList.current?.dataset.overflow === 'true' ? 0 : Math.min(pinnedList.current?.offsetHeight ?? 0, (viewport.bottom - viewport.top))) + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
+          const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
           if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         }
         whenReady(record.id, () => onSelect(record));
@@ -144,7 +144,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       (pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select'))?.focus();
     }} />
     {history.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => history.refresh(query, favoritesOnly)}>{t('retry')}</button></p>}
-    <HistoryList active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
+    <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
       {filtered.filter((record) => !record.isPinned).map(row)}
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>

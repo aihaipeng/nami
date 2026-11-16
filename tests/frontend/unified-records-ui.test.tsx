@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { bridge, calls, emit, mount, windowState } from './harness';
+import { createRef } from 'react';
+import { HistoryList } from '../../src/shared/HistoryList';
 import { RecordActions } from '../../src/shared/RecordActions';
 import { translator } from '../../src/shared/i18n';
 
@@ -63,14 +65,49 @@ describe('unified records workspace', () => {
     expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
   });
 
-  it.each(['clipboard', 'translation'] as const)('uses a single full-height %s scroll owner for pinned and ordinary records', async (kind) => {
+  it.each(['clipboard', 'translation'] as const)('clips %s ordinary records below the pinned region with one active scroll owner', async (kind) => {
     await mount('clipboard');
     if (kind === 'translation') await switchView(kind);
     const pane = panel(kind);
     const scroller = pane.querySelector('.history-list')!;
-    expect(pane.querySelector('.history-pinned')?.parentElement).toBe(scroller);
+    expect(pane.querySelector('.history-pinned')?.parentElement).toBe(scroller.parentElement);
+    expect(scroller.contains(pane.querySelector('.history-pinned'))).toBe(false);
     expect(pane.querySelector('.history-items')?.parentElement).toBe(scroller);
     expect(pane.querySelector('.history-viewport')?.querySelectorAll('.history-list')).toHaveLength(1);
+  });
+
+  it('preserves row instances across oversized pins, uses one scroll owner and maps the thumb to the full track', () => {
+    const list = createRef<HTMLDivElement>(); const pinnedList = createRef<HTMLDivElement>();
+    const onNearEnd = vi.fn();
+    const view = render(<HistoryList list={list} pinnedList={pinnedList} pinned={[<article key="p" data-testid="p">Pinned</article>]} onNearEnd={onNearEnd}><article data-testid="r">Ordinary</article></HistoryList>);
+    const viewport = view.container.querySelector<HTMLElement>('.history-viewport')!;
+    const frame = view.container.querySelector<HTMLElement>('.history-list-frame')!;
+    const content = view.container.querySelector<HTMLElement>('.history-unpinned')!;
+    let pinnedHeight = 80;
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 200 });
+    Object.defineProperty(pinnedList.current, 'offsetHeight', { configurable: true, get: () => pinnedHeight });
+    Object.defineProperties(content, { clientHeight: { configurable: true, value: 120 }, scrollHeight: { configurable: true, value: 400 } });
+    Object.defineProperties(frame, { clientHeight: { configurable: true, value: 200 }, scrollHeight: { configurable: true, value: 480 } });
+    const pinnedRow = screen.getByTestId('p'); const ordinaryRow = screen.getByTestId('r');
+    fireEvent.scroll(content);
+    expect(list.current).toBe(content);
+    expect(view.container.querySelector<HTMLElement>('.history-scrollbar-thumb')!.style.height).toBe('60px');
+    fireEvent.wheel(pinnedRow, { deltaY: 3, deltaMode: 1 });
+    expect(content.scrollTop).toBe(48);
+    pinnedHeight = 240; fireEvent.scroll(content);
+    expect(list.current).toBe(frame);
+    expect(frame.scrollTop).toBe(48);
+    expect(frame.contains(pinnedRow)).toBe(true);
+    expect(view.container.querySelectorAll('.history-list')).toHaveLength(1);
+    fireEvent.scroll(frame);
+    expect(onNearEnd.mock.calls.at(-1)?.[0]).toBe(frame);
+    frame.scrollTop = 100;
+    pinnedHeight = 80; fireEvent.scroll(frame);
+    expect(list.current).toBe(content);
+    expect(content.scrollTop).toBe(100);
+    expect(frame.scrollTop).toBe(0);
+    expect(screen.getByTestId('p')).toBe(pinnedRow);
+    expect(screen.getByTestId('r')).toBe(ordinaryRow);
   });
 
   it('uses the same React record workspace in the macOS child WebView and retains both panes', async () => {

@@ -1,10 +1,10 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject, type UIEvent } from 'react';
 import { motion } from 'motion/react';
 
-// The scrollbar spans the complete viewport while pinned rows stay above the scrolling list.
-export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, active = true, scrollOnly = false }: {
+// Clip ordinary rows below the transparent pinned region; keep one full-height scrollbar.
+export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, onScrollOwnerChange, active = true, scrollOnly = false }: {
   list: RefObject<HTMLDivElement | null>; pinnedList: RefObject<HTMLDivElement | null>;
-  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void; active?: boolean; scrollOnly?: boolean;
+  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void; onScrollOwnerChange?: () => void; active?: boolean; scrollOnly?: boolean;
 }) {
   const listId = useId();
   const [scrollbarVisible, setScrollbarVisible] = useState(false);
@@ -29,30 +29,58 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
     dragCleanup.current?.();
     setScrollbarVisible(false);
   }, [active]);
+  useLayoutEffect(() => () => { list.current = null; }, [list]);
   const viewport = useRef<HTMLDivElement>(null);
-  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, pinned: 0 });
+  const frame = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0, overflow: false });
   function measure() {
-    const element = list.current;
+    const element = scroll.overflow ? frame.current : content.current;
+    list.current = element;
     if (!element) return;
-    const next = { top: Math.max(0, Math.min(element.scrollHeight - element.clientHeight, element.scrollTop)), height: element.clientHeight, content: element.scrollHeight, pinned: pinnedList.current?.offsetHeight ?? 0 };
+    const height = viewport.current?.clientHeight ?? 0;
+    const pinnedHeight = pinnedList.current?.offsetHeight ?? 0;
+    const style = content.current ? getComputedStyle(content.current) : null;
+    const padding = (parseFloat(style?.paddingTop ?? '') || 0) + (parseFloat(style?.paddingBottom ?? '') || 0);
+    const overflow = height > 0 ? pinnedHeight > 0 && pinnedHeight + padding >= height : scroll.overflow;
+    const next = { top: Math.max(0, Math.min(element.scrollHeight - element.clientHeight, element.scrollTop)), height: element.clientHeight, content: element.scrollHeight, track: height || element.clientHeight, overflow };
     setScroll((old) => Object.keys(next).every((key) => old[key as keyof typeof old] === next[key as keyof typeof next]) ? old : next);
   }
   useLayoutEffect(() => {
+    const owner = scroll.overflow ? frame.current : content.current;
+    if (owner && list.current && owner !== list.current) {
+      owner.scrollTop = scroll.top;
+      list.current = owner;
+      onScrollOwnerChange?.();
+    }
+    if (!scroll.overflow && frame.current) frame.current.scrollTop = 0;
+    if (scroll.overflow && content.current) content.current.scrollTop = 0;
     measure();
     const observer = new ResizeObserver(measure);
-    for (const element of [list.current, pinnedList.current, list.current?.querySelector('.history-items')]) if (element) observer.observe(element);
+    for (const element of [viewport.current, frame.current, content.current, pinnedList.current, content.current?.querySelector('.history-items')]) if (element) observer.observe(element);
     return () => observer.disconnect();
-  }, [children, pinned, active]);
+  }, [children, pinned, active, scroll.overflow]);
   const maximum = Math.max(0, scroll.content - scroll.height);
-  const thumb = Math.min(scroll.height, Math.max(24, scroll.height * scroll.height / Math.max(1, scroll.content)));
-  const travel = scroll.height - thumb;
+  const thumb = Math.min(scroll.track, Math.max(24, scroll.track * scroll.height / Math.max(1, scroll.content)));
+  const travel = scroll.track - thumb;
   function move(top: number) { list.current?.scrollTo({ top: Math.max(0, Math.min(maximum, top)) }); }
-  return <div ref={viewport} className="history-viewport" onWheel={showScrollbar} onTouchMove={showScrollbar} onKeyDownCapture={(event) => {
+  function handleScroll(event: UIEvent<HTMLDivElement>) {
+    if (event.currentTarget !== list.current) return;
+    measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); }
+  }
+  return <div ref={viewport} className="history-viewport" onWheel={(event) => {
+    showScrollbar();
+    if (!scroll.overflow && pinnedList.current?.contains(event.target as Node) && list.current) {
+      list.current.scrollTop += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? list.current.clientHeight : 1);
+    }
+  }} onTouchMove={showScrollbar} onKeyDownCapture={(event) => {
     if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.nativeEvent.isComposing && ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) showScrollbar();
   }}>
-    <motion.div layoutScroll ref={list} id={listId} className="history-list" onScroll={(event) => { measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); } }}>
-      <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.height > 0 && scroll.pinned >= scroll.height}>{pinned}</div>
-      <div className="history-items">{children}</div>
+    <motion.div layoutScroll ref={frame} id={scroll.overflow ? listId : undefined} className={`history-list-frame${scroll.overflow ? ' history-list' : ''}`} data-overflow={scroll.overflow} onScroll={handleScroll}>
+      <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.overflow}>{pinned}</div>
+      <motion.div layoutScroll ref={content} id={scroll.overflow ? undefined : listId} className={`history-unpinned${scroll.overflow ? '' : ' history-list'}`} onScroll={handleScroll}>
+        <div className="history-items">{children}</div>
+      </motion.div>
     </motion.div>
     {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
