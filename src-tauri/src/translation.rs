@@ -1,8 +1,14 @@
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const TRANSLATION_RETRY_LIMIT: usize = 3;
+const TRANSLATION_RETRY_DELAY: Duration = Duration::from_millis(300);
+type BatchTranslation = (Vec<String>, Vec<Option<String>>);
+type BatchFuture<'a> = Pin<Box<dyn Future<Output = Result<BatchTranslation, String>> + Send + 'a>>;
 const LANGUAGES: &[&str] = &[
     "ar", "zh-CN", "zh-TW", "nl", "en", "fr", "de", "id", "it", "ja", "ko", "pl", "pt", "ru", "es",
     "tr", "vi",
@@ -353,6 +359,40 @@ fn request(
     }
 }
 
+async fn with_translation_retries<'a, T: 'a>(
+    delay: Duration,
+    mut operation: impl FnMut() -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
+) -> Result<T, String> {
+    let mut last_error = String::new();
+    for attempt in 0..=TRANSLATION_RETRY_LIMIT {
+        if attempt > 0 {
+            tokio::time::sleep(delay).await;
+        }
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
+fn fetch_batch<'a>(
+    client: &'a Client,
+    engine: &'a str,
+    active: &'a [&str],
+    source: &'a str,
+    target: &'a str,
+) -> BatchFuture<'a> {
+    Box::pin(async move {
+        let response = request(client, engine, active, source, target)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let data = response_bytes(response).await?;
+        parse_response(engine, &data, active.len(), source)
+    })
+}
+
 pub async fn translate(
     engine: &str,
     text: &str,
@@ -382,12 +422,10 @@ pub async fn translate(
             lines.texts.iter().map(|text| text.to_string()).collect();
         for batch in &batches {
             let active: Vec<&str> = batch.iter().map(|index| lines.texts[*index]).collect();
-            let response = request(&client, engine, &active, source, target)
-                .send()
-                .await
-                .map_err(network_error)?;
-            let data = response_bytes(response).await?;
-            let (translated, languages) = parse_response(engine, &data, batch.len(), source)?;
+            let (translated, languages) = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
+                fetch_batch(&client, engine, &active, source, target)
+            })
+            .await?;
             if target_index == 0 && source == "auto" {
                 detected.extend(languages);
             }
@@ -664,6 +702,48 @@ mod tests {
         );
         let empty = split_lines("");
         assert_eq!(empty.texts, [""]);
+    }
+
+    #[tokio::test]
+    async fn retries_transient_translation_failures_before_reporting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        assert_eq!(TRANSLATION_RETRY_LIMIT, 3);
+        assert_eq!(TRANSLATION_RETRY_DELAY, Duration::from_millis(300));
+        let calls = AtomicUsize::new(0);
+        let result = with_translation_retries(Duration::ZERO, || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if attempt < TRANSLATION_RETRY_LIMIT {
+                    Err(format!("transient {attempt}"))
+                } else {
+                    Ok(attempt)
+                }
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, TRANSLATION_RETRY_LIMIT);
+        assert_eq!(calls.load(Ordering::SeqCst), TRANSLATION_RETRY_LIMIT + 1);
+
+        calls.store(0, Ordering::SeqCst);
+        let error = with_translation_retries(Duration::ZERO, || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Err::<usize, _>(format!("failure {attempt}")) })
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, format!("failure {TRANSLATION_RETRY_LIMIT}"));
+        assert_eq!(calls.load(Ordering::SeqCst), TRANSLATION_RETRY_LIMIT + 1);
+
+        calls.store(0, Ordering::SeqCst);
+        let ready = with_translation_retries(Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok::<_, String>("ready") })
+        })
+        .await
+        .unwrap();
+        assert_eq!(ready, "ready");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
