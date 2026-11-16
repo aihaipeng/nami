@@ -421,14 +421,13 @@ const SCRIPT: &str = r#"
       await waitFor(async () => (await invoke('app_snapshot')).window.recordView === 'clipboard' && !document.querySelector('.clipboard-panel').closest('.record-view').hidden, 'clipboard view did not appear in shared host');
       assert(!document.querySelector('.clipboard-panel .records-details').disabled, 'clipboard details must be available');
       assert(document.querySelector('.clipboard-panel [aria-label="Clipboard"]').getAttribute('aria-pressed') === 'true', 'clipboard mode not highlighted');
-      assert((await invoke('app_snapshot')).window.translationVisible === false, 'clipboard switch kept translation details open');
+      assert((await invoke('app_snapshot')).window.translationVisible === true, 'clipboard switch collapsed open details');
       assert((await invoke('app_snapshot')).window.historyWidth === sharedWidth, 'mode switch changed shared list width');
       await invoke('records_view_set', {view:'translation'});
       await waitFor(() => !document.querySelector('#translation-history').closest('.record-view').hidden, 'translation view did not restore');
       assert(source() === hostInput && source().value === original.text, 'mode switch recreated or cleared translation input');
-      assert((await invoke('app_snapshot')).window.translationVisible === false, 'translation mode unexpectedly expanded details');
-      await invoke('records_details_toggle');
-      await waitFor(async () => (await invoke('app_snapshot')).window.translationVisible && (await snapshot()).selectedId === id, 'details did not restore associated record');
+      assert((await invoke('app_snapshot')).window.translationVisible === true, 'translation switch collapsed open details');
+      await waitFor(async () => (await snapshot()).selectedId === id, 'mode switch lost the associated record');
       assert(document.querySelector('.result-column').textContent === original.translations[0], 'details reopening lost cached result');
       row(id).querySelector('.history-row-select').click();
       await waitFor(async () => (await invoke('app_snapshot')).window.translationVisible, 'repeat selection closed details');

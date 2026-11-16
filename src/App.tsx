@@ -89,7 +89,10 @@ export default function App() {
   async function command(name: string, args?: Record<string, unknown>) {
     setError(false);
     if (!native) {
-      if (name === 'records_view_set') setSnapshot((value) => ({ ...value, window: { ...value.window, recordView: args?.view as 'clipboard' | 'translation', historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: false, translationExtent: 0 } }));
+      if (name === 'records_view_set') setSnapshot((value) => {
+        const keep = value.window.historyVisible && value.window.translationVisible;
+        return { ...value, window: { ...value.window, recordView: args?.view as 'clipboard' | 'translation', historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: keep && value.window.translationVisible, translationExtent: keep ? value.window.translationExtent : 0, clipboardDetailId: keep ? value.window.clipboardDetailId : null } };
+      });
       if (name === 'clipboard_details_select') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardDetailId: String(args?.recordId) } }));
       if (name === 'records_details_toggle') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: !value.window.translationVisible, translationExtent: value.window.translationVisible ? 0 : value.window.translationWidth } }));
       if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {

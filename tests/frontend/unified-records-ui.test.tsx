@@ -251,6 +251,29 @@ describe('unified records workspace', () => {
     expect(source().value).toBe('The next train leaves in ten minutes.');
   });
 
+  it('keeps open details visible when switching between clipboard and translation records', async () => {
+    await mount('translation');
+    await switchView('translation');
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
+    fireEvent.click(panel('translation').querySelector<HTMLElement>('[data-record-id="sample-04"] button')!);
+    await waitFor(() => expect(source().value).toBe('Please send me the updated design before Friday.'));
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    const selects = calls('history_sample_select').length;
+    await switchView('clipboard');
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('clip-first'));
+    expect(panel('clipboard').querySelector('[data-record-id="clip-first"]')?.classList.contains('selected')).toBe(true);
+    expect(calls('history_sample_select')).toHaveLength(selects);
+    await switchView('translation');
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    expect(bridge.history.selectedId).toBe('sample-04');
+    expect(source().value).toBe('Please send me the updated design before Friday.');
+    expect(panel('translation').querySelector('[data-record-id="sample-04"]')?.classList.contains('selected')).toBe(true);
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('clip-first');
+    expect(within(panel('translation')).getByRole('button', { name: 'Collapse details' })).toBeTruthy();
+  });
+
   it('uses the same search layout and detail artwork in both record views', async () => {
     await mount('translation');
     const clipboardSearch = search('clipboard');

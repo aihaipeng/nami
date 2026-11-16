@@ -115,9 +115,13 @@ beforeEach(() => {
     }
     if (name === 'records_view_set') {
       const { view } = args as { view: 'clipboard' | 'translation' };
+      const keep = bridge.snapshot.window.historyVisible && bridge.snapshot.window.translationVisible;
       bridge.snapshot.window.recordView = view;
       bridge.snapshot.window.historyVisible = true;
-      bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; bridge.snapshot.window.clipboardDetailId = null;
+      bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
+      if (!keep) {
+        bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; bridge.snapshot.window.clipboardDetailId = null;
+      }
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
     if (name === 'clipboard_details_select') {

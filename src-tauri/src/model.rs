@@ -154,13 +154,21 @@ impl WindowState {
     }
 
     pub fn set_record_view(&mut self, view: RecordView) {
+        let keep_details = self.history_visible && self.translation_visible;
         if view == RecordView::Translation {
             self.restore_translation_width();
         }
         self.record_view = view;
-        self.clipboard_detail_id = None;
+        if keep_details && view == RecordView::Clipboard {
+            self.translation_width_before_clipboard_details
+                .get_or_insert(self.translation_width);
+            self.translation_width = self.translation_min_width();
+        }
+        if !keep_details {
+            self.clipboard_detail_id = None;
+            self.translation_visible = false;
+        }
         self.history_visible = true;
-        self.translation_visible = false;
     }
 
     pub fn toggle_record_details(&mut self) {
@@ -359,19 +367,34 @@ mod tests {
     }
 
     #[test]
-    fn details_open_in_either_mode_and_switching_modes_collapses_the_previous_content() {
+    fn open_details_stay_open_when_switching_record_modes() {
         let mut state = super::WindowState::default();
-        for view in [super::RecordView::Clipboard, super::RecordView::Translation] {
-            state.set_record_view(view);
-            state.toggle_record_details();
-            assert!(state.history_visible && state.translation_visible);
-            assert_eq!(state.record_view, view);
-            state.toggle_record_details();
-            assert!(state.history_visible && !state.translation_visible);
-            state.toggle_record_details();
-        }
         state.set_record_view(super::RecordView::Clipboard);
         assert!(state.history_visible && !state.translation_visible);
+        state.toggle_record_details();
+        state.clipboard_detail_id = Some("clip".into());
+        let clipboard_width = state.translation_width;
+        state.set_record_view(super::RecordView::Translation);
+        assert!(state.history_visible && state.translation_visible);
+        assert_eq!(state.record_view, super::RecordView::Translation);
+        assert_eq!(state.clipboard_detail_id.as_deref(), Some("clip"));
+        assert_eq!(state.translation_width, 920.0);
+        state.set_record_view(super::RecordView::Clipboard);
+        assert!(state.history_visible && state.translation_visible);
+        assert_eq!(state.clipboard_detail_id.as_deref(), Some("clip"));
+        assert_eq!(state.translation_width, clipboard_width);
+        state.toggle_record_details();
+        assert!(!state.translation_visible);
+        state.set_record_view(super::RecordView::Translation);
+        assert!(state.history_visible && !state.translation_visible);
+
+        let mut summoned = super::WindowState {
+            clipboard_detail_id: Some("clip".into()),
+            ..Default::default()
+        };
+        summoned.set_record_view(super::RecordView::Clipboard);
+        assert!(summoned.history_visible && !summoned.translation_visible);
+        assert!(summoned.clipboard_detail_id.is_none());
     }
 
     #[test]
