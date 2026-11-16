@@ -66,7 +66,8 @@
 .clipboard-detail .clipboard-image-preview img { max-height: none; max-width: 100%; }
 .clipboard-detail .clipboard-files { margin: 0; gap: 10px; }
 .clipboard-detail .clipboard-file-name { white-space: normal; overflow-wrap: anywhere; }
-.clipboard-detail-metadata { flex: 0 0 auto; display: flex; flex-direction: column; gap: 5px; margin: 6px 14px 10px; padding-top: 10px; border-top: 1px solid hsl(var(--foreground) / .1); font-size: 11px; line-height: 16px; }
+.clipboard-detail-metadata { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; gap: 5px; margin: 6px 0 10px; padding: 10px 14px 0; font-size: 11px; line-height: 16px; }
+.clipboard-detail-metadata::before { content: ''; position: absolute; pointer-events: none; left: 3%; width: 94%; top: 0; height: 1px; background: linear-gradient(to right, transparent, hsl(var(--foreground) / .28) 25%, hsl(var(--foreground) / .28) 75%, transparent); }
 .clipboard-detail-metadata > div { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .clipboard-detail-metadata > div > span:first-child { color: var(--history-secondary); flex: 0 0 72px; }
 .clipboard-detail-metadata .history-row-heading { align-items: flex-start; height: auto; min-width: 0; padding: 0; color: var(--history-label); }

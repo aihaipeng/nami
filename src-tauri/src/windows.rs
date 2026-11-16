@@ -220,7 +220,7 @@ objc2::define_class!(
                 let bounds: NSRect = objc2::msg_send![self, bounds];
                 let base: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), labelColor];
                 let colors: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSMutableArray), new];
-                for alpha in [0.0_f64, 0.04, 0.12, 0.04, 0.0] {
+                for alpha in [0.0_f64, 0.28, 0.28, 0.28, 0.0] {
                     let color: *mut AnyObject = objc2::msg_send![base, colorWithAlphaComponent: alpha];
                     let _: () = objc2::msg_send![&*colors, addObject: color];
                 }
@@ -370,7 +370,7 @@ impl TranslationStage {
             }
             let divider: *mut AnyObject = objc2::msg_send![self, viewWithTag: 206isize];
             if !divider.is_null() {
-                let _: () = objc2::msg_send![divider, setFrame: NSRect::new(NSPoint::new(frames.translation.x - 6.0, bounds.size.height * 0.07), NSSize::new(6.0, bounds.size.height * 0.86))];
+                let _: () = objc2::msg_send![divider, setFrame: NSRect::new(NSPoint::new(frames.translation.x - 6.0, bounds.size.height * 0.03), NSSize::new(6.0, bounds.size.height * 0.94))];
                 let _: () = objc2::msg_send![divider, setHidden: !state.history_visible.get() || !state.translation_visible.get()];
             }
             native_controls::layout(
