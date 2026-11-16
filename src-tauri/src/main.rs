@@ -25,7 +25,11 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod records_runtime;
+
 pub struct AppState {
+    records_dirty: AtomicBool,
+    records_navigation: Mutex<Option<String>>,
     clipboard_enabled: AtomicBool,
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
@@ -58,6 +62,8 @@ impl Default for AppState {
             windows.history_width_initialized = true;
         }
         Self {
+            records_dirty: AtomicBool::new(false),
+            records_navigation: Mutex::new(None),
             clipboard_enabled: AtomicBool::new(false),
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
@@ -163,6 +169,10 @@ fn main() {
             commands::window_show,
             commands::window_hide,
             commands::window_pin,
+            commands::records_view_set,
+            commands::records_details_toggle,
+            commands::records_editor_set,
+            commands::records_navigation_resolve,
             commands::history_visibility_set,
             commands::history_toggle,
             commands::history_width_set,

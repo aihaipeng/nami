@@ -18,14 +18,6 @@
 .clipboard-file[data-missing=true] .clipboard-file-name { text-decoration: line-through; }
 .clipboard-record-body .clipboard-files, .clipboard-record-body .clipboard-media-placeholder { margin-top: 0; }
 
-.clipboard-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
-.clipboard-context-menu { z-index: 50; padding: 4px; }
-.clipboard-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; height: 29px; padding: 0 8px; border-radius: 6px; font-size: 12px; text-align: left; }
-.clipboard-context-menu button:hover:not(:disabled), .clipboard-context-menu button:focus-visible { background: hsl(var(--foreground) / .1); outline: none; }
-.clipboard-context-menu button:disabled { opacity: .4; }
-.clipboard-context-menu button > svg, .clipboard-context-menu .history-symbol, .clipboard-note-icon { flex: 0 0 14px; width: 14px; height: 14px; stroke-width: 1.5; }
-.clipboard-note-icon { display: inline-block; background: currentColor; mask: center / contain no-repeat; -webkit-mask: center / contain no-repeat; }
-.clipboard-context-menu .clipboard-menu-delete { color: #ff5f57; }
 
 .clipboard-record-body { position: relative; display: grid; margin-top: 6px; overflow: hidden; }
 .clipboard-record-title, .clipboard-record-content { grid-area: 1 / 1; min-width: 0; }
@@ -59,9 +51,6 @@
 .clipboard-editor-layer.closing .clipboard-editor { transition-duration: 140ms; }
 @media (prefers-reduced-motion: reduce) { .clipboard-record-title, .clipboard-record-content { transition-duration: 0ms !important; } .clipboard-editor-layer, .clipboard-editor.floating-panel { transition-duration: 1ms !important; } }
 
-/* EcoPaste quick actions: immediate hover, 150ms fade and 4px horizontal motion. */
-.clipboard-panel .history-row-actions { transform: translateX(4px); transition: opacity 150ms ease-out, transform 150ms ease-out, visibility 150ms; transition-delay: 0ms; }
-.clipboard-panel .history-row:hover .history-row-actions, .clipboard-panel .history-row:focus-within .history-row-actions { transform: translateX(0); transition-duration: 150ms; }
-.clipboard-panel .history-row time { visibility: visible; opacity: 1; transform: translateX(0); transition: opacity 150ms ease-out, transform 150ms ease-out; transition-delay: 0ms; }
-.clipboard-panel .history-row:hover time, .clipboard-panel .history-row:focus-within time { visibility: visible; opacity: 0; transform: translateX(-4px); }
-@media (prefers-reduced-motion: reduce) { .clipboard-panel .history-row-actions, .clipboard-panel .history-row time { transition: none !important; } }
+.clipboard-navigation-confirm { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 16px; border-radius: inherit; background: hsl(var(--background) / .96); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); font-size: 12px; }
+.clipboard-navigation-confirm strong { font-size: 13px; }
+.clipboard-navigation-confirm p { color: hsl(var(--muted-foreground)); margin: 8px 0; }

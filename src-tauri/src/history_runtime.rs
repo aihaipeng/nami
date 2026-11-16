@@ -77,7 +77,7 @@ pub(crate) async fn update_record(
     let worker = app.clone();
     let worker_id = id.clone();
     let worker_action = action.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let (previous, next) = tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<AppState>();
         let (previous, next) = state
             .history
@@ -87,23 +87,30 @@ pub(crate) async fn update_record(
         if let Some(database) = state.database.lock().unwrap().as_mut() {
             database.update(&previous, next.as_ref())?;
         }
-        Ok::<_, String>(())
+        Ok::<_, String>((previous, next))
     })
     .await
     .map_err(|_| "storage_worker")?
     .map_err(|error| storage_failure(app, error))?;
     crate::commands::on_main(app, move |app| {
+        let query = app
+            .state::<AppState>()
+            .history_page
+            .lock()
+            .unwrap()
+            .query
+            .clone();
         app.state::<AppState>()
             .history
             .lock()
             .unwrap()
-            .update(&id, &action)?;
+            .update_for_query(&id, &action, &query)?;
         app.state::<AppState>()
             .history_page
             .lock()
             .unwrap()
             .cache
-            .clear();
+            .update_record(&previous, next.as_ref());
         windows::refresh_history(&app)?;
         publish_history(&app)?;
         Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
@@ -152,7 +159,7 @@ pub(crate) async fn commit_translation(
             == revision;
         let query = {
             let mut page = state.history_page.lock().unwrap();
-            page.cache.clear();
+            page.cache.insert_record(&record);
             page.query.clone()
         };
         state
@@ -198,7 +205,14 @@ pub(crate) fn restore_cached_query(
     state
         .history_query_revision
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    state.history.lock().unwrap().apply_page(page, true);
+    let detail_visible = state.windows.lock().unwrap().translation_visible;
+    {
+        let mut history = state.history.lock().unwrap();
+        history.apply_page(page, true);
+        if detail_visible {
+            history.restore_visual_selection();
+        }
+    }
     windows::refresh_history(app)?;
     publish_history(app)?;
     Ok(true)
@@ -307,15 +321,22 @@ async fn load_page(
         {
             return Ok(state.history.lock().unwrap().snapshot());
         }
+        let cursor = page.cursor.clone();
+        let detail_visible = state.windows.lock().unwrap().translation_visible;
+        let loaded = {
+            let mut history = state.history.lock().unwrap();
+            history.apply_page(page, reset);
+            if detail_visible {
+                history.restore_visual_selection();
+            }
+            history.loaded_page(cursor.clone())
+        };
         {
             let mut paging = state.history_page.lock().unwrap();
-            if reset {
-                paging.cache.insert(request.query.clone(), page.clone());
-            }
+            paging.cache.insert(request.query.clone(), loaded);
             paging.query = request.query;
-            paging.cursor = page.cursor.clone();
+            paging.cursor = cursor;
         }
-        state.history.lock().unwrap().apply_page(page, reset);
         windows::refresh_history(&app)?;
         publish_history(&app)?;
         let snapshot = state.history.lock().unwrap().snapshot();

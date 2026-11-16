@@ -3,6 +3,9 @@ export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
 export type WindowTarget = Exclude<Region, 'history'>;
 
 export interface WindowState {
+  recordView?: 'clipboard' | 'translation';
+  recordsSession?: number;
+  recordsFocus?: number;
   translationVisible: boolean;
   historyVisible: boolean;
   translationPinned: boolean;
@@ -53,6 +56,9 @@ export const initialSnapshot: AppSnapshot = {
   accessibility: false,
   shortcutErrors: [],
   window: {
+    recordView: 'clipboard',
+    recordsSession: 0,
+    recordsFocus: 0,
     translationVisible: true,
     historyVisible: false,
     translationPinned: false,

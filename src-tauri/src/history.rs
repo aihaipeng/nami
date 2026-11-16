@@ -34,7 +34,7 @@ impl HistoryPageCache {
         query: crate::database::HistoryQuery,
         page: crate::database::HistoryPage,
     ) {
-        // Only retain the two first pages for the current search, never accumulated scroll pages.
+        // Retain the two already-browsed views for the current search without reading more rows.
         self.pages
             .retain(|(key, _)| key.text == query.text && key != &query);
         self.pages.push((query, page));
@@ -42,6 +42,54 @@ impl HistoryPageCache {
 
     pub fn clear(&mut self) {
         self.pages.clear();
+    }
+
+    pub fn update_record(&mut self, previous: &HistoryRecord, next: Option<&HistoryRecord>) {
+        for (query, page) in &mut self.pages {
+            let was_match = query.matches(previous);
+            let now_match = next.is_some_and(|record| query.matches(record));
+            let loaded = page
+                .records
+                .iter()
+                .position(|record| record.id == previous.id);
+            if was_match && !now_match {
+                page.total_records -= 1;
+            } else if !was_match && now_match {
+                page.total_records += 1;
+            }
+            if let Some(index) = loaded {
+                if now_match {
+                    page.records[index] = next.unwrap().clone();
+                } else {
+                    page.records.remove(index);
+                }
+            } else if let Some(record) =
+                next.filter(|record| now_match && (!was_match || record.is_pinned))
+            {
+                page.records.insert(0, record.clone());
+            }
+            page.records.sort_by(|a, b| {
+                b.is_pinned
+                    .cmp(&a.is_pinned)
+                    .then_with(|| b.date.cmp(&a.date))
+            });
+            page.has_more &= page.records.len() < page.total_records;
+        }
+    }
+
+    pub fn insert_record(&mut self, record: &HistoryRecord) {
+        for (query, page) in &mut self.pages {
+            if !query.matches(record) || page.records.iter().any(|item| item.id == record.id) {
+                continue;
+            }
+            page.total_records += 1;
+            page.records.insert(0, record.clone());
+            page.records.sort_by(|a, b| {
+                b.is_pinned
+                    .cmp(&a.is_pinned)
+                    .then_with(|| b.date.cmp(&a.date))
+            });
+        }
     }
 }
 
@@ -113,6 +161,18 @@ impl HistoryStore {
             .cloned()
     }
 
+    pub fn loaded_page(
+        &self,
+        cursor: Option<crate::database::HistoryCursor>,
+    ) -> crate::database::HistoryPage {
+        crate::database::HistoryPage {
+            records: self.records.clone(),
+            cursor,
+            has_more: self.has_more,
+            total_records: self.total_records,
+        }
+    }
+
     pub fn add(&mut self, record: HistoryRecord) -> Result<(), String> {
         if record.id.is_empty() || self.indices.contains_key(&record.id) {
             return Err("history_record".into());
@@ -136,16 +196,22 @@ impl HistoryStore {
         query: &crate::database::HistoryQuery,
     ) -> Result<(), String> {
         let id = record.id.clone();
+        if id.is_empty() || self.indices.contains_key(&id) {
+            return Err("history_record".into());
+        }
         let visible = query.matches(&record);
         if visible {
             self.add(record.clone())?;
         } else {
-            self.total_records += 1;
             self.revision += 1;
         }
         if current {
             self.selected_record = Some(record);
-            self.select(Some(&id))?;
+            if visible {
+                self.select(Some(&id))?;
+            } else {
+                self.clear_visual_selection();
+            }
         }
         Ok(())
     }
@@ -157,11 +223,29 @@ impl HistoryStore {
         self.selected_id.as_deref()
     }
 
+    pub fn clear_visual_selection(&mut self) {
+        if self.selected_id.take().is_some() {
+            self.revision += 1;
+        }
+    }
+
+    pub fn restore_visual_selection(&mut self) {
+        let id = self
+            .selected_record
+            .as_ref()
+            .filter(|record| self.indices.contains_key(&record.id))
+            .map(|record| record.id.clone());
+        if self.selected_id != id {
+            self.selected_id = id;
+            self.revision += 1;
+        }
+    }
+
     pub fn select(&mut self, id: Option<&str>) -> Result<(), String> {
         if id.is_some_and(|id| self.record(id).is_none()) {
             return Err("not_found".into());
         }
-        if self.selected_id.as_deref() != id {
+        if self.selected_id.as_deref() != id || (id.is_none() && self.selected_record.is_some()) {
             self.selected_record = id.and_then(|id| self.record(id));
             self.selected_id = id.map(str::to_owned);
             self.revision += 1;
@@ -171,7 +255,11 @@ impl HistoryStore {
 
     pub fn apply_page(&mut self, page: crate::database::HistoryPage, reset: bool) {
         if reset {
-            self.selected_record = self.selected_id.as_deref().and_then(|id| self.record(id));
+            self.selected_record = self
+                .selected_id
+                .as_deref()
+                .and_then(|id| self.record(id))
+                .or_else(|| self.selected_record.clone());
             self.records = page.records;
             self.generation += 1;
         } else {
@@ -190,6 +278,13 @@ impl HistoryStore {
             .collect();
         self.total_records = page.total_records;
         self.has_more = page.has_more;
+        if self
+            .selected_id
+            .as_ref()
+            .is_some_and(|id| !self.indices.contains_key(id))
+        {
+            self.clear_visual_selection();
+        }
         self.revision += 1;
     }
 
@@ -216,28 +311,47 @@ impl HistoryStore {
     }
 
     pub fn update(&mut self, id: &str, action: &str) -> Result<(), String> {
-        let (_, next) = self.prepare_update(id, action)?;
+        self.update_for_query(id, action, &crate::database::HistoryQuery::default())
+    }
+
+    pub fn update_for_query(
+        &mut self,
+        id: &str,
+        action: &str,
+        query: &crate::database::HistoryQuery,
+    ) -> Result<(), String> {
+        let (previous, next) = self.prepare_update(id, action)?;
+        let was_match = query.matches(&previous);
+        let now_match = next.as_ref().is_some_and(|record| query.matches(record));
         if let Some(index) = self.indices.get(id).copied() {
-            if let Some(next) = next {
-                self.records[index] = next;
+            if now_match {
+                self.records[index] = next.clone().unwrap();
             } else {
                 self.records.remove(index);
-                self.indices = self
-                    .records
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| (r.id.clone(), i))
-                    .collect();
             }
-        } else {
+        } else if !was_match && now_match {
+            self.records.insert(0, next.clone().unwrap());
+        }
+        self.indices = self
+            .records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id.clone(), i))
+            .collect();
+        if self
+            .selected_record
+            .as_ref()
+            .is_some_and(|record| record.id == id)
+        {
             self.selected_record = next;
         }
-        if action == "delete" {
+        if was_match && !now_match {
             self.total_records -= 1;
-            if self.selected_id.as_deref() == Some(id) {
-                self.selected_id = None;
-                self.selected_record = None;
-            }
+        } else if !was_match && now_match {
+            self.total_records += 1;
+        }
+        if !now_match && self.selected_id.as_deref() == Some(id) {
+            self.clear_visual_selection();
         }
         self.revision += 1;
         Ok(())
@@ -298,6 +412,147 @@ mod tests {
     }
 
     #[test]
+    fn switching_filters_restores_deep_loaded_records_full_content_and_cursor() {
+        let cursor = |sequence| {
+            Some(crate::database::HistoryCursor {
+                pinned: false,
+                sequence,
+                created_at: sequence,
+            })
+        };
+        let all = crate::database::HistoryQuery::default();
+        let favorites = crate::database::HistoryQuery {
+            favorites_only: true,
+            ..all.clone()
+        };
+        let mut store = HistoryStore::new(vec![]);
+        store.apply_page(
+            crate::database::HistoryPage {
+                records: (0..100)
+                    .map(|index| record(&format!("all-{index}")))
+                    .collect(),
+                cursor: cursor(100),
+                has_more: true,
+                total_records: 220,
+            },
+            true,
+        );
+        let mut deep = record("deep");
+        deep.text = "full deep content ".repeat(100);
+        let text = deep.text.clone();
+        let mut next: Vec<_> = (100..199)
+            .map(|index| record(&format!("all-{index}")))
+            .collect();
+        next.push(deep);
+        store.apply_page(
+            crate::database::HistoryPage {
+                records: next,
+                cursor: cursor(200),
+                has_more: true,
+                total_records: 220,
+            },
+            false,
+        );
+        let mut cache = HistoryPageCache::default();
+        cache.insert(all.clone(), store.loaded_page(cursor(200)));
+        cache.insert(
+            favorites,
+            crate::database::HistoryPage {
+                records: vec![record("favorite")],
+                cursor: cursor(1),
+                has_more: false,
+                total_records: 1,
+            },
+        );
+        let restored = cache.get(&all).unwrap();
+        assert_eq!(restored.cursor.as_ref().unwrap().sequence, 200);
+        assert_eq!(restored.records.len(), 200);
+        assert_eq!(restored.total_records, 220);
+        assert!(restored.has_more);
+        store.apply_page(restored, true);
+        assert_eq!(store.record("deep").unwrap().text, text);
+        assert_eq!(store.snapshot().records.len(), 200);
+
+        let previous = store.record("all-150").unwrap();
+        let mut favorite = previous.clone();
+        favorite.is_favorite = true;
+        cache.update_record(&previous, Some(&favorite));
+        let all_after = cache.get(&all).unwrap();
+        assert_eq!(all_after.records.len(), 200);
+        assert_eq!(all_after.total_records, 220);
+        assert_eq!(all_after.cursor.unwrap().sequence, 200);
+        assert_eq!(all_after.records.last().unwrap().text, text);
+        let favorite_query = crate::database::HistoryQuery {
+            favorites_only: true,
+            ..all.clone()
+        };
+        let favorites_after = cache.get(&favorite_query).unwrap();
+        assert_eq!(favorites_after.total_records, 2);
+        assert!(favorites_after
+            .records
+            .iter()
+            .any(|record| record.id == favorite.id));
+        cache.update_record(&favorite, Some(&previous));
+        assert_eq!(cache.get(&favorite_query).unwrap().total_records, 1);
+        assert!(!cache
+            .get(&favorite_query)
+            .unwrap()
+            .records
+            .iter()
+            .any(|record| record.id == favorite.id));
+
+        let mut new = record("new-result");
+        new.date = "2026-11-16T12:00:00Z".into();
+        cache.insert_record(&new);
+        cache.insert_record(&new);
+        let restored = cache.get(&all).unwrap();
+        assert_eq!(restored.records.len(), 201);
+        assert_eq!(restored.total_records, 221);
+        assert_eq!(restored.cursor.as_ref().unwrap().sequence, 200);
+        assert_eq!(restored.records[0].id, new.id);
+        assert_eq!(cache.get(&favorite_query).unwrap().total_records, 1);
+        store.apply_page(restored, true);
+        assert_eq!(store.record("deep").unwrap().text, text);
+    }
+
+    #[test]
+    fn cached_mutations_preserve_cursor_and_account_for_offscreen_flags_and_deletes() {
+        let query = crate::database::HistoryQuery::default();
+        let mut cache = HistoryPageCache::default();
+        cache.insert(
+            query.clone(),
+            crate::database::HistoryPage {
+                records: vec![record("loaded")],
+                cursor: Some(crate::database::HistoryCursor {
+                    pinned: false,
+                    sequence: 10,
+                    created_at: 10,
+                }),
+                has_more: true,
+                total_records: 3,
+            },
+        );
+        let offscreen = record("offscreen");
+        let mut pinned = offscreen.clone();
+        pinned.is_pinned = true;
+        cache.update_record(&offscreen, Some(&pinned));
+        let page = cache.get(&query).unwrap();
+        assert_eq!(page.records[0].id, "offscreen");
+        assert_eq!(page.total_records, 3);
+        assert_eq!(page.cursor.unwrap().sequence, 10);
+        cache.update_record(&record("not-loaded"), None);
+        let page = cache.get(&query).unwrap();
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.total_records, 2);
+        assert!(!page.has_more);
+        assert_eq!(page.cursor.unwrap().sequence, 10);
+        cache.update_record(&record("loaded"), None);
+        let page = cache.get(&query).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.total_records, 1);
+    }
+
+    #[test]
     fn completed_records_respect_active_global_query_and_retain_selected_detail() {
         let mut store = HistoryStore::new(vec![]);
         let query = crate::database::HistoryQuery {
@@ -312,8 +567,8 @@ mod tests {
         store.add_completed(beta.clone(), true, &query).unwrap();
         let snapshot = store.snapshot();
         assert_eq!(snapshot.records.len(), 1);
-        assert_eq!(snapshot.total_records, 2);
-        assert_eq!(snapshot.selected_id.as_deref(), Some("beta"));
+        assert_eq!(snapshot.total_records, 1);
+        assert_eq!(snapshot.selected_id, None);
         assert_eq!(store.record("beta").unwrap().text, beta.text);
         store.update("beta", "favorite").unwrap();
         assert!(store.record("beta").unwrap().is_favorite);
@@ -325,7 +580,7 @@ mod tests {
             .add_completed(record("not-favorite"), false, &favorites)
             .unwrap();
         assert_eq!(store.snapshot().records.len(), 1);
-        assert_eq!(store.snapshot().total_records, 3);
+        assert_eq!(store.snapshot().total_records, 1);
     }
 
     #[test]
@@ -341,6 +596,83 @@ mod tests {
         let detail = store.record("long").unwrap();
         assert_eq!(detail.text, item.text);
         assert_eq!(detail.translations, item.translations);
+    }
+
+    #[test]
+    fn visual_selection_can_close_and_reopen_without_losing_full_detail() {
+        let mut store = HistoryStore::new(vec![record("one"), record("two")]);
+        store.select(Some("one")).unwrap();
+        store.clear_visual_selection();
+        assert_eq!(store.snapshot().selected_id, None);
+        store.restore_visual_selection();
+        assert_eq!(store.selected_id(), Some("one"));
+        store.apply_page(
+            crate::database::HistoryPage {
+                records: vec![record("two")],
+                cursor: None,
+                has_more: false,
+                total_records: 1,
+            },
+            true,
+        );
+        assert_eq!(store.selected_id(), None);
+        assert!(store.record("one").is_some());
+        store.restore_visual_selection();
+        assert_eq!(store.selected_id(), None);
+        store.apply_page(
+            crate::database::HistoryPage {
+                records: vec![record("one"), record("two")],
+                cursor: None,
+                has_more: false,
+                total_records: 2,
+            },
+            true,
+        );
+        store.restore_visual_selection();
+        assert_eq!(store.selected_id(), Some("one"));
+        store.clear_visual_selection();
+        store.select(None).unwrap();
+        store.restore_visual_selection();
+        assert_eq!(store.selected_id(), None);
+    }
+
+    #[test]
+    fn favorite_filter_updates_rows_counts_and_associated_detail_without_requery() {
+        let mut item = record("favorite");
+        item.is_favorite = true;
+        let mut store = HistoryStore::new(vec![item]);
+        store.select(Some("favorite")).unwrap();
+        let generation = store.snapshot().generation;
+        let query = crate::database::HistoryQuery {
+            text: String::new(),
+            favorites_only: true,
+        };
+        store
+            .update_for_query("favorite", "favorite", &query)
+            .unwrap();
+        let snapshot = store.snapshot();
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.total_records, 0);
+        assert_eq!(snapshot.selected_id, None);
+        assert_eq!(snapshot.generation, generation);
+        assert!(!store.record("favorite").unwrap().is_favorite);
+        store
+            .update_for_query("favorite", "favorite", &query)
+            .unwrap();
+        assert_eq!(store.snapshot().records.len(), 1);
+        assert_eq!(store.snapshot().total_records, 1);
+        store.restore_visual_selection();
+        assert_eq!(store.selected_id(), Some("favorite"));
+        store
+            .add_completed(record("excluded"), true, &query)
+            .unwrap();
+        assert_eq!(store.snapshot().total_records, 1);
+        assert_eq!(store.selected_id(), None);
+        store
+            .update_for_query("excluded", "delete", &query)
+            .unwrap();
+        assert_eq!(store.snapshot().total_records, 1);
+        assert!(store.record("excluded").is_none());
     }
 
     #[test]

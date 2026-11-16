@@ -89,9 +89,11 @@ export default function App() {
   async function command(name: string, args?: Record<string, unknown>) {
     setError(false);
     if (!native) {
+      if (name === 'records_view_set') setSnapshot((value) => ({ ...value, window: { ...value.window, recordView: args?.view as 'clipboard' | 'translation', historyVisible: true, historyExtent: value.window.historyWidth, ...(args?.view === 'clipboard' ? { translationVisible: false, translationExtent: 0 } : {}) } }));
+      if (name === 'records_details_toggle') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: !value.window.translationVisible, translationExtent: value.window.translationVisible ? 0 : value.window.translationWidth } }));
       if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {
-        const visible = name === 'history_toggle' ? !value.window.historyVisible : Boolean(args?.visible);
-        return { ...value, window: { ...value.window, translationVisible: true, translationExtent: value.window.translationWidth, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };
+        const visible = name === 'history_toggle' ? value.window.recordView !== 'translation' || !value.window.historyVisible : Boolean(args?.visible);
+        return { ...value, window: { ...value.window, recordView: 'translation', translationVisible: true, translationExtent: value.window.translationWidth, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };
       });
       if (name === 'history_width_set') setSnapshot((value) => ({ ...value, window: { ...value.window, historyWidth: Math.min(720, Math.max(280, Number(args?.width))), historyExtent: value.window.historyVisible ? Math.min(720, Math.max(280, Number(args?.width))) : 0 } }));
       if (name === 'translation_columns_set') setSnapshot((value) => ({ ...value, window: { ...value.window, secondaryEnabled: Boolean(args?.secondaryEnabled) } }));
@@ -104,7 +106,7 @@ export default function App() {
       if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
       return;
     }
-    const showsActivity = !['history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show'].includes(name);
+    const showsActivity = !['records_view_set', 'records_details_toggle', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);
@@ -132,7 +134,7 @@ export default function App() {
       {(!connected || pending > 0) && <ActivityBeam label={t('working')} />}
       {connected && target === 'translation' && <Translation {...common} />}
       {connected && target === 'history' && <HistoryView {...common} />}
-      {connected && target === 'clipboard' && <Clipboard {...common} />}
+      {connected && target === 'clipboard' && <Clipboard {...common} active={snapshot.window.recordView === undefined || snapshot.window.recordView === 'clipboard' && snapshot.window.historyVisible} />}
       {connected && target === 'settings' && <Settings {...common} />}
     </main>
   </>;

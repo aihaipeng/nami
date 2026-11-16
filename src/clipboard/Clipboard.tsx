@@ -6,7 +6,8 @@ import type { ClipboardResult } from '../shared/contracts';
 import type { MessageKey } from '../shared/i18n';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryIcon } from '../translation/HistoryIcon';
-import { HistoryWordmark } from '../shared/HistoryWordmark';
+import { RecordToolbar } from '../shared/RecordToolbar';
+import { useRecordBrowser } from '../shared/useRecordBrowser';
 import { historyPreview } from '../translation/history';
 import { cn } from '../lib/utils';
 import fallbackIcon from '../assets/history/reference-nami.png';
@@ -19,32 +20,32 @@ import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import './clipboard.css';
 
-export function Clipboard({ t, snapshot, command, native, activity }: ViewProps) {
+export function Clipboard({ t, snapshot, command, native, activity, active = true }: ViewProps & { active?: boolean }) {
   const [session, setSession] = useState(0);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const [query, setQuery] = useState('');
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
-  const clipboard = useClipboard(native, query, favoritesOnly);
-  const records = clipboard.page.records;
-  const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
-  const visibleIds = new Set(records.map(({ id }) => id));
   const operation = useRef(0);
   const mounted = useRef(true);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
+  const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, pinnedList, () => clipboard.displayReady);
+  const { query, setQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember } = browser;
+  const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0);
+  const records = clipboard.page.records;
+  const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
+  const visibleIds = new Set(records.map(({ id }) => id));
   const ordered = [...records.filter((record) => record.isPinned), ...records.filter((record) => !record.isPinned)];
   useEffect(() => {
     if (!native) return;
     let disposed = false;
     let remove: (() => void) | undefined;
     void listen<{ label: string; visible: boolean }>('window://visibility', ({ payload }) => {
-      if (disposed || payload.label !== 'clipboard') return;
+      if (disposed || payload.label !== 'clipboard' || snapshot.window.recordsSession !== undefined) return;
       ++operation.current;
       setEditing(null); setMenu(null); setRevealed(null); setSelected(null); setFeedback(null);
       setQuery(''); setFavoritesOnly(false); setSession((value) => value + 1);
@@ -52,6 +53,15 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
       if (!payload.visible) (document.activeElement as HTMLElement | null)?.blur();
     }).then((unlisten) => { if (disposed) unlisten(); else remove = unlisten; }).catch(() => { if (!disposed) setFeedback('nativeError'); });
     return () => { disposed = true; remove?.(); };
+  }, [native, snapshot.window.recordsSession]);
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const subscription = listen<ClipboardResult>('clipboard_use_failed', ({ payload }) => {
+      if (disposed) return;
+      setFeedback(payload.code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : payload.code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : payload.copyStatus === 'superseded' ? 'clipboardChanged' : payload.copyStatus === 'current' ? null : 'copyFailed');
+    });
+    return () => { disposed = true; void subscription.then((remove) => remove()); };
   }, [native]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; ++operation.current; }; }, []);
   useEffect(() => { setMenu(null); setRevealed(null); }, [query, favoritesOnly]);
@@ -60,7 +70,14 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
     window.addEventListener('scroll', dismiss, true);
     return () => window.removeEventListener('scroll', dismiss, true);
   }, []);
-  useEffect(() => { list.current?.scrollTo(0, 0); pinnedList.current?.scrollTo(0, 0); }, [query, favoritesOnly]);
+  useEffect(() => {
+    ++operation.current;
+    setEditing(null); setMenu(null); setRevealed(null); setSelected(null); setFeedback(null); setSession((value) => value + 1);
+  }, [snapshot.window.recordsSession]);
+  useEffect(() => { if (!active) { setEditing(null); setMenu(null); setRevealed(null); setSession((value) => value + 1); } }, [active]);
+  useEffect(() => {
+    if (active && snapshot.window.recordsFocus !== undefined) search.current?.focus({ preventScroll: true });
+  }, [active, snapshot.window.recordsFocus]);
 
   async function useRecord(recordId: string, action: 'copy' | 'paste') {
     if (!native || (action === 'copy' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return;
@@ -81,7 +98,7 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || (editing && event.key === 'Escape')) return;
+      if (!active || event.defaultPrevented || event.isComposing || event.keyCode === 229 || (editing && event.key === 'Escape')) return;
       if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
         event.preventDefault(); ++operation.current;
         void command('window_hide', { region: 'clipboard' });
@@ -89,7 +106,7 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
     };
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
-  }, [snapshot.capabilities.primaryModifier, command, editing]);
+  }, [snapshot.capabilities.primaryModifier, command, editing, active]);
   function focusRow(id: string) { setSelected(id); rowRefs.current.get(id)?.focus(); }
   function loadNearEnd(element: HTMLDivElement) {
     if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 180) void clipboard.loadMore();
@@ -123,28 +140,20 @@ export function Clipboard({ t, snapshot, command, native, activity }: ViewProps)
   return <section inert={editing !== null} className="history-panel clipboard-panel" aria-label={t('clipboard')}>
     {clipboard.showActivity && <ActivityBeam label={t('working')} />}
     <div className="drag-strip" data-tauri-drag-region />
-    <header className="history-toolbar" onMouseDown={(event) => { if ((event.target as HTMLElement).closest('button')) event.preventDefault(); }}>
-      <HistoryWordmark />
-      <label className="history-search"><HistoryIcon name="magnifyingglass" /><input ref={search} type="search" aria-label={t('searchClipboard')} placeholder={t('searchClipboard')} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'ArrowDown' && !event.nativeEvent.isComposing && ordered[0]) { event.preventDefault(); focusRow(ordered[0].id); } }} />
-        {query && <button type="button" aria-label={t('clearClipboardSearch')} onClick={() => { setQuery(''); search.current?.focus(); }}><HistoryIcon name="xmark.circle.fill" /></button>}
-      </label>
-      <button className="icon-button" title={t('allClipboard')} aria-label={t('allClipboard')} aria-pressed={!favoritesOnly} onClick={() => setFavoritesOnly(false)}><HistoryIcon name="list.bullet" /></button>
-      <button className="icon-button" title={t('favoriteClipboard')} aria-label={t('favoriteClipboard')} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(true)}><HistoryIcon name={favoritesOnly ? 'star.fill' : 'star'} /></button>
-      <button className="icon-button history-pin" title={snapshot.window.clipboardPinned ? t('unpin') : t('pin')} aria-label={snapshot.window.clipboardPinned ? t('unpin') : t('pin')} aria-pressed={snapshot.window.clipboardPinned} onClick={() => void command('window_pin', { region: 'clipboard', pinned: !snapshot.window.clipboardPinned })}><HistoryIcon name={snapshot.window.clipboardPinned ? 'pin.fill' : 'pin'} /></button>
-    </header>
+    <RecordToolbar t={t} snapshot={snapshot} command={command} view="clipboard" query={query} onQuery={setQuery} search={search} onArrowDown={() => { if (ordered[0]) focusRow(ordered[0].id); }} />
     {clipboard.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></p>}
-    <HistoryList list={list} pinnedList={pinnedList} pinnedCount={records.filter((record) => record.isPinned).length} pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
+    <HistoryList onScroll={() => { remember(); clipboard.refreshDeferred(); }} list={list} pinnedList={pinnedList} pinnedCount={records.filter((record) => record.isPinned).length} pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
       {clipboard.retainedRecords.filter((record) => !record.isPinned).map(row)}
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status"><p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardCaptureOff')}</p>{!query && !favoritesOnly && !snapshot.clipboardCaptureEnabled && <button onClick={() => void command('window_show', { target: 'settings' })}>{t('openSettings')}</button>}</div>}
     </HistoryList>
-    <HistoryFooter key={session} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
+    <HistoryFooter key={session} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
     {menu && menuRecord && <ClipboardMenu record={menuRecord} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
       if (action === 'paste') void useRecord(menuRecord.id, 'paste');
       else if (action === 'note') setEditing(menuRecord.id);
       else void clipboard.update(menuRecord.id, action);
     }} />}
-    {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} onReturnFocus={() => focusRow(editing)} />}
+    {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} onSaved={(detail) => clipboard.applyEdit(editing, detail)} onReturnFocus={() => focusRow(editing)} />}
     {feedback && <div className="clipboard-feedback" role="status">{t(feedback)}</div>}
   </section>;
 }

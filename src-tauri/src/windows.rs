@@ -1,5 +1,5 @@
 use crate::{
-    model::{PanelFrame, WindowState},
+    model::{PanelFrame, RecordView, WindowState},
     platform, AppState,
 };
 use objc2::{rc::Retained, runtime::AnyObject, DefinedClass, MainThreadOnly};
@@ -15,6 +15,7 @@ const HISTORY_MIN_WIDTH: f64 = 280.0;
 const HISTORY_MAX_WIDTH: f64 = 720.0;
 const STAGE_HISTORY_TAG: isize = 1;
 const STAGE_TRANSLATION_TAG: isize = 2;
+const STAGE_CLIPBOARD_TAG: isize = 3;
 
 #[path = "windows/native_controls.rs"]
 mod native_controls;
@@ -218,6 +219,7 @@ struct StageState {
     translation_visible: Cell<bool>,
     history_view: Cell<usize>,
     translation_view: Cell<usize>,
+    clipboard_view: Cell<usize>,
 }
 
 objc2::define_class!(
@@ -280,6 +282,7 @@ objc2::define_class!(
             match tag {
                 STAGE_HISTORY_TAG => self.ivars().history_view.set(view as usize),
                 STAGE_TRANSLATION_TAG => self.ivars().translation_view.set(view as usize),
+                STAGE_CLIPBOARD_TAG => self.ivars().clipboard_view.set(view as usize),
                 _ => {}
             }
         }
@@ -302,6 +305,7 @@ impl TranslationStage {
             let frames = geometry.frames(bounds.size.width);
             for (pointer, frame) in [
                 (state.history_view.get(), frames.history),
+                (state.clipboard_view.get(), frames.history),
                 (state.translation_view.get(), frames.translation),
             ] {
                 if pointer == 0 {
@@ -448,6 +452,29 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
         .map_err(|_| "window_geometry")?;
     }
 
+    let clipboard = window
+        .add_child(
+            tauri::webview::WebviewBuilder::new("clipboard", WebviewUrl::App("index.html".into()))
+                .transparent(true),
+            tauri::LogicalPosition::new(-360.0, 0.0),
+            LogicalSize::new(360.0, 620.0),
+        )
+        .map_err(|_| "window_create")?;
+    clipboard
+        .set_auto_resize(false)
+        .map_err(|_| "window_create")?;
+    clipboard
+        .with_webview(move |webview| unsafe {
+            let view = webview.inner().cast::<AnyObject>();
+            let _: () = objc2::msg_send![view, setAutoresizingMask: 0usize];
+            let _: () = objc2::msg_send![view, setFocusRingType: 1usize];
+            let stage = stage_pointer as *mut TranslationStage;
+            let _: () = objc2::msg_send![stage, addSubview: view];
+            let _: () = objc2::msg_send![stage, setStageView: view, forTag: STAGE_CLIPBOARD_TAG];
+            let _: () = objc2::msg_send![view, setHidden: true];
+        })
+        .map_err(|_| "window_geometry")?;
+
     native_controls::install(window.app_handle(), &stage)?;
     native_resize::install(window.app_handle(), &stage)?;
     let state = window
@@ -515,6 +542,9 @@ fn observe_translation_resize(app: &AppHandle, window: &Window) -> Result<(), St
 }
 
 fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
+    if label == "clipboard" {
+        return create(app, "translation");
+    }
     if let Some(window) = app.get_window(label) {
         return Ok(window);
     }
@@ -611,6 +641,17 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         WindowEvent::Focused(false) => {
             if owned_label == "translation" {
                 handle.state::<AppState>().windows.lock().unwrap().blur();
+                if !handle
+                    .state::<AppState>()
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .history_visible
+                {
+                    if let Some(window) = handle.get_window("translation") {
+                        let _ = native_history::dismiss_transient(&window);
+                    }
+                }
                 let _ = apply_translation(&handle);
             } else if owned_label == "clipboard"
                 && !handle
@@ -633,9 +674,45 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
 }
 
 pub fn emit_state(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>().windows.lock().unwrap().clone();
+    let (state, ended) = {
+        let state = app.state::<AppState>();
+        let mut regions = state.windows.lock().unwrap();
+        let ended = regions.sync_records_session();
+        if ended {
+            regions.record_view = RecordView::Clipboard;
+        }
+        (regions.clone(), ended)
+    };
+    if ended {
+        app.state::<AppState>()
+            .records_dirty
+            .store(false, Ordering::SeqCst);
+        app.state::<AppState>()
+            .records_navigation
+            .lock()
+            .unwrap()
+            .take();
+        if let Some(window) = app.get_window("translation") {
+            native_history::reset_session(&window)?;
+        }
+        crate::clipboard_runtime::visibility(app, false)?;
+    }
+    if !state.translation_visible {
+        let state = app.state::<AppState>();
+        if state.history.lock().unwrap().selected_id().is_some() {
+            state.history.lock().unwrap().clear_visual_selection();
+            crate::history_runtime::publish_history(app)?;
+        }
+    }
     if let Some(window) = app.get_window("translation") {
         native_history::sync(&window, state.history_visible)?;
+    }
+    if let Some(view) = app.get_webview("clipboard") {
+        let hidden = !state.history_visible || state.record_view != RecordView::Clipboard;
+        view.with_webview(move |webview| unsafe {
+            let _: () = objc2::msg_send![webview.inner().cast::<AnyObject>(), setHidden: hidden];
+        })
+        .map_err(|_| "window_geometry")?;
     }
     for label in ["translation", "history", "clipboard", "settings"] {
         if let Some(window) = app.get_webview(label) {
@@ -1140,41 +1217,129 @@ pub fn update_translation_level(app: &AppHandle) -> Result<(), String> {
     emit_state(app)
 }
 
+pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
+    let view = match view {
+        "clipboard" => RecordView::Clipboard,
+        "translation" => RecordView::Translation,
+        _ => return Err("invalid_argument".into()),
+    };
+    let current = app.state::<AppState>().windows.lock().unwrap().record_view;
+    if current == view {
+        return Ok(());
+    }
+    if crate::records_runtime::defer_navigation(
+        app,
+        if view == RecordView::Clipboard {
+            "view:clipboard"
+        } else {
+            "view:translation"
+        },
+    )? {
+        return Ok(());
+    }
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .set_record_view(view);
+    apply_translation(app)?;
+    if view == RecordView::Translation {
+        if let Some(window) = app.get_window("translation") {
+            native_history::focus_search(&window)?;
+        }
+    } else if let Some(view) = app.get_webview("clipboard") {
+        view.set_focus().map_err(|_| "window_focus")?;
+    }
+    Ok(())
+}
+
+pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut regions = state.windows.lock().unwrap();
+        if regions.record_view != RecordView::Translation {
+            return Err("details_unavailable".into());
+        }
+        regions.translation_visible = !regions.translation_visible;
+        if regions.translation_visible {
+            state.history.lock().unwrap().restore_visual_selection();
+        }
+    }
+    refresh_history(app)?;
+    crate::history_runtime::publish_history(app)?;
+    apply_translation(app)
+}
+
 pub fn show(app: &AppHandle, target: &str) -> Result<(), String> {
+    show_entry(app, target, true)
+}
+
+pub fn resume_navigation(app: &AppHandle, target: &str) -> Result<(), String> {
+    show_entry(app, target, false)
+}
+
+fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String> {
     if !["translation", "clipboard", "settings"].contains(&target) {
         return Err("invalid_argument".into());
     }
-    if target == "clipboard" {
+    if capture && target != "settings" {
         app.state::<AppState>()
             .operation
             .fetch_add(1, Ordering::SeqCst);
-        // Never retain a previous target when the current entry has no external application.
         *app.state::<AppState>().target.lock().unwrap() = platform::capture_target();
     }
+    if target != "settings" && crate::records_runtime::defer_navigation(app, target)? {
+        return Ok(());
+    }
     let window = create(app, target)?;
-    if target == "translation" {
+    if target != "settings" {
         {
             let state = app.state::<AppState>();
             let mut regions = state.windows.lock().unwrap();
-            regions.show_translation();
+            if target == "translation" {
+                regions.summon_translation();
+            } else {
+                regions.set_record_view(RecordView::Clipboard);
+                regions.records_focus += 1;
+            }
         }
         apply_translation(app)?;
     }
-    if target == "clipboard" && !window.is_visible().map_err(|_| "window_visibility")? {
-        crate::clipboard_runtime::visibility(app, true)?;
-    }
     window.show().map_err(|_| "window_show")?;
     window.set_focus().map_err(|_| "window_focus")?;
-    // An accessory (menu bar) application is not brought forward by
-    // makeKeyAndOrderFront alone. Activate it so global shortcuts and the tray
-    // menu deliver keyboard focus to the tool window.
     activate_application();
-    if matches!(target, "translation" | "clipboard") {
-        if let Some(view) = app.get_webview(target) {
-            view.set_focus().map_err(|_| "window_focus")?;
-        }
+    if let Some(view) = app.get_webview(target) {
+        view.set_focus().map_err(|_| "window_focus")?;
     }
     emit_state(app)
+}
+
+pub fn focus_records_editor(app: &AppHandle) -> Result<(), String> {
+    let view = app
+        .get_webview("clipboard")
+        .or_else(|| app.get_webview("translation"))
+        .ok_or("window_unavailable")?;
+    view.window().set_focus().map_err(|_| "window_focus")?;
+    activate_application();
+    view.set_focus().map_err(|_| "window_focus".into())
+}
+
+pub fn reveal_clipboard_failure(app: &AppHandle) -> Result<(), String> {
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .set_record_view(RecordView::Clipboard);
+    apply_translation(app)?;
+    if let Some(window) = app.get_window("translation") {
+        reveal_without_focus(&window)?;
+    }
+    Ok(())
+}
+
+pub fn hide_after_clipboard_use(app: &AppHandle) -> Result<(), String> {
+    app.state::<AppState>().windows.lock().unwrap().dismiss();
+    apply_translation(app)
 }
 
 fn activate_application() {
@@ -1197,28 +1362,28 @@ pub fn reveal_without_focus(window: &Window) -> Result<(), String> {
 
 pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
     match region {
-        "translation" | "history" => {
-            {
-                let state = app.state::<AppState>();
-                let mut windows = state.windows.lock().unwrap();
-                if region == "translation" {
-                    windows.dismiss()
-                } else {
-                    windows.history_visible = false
-                }
+        "translation" | "history" | "clipboard" => {
+            if let Some(window) = app.get_window("translation") {
+                native_history::dismiss_transient(&window)?;
             }
-            apply_translation(app)
-        }
-        "clipboard" | "settings" => {
             if region == "clipboard" {
                 app.state::<AppState>()
                     .operation
                     .fetch_add(1, Ordering::SeqCst);
             }
-            if let Some(window) = app.get_window(region) {
-                if region == "clipboard" {
-                    crate::clipboard_runtime::visibility(app, false)?;
+            {
+                let state = app.state::<AppState>();
+                let mut regions = state.windows.lock().unwrap();
+                if region == "history" {
+                    regions.history_visible = false;
+                } else {
+                    regions.dismiss();
                 }
+            }
+            apply_translation(app)
+        }
+        "settings" => {
+            if let Some(window) = app.get_window("settings") {
                 window.hide().map_err(|_| "window_hide")?;
             }
             Ok(())

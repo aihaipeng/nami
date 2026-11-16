@@ -1,6 +1,18 @@
 {
   "identifier": "translation",
-  "windows": ["translation"],
-  "webviews": ["translation", "history"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-start-dragging", "allow-p0-common", "allow-p0-translation"]
+  "windows": [
+    "translation"
+  ],
+  "webviews": [
+    "translation",
+    "history"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-p0-common",
+    "allow-p0-translation",
+    "allow-p0-clipboard"
+  ]
 }

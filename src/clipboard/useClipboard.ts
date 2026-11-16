@@ -24,7 +24,7 @@ function hydrate(page: ClipboardWirePage): ClipboardPage {
 }
 const emptyPage: ClipboardPage = { records: [], cursor: null, hasMore: false, totalRecords: 0 };
 
-export function useClipboard(native: boolean, query: string, favoritesOnly: boolean) {
+export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean) {
   const [page, setPage] = useState(emptyPage);
   const [loading, setLoading] = useState(native);
   const [showActivity, setShowActivity] = useState(native);
@@ -41,6 +41,11 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const morePending = useRef(false);
   const resetPending = useRef(false);
   const pages = useRef(new Map<boolean, ClipboardPage>());
+  const deferred = useRef(false);
+  const localWrites = useRef(0);
+  const writeQueue = useRef(Promise.resolve());
+  const shouldDefer = useRef(deferRefresh);
+  shouldDefer.current = deferRefresh;
 
   const fetchPage = useCallback(async (append = false, animate = true) => {
     if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || !latest.current.hasMore))) return;
@@ -57,9 +62,13 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       const merged = append ? { ...next, records: [...latest.current.records, ...next.records.filter((record) => !latest.current.records.some(({ id }) => id === record.id))] } : next;
       if (!append) {
         loadedFilters.current = queryFilters;
-        pages.current.set(queryFilters.favoritesOnly, next);
-        if (result.alternate) pages.current.set(!queryFilters.favoritesOnly, hydrate(result.alternate));
+        if (result.alternate) {
+          const alternate = hydrate(result.alternate);
+          const retained = pages.current.get(!queryFilters.favoritesOnly);
+          if (!retained || retained.records.length <= alternate.records.length) pages.current.set(!queryFilters.favoritesOnly, alternate);
+        }
       }
+      pages.current.set(queryFilters.favoritesOnly, merged);
       setCaptureError(false);
       latest.current = merged;
       setPage(merged);
@@ -82,7 +91,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const removers: (() => void)[] = [];
     if (native) void (async () => {
       for (const subscribe of [
-        () => listen<number>('clipboard_changed', () => { if (!disposed) { setCaptureError(false); pages.current.clear(); void fetchPage(false, false); } }),
+        () => listen<number>('clipboard_changed', () => { if (!disposed) { setCaptureError(false); if (localWrites.current || shouldDefer.current?.()) deferred.current = true; else { pages.current.clear(); deferred.current = false; void fetchPage(false, false); } } }),
         () => listen<string>('clipboard_capture_error', () => { if (!disposed) setCaptureError(true); }),
       ]) {
         const remove = await subscribe();
@@ -128,13 +137,57 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
     if (!native || !active.current) return;
     const session = lifecycle.current;
+    const pending = writeQueue.current;
+    let release!: () => void;
+    writeQueue.current = new Promise<void>((resolve) => { release = resolve; });
+    ++localWrites.current;
+    await pending;
+    if (!active.current || session !== lifecycle.current) { --localWrites.current; release(); return; }
+    const previous = latest.current.records.find((record) => record.id === recordId);
     setError(false);
     try {
       await invoke('clipboard_record_update', { recordId, action });
+      if (!active.current || session !== lifecycle.current) return;
+      if (!shouldDefer.current?.()) {
+        pages.current.clear(); deferred.current = false; void fetchPage(false, false);
+      } else if (previous) {
+        const updated = action === 'delete' ? null : { ...previous, ...(action === 'favorite' ? { isFavorite: !previous.isFavorite } : { isPinned: !previous.isPinned }) };
+        for (const [favorites, cached] of pages.current) {
+          const before = !favorites || previous.isFavorite;
+          const after = updated !== null && (!favorites || updated.isFavorite);
+          let records = cached.records.filter((record) => record.id !== recordId);
+          if (after && updated) {
+            const oldIndex = cached.records.findIndex((record) => record.id === recordId);
+            records.splice(oldIndex < 0 ? records.length : oldIndex, 0, updated);
+            records = records.sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || Date.parse(b.date) - Date.parse(a.date));
+          }
+          pages.current.set(favorites, { ...cached, records, totalRecords: cached.totalRecords + Number(after) - Number(before) });
+        }
+        const next = pages.current.get(filters.current.favoritesOnly);
+        if (next) { latest.current = next; setPage(next); }
+      }
     } catch { if (active.current && session === lifecycle.current) setError(true); }
-  }, [native]);
+    finally { --localWrites.current; release(); }
+  }, [native, fetchPage]);
+
+  function applyEdit(recordId: string, detail: { title: string; text: string }) {
+    const previous = latest.current.records.find((record) => record.id === recordId);
+    if (!active.current || !previous) return;
+    const matches = detail.text.toLowerCase().includes(filters.current.query.trim().toLowerCase());
+    const updated = { ...previous, title: detail.title, text: [...detail.text].slice(0, 256).join('') };
+    const patch = (cached: ClipboardPage, favorites: boolean): ClipboardPage => {
+      const before = !favorites || previous.isFavorite;
+      const after = before && matches;
+      const records = cached.records.flatMap((record) => record.id !== recordId ? [record] : after ? [updated] : []);
+      const totalRecords = cached.totalRecords + Number(after) - Number(before);
+      return { ...cached, records, totalRecords, hasMore: cached.hasMore && records.length < totalRecords };
+    };
+    for (const [favorites, cached] of pages.current) pages.current.set(favorites, patch(cached, favorites));
+    latest.current = pages.current.get(filters.current.favoritesOnly) ?? patch(latest.current, filters.current.favoritesOnly);
+    setPage(latest.current);
+  }
 
   const displayedPage = filters.current.query === query && loadedFilters.current.favoritesOnly !== favoritesOnly ? pages.current.get(favoritesOnly) ?? page : page;
   const retainedRecords = [...new Map(displayedPage.records.concat([...pages.current.values()].flatMap((cached) => cached.records)).map((record) => [record.id, record])).values()];
-  return { page: displayedPage, retainedRecords, loading, showActivity, error: error || captureError, update, loadMore: () => fetchPage(true), refresh: () => { if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  return { applyEdit, page: displayedPage, displayReady: loadedFilters.current.query === query && (loadedFilters.current.favoritesOnly === favoritesOnly || pages.current.has(favoritesOnly)), retainedRecords, loading, showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

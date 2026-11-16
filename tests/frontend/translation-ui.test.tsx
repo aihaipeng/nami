@@ -12,6 +12,17 @@ const select = (id = sample.id, retranslate = false) => act(async () => { await 
 // These tests exercise DOM behavior and the native bridge contract. AppKit geometry,
 // glass rendering and frame pacing are covered by the separate native checks.
 describe('translation input and shortcuts', () => {
+  it('dismisses transient actions on hide and preserves the translation draft', async () => {
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Preserved draft' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Actions/ }));
+    expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
+    await windowState({ translationVisible: true, translationExtent: 920 });
+    expect(source().value).toBe('Preserved draft');
+  });
+
   it('makes panel whitespace draggable while preserving result text selection', async () => {
     await mount();
     expect(document.querySelector('.translation-panel')?.getAttribute('data-tauri-drag-region')).toBe('deep');
@@ -182,15 +193,15 @@ describe('selection across native webviews', () => {
     expect(calls('window_show')).toHaveLength(0);
   });
 
-  it('selecting the same record again hides only translation while retaining history', async () => {
+  it('selecting the same record again keeps translation and history visible', async () => {
     await mount(); await select(); await select();
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
     expect(bridge.snapshot.window.historyVisible).toBe(true);
     expect(calls('window_hide')).toHaveLength(0);
     expect((document.querySelector('.source-input') as HTMLTextAreaElement).value).toBe(sample.text);
   });
 
-  it('leaves collapse and restore authoritative in the backend across rapid selection commands', async () => {
+  it('keeps details open across rapid repeated selection commands', async () => {
     await mount();
     const visible: boolean[] = [];
     await act(async () => {
@@ -199,7 +210,7 @@ describe('selection across native webviews', () => {
         visible.push(bridge.snapshot.window.translationVisible);
       }
     });
-    expect(visible).toEqual([true, false, true]);
+    expect(visible).toEqual([true, true, true]);
     expect(source().value).toBe(sample.text);
     expect(calls('window_show')).toHaveLength(0);
     expect(calls('window_hide')).toHaveLength(0);
@@ -220,9 +231,40 @@ describe('selection across native webviews', () => {
     expect(calls('window_hide')).toHaveLength(0);
   });
 
-  it('clears backend selection without changing translation visibility', async () => {
-    await mount(); await select(); await select();
+  it('finishes a background translation without reopening details or changing the clipboard view', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'translation_run') await new Promise<void>((resolve) => { finish = resolve; });
+      return original(name, args);
+    });
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Background synthetic request' } });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    await windowState({ recordView: 'clipboard', translationVisible: false, translationExtent: 0 });
+    await act(async () => finish());
+    await waitFor(() => expect(bridge.history.records.some((record) => record.text === 'Background synthetic request')).toBe(true));
+    expect(bridge.snapshot.window.recordView).toBe('clipboard');
     expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(calls('window_show')).toHaveLength(0);
+    await windowState({ recordView: 'translation', translationVisible: true, translationExtent: 920 });
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
+  });
+
+  it('can copy restored results after visual history selection has been cleared', async () => {
+    await mount(); await select();
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    await emit('history_sample_selected', { sampleId: null, retranslate: false, record: null });
+    await windowState({ translationVisible: true, translationExtent: 920 });
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: sample.id, part: 'primary' });
+    expect(source().value).toBe(sample.text);
+  });
+
+  it('clears backend selection without changing translation visibility', async () => {
+    await mount(); await select();
+    await windowState({ translationVisible: false, translationExtent: 0 });
     await act(async () => { await bridge.invoke('history_sample_select', { sampleId: null, retranslate: false }); });
     expect(bridge.history.selectedId).toBeNull();
     expect(bridge.snapshot.window.translationVisible).toBe(false);
@@ -264,7 +306,7 @@ describe('selection across native webviews', () => {
     expect(within(translation.container).getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
     expect(button.getAttribute('aria-pressed')).toBe('true');
     await user.click(button);
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
     expect(bridge.snapshot.window.historyVisible).toBe(true);
     expect(calls('window_hide')).toHaveLength(0);
   });
@@ -320,12 +362,12 @@ describe('selection across native webviews', () => {
     expect(screen.queryByText(sample.translations[0])).toBeNull();
   });
 
-  it('clearing selection does not erase the current source or cached text', async () => {
+  it('clearing visual selection preserves the current source, cached text and copy association', async () => {
     await mount(); await select(); await emit('history_sample_selected', { sampleId: null, retranslate: false });
     expect(source().value).toBe(sample.text);
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
     fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect(calls('translation_sample_copy')).toHaveLength(0);
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: sample.id, part: 'primary' });
   });
 
   it('ignores unknown record IDs instead of replacing the current draft', async () => {

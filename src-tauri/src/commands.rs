@@ -63,16 +63,12 @@ pub fn window_hide(
     region: String,
     keep_history: Option<bool>,
 ) -> Result<(), String> {
-    let allowed = match region.as_str() {
-        "history" | "translation" => "translation",
-        "clipboard" => "clipboard",
-        "settings" => "settings",
-        _ => return Err("invalid_argument".into()),
-    };
-    if allowed == "translation" {
-        authorize(&window, &["translation", "history"])?;
+    if region == "settings" {
+        authorize(&window, &["settings"])?;
+    } else if ["history", "translation", "clipboard"].contains(&region.as_str()) {
+        authorize(&window, &["translation", "history", "clipboard"])?;
     } else {
-        authorize(&window, &[allowed])?;
+        return Err("invalid_argument".into());
     }
     if region == "translation" && keep_history == Some(true) {
         {
@@ -121,28 +117,60 @@ pub fn window_pin(
     let state = app.state::<AppState>();
     match region.as_str() {
         "translation" | "history" => {
-            authorize(&window, &["translation", "history"])?;
+            authorize(&window, &["translation", "history", "clipboard"])?;
             {
                 let mut windows = state.windows.lock().unwrap();
                 if region == "translation" {
                     windows.translation_pinned = pinned
                 } else {
-                    windows.history_pinned = pinned
+                    windows.history_pinned = pinned;
+                    windows.clipboard_pinned = pinned
                 }
             }
             windows::update_translation_level(&app)
         }
         "clipboard" => {
-            authorize(&window, &["clipboard"])?;
-            window
-                .window()
-                .set_always_on_top(pinned)
-                .map_err(|_| "window_pin")?;
-            state.windows.lock().unwrap().clipboard_pinned = pinned;
-            windows::emit_state(&app)
+            authorize(&window, &["clipboard", "translation"])?;
+            {
+                let mut windows = state.windows.lock().unwrap();
+                windows.history_pinned = pinned;
+                windows.clipboard_pinned = pinned;
+            }
+            windows::update_translation_level(&app)
         }
         _ => Err("invalid_argument".into()),
     }
+}
+
+#[tauri::command]
+pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result<(), String> {
+    authorize(&window, &["translation", "history", "clipboard"])?;
+    windows::set_record_view(&app, &view)
+}
+
+#[tauri::command]
+pub fn records_details_toggle(window: Webview, app: AppHandle) -> Result<(), String> {
+    authorize(&window, &["translation", "history", "clipboard"])?;
+    windows::toggle_record_details(&app)
+}
+
+#[tauri::command]
+pub fn records_editor_set(window: Webview, app: AppHandle, dirty: bool) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    app.state::<AppState>()
+        .records_dirty
+        .store(dirty, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn records_navigation_resolve(
+    window: Webview,
+    app: AppHandle,
+    proceed: bool,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    crate::records_runtime::resolve_navigation(&app, proceed)
 }
 
 #[tauri::command]
@@ -166,6 +194,7 @@ pub fn history_visibility_set(
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
+        state.record_view = crate::model::RecordView::Translation;
         state.history_visible = visible;
         state.translation_visible = true;
     }
@@ -330,7 +359,11 @@ pub(crate) fn select_history_sample(
             windows.translation_visible
         };
         if visible {
-            windows::show(app, "translation")?;
+            windows::apply_translation(app)?;
+            if let Some(view) = app.get_webview("translation") {
+                view.window().show().map_err(|_| "window_show")?;
+                view.set_focus().map_err(|_| "window_focus")?;
+            }
         } else {
             windows::apply_translation(app)?;
         }
@@ -411,7 +444,7 @@ pub async fn clipboard_record_use(
     record_id: String,
     action: String,
 ) -> Result<OperationResult, String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     if !["copy", "paste"].contains(&action.as_str()) {
         return Err("invalid_argument".into());
     }
@@ -444,11 +477,8 @@ pub async fn clipboard_record_use(
         };
         state.clipboard_version.store(version, Ordering::SeqCst);
         if action == "copy" {
-            if !state.windows.lock().unwrap().clipboard_pinned {
-                if let Some(window) = app.get_webview_window("clipboard") {
-                    let _ = crate::clipboard_runtime::visibility(&app, false);
-                    let _ = window.hide();
-                }
+            if !state.windows.lock().unwrap().history_pinned {
+                let _ = windows::hide_after_clipboard_use(&app);
             }
             return Err(OperationResult::copied());
         }
@@ -473,11 +503,8 @@ pub async fn clipboard_record_use(
                 platform::clipboard_version(),
             ));
         }
-        if !state.windows.lock().unwrap().clipboard_pinned {
-            if let Some(window) = app.get_webview_window("clipboard") {
-                let _ = crate::clipboard_runtime::visibility(&app, false);
-                let _ = window.hide();
-            }
+        if !state.windows.lock().unwrap().history_pinned {
+            let _ = windows::hide_after_clipboard_use(&app);
         }
         if !platform::activate(target) {
             return Err(OperationResult::failed(
@@ -553,15 +580,22 @@ async fn reveal_failure(
     if result.status != "failed" || result.code == Some("cancelled") {
         return Ok(());
     }
+    let failure = serde_json::json!({ "status": result.status, "copyStatus": result.copy_status, "code": result.code });
     on_main(app, move |app| {
         if app.state::<AppState>().operation.load(Ordering::SeqCst) == operation {
-            if let Some(window) = app.get_webview_window("clipboard") {
-                // Surface the failure without changing the captured target or stealing focus.
-                let _ = windows::reveal_without_focus(&window.as_ref().window());
+            // Restore the list without recapturing the target or cancelling this operation.
+            windows::reveal_clipboard_failure(&app)?;
+            if let Some(view) = app
+                .get_webview("clipboard")
+                .or_else(|| app.get_webview("translation"))
+            {
+                view.emit("clipboard_use_failed", &failure)
+                    .map_err(|_| "event_emit")?;
             }
         }
+        Ok::<_, String>(())
     })
-    .await
+    .await?
 }
 
 #[tauri::command]
@@ -699,7 +733,7 @@ pub async fn clipboard_query(
     favorites_only: bool,
     cursor: Option<nami::clipboard::ClipboardCursor>,
 ) -> Result<nami::clipboard::ClipboardQueryResult, String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     crate::clipboard_runtime::database(&app, move |database| {
         let page = database.clipboard_page(
             &query,
@@ -728,7 +762,7 @@ pub async fn clipboard_record_detail(
     app: AppHandle,
     record_id: String,
 ) -> Result<nami::clipboard::ClipboardDetail, String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     crate::clipboard_runtime::database(&app, move |database| database.clipboard_detail(&record_id))
         .await
 }
@@ -742,7 +776,7 @@ pub async fn clipboard_record_update(
     title: Option<String>,
     text: Option<String>,
 ) -> Result<(), String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let root = crate::clipboard_runtime::image_root(&app)?;
@@ -822,7 +856,7 @@ pub async fn clipboard_files(
     app: AppHandle,
     record_id: String,
 ) -> Result<Vec<nami::clipboard::FileEntry>, String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     let record = crate::clipboard_runtime::database(&app, move |database| {
         database.clipboard_record(&record_id)
     })
@@ -848,7 +882,7 @@ pub async fn clipboard_image(
     record_id: String,
     max_pixels: Option<u32>,
 ) -> Result<ClipboardImage, String> {
-    authorize(&window, &["clipboard"])?;
+    authorize(&window, &["clipboard", "translation"])?;
     let max_pixels = max_pixels.unwrap_or(1024);
     if !(128..=2048).contains(&max_pixels) {
         return Err("invalid_argument".into());

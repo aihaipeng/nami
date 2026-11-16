@@ -25,7 +25,10 @@ pub(crate) async fn database<T: Send + 'static>(
 }
 
 pub(crate) fn visibility(app: &AppHandle, visible: bool) -> Result<(), String> {
-    if let Some(view) = app.get_webview("clipboard") {
+    if let Some(view) = app
+        .get_webview("clipboard")
+        .or_else(|| app.get_webview("translation"))
+    {
         view.emit(
             "window://visibility",
             serde_json::json!({"label":"clipboard","visible":visible}),
@@ -41,7 +44,10 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
         .clipboard_revision
         .fetch_add(1, Ordering::SeqCst)
         + 1;
-    if let Some(view) = app.get_webview("clipboard") {
+    if let Some(view) = app
+        .get_webview("clipboard")
+        .or_else(|| app.get_webview("translation"))
+    {
         view.emit("clipboard_changed", revision)
             .map_err(|_| "event_emit")?;
     }

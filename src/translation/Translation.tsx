@@ -9,6 +9,7 @@ import { inputWithinLimits } from '../shared/input';
 import { displaySource, editSource } from '../shared/source';
 import { cn } from '../lib/utils';
 import { HistoryPanel } from './HistoryPanel';
+import { Clipboard } from '../clipboard/Clipboard';
 import { HistoryIcon } from './HistoryIcon';
 import { historySamples, type HistoryRecord, type HistorySelection } from './history';
 import { HistoryDivider } from './HistoryDivider';
@@ -118,7 +119,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     normalizedCaret.current = null;
   }, [draft]);
 
-  useEffect(() => { setPopup(null); }, [snapshot.locale, state.historyWidth]);
+  useEffect(() => { setPopup(null); }, [snapshot.locale, state.historyWidth, state.translationVisible]);
   useEffect(() => {
     const close = () => setPopup(null);
     window.addEventListener('blur', close);
@@ -201,10 +202,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function selectHistory(record: HistoryRecord, retranslate = false) {
     setPopup(null);
-    if (!native && !retranslate && selectedId === record.id && state.translationVisible && !state.translationPinned) {
-      void command('window_hide', { region: 'translation', keepHistory: true });
-      return;
-    }
     cancelRequest(); fromSelection.current = false; setServiceError(null);
     normalizedCaret.current = null;
     setSelectedId(record.id); setDraft(record.text);
@@ -235,9 +232,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }
 
   function copyTranslation(index: number) {
-    if (!native || !capabilities.clipboardWrite || !selectedId || !cachedResults[index]) return;
+    const recordId = completedRecord.current?.id ?? selectedId;
+    if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index]) return;
     setPopup(null);
-    void command('translation_sample_copy', { sampleId: selectedId, part: index ? 'secondary' : 'primary' });
+    void command('translation_sample_copy', { sampleId: recordId, part: index ? 'secondary' : 'primary' });
   }
 
   function keydown(event: KeyboardEvent, region: 'translation' | 'history') {
@@ -284,7 +282,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   return <div className={cn('translation-shell', state.historyVisible && 'with-history', !state.translationVisible && 'history-only')} style={shellStyle}>
     {!capabilities.nativeHistory && <div className="history-clip" style={historyWidthChanged ? { transition: 'none' } : undefined} hidden={!state.historyVisible && state.historyExtent === 0} aria-hidden={!state.historyVisible} inert={!state.historyVisible}>
-    <HistoryPanel t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId} onSelect={native ? (record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); } : selectHistory} onKeyDown={(event) => keydown(event, 'history')} />
+    <div className="record-view" hidden={state.recordView === 'clipboard'} inert={state.recordView === 'clipboard'}>
+    <HistoryPanel active={state.recordView !== 'clipboard' && state.historyVisible} t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId} onSelect={native ? (record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); } : selectHistory} onKeyDown={(event) => keydown(event, 'history')} />
+    </div>
+    <div className="record-view" hidden={state.recordView !== 'clipboard'} inert={state.recordView !== 'clipboard'}><Clipboard t={t} snapshot={snapshot} command={command} native={native} activity={activity} active={state.recordView === 'clipboard' && state.historyVisible} /></div>
     </div>}
     <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
     <section className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}

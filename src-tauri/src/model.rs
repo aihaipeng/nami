@@ -50,9 +50,22 @@ pub fn translation_sample_text(id: &str, part: &str) -> Option<String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordView {
+    #[default]
+    Clipboard,
+    Translation,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowState {
+    pub record_view: RecordView,
+    pub records_session: u64,
+    pub records_focus: u64,
+    #[serde(skip)]
+    pub records_open: bool,
     pub translation_visible: bool,
     pub history_visible: bool,
     pub translation_pinned: bool,
@@ -78,6 +91,10 @@ pub struct WindowState {
 impl Default for WindowState {
     fn default() -> Self {
         Self {
+            record_view: RecordView::Clipboard,
+            records_session: 0,
+            records_focus: 0,
+            records_open: false,
             translation_visible: true,
             history_visible: false,
             translation_pinned: false,
@@ -107,7 +124,8 @@ impl WindowState {
     }
 
     pub fn toggle_history(&mut self) {
-        self.history_visible = !self.history_visible;
+        self.history_visible = self.record_view != RecordView::Translation || !self.history_visible;
+        self.record_view = RecordView::Translation;
         self.translation_visible = true;
     }
 
@@ -115,13 +133,34 @@ impl WindowState {
         self.translation_visible = true;
     }
 
-    pub fn select_history_record(&mut self, repeated: bool, retranslate: bool) {
-        if repeated && !retranslate && self.translation_visible && !self.translation_pinned {
+    pub fn summon_translation(&mut self) {
+        self.record_view = RecordView::Translation;
+        self.history_visible = false;
+        self.translation_visible = true;
+    }
+
+    pub fn set_record_view(&mut self, view: RecordView) {
+        self.record_view = view;
+        self.history_visible = true;
+        if view == RecordView::Clipboard {
             self.translation_visible = false;
-            self.history_visible = true;
-        } else {
-            self.show_translation();
         }
+    }
+
+    pub fn select_history_record(&mut self, _repeated: bool, _retranslate: bool) {
+        self.record_view = RecordView::Translation;
+        self.history_visible = true;
+        self.translation_visible = true;
+    }
+
+    pub fn sync_records_session(&mut self) -> bool {
+        let open = self.translation_visible || self.history_visible;
+        let ended = self.records_open && !open;
+        if ended {
+            self.records_session += 1;
+        }
+        self.records_open = open;
+        ended
     }
 
     pub fn blur(&mut self) {
@@ -131,7 +170,7 @@ impl WindowState {
 
     pub fn dismiss(&mut self) {
         self.translation_visible = false;
-        self.history_visible &= self.history_pinned;
+        self.history_visible = false;
     }
 
     pub fn translation_min_width(&self) -> f64 {
@@ -261,25 +300,52 @@ impl OperationResult {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn history_selection_toggles_authoritative_state_without_frontend_roundtrips() {
+    fn repeated_history_selection_keeps_details_open() {
         let mut state = super::WindowState::default();
-        state.select_history_record(false, false);
-        assert!(state.translation_visible);
-        for expected in [false, true, false, true] {
+        for _ in 0..20 {
             state.select_history_record(true, false);
-            assert_eq!(state.translation_visible, expected);
-            assert!(state.history_visible);
+            assert!(state.translation_visible && state.history_visible);
+            assert_eq!(state.record_view, super::RecordView::Translation);
         }
-        state.translation_pinned = true;
-        state.select_history_record(true, false);
-        assert!(state.translation_visible);
-        state.translation_pinned = false;
-        state.select_history_record(true, true);
-        assert!(state.translation_visible);
-        state.select_history_record(true, false);
-        assert!(!state.translation_visible);
-        state.select_history_record(false, false);
-        assert!(state.translation_visible);
+    }
+
+    #[test]
+    fn record_modes_share_size_and_pin_but_clipboard_collapses_details() {
+        let mut state = super::WindowState {
+            history_width: 430.0,
+            history_pinned: true,
+            ..Default::default()
+        };
+        state.set_record_view(super::RecordView::Clipboard);
+        assert!(state.history_visible && !state.translation_visible);
+        state.set_record_view(super::RecordView::Translation);
+        assert!(state.history_visible && !state.translation_visible);
+        assert_eq!(state.history_width, 430.0);
+        assert!(state.history_pinned);
+        state.show_translation();
+        state.toggle_history();
+        assert!(!state.history_visible && state.translation_visible);
+        state.set_record_view(super::RecordView::Clipboard);
+        state.toggle_history();
+        assert!(state.history_visible && state.translation_visible);
+        assert_eq!(state.record_view, super::RecordView::Translation);
+    }
+
+    #[test]
+    fn browsing_session_only_ends_when_both_regions_hide() {
+        let mut state = super::WindowState::default();
+        assert!(!state.sync_records_session());
+        state.history_visible = true;
+        state.sync_records_session();
+        state.history_visible = false;
+        assert!(!state.sync_records_session());
+        assert_eq!(state.records_session, 0);
+        state.dismiss();
+        assert!(state.sync_records_session());
+        assert_eq!(state.records_session, 1);
+        assert!(!state.sync_records_session());
+        state.summon_translation();
+        assert!(!state.history_visible && state.translation_visible);
     }
 
     use super::*;
@@ -550,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn history_dismiss_matches_finderx_and_size_limits_follow_columns() {
+    fn explicit_dismiss_hides_both_even_when_pinned_and_preserves_sizes() {
         for pinned in [false, true] {
             let mut state = WindowState {
                 history_visible: true,
@@ -559,7 +625,7 @@ mod tests {
             };
             state.dismiss();
             assert!(!state.translation_visible);
-            assert_eq!(state.history_visible, pinned);
+            assert!(!state.history_visible);
             assert_eq!(state.translation_min_width(), 700.0);
             state.secondary_enabled = false;
             assert_eq!(state.translation_min_width(), 480.0);

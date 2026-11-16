@@ -14,13 +14,66 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('opens the shared five-action context menu without selecting or translating the row', async () => {
+    await mount('history');
+    const before = calls('history_sample_select').length;
+    fireEvent.contextMenu(row('sample-03'), { clientX: 100, clientY: 180 });
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Retranslate', 'Copy source text', 'Favorite', 'Pin record', 'Delete']);
+    expect(within(menu).getByRole('menuitem', { name: 'Delete' }).classList.contains('clipboard-menu-delete')).toBe(true);
+    expect(within(menu).getAllByRole('menuitem').every((item) => item.children.length === 2)).toBe(true);
+    expect(calls('history_sample_select')).toHaveLength(before);
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('dispatches context actions by record ID and preserves protected delete', async () => {
+    await mount('history');
+    fireEvent.contextMenu(row('sample-03'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy source text' }));
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', part: 'source' });
+    fireEvent.contextMenu(row('sample-03'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Favorite' }));
+    await waitFor(() => expect(within(row('sample-03')).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
+    fireEvent.contextMenu(row('sample-03'));
+    expect((screen.getByRole('menuitem', { name: 'Delete' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.scroll(document.querySelector('.history-list')!);
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.contextMenu(row('sample-03'));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('keeps context copy disabled when the platform cannot write clipboard', async () => {
+    bridge.snapshot.capabilities.clipboardWrite = false;
+    await mount('history');
+    fireEvent.contextMenu(row('sample-03'));
+    expect((screen.getByRole('menuitem', { name: 'Copy source text' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('dismisses the record menu and shortcuts when history hides without changing records', async () => {
+    await mount('history');
+    fireEvent.click(screen.getByRole('button', { name: 'Keyboard shortcuts' }));
+    fireEvent.contextMenu(row('sample-03'));
+    await windowState({ historyVisible: false, historyExtent: 0 });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull();
+    await windowState({ historyVisible: true, historyExtent: 360 });
+    expect(records()).toHaveLength(20);
+  });
+
   it('loads all 20 synthetic records with the pinned section separate', async () => {
     await mount('history');
     expect(records()).toHaveLength(20);
     expect(document.querySelectorAll('.history-pinned article')).toHaveLength(2);
     expect(document.querySelectorAll('.history-list article')).toHaveLength(18);
     expect(screen.queryByRole('textbox', { name: 'Source text' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'All history' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Translations' }).getAttribute('aria-pressed')).toBe('true');
   });
 
   it('searches complete translations through the backend and clears the query back to all records', async () => {
@@ -54,7 +107,7 @@ describe('history list and session actions', () => {
     const target = row('sample-04');
     await user.click(within(target).getByRole('button', { name: 'Remove favorite' }));
     expect(records()).toHaveLength(4);
-    await user.click(screen.getByRole('button', { name: 'All history' }));
+    await user.click(screen.getByRole('button', { name: 'Favorite history' }));
     expect(records()).toHaveLength(20);
     expect(within(row('sample-04')).getByRole('button', { name: 'Favorite' }).getAttribute('aria-pressed')).toBe('false');
     expect(historySamples.find(({ id }) => id === 'sample-04')!.isFavorite).toBe(true);
@@ -73,8 +126,8 @@ describe('history list and session actions', () => {
 
   it('uses FinderX SF Symbols and switches filled record flags without rotating record pins', async () => {
     const user = userEvent.setup(); await mount('history');
-    expect(screen.getByRole('button', { name: 'All history' }).querySelector('[data-symbol="list.bullet"]')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Pin history region' }).classList.contains('history-pin')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Clipboard' }).querySelector('[data-symbol="list.bullet"]')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Pin records' }).classList.contains('history-pin')).toBe(true);
     const target = row('sample-03');
     expect(target.querySelector('[data-symbol="languages"]')).toBeTruthy();
     expect(target.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
@@ -157,10 +210,10 @@ describe('history list and session actions', () => {
 
   it('pins the history region through the native contract and reflects returned state', async () => {
     const user = userEvent.setup(); await mount('history');
-    await user.click(screen.getByRole('button', { name: 'Pin history region' }));
+    await user.click(screen.getByRole('button', { name: 'Pin records' }));
     expect(calls('window_pin').at(-1)).toEqual(['window_pin', { region: 'history', pinned: true }]);
     await windowState({ historyPinned: true });
-    await user.click(screen.getByRole('button', { name: 'Unpin window' }));
+    await user.click(screen.getByRole('button', { name: 'Unpin records' }));
     expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'history', pinned: false });
   });
 

@@ -214,8 +214,10 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
                 error,
             });
             let result = windows::show(&owned, "translation").and_then(|_| {
-                if let Some(view) = owned.get_webview("translation") {
-                    view.emit("selection_ready", ()).map_err(|_| "event_emit")?;
+                if state.records_navigation.lock().unwrap().is_none() {
+                    if let Some(view) = owned.get_webview("translation") {
+                        view.emit("selection_ready", ()).map_err(|_| "event_emit")?;
+                    }
                 }
                 Ok(())
             });

@@ -52,6 +52,12 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         state.history_width_initialized = true;
     }
     windows::show(app, "translation")?;
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .history_visible = true;
+    windows::apply_translation(app)?;
     if app
         .get_window("translation")
         .ok_or("missing test window")?
@@ -113,7 +119,7 @@ const SCRIPT: &str = r#"
     }
     throw new Error(message);
   }
-  const rows = () => [...document.querySelectorAll('[data-record-id]')];
+  const rows = () => [...document.querySelectorAll('#translation-history [data-record-id]')];
   const row = (id) => rows().find((element) => element.dataset.recordId === id);
   const source = () => document.querySelector('.source-input');
   const snapshot = () => invoke('history_snapshot');
@@ -132,6 +138,7 @@ const SCRIPT: &str = r#"
     try {
       currentCase = 'shared history startup';
       await waitFor(async () => rows().length === 20 && (await snapshot()).records.length === 20, 'synthetic history did not load into shared React view');
+      await invoke('clipboard_query', {query:'',favoritesOnly:false,cursor:null});
       const app = await invoke('app_snapshot');
       assert(app.capabilities.nativeHistory === false && app.capabilities.nativeChrome === false, 'portable host incorrectly reports native controls');
       for (const capability of ['nativeMaterial', 'selection', 'clipboardWrite', 'autoPaste', 'accessibilityPermission']) {
@@ -206,7 +213,28 @@ const SCRIPT: &str = r#"
         assert(source() === input && row(id) === selected, 'portable layout recreated source or record elements');
         assert(source().value === original.text, 'portable layout lost input');
       }
-      assert(!document.querySelector('[role=alert]'), 'application reported an error during portable regression');
+      assert(!document.querySelector('[role=alert]'), 'application reported an error during portable regression: ' + JSON.stringify([...document.querySelectorAll('[role=alert]')].map(node=>({class:node.className,text:node.textContent}))));
+      pass(currentCase);
+
+      currentCase = 'unified records switch shares host and preserves cached translation';
+      const hostInput = source();
+      const sharedWidth = (await invoke('app_snapshot')).window.historyWidth;
+      await invoke('records_view_set', {view:'clipboard'});
+      await waitFor(async () => (await invoke('app_snapshot')).window.recordView === 'clipboard' && !document.querySelector('.clipboard-panel').closest('.record-view').hidden, 'clipboard view did not appear in shared host');
+      assert(document.querySelector('.clipboard-panel [aria-label="Details unavailable"]').disabled, 'clipboard detail placeholder must be disabled');
+      assert(document.querySelector('.clipboard-panel [aria-label="Clipboard"]').getAttribute('aria-pressed') === 'true', 'clipboard mode not highlighted');
+      assert((await invoke('app_snapshot')).window.translationVisible === false, 'clipboard switch kept translation details open');
+      assert((await invoke('app_snapshot')).window.historyWidth === sharedWidth, 'mode switch changed shared list width');
+      await invoke('records_view_set', {view:'translation'});
+      await waitFor(() => !document.querySelector('#translation-history').closest('.record-view').hidden, 'translation view did not restore');
+      assert(source() === hostInput && source().value === original.text, 'mode switch recreated or cleared translation input');
+      assert((await invoke('app_snapshot')).window.translationVisible === false, 'translation mode unexpectedly expanded details');
+      await invoke('records_details_toggle');
+      await waitFor(async () => (await invoke('app_snapshot')).window.translationVisible && (await snapshot()).selectedId === id, 'details did not restore associated record');
+      assert(document.querySelector('.result-column').textContent === original.translations[0], 'details reopening lost cached result');
+      row(id).querySelector('.history-row-select').click();
+      await waitFor(async () => (await invoke('app_snapshot')).window.translationVisible, 'repeat selection closed details');
+      assert(!document.querySelector('[role=alert]'), 'unified records produced an error');
       pass(currentCase);
       await invoke('plugin:event|emit', {event:'portable-test-result', payload:{passed:true,cases,error:null}});
     } finally {

@@ -4,6 +4,17 @@ use serde::Serialize;
 use std::{sync::mpsc, time::Duration};
 use tauri::Listener;
 
+objc2::define_class!(
+    #[unsafe(super = objc2_foundation::NSObject)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = bool]
+    struct SearchCommandFixture;
+    impl SearchCommandFixture {
+        #[unsafe(method(hasMarkedText))]
+        fn marked_text(&self) -> bool { *self.ivars() }
+    }
+);
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LayerFrame {
@@ -266,6 +277,7 @@ fn reset(app: &AppHandle, history: f64, translation: f64) -> Result<(), String> 
         .to_logical::<f64>(scale)
         .y;
     let state = WindowState {
+        record_view: crate::model::RecordView::Translation,
         history_visible: true,
         translation_visible: true,
         history_pinned: true,
@@ -1405,6 +1417,31 @@ fn history_click(app: &AppHandle, tag: isize) -> Result<(), String> {
     Ok(())
 }
 
+fn history_all(app: &AppHandle) -> Result<(), String> {
+    if history_snapshot(app)?["favoritesOnly"] == true {
+        history_click(app, 203)?;
+    }
+    Ok(())
+}
+
+fn clipboard_host(app: &AppHandle) -> Result<Window, String> {
+    create(app, "translation")?;
+    {
+        let state = app.state::<AppState>();
+        state
+            .windows
+            .lock()
+            .unwrap()
+            .set_record_view(crate::model::RecordView::Clipboard);
+    }
+    apply_translation(app)?;
+    Ok(app
+        .get_webview("clipboard")
+        .ok_or("missing clipboard view")?
+        .window()
+        .clone())
+}
+
 fn history_select(app: &AppHandle, index: isize) -> Result<(), String> {
     unsafe {
         let row = history_object(app, 3000 + index)?;
@@ -1683,7 +1720,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
         on_main(app, |app| {
             reset(app, 360.0, 920.0)?;
             history_search(app, "")?;
-            history_click(app, 202)
+            history_all(app)
         })?;
         wait_history_query(app)?;
         samples.push(on_main(app, |app| unsafe {
@@ -1843,7 +1880,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
                 )?;
                 equal(
                     action["offset"].as_f64().ok_or("missing offset")?,
-                    if showing { 0.0 } else { 8.0 },
+                    if showing { 0.0 } else { 4.0 },
                     "hover target slide",
                 )?;
                 if action["enabled"] != showing || action["hidden"] != false {
@@ -1853,11 +1890,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
                     .as_f64()
                     .ok_or("missing animation duration")?;
                 if duration != 0.0 {
-                    equal(
-                        duration,
-                        if showing { 0.14 } else { 0.1 },
-                        "FinderX hover duration",
-                    )?;
+                    equal(duration, 0.15, "shared EcoPaste hover duration")?;
                 }
             }
             samples.push(value);
@@ -1892,7 +1925,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
             return Err("native favorites filter count".into());
         }
         samples.push(favorites);
-        on_main(app, |app| history_click(app, 202))?;
+        on_main(app, history_all)?;
         wait_history_query(app)?;
         let all_nodes = on_main(app, history_snapshot)?;
         for _ in 0..6 {
@@ -1917,7 +1950,7 @@ fn run_history_native_actions(app: &AppHandle) -> DomCase {
                 }
             }
             let restored = on_main(app, |app| {
-                history_click(app, 202)?;
+                history_all(app)?;
                 history_snapshot(app)
             })?;
             if restored["queryPending"] != false {
@@ -2378,7 +2411,7 @@ fn run_runtime_history(app: &AppHandle) -> DomCase {
         on_main(app, |app| {
             reset(app, 360.0, 920.0)?;
             history_search(app, "")?;
-            history_click(app, 202)
+            history_all(app)
         })?;
         wait_history_query(app)?;
         on_main(app, |app| {
@@ -2475,7 +2508,7 @@ fn run_clipboard_history_view(app: &AppHandle) -> DomCase {
         }
         on_main(app, |app| {
             // Create an isolated WebView without capturing a real paste target or reading general pasteboard.
-            create(app, "clipboard")?;
+            clipboard_host(app)?;
             Ok(())
         })?;
         let script = r#"const wordmark=document.querySelector('.clipboard-panel .history-wordmark');const row=document.querySelector('[data-record-id="clipboard-view-regression"]');if(!wordmark||!row)return {ready:false};const style=getComputedStyle(wordmark);return {ready:true,width:wordmark.getBoundingClientRect().width,height:wordmark.getBoundingClientRect().height,background:style.backgroundColor,mask:style.maskImage||style.webkitMaskImage,text:wordmark.textContent,draggable:wordmark.hasAttribute('data-tauri-drag-region'),preview:row.querySelector('.history-preview').textContent};"#;
@@ -2571,7 +2604,7 @@ return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds
         on_main(app, |app| {
             reset(app, 360.0, 920.0)?;
             history_search(app, "")?;
-            history_click(app, 202)
+            history_all(app)
         })?;
         wait_history_query(app)?;
         for (index, text) in [
@@ -2719,7 +2752,7 @@ window.__clipboardSwitch={done:false};
  const initial=[...panel.querySelectorAll('.history-row')];
  const nodes=new Map(initial.map(row=>[row.dataset.recordId,row]));
  const favorite=panel.querySelector('[aria-label="Favorite clipboard records"]');
- const all=panel.querySelector('[aria-label="All clipboard records"]');
+ const all=panel.querySelector('[aria-label="Favorite clipboard records"]');
  const durations=[];
  try {
   for(let index=0;index<20;index++){
@@ -2770,8 +2803,10 @@ window.__clipboardSwitch={done:false};
         if visible_note {
             on_main(app, |app| {
                 let window = app
-                    .get_window("clipboard")
-                    .ok_or("missing clipboard window")?;
+                    .get_webview("clipboard")
+                    .ok_or("missing clipboard view")?
+                    .window()
+                    .clone();
                 window
                     .set_always_on_top(true)
                     .map_err(|_| "clipboard test visibility")?;
@@ -2973,8 +3008,10 @@ return {revealed:row.dataset.noteRevealed,expanded:body.dataset.expanded,opacity
         samples.push(serde_json::json!({"noteExpanded":true,"heightDelta":growth,"followingRowDelta":movement,"collapsed":collapsed,"naturalTransitions":visible_note}));
         if visible_note {
             on_main(app, |app| {
-                app.get_window("clipboard")
-                    .ok_or("missing clipboard window")?
+                app.get_webview("clipboard")
+                    .ok_or("missing clipboard view")?
+                    .window()
+                    .clone()
                     .hide()
                     .map_err(|_| "clipboard test visibility".into())
             })?;
@@ -3034,8 +3071,10 @@ return {revealed:row.dataset.noteRevealed,expanded:body.dataset.expanded,opacity
                     .ok_or("missing clipboard view")?;
                 crate::commands::window_pin(view.clone(), app.clone(), "clipboard".into(), pinned)?;
                 let window = app
-                    .get_window("clipboard")
-                    .ok_or("missing clipboard window")?;
+                    .get_webview("clipboard")
+                    .ok_or("missing clipboard view")?
+                    .window()
+                    .clone();
                 window.show().map_err(|_| "window_show")?;
                 window.set_focus().map_err(|_| "window_focus")?;
                 activate_application();
@@ -3047,8 +3086,10 @@ return {revealed:row.dataset.noteRevealed,expanded:body.dataset.expanded,opacity
             for _ in 0..40 {
                 hidden = on_main(app, |app| {
                     Ok(!app
-                        .get_window("clipboard")
-                        .ok_or("missing clipboard window")?
+                        .get_webview("clipboard")
+                        .ok_or("missing clipboard view")?
+                        .window()
+                        .clone()
                         .is_visible()
                         .map_err(|_| "window_visibility")?)
                 })?;
@@ -3271,7 +3312,7 @@ fn run_history_pagination(app: &AppHandle) -> DomCase {
         let found = on_main(app, history_snapshot)?;
         if found["rows"].as_array().map(|rows| rows.len()) != Some(1)
             || found["rows"][0]["id"] != "pagination-0"
-            || found["totalRecords"] != 250
+            || found["totalRecords"] != 1
         {
             return Err("native query did not find an unloaded database record".into());
         }
@@ -3295,12 +3336,197 @@ fn run_history_pagination(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_translation_action_timing(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        on_main(app, |app| {
+            create(app, "translation")?;
+            reset(app, 360.0, 920.0)
+        })?;
+        for _ in 0..100 {
+            if evaluate_view_dom(
+                app,
+                "translation",
+                "return !!document.querySelector('.translation-panel');",
+            )? == true
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        for index in [0usize, 2] {
+            let sample = on_main(app, move |app| {
+                let window = app.get_window("translation").ok_or("missing window")?;
+                let initial = history_snapshot(app)?;
+                let menu = native_history::context_menu_snapshot(&window, index)?;
+                Ok(serde_json::json!({"row":initial["rows"][index],"menu":menu}))
+            })?;
+            let menu = sample["menu"].as_array().ok_or("missing menu")?;
+            if menu.len() != 5
+                || menu[0]["title"] != "Retranslate"
+                || menu[1]["title"] != "Copy source text"
+                || menu[4]["title"] != "Delete"
+                || menu[4]["red"] != true
+            {
+                return Err(format!("native context menu: {sample}"));
+            }
+            let protected = sample["row"]["pinned"] == true || sample["row"]["favorite"] == true;
+            if menu[4]["enabled"] != !protected {
+                return Err(format!("native protected delete: {sample}"));
+            }
+            for (action, item) in menu.iter().enumerate() {
+                if item["iconWidth"].as_f64() != Some(14.0)
+                    || item["iconHeight"].as_f64() != Some(14.0)
+                    || item["tag"] != action
+                    || item["recordId"] != sample["row"]["id"]
+                {
+                    return Err(format!("native menu action/icon: {sample}"));
+                }
+            }
+            samples.push(sample);
+        }
+        let id = on_main(app, |app| {
+            let state = history_snapshot(app)?;
+            let id = state["rows"][2]["id"].as_str().ok_or("record")?.to_owned();
+            let window = app.get_window("translation").ok_or("window")?;
+            native_history::invoke_context_menu_action(&window, 2, 2)?;
+            Ok(id)
+        })?;
+        let mut updated = false;
+        for _ in 0..100 {
+            let value = on_main(app, history_snapshot)?;
+            if value["rows"]
+                .as_array()
+                .ok_or("rows")?
+                .iter()
+                .any(|row| row["id"] == id && row["favorite"] == true)
+            {
+                updated = true;
+                samples.push(value);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !updated {
+            return Err("native menu favorite did not reach shared history".into());
+        }
+        for showing in [true, false, true, false] {
+            let sample = on_main(app, move |app| unsafe {
+                let row = history_object(app, 3002)?;
+                let _: () = if showing {
+                    objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()]
+                } else {
+                    objc2::msg_send![row, mouseExited: std::ptr::null::<AnyObject>()]
+                };
+                history_snapshot(app)
+            })?;
+            let row = &sample["rows"][2];
+            for (index, action) in row["actions"]
+                .as_array()
+                .ok_or("actions")?
+                .iter()
+                .enumerate()
+            {
+                equal(
+                    action["offset"].as_f64().unwrap(),
+                    if showing { 0.0 } else { 4.0 },
+                    "action offset",
+                )?;
+                equal(
+                    action["opacity"].as_f64().unwrap(),
+                    if showing { 1.0 } else { 0.0 },
+                    "action opacity",
+                )?;
+                let duration = action["animationDuration"].as_f64().unwrap();
+                if duration != 0.0 {
+                    equal(duration, 0.15, "action duration")?;
+                }
+                if action["enabled"] != (showing && index != 4) {
+                    return Err("retracted action remains enabled".into());
+                }
+            }
+            equal(
+                row["timeOffset"].as_f64().unwrap(),
+                if showing { -4.0 } else { 0.0 },
+                "time offset",
+            )?;
+            equal(
+                row["timeOpacity"].as_f64().unwrap(),
+                if showing { 0.0 } else { 1.0 },
+                "time opacity",
+            )?;
+            let duration = row["timeDuration"].as_f64().unwrap();
+            if duration != 0.0 {
+                equal(duration, 0.15, "time duration")?;
+            }
+            samples.push(sample);
+        }
+        on_main(app, |app| {
+            app.get_window("translation")
+                .ok_or("window")?
+                .show()
+                .map_err(|_| "show")?;
+            app.get_window("translation")
+                .ok_or("window")?
+                .set_focus()
+                .map_err(|_| "focus")?;
+            activate_application();
+            app.get_webview("translation")
+                .ok_or("view")?
+                .set_focus()
+                .map_err(|_| "focus")?;
+            Ok(())
+        })?;
+        let css = evaluate_view_dom(
+            app,
+            "translation",
+            r#"
+const panel=document.createElement('div');panel.className='history-panel';
+const row=document.createElement('article');row.className='history-row';row.innerHTML='<button>Fixture</button><time>12:00</time><div class="history-row-actions"><button>Copy</button></div>';panel.append(row);document.body.append(panel);
+const actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
+const read=()=>({duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,timeDuration:getComputedStyle(time).transitionDuration,offset:getComputedStyle(actions).transform});
+const idle=read();row.querySelector('button').focus();const active=read(),focused=row.matches(':focus-within');panel.remove();return {idle,active,focused};
+"#,
+        )?;
+        if css["idle"]["duration"] != "0.15s, 0.15s, 0.15s"
+            || css["active"]["duration"] != "0.15s"
+            || css["focused"] != true
+            || css["idle"]["delay"] != "0s, 0s, 0s"
+            || css["idle"]["timeDuration"] != "0.15s, 0.15s"
+        {
+            return Err(format!("shared history timing: {css}"));
+        }
+        samples.push(css);
+        let cleanup = on_main(app, |app| unsafe {
+            let row = history_object(app, 3002)?;
+            let _: () = objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()];
+            history_click(app, 207)?;
+            hide(app, "translation")?;
+            history_snapshot(app)
+        })?;
+        if cleanup["shortcutsHidden"] != true || cleanup["rows"][2]["hovered"] != false {
+            return Err("history transient UI survived hide".into());
+        }
+        samples.push(cleanup);
+
+        Ok(())
+    })();
+    DomCase {
+        name: "translation action timing",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_action_timing(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
         on_main(app, |app| {
-            let window = create(app, "clipboard")?;
+            let window = clipboard_host(app)?;
             window.show().map_err(|_| "window_show")?;
+            window.set_focus().map_err(|_| "window_focus")?;
+            activate_application();
             app.get_webview("clipboard")
                 .ok_or("missing clipboard view")?
                 .set_focus()
@@ -3400,9 +3626,7 @@ fn run_clipboard_media_layout(app: &AppHandle) -> DomCase {
                 })?;
         }
         on_main(app, |app| {
-            create(app, "clipboard")?
-                .show()
-                .map_err(|_| "window_show")?;
+            clipboard_host(app)?.show().map_err(|_| "window_show")?;
             Ok(())
         })?;
         for _ in 0..150 {
@@ -3518,9 +3742,7 @@ fn run_clipboard_editor_layout(app: &AppHandle) -> DomCase {
                 fingerprint: nami::clipboard::fingerprint("files", paths.as_bytes()),
             })?;
         on_main(app, |app| {
-            create(app, "clipboard")?
-                .show()
-                .map_err(|_| "window_show")?;
+            clipboard_host(app)?.show().map_err(|_| "window_show")?;
             app.get_webview("clipboard")
                 .ok_or("missing clipboard view")?
                 .set_focus()
@@ -3570,13 +3792,8 @@ return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.
                 let operation_before_blur =
                     app.state::<AppState>().operation.load(Ordering::SeqCst);
                 on_main(app, |app| {
-                    // Match copy/paste's direct hide; focus loss must not cancel the active paste.
-                    crate::clipboard_runtime::visibility(app, false)?;
-                    app.get_window("clipboard")
-                        .ok_or("missing clipboard window")?
-                        .hide()
-                        .map_err(|_| "window_hide")?;
-                    Ok(())
+                    // Exercise the same shared-host hide used by automatic paste.
+                    hide_after_clipboard_use(app)
                 })?;
                 for _ in 0..80 {
                     let dismissed = evaluate_view_dom(
@@ -3595,18 +3812,14 @@ return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.
                 }
                 samples.push(serde_json::json!({"automaticHidePreservesPasteToken":true}));
                 on_main(app, |app| {
-                    crate::clipboard_runtime::visibility(app, true)?;
-                    app.get_window("clipboard")
-                        .ok_or("missing clipboard window")?
-                        .show()
-                        .map_err(|_| "window_show")?;
+                    clipboard_host(app)?;
                     Ok(())
                 })?;
-                let restored = evaluate_view_dom(app,"clipboard", "return {editor:!!document.querySelector('.clipboard-editor'),menu:!!document.querySelector('.clipboard-context-menu'),search:document.querySelector('.history-search input').value,all:document.querySelector('[aria-label=\"All clipboard records\"]').getAttribute('aria-pressed')};")?;
+                let restored = evaluate_view_dom(app,"clipboard", "return {editor:!!document.querySelector('.clipboard-editor'),menu:!!document.querySelector('.clipboard-context-menu'),search:document.querySelector('.history-search input').value,all:document.querySelector('[aria-label=\"Favorite clipboard records\"]').getAttribute('aria-pressed')};")?;
                 if restored["editor"] != false
                     || restored["menu"] != false
                     || restored["search"] != ""
-                    || restored["all"] != "true"
+                    || restored["all"] != "false"
                 {
                     return Err(format!(
                         "clipboard reopen did not restore defaults: {restored}"
@@ -3621,6 +3834,609 @@ return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.
     })();
     DomCase {
         name: "clipboard editor layout",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_unified_records(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let original_database = app.state::<AppState>().database.lock().unwrap().take();
+    let original_page = app.state::<AppState>().history_page.lock().unwrap().clone();
+    let original_store = std::mem::replace(
+        &mut *app.state::<AppState>().history.lock().unwrap(),
+        crate::history::HistoryStore::new(crate::model::initial_history_records()),
+    );
+    let result = (|| {
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        for record in crate::model::initial_history_records() {
+            database.insert(&record, "edge", || true)?;
+        }
+        *app.state::<AppState>().database.lock().unwrap() = Some(database);
+        *app.state::<AppState>().history_page.lock().unwrap() = Default::default();
+        for (id, text, favorite) in [
+            (
+                "unified-clipboard-one",
+                "Synthetic unified clipboard record one",
+                false,
+            ),
+            (
+                "unified-clipboard-two",
+                "Synthetic unified clipboard record two",
+                true,
+            ),
+        ] {
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("missing isolated database")?
+                .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: id.into(),
+                    kind: "text".into(),
+                    text: text.into(),
+                    date: "2099-01-01T00:00:00Z".into(),
+                    is_favorite: favorite,
+                    is_pinned: false,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+                })?;
+        }
+        on_main(app, |app| {
+            let record = crate::model::HistoryRecord {
+                id: "unified-translation".into(),
+                text: "Synthetic unified translation input".into(),
+                source_language: "en".into(),
+                target_languages: vec!["zh-CN".into()],
+                translations: vec!["合并原生测试译文".into()],
+                date: "2099-01-01T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+            };
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("isolated database")?
+                .insert(&record, "edge", || true)?;
+            history_add(app, record)?;
+            create(app, "translation")?;
+            {
+                let state = app.state::<AppState>();
+                let mut windows = state.windows.lock().unwrap();
+                windows.history_width = 420.0;
+                windows.history_width_initialized = true;
+                windows.history_pinned = true;
+                windows.translation_pinned = true;
+            }
+            let window = clipboard_host(app)?;
+            window.show().map_err(|_| "test window show")?;
+            window.set_focus().map_err(|_| "test window focus")?;
+            activate_application();
+            app.get_webview("clipboard")
+                .ok_or("clipboard child")?
+                .set_focus()
+                .map_err(|_| "clipboard focus")?;
+            Ok(())
+        })?;
+        wait_motion(app)?;
+        let mut initial = serde_json::Value::Null;
+        for _ in 0..100 {
+            initial = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const panel=document.querySelector('.clipboard-panel');
+if(!panel||!panel.querySelector('[data-record-id="unified-clipboard-one"]'))return {ready:false};
+const toolbar=[...panel.querySelectorAll('.history-toolbar > button')].map(b=>({label:b.getAttribute('aria-label'),active:b.getAttribute('aria-pressed'),disabled:b.disabled}));
+const footer=panel.querySelector('.history-footer'),star=footer.querySelector('.history-favorites'),keyboard=footer.querySelector('.history-shortcuts'),count=footer.querySelector('.history-record-count');
+const r=footer.getBoundingClientRect(),f=star.getBoundingClientRect(),k=keyboard.getBoundingClientRect(),c=count.getBoundingClientRect();
+return {ready:true,toolbar,centerDelta:Math.abs((f.left+f.right)/2-(r.left+r.right)/2),ordered:c.right<f.left&&f.right<k.left,count:count.textContent};
+"#,
+            )?;
+            if initial["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if initial["ready"] != true
+            || initial["centerDelta"].as_f64().unwrap_or(99.0) > 0.5
+            || initial["ordered"] != true
+            || initial["count"] != "2 records"
+        {
+            return Err(format!("unified clipboard footer: {initial}"));
+        }
+        let labels = initial["toolbar"]
+            .as_array()
+            .ok_or("missing clipboard toolbar")?
+            .iter()
+            .map(|button| button["label"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>();
+        if labels
+            != [
+                "Clipboard",
+                "Translations",
+                "Unpin records",
+                "Details unavailable",
+            ]
+            || initial["toolbar"][0]["active"] != "true"
+            || initial["toolbar"][3]["disabled"] != true
+        {
+            return Err(format!("unified clipboard toolbar: {initial}"));
+        }
+        samples.push(initial);
+        let mounted = on_main(app, |app| {
+            if app.get_window("clipboard").is_some() {
+                return Err("clipboard retained a separate native window".into());
+            }
+            let window = app.get_window("translation").ok_or("missing shared host")?;
+            let clipboard = app
+                .get_webview("clipboard")
+                .ok_or("missing clipboard child")?;
+            if clipboard.window().label() != window.label() {
+                return Err("clipboard belongs to another host".into());
+            }
+            let stage = translation_stage(&window)?;
+            let expected_parent = Retained::as_ptr(&stage) as usize;
+            let (send, receive) = mpsc::sync_channel(1);
+            clipboard
+                .with_webview(move |view| unsafe {
+                    let parent: *mut AnyObject =
+                        objc2::msg_send![view.inner().cast::<AnyObject>(), superview];
+                    let _ = send.send(parent as usize);
+                })
+                .map_err(|_| "clipboard native parent")?;
+            if receive
+                .try_recv()
+                .map_err(|_| "deferred clipboard parent")?
+                != expected_parent
+            {
+                return Err("clipboard native child not mounted in shared stage".into());
+            }
+            let child = view_frame(app, "clipboard")?;
+            let history = view_frame(app, "history")?;
+            equal(child.origin.x, history.origin.x, "shared left frame x")?;
+            equal(
+                child.size.width,
+                history.size.width,
+                "shared left frame width",
+            )?;
+            equal(
+                child.size.height,
+                history.size.height,
+                "shared left frame height",
+            )?;
+            Ok(
+                serde_json::json!({"sharedHost":window.label(),"width":child.size.width,"stage":expected_parent}),
+            )
+        })?;
+        samples.push(mounted);
+        samples.push(on_main(app, |app| {
+            let window=app.get_window("translation").ok_or("host")?;
+            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(-36.0,0.0))?;
+            let child=view_frame(app,"clipboard")?;
+            let history=view_frame(app,"history")?;
+            equal(child.origin.x,history.origin.x,"resized child left")?;
+            equal(child.size.width,history.size.width,"resized child width")?;
+            equal(child.size.height,history.size.height,"resized child height")?;
+            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(36.0,0.0))?;
+            let restored=view_frame(app,"clipboard")?;
+            equal(restored.size.width,420.0,"restored clipboard width")?;
+            Ok(serde_json::json!({"clipboardOnlyResizeChildMatches":true,"expandedWidth":child.size.width,"restoredWidth":restored.size.width}))
+        })?);
+        evaluate_view_dom(app, "clipboard", "document.querySelector('.history-toolbar [aria-label=\"Translations\"]').click();return true;")?;
+        for _ in 0..100 {
+            if on_main(app, |app| {
+                Ok(app.state::<AppState>().windows.lock().unwrap().record_view
+                    == crate::model::RecordView::Translation)
+            })? {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wait_motion(app)?;
+        on_main(app, |app| unsafe {
+            let window = app.get_window("translation").ok_or("host")?;
+            let native = window
+                .ns_window()
+                .map_err(|_| "native host")?
+                .cast::<AnyObject>();
+            let search = history_object(app, 205)?;
+            let responder: *mut AnyObject = objc2::msg_send![native, firstResponder];
+            let editor: *mut AnyObject = objc2::msg_send![search, currentEditor];
+            if responder.is_null()
+                || (responder != search && (editor.is_null() || responder != editor))
+            {
+                return Err(
+                    "native translation mode retained another view's keyboard responder".into(),
+                );
+            }
+            Ok(())
+        })?;
+        let toolbar = on_main(app, history_snapshot)?;
+        let buttons = toolbar["toolbar"].as_array().ok_or("native toolbar")?;
+        if buttons
+            .iter()
+            .map(|b| b["tag"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+            != [202, 211, 204, 212, 203]
+            || buttons[1]["active"] != true
+            || buttons[0]["active"] != false
+        {
+            return Err(format!("native unified toolbar: {toolbar}"));
+        }
+        for pair in buttons[..4].windows(2) {
+            if pair[0]["x"].as_f64().unwrap() >= pair[1]["x"].as_f64().unwrap() {
+                return Err("native header button order is incorrect".into());
+            }
+        }
+        equal(
+            buttons[4]["x"].as_f64().unwrap() + buttons[4]["width"].as_f64().unwrap() / 2.0,
+            210.0,
+            "native footer star center",
+        )?;
+        samples.push(toolbar);
+        let baseline = on_main(app, geometry)?;
+        for _ in 0..4 {
+            for tag in [202isize, 211] {
+                let frame = on_main(app, move |app| {
+                    history_click(app, tag)?;
+                    geometry(app)
+                })?;
+                equal(
+                    frame.window_width,
+                    baseline.window_width,
+                    "mode switch window width",
+                )?;
+                equal(
+                    frame.history_width,
+                    baseline.history_width,
+                    "mode switch left width",
+                )?;
+                equal(
+                    frame.translation_width,
+                    baseline.translation_width,
+                    "mode switch right width",
+                )?;
+            }
+        }
+        on_main(app, |app| {
+            history_click(app, 212)?;
+            Ok(())
+        })?;
+        wait_motion(app)?;
+        on_main(app, |app| {
+            geometry(app)?.adjacent()?;
+            let history = view_frame(app, "history")?;
+            let clipboard = view_frame(app, "clipboard")?;
+            equal(
+                history.origin.x,
+                clipboard.origin.x,
+                "hidden child remains left-aligned",
+            )?;
+            crate::commands::select_history_sample(app, Some("unified-translation".into()), false)?;
+            crate::commands::select_history_sample(app, Some("unified-translation".into()), false)?;
+            let state = app.state::<AppState>().windows.lock().unwrap().clone();
+            if !state.history_visible || !state.translation_visible {
+                return Err("repeated record selection collapsed details".into());
+            }
+            Ok(())
+        })?;
+        wait_motion(app)?;
+        samples.push(on_main(app, |app| {
+            let window=app.get_window("translation").ok_or("host")?;
+            let original=geometry(app)?;
+            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(-24.0,0.0))?;
+            let resized=geometry(app)?;
+            resized.adjacent()?;
+            let child=view_frame(app,"clipboard")?;
+            equal(child.origin.x,resized.history_x,"combined resize child left")?;
+            equal(child.size.width,resized.history_width,"combined resize child width")?;
+            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(24.0,0.0))?;
+            equal(geometry(app)?.window_width,original.window_width,"combined resize restores width")?;
+            Ok(serde_json::json!({"combinedResizeChildMatches":true,"historyWidth":child.size.width}))
+        })?);
+        on_main(app, |app| history_search(app, "合并原生测试译文"))?;
+        wait_history_query(app)?;
+        let searched = on_main(app, history_snapshot)?;
+        if searched["totalRecords"] != 1 {
+            return Err(format!("translation full-text search count: {searched}"));
+        }
+        samples.push(searched);
+        let session = on_main(app, |app| {
+            Ok(app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .records_session)
+        })?;
+        on_main(app, |app| {
+            let view = app.get_webview("translation").ok_or("translation view")?;
+            crate::commands::history_toggle(view, app.clone())
+        })?;
+        wait_motion(app)?;
+        on_main(app, |app| {
+            let view = app.get_webview("translation").ok_or("translation view")?;
+            crate::commands::history_toggle(view, app.clone())
+        })?;
+        wait_motion(app)?;
+        let reopened = on_main(app, history_snapshot)?;
+        let reopened_session = on_main(app, |app| {
+            Ok(app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .records_session)
+        })?;
+        if reopened["query"] != "合并原生测试译文" || reopened_session != session {
+            return Err(format!(
+                "left-only collapse reset browsing session: {reopened}"
+            ));
+        }
+        samples.push(reopened);
+        on_main(app, |app| show(app, "translation"))?;
+        wait_motion(app)?;
+        on_main(app, |app| {
+            let state = app.state::<AppState>().windows.lock().unwrap().clone();
+            if state.history_visible || !state.translation_visible {
+                return Err("translation summon did not show translation only".into());
+            }
+            let view = app.get_webview("translation").ok_or("translation view")?;
+            crate::commands::window_hide(view, app.clone(), "translation".into(), None)
+        })?;
+        wait_motion(app)?;
+        wait_history_query(app)?;
+        let reset = on_main(app, history_snapshot)?;
+        let full_reset = on_main(app, |app| {
+            let state = app.state::<AppState>().windows.lock().unwrap().clone();
+            if state.history_visible || state.translation_visible {
+                return Err("fixed Esc command did not dismiss both cards".into());
+            }
+            Ok(state.records_session)
+        })?;
+        if reset["query"] != "" || reset["favoritesOnly"] != false || full_reset != session + 1 {
+            return Err(format!("complete hide did not reset browsing: {reset}"));
+        }
+        samples.push(reset);
+        on_main(app, |app| {
+            clipboard_host(app)?;
+            Ok(())
+        })?;
+        wait_motion(app)?;
+        let reset_clipboard = evaluate_view_dom(app,"clipboard","const p=document.querySelector('.clipboard-panel');return {search:p.querySelector('.history-search input').value,favorite:p.querySelector('.history-favorites').getAttribute('aria-pressed'),editor:!!document.querySelector('.clipboard-editor')};")?;
+        if reset_clipboard["search"] != ""
+            || reset_clipboard["favorite"] != "false"
+            || reset_clipboard["editor"] != false
+        {
+            return Err(format!(
+                "clipboard browser failed session reset: {reset_clipboard}"
+            ));
+        }
+        samples.push(reset_clipboard);
+        let token = app.state::<AppState>().operation.load(Ordering::SeqCst);
+        on_main(app, hide_after_clipboard_use)?;
+        wait_motion(app)?;
+        on_main(app, reveal_clipboard_failure)?;
+        wait_motion(app)?;
+        let recovery = on_main(app, move |app| {
+            let state = app.state::<AppState>().windows.lock().unwrap().clone();
+            if !state.history_visible
+                || state.record_view != crate::model::RecordView::Clipboard
+                || app.state::<AppState>().operation.load(Ordering::SeqCst) != token
+            {
+                return Err(
+                    "clipboard failure recovery changed paste token or failed to restore view"
+                        .into(),
+                );
+            }
+            let view = app.get_webview("clipboard").ok_or("clipboard view")?;
+            let (send, receive) = mpsc::sync_channel(1);
+            view.with_webview(move |view| unsafe {
+                let hidden: bool = objc2::msg_send![view.inner().cast::<AnyObject>(), isHidden];
+                let _ = send.send(hidden);
+            })
+            .map_err(|_| "clipboard hidden state")?;
+            if receive
+                .try_recv()
+                .map_err(|_| "clipboard visibility deferred")?
+            {
+                return Err("clipboard failure recovery left the child hidden".into());
+            }
+            Ok(serde_json::json!({"failureRecovery":true,"pasteTokenPreserved":true}))
+        })?;
+        samples.push(recovery);
+        on_main(app, |app| {
+            app.get_webview("clipboard").ok_or("clipboard child")?.emit("clipboard_use_failed",serde_json::json!({"status":"failed","copyStatus":"not_written","code":"clipboard_file_missing"})).map_err(|_|"failure event".to_owned())
+        })?;
+        let mut visible_failure = false;
+        for _ in 0..100 {
+            visible_failure=evaluate_view_dom(app,"clipboard","return document.querySelector('.clipboard-feedback')?.textContent==='The original file was moved or deleted and cannot be restored';")?==true;
+            if visible_failure {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !visible_failure {
+            return Err("restored clipboard lost operation failure feedback after reset".into());
+        }
+        samples.push(serde_json::json!({"failureFeedbackAfterReset":true}));
+        for _ in 0..100 {
+            let editor = evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+const row=document.querySelector('[data-record-id="unified-clipboard-one"]');
+if(!row)return false;
+const card=document.querySelector('.clipboard-editor');
+if(card)return !card.querySelector('input').disabled;
+const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');
+if(note)note.click();else row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:60}));
+return false;
+"#,
+            )?;
+            if editor == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const input=document.querySelector('.clipboard-editor input');if(!input||input.disabled)throw Error('note editor did not load');
+Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Unsaved synthetic note');
+input.dispatchEvent(new Event('input',{bubbles:true}));return true;
+"#,
+        )?;
+        let mut dirty = false;
+        for _ in 0..100 {
+            dirty = app.state::<AppState>().records_dirty.load(Ordering::SeqCst);
+            if dirty {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !dirty {
+            return Err("note editor did not protect unsaved changes".into());
+        }
+        for action in ["Cancel", "Discard"] {
+            if action == "Cancel" {
+                *app.state::<AppState>().selection.lock().unwrap() =
+                    Some(crate::selection::SelectionContext {
+                        text: "Synthetic pending selected text".into(),
+                        source_app: None,
+                        error: None,
+                    });
+                *app.state::<AppState>().selection_source.lock().unwrap() =
+                    Some(serde_json::json!({"name":"Synthetic source"}));
+            }
+            on_main(app, |app| show(app, "translation"))?;
+            let mut confirmation = false;
+            for _ in 0..100 {
+                confirmation=evaluate_view_dom(app,"clipboard","return !!document.querySelector('[role=alertdialog][aria-label=\"Save changes?\"]');")?==true;
+                if confirmation {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !confirmation {
+                return Err("global navigation bypassed note confirmation".into());
+            }
+            let guarded = on_main(app, |app| {
+                Ok(app.state::<AppState>().windows.lock().unwrap().record_view
+                    == crate::model::RecordView::Clipboard)
+            })?;
+            if !guarded {
+                return Err("navigation switched view before confirmation".into());
+            }
+            evaluate_view_dom(app,"clipboard",&format!("const dialog=document.querySelector('[role=alertdialog]');const button=[...dialog.querySelectorAll('button')].find(b=>b.textContent==='{}');if(!button)throw Error('confirmation action missing');button.click();return true;",action))?;
+            if action == "Cancel" {
+                let mut retained = false;
+                for _ in 0..100 {
+                    retained=evaluate_view_dom(app,"clipboard","return !document.querySelector('[role=alertdialog]')&&document.querySelector('.clipboard-editor input')?.value==='Unsaved synthetic note';")?==true;
+                    if retained {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if !retained {
+                    return Err("Cancel did not preserve note draft".into());
+                }
+                if app.state::<AppState>().selection.lock().unwrap().is_some()
+                    || app
+                        .state::<AppState>()
+                        .selection_source
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                    || app
+                        .state::<AppState>()
+                        .records_navigation
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                {
+                    return Err("Cancel retained pending selection or navigation context".into());
+                }
+            } else {
+                let mut navigated = false;
+                for _ in 0..100 {
+                    navigated = on_main(app, |app| {
+                        let state = app.state::<AppState>().windows.lock().unwrap().clone();
+                        Ok(state.record_view == crate::model::RecordView::Translation
+                            && state.translation_visible
+                            && !state.history_visible)
+                    })?;
+                    if navigated {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if !navigated {
+                    return Err("Discard did not continue pending translation summon".into());
+                }
+                let note = app
+                    .state::<AppState>()
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("database")?
+                    .clipboard_detail("unified-clipboard-one")?;
+                if !note.title.is_empty() {
+                    return Err("Discard unexpectedly persisted note title".into());
+                }
+            }
+            samples.push(serde_json::json!({"noteNavigationAction":action,"guarded":true}));
+        }
+        on_main(app, |app| {
+            set_record_view(app, "translation")?;
+            {
+                let state = app.state::<AppState>();
+                let mut windows = state.windows.lock().unwrap();
+                windows.translation_visible = true;
+                windows.history_visible = true;
+                windows.history_pinned = true;
+                windows.translation_pinned = true;
+            }
+            apply_translation(app)
+        })?;
+        wait_motion(app)?;
+        samples.push(on_main(app, |app| unsafe {
+            let window=app.get_window("translation").ok_or("host")?;
+            native_history::focus_search(&window)?;
+            let root=history_object(app,201)?;
+            let search=history_object(app,205)?;
+            let marker=objc2::MainThreadMarker::new().ok_or("main thread")?;
+            let marked=SearchCommandFixture::alloc(marker).set_ivars(true);
+            let marked:Retained<SearchCommandFixture>=objc2::msg_send![super(marked),init];
+            let consumed:bool=objc2::msg_send![root,control:search,textView:&*marked,doCommandBySelector:objc2::sel!(cancelOperation:)];
+            if consumed {return Err("native search consumed Escape during text composition".into());}
+            let editor:*mut AnyObject=objc2::msg_send![search,currentEditor];
+            if editor.is_null() {return Err("native search missing field editor".into());}
+            let consumed:bool=objc2::msg_send![root,control:search,textView:editor,doCommandBySelector:objc2::sel!(cancelOperation:)];
+            let state=app.state::<AppState>().windows.lock().unwrap().clone();
+            if !consumed||state.history_visible||state.translation_visible {return Err("native search Escape failed to dismiss fixed workspace".into());}
+            Ok(serde_json::json!({"searchEscapeDismissedFixedWorkspace":true,"compositionEscapePreserved":true}))
+        })?);
+        Ok(())
+    })();
+    *app.state::<AppState>().database.lock().unwrap() = original_database;
+    *app.state::<AppState>().history_page.lock().unwrap() = original_page;
+    let _ = on_main(app, move |app| {
+        *app.state::<AppState>().history.lock().unwrap() = original_store;
+        refresh_history(app)
+    });
+    DomCase {
+        name: "unified records panel",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -3642,12 +4458,24 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         .unwrap()
         .history_width_initialized = true;
     if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
-        if !["clipboard-actions", "clipboard-editor", "clipboard-media"].contains(&case.as_str()) {
+        if ![
+            "clipboard-actions",
+            "clipboard-editor",
+            "clipboard-media",
+            "translation-actions",
+            "unified-records",
+        ]
+        .contains(&case.as_str())
+        {
             return Err("unknown native test case".into());
         }
         let app = app.clone();
         std::thread::spawn(move || {
-            let result = if case == "clipboard-actions" {
+            let result = if case == "unified-records" {
+                run_unified_records(&app)
+            } else if case == "translation-actions" {
+                run_translation_action_timing(&app)
+            } else if case == "clipboard-actions" {
                 run_clipboard_action_timing(&app)
             } else if case == "clipboard-media" {
                 run_clipboard_media_layout(&app)
@@ -3655,7 +4483,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_clipboard_editor_layout(&app)
             };
             let passed = result.passed;
-            let report = serde_json::json!({"runId":run_id,"testCase":case,"passed":passed,"cases":[],"domCases":[result],"scope":"selected isolated clipboard UI case only; no translation or geometry suite"});
+            let report = serde_json::json!({"runId":run_id,"testCase":case,"passed":passed,"cases":[],"domCases":[result],"scope":"selected isolated UI case only; no full geometry suite"});
             let saved = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
             app.exit(if passed && saved.is_ok() { 0 } else { 1 });
         });
@@ -3693,6 +4521,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         dom_cases.push(run_history_pagination(&app));
         dom_cases.push(run_source_editing(&app));
         dom_cases.push(run_resize_hit_targets(&app));
+        dom_cases.push(run_unified_records(&app));
         dom_cases.push(run_clipboard_history_view(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
         let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());

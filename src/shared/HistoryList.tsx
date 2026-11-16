@@ -1,9 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 // The scrollbar spans the complete viewport while pinned rows stay above the scrolling list.
-export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd }: {
+export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll }: {
   list: RefObject<HTMLDivElement | null>; pinnedList: RefObject<HTMLDivElement | null>;
-  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void;
+  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void;
 }) {
   const listId = useId();
   const [scrollbarVisible, setScrollbarVisible] = useState(false);
@@ -37,8 +37,8 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
   const travel = scroll.track - thumb;
   function move(top: number) { list.current?.scrollTo({ top: Math.max(0, Math.min(maximum, top)) }); }
   return <div ref={viewport} className="history-viewport">
-    <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} onScroll={(event) => onNearEnd(event.currentTarget)}>{pinned}</div>
-    <div ref={list} id={listId} className="history-list" onScroll={(event) => { showScrollbar(); measure(); onNearEnd(event.currentTarget); }}>{children}</div>
+    <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} onScroll={(event) => { onScroll?.(); onNearEnd(event.currentTarget); }}>{pinned}</div>
+    <div ref={list} id={listId} className="history-list" onScroll={(event) => { showScrollbar(); measure(); onScroll?.(); onNearEnd(event.currentTarget); }}>{children}</div>
     {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerEnter={showScrollbar} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;

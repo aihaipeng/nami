@@ -83,7 +83,7 @@
   html[data-native=true], html[data-native=true] body { background: transparent; }
   html[data-native=true] .app-surface { background: var(--glass-surface); }
   html[data-native=true] .app-surface:not(.settings) { border-radius: 20px; box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .13); }
-  html[data-native-material=true] .app-surface.translation, html[data-native-material=true] .app-surface.history { background: transparent; border-radius: 0; box-shadow: none; }
+  html[data-native-material=true] .app-surface.translation, html[data-native-material=true] .app-surface.history, html[data-native-material=true] .app-surface.clipboard { background: transparent; border-radius: 0; box-shadow: none; }
   @media (prefers-reduced-transparency: reduce) {
     :root { --glass-surface: hsl(var(--background)); }
   }
@@ -191,7 +191,15 @@
   @media (prefers-reduced-motion: reduce) { .history-scrollbar-thumb { transition: none; } }
   .history-scrollbar:hover .history-scrollbar-thumb, .history-scrollbar:focus-visible .history-scrollbar-thumb { background: var(--history-secondary); }
   .history-footer { position: absolute; bottom: 4px; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 14px; color: var(--history-secondary); font-size: 11px; }
-  .history-footer .history-shortcuts { color: var(--history-secondary); }
+  .history-footer .history-shortcuts { color: var(--history-secondary); margin-left: auto; }
+  .history-footer .history-favorites { position: absolute; left: 50%; transform: translateX(-50%); color: var(--history-secondary); background: transparent; }
+  .history-footer .history-favorites[aria-pressed=true] { color: var(--history-label); }
+  .history-footer .history-favorites:hover, .history-footer .history-favorites:active { background: transparent; }
+  .records-details > svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .records-details:disabled { opacity: .35; }
+  .record-view { position: absolute; inset: 0; }
+  .record-view[hidden] { display: none; }
+
   .history-shortcuts-panel { position: absolute; right: 12px; bottom: 36px; width: 230px; height: 136px; padding: 14px; border-radius: 10px; font-size: 11px; }
   .history-shortcuts-panel strong { display: block; font-size: 12px; margin-bottom: 10px; }
   .history-shortcuts-panel > div { display: flex; justify-content: space-between; height: 24px; color: var(--history-label); }
@@ -210,9 +218,10 @@
   .history-languages { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; }
   .history-row time { margin-left: 3px; font-size: 11px; flex-shrink: 0; }
   .history-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: normal; padding: 0 2px; margin-top: 6px; }
-  .history-row-actions { position: absolute; display: flex; align-items: center; gap: 1px; right: 5px; top: 3px; opacity: 0; visibility: hidden; transform: translateX(8px); transition: opacity .1s ease-out, transform .1s ease-out, visibility .1s; }
-  .history-row:hover .history-row-actions, .history-row:focus-within .history-row-actions { opacity: 1; visibility: visible; transform: translateX(0); transition-duration: .14s; }
-  .history-row:hover time, .history-row:focus-within time { visibility: hidden; }
+  .history-row-actions { position: absolute; display: flex; align-items: center; gap: 1px; right: 5px; top: 3px; opacity: 0; visibility: hidden; transform: translateX(4px); transition: opacity 150ms ease-out, transform 150ms ease-out, visibility 150ms; transition-delay: 0ms; }
+  .history-row:hover .history-row-actions, .history-row:focus-within .history-row-actions { opacity: 1; visibility: visible; transform: translateX(0); transition-duration: 150ms; }
+  .history-row time { visibility: visible; opacity: 1; transform: translateX(0); transition: opacity 150ms ease-out, transform 150ms ease-out; transition-delay: 0ms; }
+  .history-row:hover time, .history-row:focus-within time { opacity: 0; transform: translateX(-4px); }
   .history-row:hover .history-languages, .history-row:focus-within .history-languages { margin-right: calc(var(--history-actions-width) - 36px); -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); }
   .history-row-actions .icon-button, .history-row-actions .icon-button[aria-pressed=true] { background: transparent; color: var(--history-label); }
   .history-row-actions .history-delete { color: var(--history-red); }
@@ -317,3 +326,15 @@
 .history-error { position: absolute; top: 38px; left: 14px; right: 14px; z-index: 3; margin: 0; }
 
 html[data-native-material=true] .app-surface.clipboard { box-shadow: none; }
+
+.record-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
+.record-context-menu { z-index: 50; padding: 4px; }
+.record-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; height: 29px; padding: 0 8px; border-radius: 6px; font-size: 12px; text-align: left; }
+.record-context-menu button:hover:not(:disabled), .record-context-menu button:focus-visible { background: hsl(var(--foreground) / .1); outline: none; }
+.record-context-menu button:disabled { opacity: .4; }
+.record-context-menu button > svg, .record-context-menu .history-symbol, .clipboard-note-icon { flex: 0 0 14px; width: 14px; height: 14px; stroke-width: 1.5; }
+.clipboard-note-icon { display: inline-block; background: currentColor; mask: center / contain no-repeat; -webkit-mask: center / contain no-repeat; }
+.record-context-menu .clipboard-menu-delete { color: #ff5f57; }
+
+
+@media (prefers-reduced-motion: reduce) { .history-panel .history-row-actions, .history-panel .history-row time { transition: none !important; } }

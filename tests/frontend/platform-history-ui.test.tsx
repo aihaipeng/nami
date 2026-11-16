@@ -6,6 +6,7 @@ import { bridge, calls, emit, mount, windowState } from './harness';
 import type { HistorySnapshot } from '../../src/translation/history';
 
 function portable(platform: 'windows' | 'linux' = 'windows') {
+  bridge.snapshot.window.recordView = 'translation';
   bridge.snapshot.capabilities = {
     platform, nativeHistory: false, nativeChrome: false, nativeMaterial: false,
     selection: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false,

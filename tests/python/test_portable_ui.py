@@ -15,6 +15,7 @@ EXPECTED_CASES = {
     'React selection restores cached translation through IPC',
     'React deletion removes shared record and preserves selection',
     'portable history layout preserves source across toggles and widths',
+    'unified records switch shares host and preserves cached translation',
 }
 
 

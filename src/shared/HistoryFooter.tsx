@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
-export function HistoryFooter({ total, clipboard = false, primaryModifier }: { total: number; clipboard?: boolean; primaryModifier: 'meta' | 'control' }) {
+export function HistoryFooter({ total, clipboard = false, favoritesOnly = false, onFavorites, primaryModifier }: { total: number; clipboard?: boolean; favoritesOnly?: boolean; onFavorites?: () => void; primaryModifier: 'meta' | 'control' }) {
   const [open, setOpen] = useState(false);
   const footer = useRef<HTMLElement>(null);
   const button = useRef<HTMLButtonElement>(null);
@@ -19,6 +19,7 @@ export function HistoryFooter({ total, clipboard = false, primaryModifier }: { t
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }
   }}>
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
+    {onFavorites && <button type="button" className="icon-button history-favorites" aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name={favoritesOnly ? 'star.fill' : 'star'} /></button>}
     <button ref={button} type="button" className="icon-button history-shortcuts" aria-label="Keyboard shortcuts" title="Keyboard shortcuts" aria-expanded={open} onClick={() => setOpen(!open)}><HistoryIcon name="keyboard" /></button>
     {open && <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label="Keyboard shortcuts">
       <strong>Keyboard shortcuts</strong>

@@ -270,11 +270,31 @@ impl HistoryDatabase {
             });
             records.push(record);
         }
+        let total_records = if needle.is_empty() && !query.favorites_only {
+            self.total_records
+        } else {
+            let sql =
+                format!("SELECT COUNT(*) FROM translation_records r WHERE 1=1{favorites}{search}");
+            let mut statement = self
+                .connection
+                .prepare_cached(&sql)
+                .map_err(storage_error)?;
+            let mut bindings: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+            if !needle.is_empty() {
+                bindings.push((":needle", &needle));
+                if indexed {
+                    bindings.push((":match", &search_value));
+                }
+            }
+            statement
+                .query_row(bindings.as_slice(), |row| row.get::<_, i64>(0))
+                .map_err(storage_error)? as usize
+        };
         Ok(HistoryPage {
             records,
             cursor: last,
             has_more,
-            total_records: self.total_records,
+            total_records,
         })
     }
 
@@ -539,6 +559,7 @@ mod tests {
             "a\"b",
             "zero\0tail",
             "translated needle",
+            "Texte",
         ] {
             let page = db
                 .page(
@@ -558,6 +579,7 @@ mod tests {
                 vec!["older-special"],
                 "needle={needle:?}"
             );
+            assert_eq!(page.total_records, 1, "needle={needle:?}");
         }
         let favorites = db
             .page(
@@ -570,6 +592,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(favorites.records.len(), 1);
+        assert_eq!(favorites.total_records, 1);
         assert!(db
             .page(
                 &HistoryQuery {
@@ -582,6 +605,42 @@ mod tests {
             .unwrap()
             .records
             .is_empty());
+    }
+
+    #[test]
+    fn filtered_totals_cover_all_matching_rows_independent_of_cursor_and_page_size() {
+        let fixture = Fixture::new();
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        for index in 0..6 {
+            let mut item = record(&format!("count-{index}"));
+            item.text = "ordinary".into();
+            item.translations = vec!["primary".into(), "secondary needle".into()];
+            item.is_favorite = index < 3;
+            db.insert(&item, "edge", || true).unwrap();
+        }
+        let query = HistoryQuery {
+            text: "secondary needle".into(),
+            favorites_only: true,
+        };
+        let first = db.page(&query, None, 1).unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.total_records, 3);
+        assert!(first.has_more);
+        let second = db.page(&query, first.cursor.as_ref(), 1).unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.total_records, 3);
+        assert_ne!(first.records[0].id, second.records[0].id);
+        let missing = db
+            .page(
+                &HistoryQuery {
+                    text: "absent".into(),
+                    favorites_only: false,
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        assert_eq!(missing.total_records, 0);
     }
 
     #[test]

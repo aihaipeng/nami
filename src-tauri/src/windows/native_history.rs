@@ -13,6 +13,8 @@ const SHORTCUTS_TAG: isize = 207;
 const WORDMARK_TAG: isize = 208;
 const CLEAR_SEARCH_TAG: isize = 209;
 const SEARCH_ICON_TAG: isize = 210;
+const TRANSLATIONS_TAG: isize = 211;
+const DETAILS_TAG: isize = 212;
 const RECORD_TAG: isize = 1000;
 
 use crate::model::HistoryRecord as Record;
@@ -34,6 +36,10 @@ struct HistoryState {
     favorites_only: Cell<bool>,
     favorite_icon_filled: Cell<bool>,
     pin_icon_filled: Cell<bool>,
+    detail_visible: Cell<bool>,
+    details_icon_expanded: Cell<bool>,
+    scroll_positions: RefCell<HashMap<bool, [NSPoint; 2]>>,
+    restore_scroll: Cell<Option<[NSPoint; 2]>>,
     search: Cell<usize>,
     search_focused: Cell<bool>,
     scroll: Cell<usize>,
@@ -260,6 +266,19 @@ objc2::define_class!(
         fn resize(&self, _: NSSize) { self.layout_content(); }
         #[unsafe(method(pressed:))]
         fn pressed(&self, sender: *mut AnyObject) { unsafe { self.perform(objc2::msg_send![sender, tag]); } }
+        #[unsafe(method(recordMenuPressed:))]
+        fn menu_pressed(&self, sender: *mut AnyObject) {
+            unsafe {
+                let id: Option<Retained<NSString>> = objc2::msg_send![sender, representedObject];
+                let Some(id) = id else { return; };
+                let id = id.to_string();
+                let index = self.ivars().records.borrow().iter().position(|record| record.id == id);
+                if let Some(index) = index {
+                    let action: isize = objc2::msg_send![sender, tag];
+                    self.perform(RECORD_TAG + index as isize * 10 + action);
+                }
+            }
+        }
         #[unsafe(method(mouseDown:))]
         fn down(&self, event: *mut AnyObject) {
             unsafe { let window: *mut AnyObject = objc2::msg_send![self, window]; let _: () = objc2::msg_send![window, performWindowDragWithEvent: event]; }
@@ -284,6 +303,27 @@ objc2::define_class!(
         }
         #[unsafe(method(controlTextDidChange:))]
         fn search_changed(&self, _: *mut AnyObject) { self.request_query(); }
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn search_command(&self, _: *mut AnyObject, editor: *mut AnyObject, command: objc2::runtime::Sel) -> bool {
+            let marked: bool = !editor.is_null() && unsafe { objc2::msg_send![editor, hasMarkedText] };
+            if marked { return false.into(); }
+            if command == objc2::sel!(cancelOperation:) {
+                unsafe {
+                    let shortcuts = self.ivars().shortcuts.get() as *mut AnyObject;
+                    let hidden: bool = objc2::msg_send![shortcuts, isHidden];
+                    if !hidden { let _: () = objc2::msg_send![shortcuts, setHidden: true]; return true.into(); }
+                }
+                if super::hide(&self.ivars().app, "translation").is_err() { self.report_error(); }
+                true
+            } else if command == objc2::sel!(moveDown:) {
+                self.move_selection(1);
+                unsafe {
+                    let window: *mut AnyObject = objc2::msg_send![self, window];
+                    let _: bool = objc2::msg_send![window, makeFirstResponder: self];
+                }
+                true
+            } else { false }
+        }
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: *mut AnyObject) {
             unsafe {
@@ -351,6 +391,13 @@ objc2::define_class!(
             unsafe {
                 let window: *mut AnyObject = objc2::msg_send![self, window];
                 let _: bool = objc2::msg_send![window, makeFirstResponder: root];
+            }
+        }
+        #[unsafe(method(rightMouseDown:))]
+        fn context_menu(&self, event: *mut AnyObject) {
+            unsafe {
+                let menu = self.record_menu();
+                let _: () = objc2::msg_send![objc2::class!(NSMenu), popUpContextMenu: &*menu, withEvent: event, forView: self];
             }
         }
         #[unsafe(method(updateTrackingAreas))]
@@ -570,7 +617,7 @@ unsafe fn default_source_icon() -> Retained<AnyObject> {
     image
 }
 
-unsafe fn animate_actions(button: &AnyObject, showing: bool) {
+unsafe fn animate_actions(button: &AnyObject, showing: bool, time: bool) {
     let layer: *mut AnyObject = objc2::msg_send![button, layer];
     let presentation: *mut AnyObject = objc2::msg_send![layer, presentationLayer];
     let current = if presentation.is_null() {
@@ -585,7 +632,16 @@ unsafe fn animate_actions(button: &AnyObject, showing: bool) {
     let _: () = objc2::msg_send![objc2::class!(CATransaction), begin];
     let _: () = objc2::msg_send![objc2::class!(CATransaction), setDisableActions: true];
     for (path, target) in [
-        ("transform.translation.x", if showing { 0.0 } else { 8.0 }),
+        (
+            "transform.translation.x",
+            if showing {
+                0.0
+            } else if time {
+                -4.0
+            } else {
+                4.0
+            },
+        ),
         ("opacity", if showing { 1.0 } else { 0.0 }),
     ] {
         let path = NSString::from_str(path);
@@ -606,8 +662,7 @@ unsafe fn animate_actions(button: &AnyObject, showing: bool) {
         let group: Retained<AnyObject> =
             objc2::msg_send![objc2::class!(CAAnimationGroup), animation];
         let _: () = objc2::msg_send![&*group, setAnimations: &*animations];
-        let _: () =
-            objc2::msg_send![&*group, setDuration: if showing { 0.14_f64 } else { 0.1_f64 }];
+        let _: () = objc2::msg_send![&*group, setDuration: 0.15_f64];
         let timing: *mut AnyObject = objc2::msg_send![objc2::class!(CAMediaTimingFunction), functionWithName: objc2_foundation::ns_string!("easeOut")];
         let _: () = objc2::msg_send![&*group, setTimingFunction: timing];
         let _: () = objc2::msg_send![layer, addAnimation: &*group, forKey: key];
@@ -639,6 +694,74 @@ fn language(code: &str) -> &str {
 }
 
 impl HistoryRow {
+    unsafe fn record_menu(&self) -> Retained<AnyObject> {
+        let root = &*(self.ivars().root as *const NativeHistory);
+        let records = root.ivars().records.borrow();
+        let record = &records[self.ivars().index.get()];
+        let menu: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSMenu), new];
+        let _: () = objc2::msg_send![&*menu, setAutoenablesItems: false];
+        for (action, title, symbol, enabled) in [
+            (0, "Retranslate", "languages", true),
+            (
+                1,
+                "Copy source text",
+                "doc.on.doc",
+                platform::capabilities().clipboard_write,
+            ),
+            (
+                2,
+                if record.is_favorite {
+                    "Remove favorite"
+                } else {
+                    "Favorite"
+                },
+                if record.is_favorite {
+                    "star.fill"
+                } else {
+                    "star"
+                },
+                true,
+            ),
+            (
+                3,
+                if record.is_pinned {
+                    "Unpin record"
+                } else {
+                    "Pin record"
+                },
+                if record.is_pinned { "pin.fill" } else { "pin" },
+                true,
+            ),
+            (
+                4,
+                "Delete",
+                "trash",
+                !record.is_favorite && !record.is_pinned,
+            ),
+        ] {
+            let item: objc2::rc::Allocated<AnyObject> =
+                objc2::msg_send![objc2::class!(NSMenuItem), alloc];
+            let item: Retained<AnyObject> = objc2::msg_send![item, initWithTitle: &*NSString::from_str(title), action: objc2::sel!(recordMenuPressed:), keyEquivalent: objc2_foundation::ns_string!("")];
+            let _: () = objc2::msg_send![&*item, setTarget: root];
+            let _: () =
+                objc2::msg_send![&*item, setRepresentedObject: &*NSString::from_str(&record.id)];
+            let _: () = objc2::msg_send![&*item, setTag: action];
+            let _: () = objc2::msg_send![&*item, setEnabled: enabled];
+            set_symbol(&item, symbol);
+            if action == 4 {
+                let attributes: Retained<AnyObject> =
+                    objc2::msg_send![objc2::class!(NSMutableDictionary), new];
+                let red: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), colorWithSRGBRed: 1.0_f64, green: 95.0_f64/255.0, blue: 87.0_f64/255.0, alpha: 1.0_f64];
+                let _: () = objc2::msg_send![&*attributes, setObject: red, forKey: objc2_foundation::ns_string!("NSColor")];
+                let title: objc2::rc::Allocated<AnyObject> =
+                    objc2::msg_send![objc2::class!(NSAttributedString), alloc];
+                let title: Retained<AnyObject> = objc2::msg_send![title, initWithString: objc2_foundation::ns_string!("Delete"), attributes: &*attributes];
+                let _: () = objc2::msg_send![&*item, setAttributedTitle: &*title];
+            }
+            let _: () = objc2::msg_send![&*menu, addItem: &*item];
+        }
+        menu
+    }
     fn protected(&self) -> bool {
         let root = unsafe { &*(self.ivars().root as *const NativeHistory) };
         let records = root.ivars().records.borrow();
@@ -657,10 +780,10 @@ impl HistoryRow {
                 let _: () = objc2::msg_send![&**button, setHidden: !allowed];
                 let _: () = objc2::msg_send![&**button, setEnabled: value && allowed];
                 let _: () = objc2::msg_send![&**button, setAccessibilityElement: value && allowed];
-                animate_actions(button, value);
+                animate_actions(button, value, false);
             }
-            let _: () =
-                objc2::msg_send![self.ivars().time.get() as *mut AnyObject, setHidden: value];
+            let time = &*(self.ivars().time.get() as *const AnyObject);
+            animate_actions(time, !value, true);
         }
         self.setNeedsDisplay(true);
     }
@@ -668,7 +791,8 @@ impl HistoryRow {
         let root = &*(self.ivars().root as *const NativeHistory);
         let records = root.ivars().records.borrow();
         let record = &records[self.ivars().index.get()];
-        let selected = root.ivars().selected.borrow().as_deref() == Some(&record.id);
+        let selected = root.ivars().detail_visible.get()
+            && root.ivars().selected.borrow().as_deref() == Some(&record.id);
         let bounds: NSRect = objc2::msg_send![self, bounds];
         let shape: *mut AnyObject = objc2::msg_send![objc2::class!(NSBezierPath), bezierPathWithRoundedRect: rect(0.5,0.5,bounds.size.width-1.0,bounds.size.height-1.0), xRadius: 10.0_f64, yRadius: 10.0_f64];
         if selected || self.ivars().hovered.get() {
@@ -796,6 +920,7 @@ impl NativeHistory {
         row.ivars().heading.set(Retained::as_ptr(&heading) as usize);
         let time = label(record.date.get(11..16).unwrap_or(""), 11.0, true);
         let _: () = objc2::msg_send![&*time, setAlignment: 1usize];
+        let _: () = objc2::msg_send![&*time, setWantsLayer: true];
         let _: () = objc2::msg_send![&*row,addSubview:&*time];
         row.ivars().time.set(Retained::as_ptr(&time) as usize);
         let preview: String = record
@@ -852,7 +977,7 @@ impl NativeHistory {
             let layer: *mut AnyObject = objc2::msg_send![&*button, layer];
             let _: () = objc2::msg_send![layer, setOpacity: 0.0_f32];
             let offset: *mut AnyObject =
-                objc2::msg_send![objc2::class!(NSNumber), numberWithDouble: 8.0_f64];
+                objc2::msg_send![objc2::class!(NSNumber), numberWithDouble: 4.0_f64];
             let _: () = objc2::msg_send![layer, setValue: offset, forKeyPath: objc2_foundation::ns_string!("transform.translation.x")];
             let _: () = objc2::msg_send![&*row,addSubview:&*button];
             row.ivars().actions.borrow_mut().push(button);
@@ -945,11 +1070,46 @@ impl NativeHistory {
         }
     }
 
+    fn scroll_positions(&self) -> [NSPoint; 2] {
+        [self.ivars().pinned_scroll.get(), self.ivars().scroll.get()].map(|pointer| unsafe {
+            let clip: *mut AnyObject = objc2::msg_send![pointer as *mut AnyObject, contentView];
+            let bounds: NSRect = objc2::msg_send![clip, bounds];
+            bounds.origin
+        })
+    }
+
+    fn restore_positions(&self, positions: [NSPoint; 2]) {
+        for (pointer, position) in [self.ivars().pinned_scroll.get(), self.ivars().scroll.get()]
+            .into_iter()
+            .zip(positions)
+        {
+            unsafe {
+                let clip: *mut AnyObject = objc2::msg_send![pointer as *mut AnyObject, contentView];
+                let _: () = objc2::msg_send![clip, scrollToPoint: position];
+                let _: () =
+                    objc2::msg_send![pointer as *mut AnyObject, reflectScrolledClipView: clip];
+            }
+        }
+    }
+
     fn request_query(&self) {
         let query = self.query();
+        let text_changed = self
+            .ivars()
+            .requested_query
+            .borrow()
+            .as_ref()
+            .is_some_and(|(previous, _)| *previous != query);
+        if text_changed {
+            self.ivars().scroll_positions.borrow_mut().clear();
+            self.ivars().restore_scroll.set(Some([NSPoint::ZERO; 2]));
+        }
         let favorites_only = self.ivars().favorites_only.get();
         if *self.ivars().requested_query.borrow() == Some((query.clone(), favorites_only)) {
-            self.reload(true);
+            self.reload(false);
+            if let Some(positions) = self.ivars().restore_scroll.take() {
+                self.restore_positions(positions);
+            }
             return;
         }
         *self.ivars().requested_query.borrow_mut() = Some((query.clone(), favorites_only));
@@ -1068,8 +1228,38 @@ impl NativeHistory {
             }
             return;
         }
-        if tag == 202 || tag == 203 {
-            self.ivars().favorites_only.set(tag == 203);
+        if tag == 202 || tag == TRANSLATIONS_TAG {
+            let view = if tag == 202 {
+                "clipboard"
+            } else {
+                "translation"
+            };
+            if super::set_record_view(&self.ivars().app, view).is_err() {
+                self.report_error();
+            }
+            return;
+        }
+        if tag == DETAILS_TAG {
+            if super::toggle_record_details(&self.ivars().app).is_err() {
+                self.report_error();
+            }
+            return;
+        }
+        if tag == 203 {
+            let previous = self.ivars().favorites_only.get();
+            self.ivars()
+                .scroll_positions
+                .borrow_mut()
+                .insert(previous, self.scroll_positions());
+            self.ivars().favorites_only.set(!previous);
+            let restore = self
+                .ivars()
+                .scroll_positions
+                .borrow()
+                .get(&!previous)
+                .copied()
+                .unwrap_or([NSPoint::ZERO; 2]);
+            self.ivars().restore_scroll.set(Some(restore));
             self.request_query();
             return;
         }
@@ -1133,18 +1323,36 @@ impl NativeHistory {
     fn update_toolbar(&self) {
         self.setNeedsDisplay(true);
         unsafe {
-            let pinned = self
+            let state = self
                 .ivars()
                 .app
                 .state::<AppState>()
                 .windows
                 .lock()
                 .unwrap()
-                .history_pinned;
-            for (tag, active) in [
-                (202, !self.ivars().favorites_only.get()),
-                (203, self.ivars().favorites_only.get()),
-                (204, pinned),
+                .clone();
+            for (tag, active, title) in [
+                (202, false, "Clipboard"),
+                (TRANSLATIONS_TAG, true, "Translations"),
+                (203, self.ivars().favorites_only.get(), "Favorites"),
+                (
+                    204,
+                    state.history_pinned,
+                    if state.history_pinned {
+                        "Unpin records"
+                    } else {
+                        "Pin records"
+                    },
+                ),
+                (
+                    DETAILS_TAG,
+                    state.translation_visible,
+                    if state.translation_visible {
+                        "Collapse details"
+                    } else {
+                        "Expand details"
+                    },
+                ),
             ] {
                 let button: *mut AnyObject = objc2::msg_send![self, viewWithTag: tag];
                 let color: *mut AnyObject = if active {
@@ -1154,21 +1362,25 @@ impl NativeHistory {
                 };
                 if tag == 203 && self.ivars().favorite_icon_filled.replace(active) != active {
                     set_symbol(&*button, if active { "star.fill" } else { "star" });
-                } else if tag == 204 && self.ivars().pin_icon_filled.replace(pinned) != pinned {
-                    set_symbol(&*button, if pinned { "pin.fill" } else { "pin" });
+                } else if tag == 204 && self.ivars().pin_icon_filled.replace(active) != active {
+                    set_symbol(&*button, if active { "pin.fill" } else { "pin" });
+                } else if tag == DETAILS_TAG
+                    && self.ivars().details_icon_expanded.replace(active) != active
+                {
+                    set_symbol(
+                        &*button,
+                        if active {
+                            "chevron.left"
+                        } else {
+                            "chevron.right"
+                        },
+                    );
                 }
                 let _: () = objc2::msg_send![button, setContentTintColor: color];
                 let _: () = objc2::msg_send![button, setState: if active {1isize} else {0isize}];
-                let label = NSString::from_str(if tag == 202 {
-                    "All history"
-                } else if tag == 203 {
-                    "Favorite history"
-                } else if pinned {
-                    "Unpin window"
-                } else {
-                    "Pin history region"
-                });
-                let _: () = objc2::msg_send![button, setAccessibilityLabel: &*label];
+                let title = NSString::from_str(title);
+                let _: () = objc2::msg_send![button, setAccessibilityLabel: &*title];
+                let _: () = objc2::msg_send![button, setToolTip: &*title];
             }
         }
     }
@@ -1310,7 +1522,7 @@ impl NativeHistory {
             let search_x = 10.0 + wordmark_bounds.size.width + 6.0;
             let search = self.ivars().search.get() as *mut AnyObject;
             let container: *mut AnyObject = objc2::msg_send![search, superview];
-            let search_width = (size.width - search_x - 88.0).max(40.0);
+            let search_width = (size.width - search_x - 114.0).max(40.0);
             frame(container, rect(search_x, 10.0, search_width, 28.0));
             let cell: *mut AnyObject = objc2::msg_send![search, cell];
             let text_size: NSSize = objc2::msg_send![cell, cellSize];
@@ -1327,11 +1539,14 @@ impl NativeHistory {
             frame(icon, rect(8.0, 7.0, 14.0, 14.0));
             let clear: *mut AnyObject = objc2::msg_send![self, viewWithTag: CLEAR_SEARCH_TAG];
             frame(clear, rect(search_width - 24.0, 2.0, 24.0, 24.0));
-            for (offset, tag) in [202isize, 203, 204].into_iter().enumerate() {
+            for (offset, tag) in [202isize, TRANSLATIONS_TAG, 204, DETAILS_TAG]
+                .into_iter()
+                .enumerate()
+            {
                 let button: *mut AnyObject = objc2::msg_send![self, viewWithTag: tag];
                 frame(
                     button,
-                    rect(size.width - 86.0 + offset as f64 * 26.0, 12.0, 24.0, 24.0),
+                    rect(size.width - 112.0 + offset as f64 * 26.0, 12.0, 24.0, 24.0),
                 );
             }
             let pinned = self.indices(true);
@@ -1399,9 +1614,14 @@ impl NativeHistory {
                 rect(
                     12.0,
                     size.height - 16.0 - count_frame.size.height / 2.0,
-                    size.width - 60.0,
+                    (size.width / 2.0 - 28.0).max(0.0),
                     count_frame.size.height,
                 ),
+            );
+            let favorite: *mut AnyObject = objc2::msg_send![self, viewWithTag: 203isize];
+            frame(
+                favorite,
+                rect(size.width / 2.0 - 12.0, size.height - 28.0, 24.0, 24.0),
             );
             let button: *mut AnyObject = objc2::msg_send![self, viewWithTag: SHORTCUTS_TAG];
             frame(
@@ -1451,6 +1671,16 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         favorites_only: Cell::new(false),
         favorite_icon_filled: Cell::new(false),
         pin_icon_filled: Cell::new(false),
+        detail_visible: Cell::new(
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .translation_visible,
+        ),
+        details_icon_expanded: Cell::new(false),
+        scroll_positions: RefCell::new(HashMap::new()),
+        restore_scroll: Cell::new(None),
         search: Cell::new(0),
         search_focused: Cell::new(false),
         scroll: Cell::new(0),
@@ -1529,9 +1759,11 @@ pub(super) fn create(app: &AppHandle) -> Result<Retained<NSView>, String> {
         root.ivars().search.set(Retained::as_ptr(&search) as usize);
         root.update_search_appearance();
         for (tag, symbol, title) in [
-            (202, "list.bullet", "All history"),
-            (203, "star", "Favorite history"),
-            (204, "pin", "Pin history region"),
+            (202, "list.bullet", "Clipboard"),
+            (TRANSLATIONS_TAG, "languages", "Translations"),
+            (204, "pin", "Pin records"),
+            (DETAILS_TAG, "chevron.right", "Expand details"),
+            (203, "star", "Favorites"),
         ] {
             let button = symbol_button(&root, tag, symbol, title);
             let _: () = objc2::msg_send![&*root,addSubview:&*button];
@@ -1695,6 +1927,11 @@ pub(super) fn apply_snapshot(
         .map(|(i, r)| (r.id.clone(), i))
         .collect();
     let reset = root.ivars().generation.replace(snapshot.generation) != snapshot.generation;
+    let restoring_scroll = if reset {
+        root.ivars().restore_scroll.get()
+    } else {
+        None
+    };
     let count_changed =
         root.ivars().total_records.replace(snapshot.total_records) != snapshot.total_records;
     root.ivars().has_more.set(snapshot.has_more);
@@ -1785,7 +2022,7 @@ pub(super) fn apply_snapshot(
         }
     }
     if changed {
-        root.reload(reset);
+        root.reload(reset && restoring_scroll.is_none());
     } else if previous != snapshot.selected_id {
         let records = root.ivars().records.borrow();
         for (record, row) in records.iter().zip(root.ivars().rows.borrow().iter()) {
@@ -1796,7 +2033,7 @@ pub(super) fn apply_snapshot(
             }
         }
     }
-    if previous != snapshot.selected_id {
+    if previous != snapshot.selected_id && restoring_scroll.is_none() {
         let index = root
             .ivars()
             .records
@@ -1812,6 +2049,10 @@ pub(super) fn apply_snapshot(
             }
         }
     }
+    if let Some(positions) = restoring_scroll {
+        root.ivars().restore_scroll.set(None);
+        root.restore_positions(positions);
+    }
     root.ivars().suppress_load.set(false);
     Ok(())
 }
@@ -1821,12 +2062,25 @@ pub(super) fn sync(window: &Window, history_visible: bool) -> Result<(), String>
     let app_state = window.app_handle().state::<AppState>();
     let state = app_state.windows.lock().unwrap().clone();
     unsafe {
-        let _: () =
-            objc2::msg_send![&*root,setHidden:!history_visible && state.history_extent<=0.0];
+        let active = state.record_view == crate::model::RecordView::Translation;
+        let _: () = objc2::msg_send![&*root,setHidden:!active || (!history_visible && state.history_extent<=0.0)];
+        if root
+            .ivars()
+            .detail_visible
+            .replace(state.translation_visible)
+            != state.translation_visible
+        {
+            for row in root.ivars().rows.borrow().iter() {
+                row.setNeedsDisplay(true);
+            }
+        }
         let _: () = objc2::msg_send![root.ivars().divider.get() as *mut AnyObject,setHidden:!state.translation_visible || !state.history_visible];
-        if !history_visible {
+        if !history_visible || !active {
             let _: () =
                 objc2::msg_send![root.ivars().shortcuts.get() as *mut AnyObject, setHidden: true];
+            for row in root.ivars().rows.borrow().iter() {
+                row.set_hover(false);
+            }
         }
     }
     root.update_toolbar();
@@ -1919,6 +2173,16 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
                 serde_json::json!({"x":frame.origin.x,"y":frame.origin.y,"width":frame.size.width,"height":frame.size.height,"hidden":hidden,"enabled":enabled,"opacity":opacity,"offset":offset,"animationDuration":duration,"drawnWidth":drawn.size.width,"drawnHeight":drawn.size.height,"imageWidth":image_size.width,"imageHeight":image_size.height})
             }).collect::<Vec<_>>();
             let time = row.ivars().time.get() as *mut AnyObject;
+            let time_layer: *mut AnyObject = objc2::msg_send![time, layer];
+            let time_opacity: f32 = objc2::msg_send![time_layer, opacity];
+            let time_offset: *mut AnyObject = objc2::msg_send![time_layer, valueForKeyPath: objc2_foundation::ns_string!("transform.translation.x")];
+            let time_offset: f64 = objc2::msg_send![time_offset, doubleValue];
+            let time_animation: *mut AnyObject = objc2::msg_send![time_layer, animationForKey: objc2_foundation::ns_string!("historyActions")];
+            let time_duration: f64 = if time_animation.is_null() {
+                0.0
+            } else {
+                objc2::msg_send![time_animation, duration]
+            };
             let time_frame: NSRect = objc2::msg_send![time, frame];
             let heading_frame: NSRect =
                 objc2::msg_send![row.ivars().heading.get() as *mut AnyObject, frame];
@@ -1934,17 +2198,20 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
                 objc2::msg_send![&*layout, defaultLineHeightForFont: preview_font];
             let preview_cell: *mut AnyObject = objc2::msg_send![preview, cell];
             let preview_cell_size: NSSize = objc2::msg_send![preview_cell, cellSizeForBounds: rect(0.0, 0.0, preview_frame.size.width, 10000.0)];
-            rows.push(serde_json::json!({"id":records[index].id,"hovered":row.ivars().hovered.get(),"selected":root.ivars().selected.borrow().as_deref()==Some(records[index].id.as_str()),"pinned":records[index].is_pinned,"favorite":records[index].is_favorite,"x":f.origin.x,"y":f.origin.y,"width":f.size.width,"height":f.size.height,"parentPointer":parent as usize,"viewportY":viewport.origin.y,"pointer":Retained::as_ptr(row) as usize,"hidden":parent.is_null(),"actions":actions,"previewFrame":{"x":preview_frame.origin.x,"y":preview_frame.origin.y,"width":preview_frame.size.width,"height":preview_frame.size.height},"previewFont":{"name":font_name.to_string(),"size":font_size,"lineHeight":line_height},"previewCellSize":{"width":preview_cell_size.width,"height":preview_cell_size.height},"headingCenterY":heading_frame.origin.y+heading_frame.size.height/2.0,"timeCenterY":time_frame.origin.y+time_frame.size.height/2.0,"timeWidth":time_frame.size.width,"timeRequiredWidth":time_size.width,"timeHeight":time_frame.size.height,"timeRequiredHeight":time_size.height}));
+            rows.push(serde_json::json!({"id":records[index].id,"hovered":row.ivars().hovered.get(),"selected":root.ivars().detail_visible.get() && root.ivars().selected.borrow().as_deref()==Some(records[index].id.as_str()),"pinned":records[index].is_pinned,"favorite":records[index].is_favorite,"x":f.origin.x,"y":f.origin.y,"width":f.size.width,"height":f.size.height,"parentPointer":parent as usize,"viewportY":viewport.origin.y,"pointer":Retained::as_ptr(row) as usize,"hidden":parent.is_null(),"actions":actions,"previewFrame":{"x":preview_frame.origin.x,"y":preview_frame.origin.y,"width":preview_frame.size.width,"height":preview_frame.size.height},"previewFont":{"name":font_name.to_string(),"size":font_size,"lineHeight":line_height},"previewCellSize":{"width":preview_cell_size.width,"height":preview_cell_size.height},"headingCenterY":heading_frame.origin.y+heading_frame.size.height/2.0,"timeOpacity":time_opacity,"timeOffset":time_offset,"timeDuration":time_duration,"timeCenterY":time_frame.origin.y+time_frame.size.height/2.0,"timeWidth":time_frame.size.width,"timeRequiredWidth":time_size.width,"timeHeight":time_frame.size.height,"timeRequiredHeight":time_size.height}));
         }
     }
     let mut toolbar = Vec::new();
     unsafe {
-        for tag in [202isize, 203, 204] {
+        for tag in [202isize, TRANSLATIONS_TAG, 204, DETAILS_TAG, 203] {
             let button: *mut AnyObject = objc2::msg_send![&*root, viewWithTag: tag];
             let cell: *mut AnyObject = objc2::msg_send![button, cell];
             let bounds: NSRect = objc2::msg_send![button, bounds];
             let drawn: NSRect = objc2::msg_send![cell, imageRectForBounds: bounds];
-            toolbar.push(serde_json::json!({"tag":tag,"drawnWidth":drawn.size.width,"drawnHeight":drawn.size.height}));
+            let frame: NSRect = objc2::msg_send![button, frame];
+            let state: isize = objc2::msg_send![button, state];
+            let label: Retained<NSString> = objc2::msg_send![button, accessibilityLabel];
+            toolbar.push(serde_json::json!({"tag":tag,"label":label.to_string(),"active":state != 0,"x":frame.origin.x,"y":frame.origin.y,"width":frame.size.width,"height":frame.size.height,"drawnWidth":drawn.size.width,"drawnHeight":drawn.size.height}));
         }
     }
     let scroll_y;
@@ -1976,4 +2243,102 @@ pub(super) fn snapshot(window: &Window) -> Result<serde_json::Value, String> {
     Ok(
         serde_json::json!({"generation":root.ivars().generation.get(),"hasMore":root.ivars().has_more.get(),"totalRecords":root.ivars().total_records.get(),"suppressLoad":root.ivars().suppress_load.get(),"queryPending":root.ivars().query_pending.get(),"loadPending":root.ivars().load_pending.get(),"toolbar":toolbar,"rootPointer":Retained::as_ptr(&root) as usize,"layoutCount":root.ivars().layout_count.get(),"scrollY":scroll_y,"scrollbarY":scrollbar_y,"pinnedY":pinned_y,"countText":count_text,"shortcutsHidden":shortcuts_hidden,"query":root.query(),"favoritesOnly":root.ivars().favorites_only.get(),"selected":root.ivars().selected.borrow().clone(),"pinnedCount":pinned.len(),"ordinaryCount":ordinary.len(),"rows":rows}),
     )
+}
+
+pub(super) fn focus_search(window: &Window) -> Result<(), String> {
+    let root = root(window)?;
+    let native = window
+        .ns_window()
+        .map_err(|_| "window_focus")?
+        .cast::<AnyObject>();
+    let accepted: bool = unsafe {
+        objc2::msg_send![native, makeFirstResponder: root.ivars().search.get() as *mut AnyObject]
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err("window_focus".into())
+    }
+}
+
+pub(super) fn reset_session(window: &Window) -> Result<(), String> {
+    let root = root(window)?;
+    dismiss_transient(window)?;
+    root.ivars().favorites_only.set(false);
+    root.ivars().scroll_positions.borrow_mut().clear();
+    root.ivars().restore_scroll.set(Some([NSPoint::ZERO; 2]));
+    unsafe {
+        let _: () = objc2::msg_send![root.ivars().search.get() as *mut AnyObject, setStringValue: objc2_foundation::ns_string!("")];
+    }
+    root.restore_positions([NSPoint::ZERO; 2]);
+    root.request_query();
+    Ok(())
+}
+
+pub(super) fn dismiss_transient(window: &Window) -> Result<(), String> {
+    let root = root(window)?;
+    for row in root.ivars().rows.borrow().iter() {
+        row.set_hover(false);
+    }
+    unsafe {
+        let _: () =
+            objc2::msg_send![root.ivars().shortcuts.get() as *mut AnyObject, setHidden: true];
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ui-tests")]
+pub(super) fn context_menu_snapshot(
+    window: &Window,
+    index: usize,
+) -> Result<serde_json::Value, String> {
+    let root = root(window)?;
+    let rows = root.ivars().rows.borrow();
+    let row = rows.get(index).ok_or("missing row")?;
+    unsafe {
+        let menu = row.record_menu();
+        let count: isize = objc2::msg_send![&*menu, numberOfItems];
+        let mut items = Vec::new();
+        for index in 0..count {
+            let item: *mut AnyObject = objc2::msg_send![&*menu, itemAtIndex: index];
+            let title: Retained<NSString> = objc2::msg_send![item, title];
+            let enabled: bool = objc2::msg_send![item, isEnabled];
+            let tag: isize = objc2::msg_send![item, tag];
+            let id: Retained<NSString> = objc2::msg_send![item, representedObject];
+            let image: *mut AnyObject = objc2::msg_send![item, image];
+            let size: NSSize = objc2::msg_send![image, size];
+            let attributed: *mut AnyObject = objc2::msg_send![item, attributedTitle];
+            let red = if attributed.is_null() {
+                false
+            } else {
+                let color: *mut AnyObject = objc2::msg_send![attributed, attribute: objc2_foundation::ns_string!("NSColor"), atIndex: 0usize, effectiveRange: std::ptr::null_mut::<objc2_foundation::NSRange>()];
+                let expected: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), colorWithSRGBRed: 1.0_f64, green: 95.0_f64/255.0, blue: 87.0_f64/255.0, alpha: 1.0_f64];
+                !color.is_null() && objc2::msg_send![color, isEqual: expected]
+            };
+            items.push(serde_json::json!({"title":title.to_string(),"enabled":enabled,"tag":tag,"recordId":id.to_string(),"iconWidth":size.width,"iconHeight":size.height,"red":red}));
+        }
+        Ok(serde_json::json!(items))
+    }
+}
+
+#[cfg(feature = "ui-tests")]
+pub(super) fn invoke_context_menu_action(
+    window: &Window,
+    index: usize,
+    action: isize,
+) -> Result<(), String> {
+    let root = root(window)?;
+    let menu = {
+        let rows = root.ivars().rows.borrow();
+        unsafe { rows.get(index).ok_or("missing row")?.record_menu() }
+    };
+    unsafe {
+        let item: *mut AnyObject = objc2::msg_send![&*menu, itemAtIndex: action];
+        let enabled: bool = objc2::msg_send![item, isEnabled];
+        if !enabled {
+            return Err("menu_disabled".into());
+        }
+        let _: () = objc2::msg_send![&*root, recordMenuPressed: item];
+    }
+    Ok(())
 }

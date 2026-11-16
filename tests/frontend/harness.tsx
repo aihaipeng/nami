@@ -35,7 +35,7 @@ let historyFavorites = false;
 let historyLoaded = 100;
 function historySnapshot(): HistorySnapshot {
   const matching = filterHistory(bridge.history.records, historyQuery, historyFavorites);
-  return structuredClone({ ...bridge.history, records: matching.slice(0, historyLoaded), totalRecords: bridge.history.records.length, hasMore: matching.length > historyLoaded });
+  return structuredClone({ ...bridge.history, records: matching.slice(0, historyLoaded), totalRecords: matching.length, hasMore: matching.length > historyLoaded });
 }
 export const scrollTo = vi.fn(function (this: HTMLElement, first?: number | ScrollToOptions, second?: number) {
   this.scrollTop = typeof first === 'number' ? second ?? 0 : first?.top ?? this.scrollTop;
@@ -111,16 +111,26 @@ beforeEach(() => {
       ++bridge.history.revision; deliver('history_changed', historySnapshot());
       return historySnapshot();
     }
+    if (name === 'records_view_set') {
+      const { view } = args as { view: 'clipboard' | 'translation' };
+      bridge.snapshot.window.recordView = view;
+      bridge.snapshot.window.historyVisible = true;
+      if (view === 'clipboard') { bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; }
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
+    if (name === 'records_details_toggle') {
+      bridge.snapshot.window.translationVisible = !bridge.snapshot.window.translationVisible;
+      bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationVisible ? bridge.snapshot.window.translationWidth : 0;
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);
     if (name === 'history_sample_select') {
       const selected = args as { sampleId: string | null; retranslate: boolean };
       const record = bridge.history.records.find(({ id }) => id === selected.sampleId);
       if (selected.sampleId !== null && !record) throw new Error('invalid_argument');
       if (selected.sampleId !== null) {
-        const collapse = bridge.history.selectedId === selected.sampleId && !selected.retranslate
-          && bridge.snapshot.window.translationVisible && !bridge.snapshot.window.translationPinned;
-        bridge.snapshot.window.translationVisible = !collapse;
-        bridge.snapshot.window.translationExtent = collapse ? 0 : bridge.snapshot.window.translationWidth;
+        bridge.snapshot.window.translationVisible = true;
+        bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationWidth;
         bridge.snapshot.window.historyVisible = true;
         bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
         deliver('window_state', structuredClone(bridge.snapshot.window));
@@ -163,6 +173,7 @@ export async function windowState(patch: Partial<WindowState>) {
 
 export async function mount(label: 'translation' | 'history' | 'clipboard' | 'settings' = 'translation') {
   bridge.label = label;
+  if (label === 'history') bridge.snapshot.window.recordView = 'translation';
   const previous = bridge.invoke.mock.calls.filter(([name]) => name === 'app_snapshot').length;
   const result = render(<App />);
   await waitFor(() => {

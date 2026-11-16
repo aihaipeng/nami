@@ -87,6 +87,7 @@ describe('paged database history', () => {
     });
     bridge.snapshot.capabilities.nativeHistory = false;
     bridge.snapshot.capabilities.nativeChrome = false;
+    bridge.snapshot.window.recordView = 'translation';
     await mount();
     expect(rows()).toHaveLength(100);
     expect(rows().some((button) => button.closest('article')?.dataset.recordId === full.id)).toBe(false);
