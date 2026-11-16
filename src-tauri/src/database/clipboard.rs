@@ -695,6 +695,7 @@ impl HistoryDatabase {
             "translation_secondary",
             "translation_proxy_url",
             "translation_proxy_enabled",
+            "translation_selection_enabled",
             "translation_shortcuts",
         ];
         if !KEYS.contains(&key) {
@@ -721,7 +722,8 @@ pub(super) fn ensure_translation_preferences(
             ('translation_primary','en'),
             ('translation_secondary','zh-CN'),
             ('translation_proxy_url',''),
-            ('translation_proxy_enabled','false');",
+            ('translation_proxy_enabled','false'),
+            ('translation_selection_enabled','true');",
         )
         .map_err(storage_error)
 }

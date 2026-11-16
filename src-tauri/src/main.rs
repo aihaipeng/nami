@@ -168,24 +168,26 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
     let suspended = state
         .shortcuts_suspended
         .load(std::sync::atomic::Ordering::SeqCst);
-    let selection = state
-        .translation_preferences
-        .lock()
-        .unwrap()
-        .shortcuts
-        .selection
-        .clone();
+    let (selection, selection_enabled) = {
+        let preferences = state.translation_preferences.lock().unwrap();
+        (
+            preferences.shortcuts.selection.clone(),
+            preferences.selection_enabled,
+        )
+    };
     let previous = state.registered_shortcuts.lock().unwrap().clone();
     let mut desired = Vec::new();
     if !suspended {
         desired.push(clipboard_shortcut());
-        if let Some(binding) = selection {
-            if let Ok(shortcut) = binding_shortcut(&binding) {
-                if !desired
-                    .iter()
-                    .any(|current| same_shortcut(current, &shortcut))
-                {
-                    desired.push(shortcut);
+        if selection_enabled {
+            if let Some(binding) = selection {
+                if let Ok(shortcut) = binding_shortcut(&binding) {
+                    if !desired
+                        .iter()
+                        .any(|current| same_shortcut(current, &shortcut))
+                    {
+                        desired.push(shortcut);
+                    }
                 }
             }
         }

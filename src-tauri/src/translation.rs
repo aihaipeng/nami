@@ -73,6 +73,7 @@ pub struct Preferences {
     pub secondary_language: String,
     pub proxy_url: String,
     pub proxy_enabled: bool,
+    pub selection_enabled: bool,
     pub shortcuts: TranslationShortcuts,
 }
 
@@ -85,6 +86,7 @@ impl Preferences {
             secondary_language: "zh-CN".into(),
             proxy_url: String::new(),
             proxy_enabled: false,
+            selection_enabled: true,
             shortcuts: TranslationShortcuts::defaults(primary),
         }
     }
@@ -120,6 +122,9 @@ impl Preferences {
             && !proxy_contains_credentials(stored_proxy)
         {
             preferences.proxy_enabled = true;
+        }
+        if let Some(enabled) = read("translation_selection_enabled") {
+            preferences.selection_enabled = enabled == "true";
         }
         if let Some(json) = read("translation_shortcuts") {
             if let Ok(shortcuts) = serde_json::from_str::<TranslationShortcuts>(&json) {
@@ -169,6 +174,9 @@ impl Preferences {
         if let Some(enabled) = patch.proxy_enabled {
             self.proxy_enabled = enabled;
         }
+        if let Some(enabled) = patch.selection_enabled {
+            self.selection_enabled = enabled;
+        }
         Ok(engine_changed)
     }
 
@@ -194,6 +202,15 @@ impl Preferences {
                 if self.proxy_enabled { "true" } else { "false" }.into(),
             ),
             (
+                "translation_selection_enabled",
+                if self.selection_enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                .into(),
+            ),
+            (
                 "translation_shortcuts",
                 serde_json::to_string(&self.shortcuts).unwrap_or_else(|_| "{}".into()),
             ),
@@ -210,6 +227,7 @@ pub struct PreferencePatch {
     pub secondary_language: Option<String>,
     pub proxy_url: Option<String>,
     pub proxy_enabled: Option<bool>,
+    pub selection_enabled: Option<bool>,
 }
 
 pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {

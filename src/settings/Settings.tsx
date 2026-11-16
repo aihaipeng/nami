@@ -22,12 +22,12 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
     <aside className="settings-sidebar">
       <div className="settings-brand" data-tauri-drag-region><span>Nami<small>{t('settings')}</small></span></div>
       <nav aria-label={t('settings')}>
-        {pages.map(({ value, icon: Icon }) => <button type="button" key={value} aria-current={page === value ? 'page' : undefined} onClick={() => setPage(value)}><Icon aria-hidden="true" />{t(value)}</button>)}
+        {pages.map(({ value, icon: Icon }) => <button type="button" key={value} aria-current={page === value ? 'page' : undefined} onClick={() => setPage(value)}><Icon aria-hidden="true" />{value === 'translation' ? t('translationPage') : t(value)}</button>)}
       </nav>
       <div className="settings-stage"><span>Nami · 0.1.0 · P0</span></div>
     </aside>
-    <section className="settings-content" aria-label={t(page)}>
-      <header className="settings-page-heading"><h1>{t(page)}</h1><p className="settings-intro">{t(current.description)}</p></header>
+    <section className={page === 'translation' ? 'settings-content settings-content-translation' : 'settings-content'} aria-label={page === 'translation' ? t('translationPage') : t(page)}>
+      {page !== 'translation' && <header className="settings-page-heading"><h1>{t(page)}</h1><p className="settings-intro">{t(current.description)}</p></header>}
       {page === 'general' && <>
         <h2>{t('personalization')}</h2>
         <div className="settings-group">
@@ -61,7 +61,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
         <div className="version-row"><span>{t('version')}</span><span>0.1.0 · P0</span></div>
       </>}
       {snapshot.shortcutErrors.length > 0 && <div className="settings-callout settings-error" role="alert">{t('shortcutFailed')}</div>}
-      <p className="settings-footnote"><Info aria-hidden="true" />{t('p0Settings')}</p>
+      {page !== 'translation' && <p className="settings-footnote"><Info aria-hidden="true" />{t('p0Settings')}</p>}
     </section>
   </div>;
 }

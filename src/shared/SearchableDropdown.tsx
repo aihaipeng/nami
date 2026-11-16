@@ -4,9 +4,9 @@ import { FloatingPanel } from './FloatingPanel';
 import { matchesLanguage } from './languages';
 import type { Translate } from './i18n';
 
-export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, hiddenTrigger = false }: {
+export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false }: {
   value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string }[];
-  t: Translate; side?: 'top' | 'bottom'; open: boolean; onOpenChange: (open: boolean) => void; searchable?: boolean; id?: string; capsule?: boolean;
+  t: Translate; side?: 'top' | 'bottom'; open: boolean; onOpenChange: (open: boolean) => void; searchable?: boolean; id?: string; capsule?: boolean; settings?: boolean; menuWidth?: number;
   hiddenTrigger?: boolean;
 }) {
   const [query, setQuery] = useState('');
@@ -33,12 +33,12 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   }
 
   return <>
-    <button ref={trigger} id={triggerId} type="button" className={capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
+    <button ref={trigger} id={triggerId} type="button" className={settings ? 'language-picker settings-dropdown' : capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
       aria-hidden={hiddenTrigger || undefined} inert={hiddenTrigger} tabIndex={hiddenTrigger ? -1 : undefined}
       aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
       <span>{selected}</span><ChevronDown aria-hidden="true" />
     </button>
-    {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={200} side={side} className="language-popover">
+    {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className="language-popover">
       {searchable && <label className="language-search"><Search aria-hidden="true" /><input role="combobox" aria-label={t('searchLanguage')}
         aria-expanded="true" aria-controls={id} aria-activedescendant={current >= 0 ? `${id}-${current}` : undefined}
         placeholder="Search..." value={query} onChange={(event) => {
@@ -64,6 +64,9 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
           const index = Math.max(0, Math.min(visible.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
           setActive(visible[index]?.code ?? '');
           event.currentTarget.querySelectorAll<HTMLButtonElement>('button')[index]?.focus();
+        } else if (event.key === 'Enter' && visible[current]) {
+          event.preventDefault();
+          choose(visible[current].code);
         }
       }}>
         {visible.map((option, index) => <button key={option.code} id={`${id}-${index}`} type="button" role="option"

@@ -65,6 +65,54 @@
 .settings-shell .settings-footnote { display: flex; align-items: flex-start; gap: 6px; margin: 22px 12px 0; font-size: 10px; line-height: 1.7; color: hsl(var(--foreground) / .6); }
 .settings-shell .settings-footnote > svg { width: 12px; height: 12px; margin-top: 2px; }
 .settings-shell .version-row { display: flex; justify-content: space-between; margin: 20px 12px 0; font-size: 11px; color: hsl(var(--foreground) / .6); }
+.settings-shell .settings-content-translation { padding: 12px 16px 16px; }
+.settings-shell .finder-intro { height: 186px; text-align: center; }
+.settings-shell .finder-emblem { display: grid; place-items: center; width: 54px; height: 54px; margin: 16px auto 0; border-radius: 12px; background: AccentColor; color: white; }
+.settings-shell .finder-emblem svg { width: 32px; height: 32px; }
+.settings-shell .finder-intro h1 { margin: 14px 12px 0; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.17px; }
+.settings-shell .finder-intro p { margin: 6px 12px 0; font-size: 12.9px; line-height: 1.4; letter-spacing: .1px; color: hsl(var(--foreground) / .6); }
+.settings-shell .finder-card { border-radius: 12px; background: rgb(var(--settings-card) / .7); }
+.settings-shell .finder-card + .finder-shortcut-heading { margin-top: 16px; }
+.settings-shell .finder-row { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 7px 0 12px; }
+.settings-shell .finder-row > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-shell .finder-row + .finder-row { position: relative; }
+.settings-shell .finder-row + .finder-row::before { content: ''; position: absolute; top: 0; left: 12px; right: 12px; height: 1px; background: hsl(var(--foreground) / .05); }
+.settings-shell .finder-proxy-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
+.settings-shell .finder-proxy-slot { display: flex; justify-content: center; min-width: 0; padding: 0 12px; }
+.settings-shell .finder-proxy { position: relative; display: inline-flex; align-items: center; max-width: 260px; height: 28px; }
+.settings-shell .finder-proxy > span { visibility: hidden; max-width: 234px; overflow: hidden; white-space: pre; font-style: italic; }
+.settings-shell .finder-proxy input { position: absolute; inset: 0; width: 100%; border: 0; border-radius: 14px; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; text-align: center; }
+.settings-shell .finder-proxy input::placeholder { color: hsl(var(--foreground) / .6); font-style: italic; }
+.settings-shell .finder-proxy input:focus { outline: none; color: hsl(var(--foreground)); }
+.settings-shell button.settings-dropdown { height: 28px; max-width: none; width: max-content; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; font-size: 13px; font-weight: 400; }
+.settings-shell button.settings-dropdown[aria-expanded=true] { background: hsl(var(--foreground) / .06); }
+.settings-shell button.settings-dropdown > svg { width: 10px; height: 10px; color: hsl(var(--foreground) / .6); transition: transform .12s linear; }
+.settings-shell button.settings-dropdown[aria-expanded=true] > svg { transform: rotate(180deg); }
+.settings-shell .finder-switch { appearance: none; position: relative; width: 36px; height: 22px; margin: 0; flex-shrink: 0; border: 0; border-radius: 11px; background: hsl(var(--foreground) / .18); cursor: pointer; }
+.settings-shell .finder-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: white; box-shadow: 0 1px 2px hsl(var(--foreground) / .25); }
+.settings-shell .finder-switch:checked { background: AccentColor; }
+.settings-shell .finder-switch:checked::after { transform: translateX(14px); }
+.settings-shell .finder-switch:disabled { opacity: .45; cursor: default; }
+.settings-shell .finder-shortcut-heading { display: flex; align-items: center; height: 34px; }
+.settings-shell .finder-shortcut-heading h2 { flex: 1; min-height: 0; margin: 0 12px 0 4px; padding: 0; font-size: 20px; font-weight: 600; letter-spacing: -.17px; }
+.settings-shell .finder-shortcut-heading + .finder-card { margin-top: 8px; }
+.settings-shell .finder-restore { height: 28px; padding: 0 12px; border: 0; border-radius: 12px; background: rgb(29, 29, 29); color: white; font: inherit; font-size: 12.9px; white-space: nowrap; }
+.settings-shell .finder-restore:hover { background: rgb(46, 46, 46); }
+.settings-shell .finder-restore:active { background: rgb(20, 20, 20); }
+.settings-shell .finder-recorder { display: inline-flex; align-items: center; height: 28px; border-radius: 8px; }
+.settings-shell .finder-recorder[data-empty] { min-width: 112px; }
+.settings-shell .finder-recorder:hover, .settings-shell .finder-recorder[data-recording] { background: hsl(var(--foreground) / .1); }
+.settings-shell .finder-clear { display: grid; place-items: center; width: 20px; height: 20px; margin-left: 6px; border: 0; border-radius: 7px; background: transparent; color: hsl(var(--foreground) / .6); opacity: 0; pointer-events: none; }
+.settings-shell .finder-clear svg { width: 9px; height: 9px; }
+.settings-shell .finder-recorder:hover .finder-clear, .settings-shell .finder-recorder[data-recording] .finder-clear { opacity: 1; pointer-events: auto; }
+.settings-shell .finder-recorder-hit { display: inline-flex; align-items: center; height: 28px; padding: 0 6px; border: 0; background: transparent; color: inherit; font: inherit; }
+.settings-shell .finder-recorder[data-empty] .finder-recorder-hit { flex: 1; justify-content: center; padding: 0 13px; }
+.settings-shell .finder-recorder-hit em { color: hsl(var(--foreground) / .6); font-style: italic; }
+.settings-shell .finder-alert-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: hsl(var(--foreground) / .2); }
+.settings-shell .finder-alert { width: min(320px, calc(100% - 48px)); padding: 16px 16px 12px; border-radius: 12px; background: rgb(var(--settings-page)); box-shadow: 0 16px 40px hsl(var(--foreground) / .18); }
+.settings-shell .finder-alert h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.settings-shell .finder-alert p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: hsl(var(--foreground) / .8); }
+.settings-shell .finder-alert button { display: block; min-width: 64px; height: 28px; margin-left: auto; padding: 0 14px; border: 0; border-radius: 8px; background: AccentColor; color: white; font: inherit; }
 @media (prefers-color-scheme: dark) {
   .settings-shell { --settings-sidebar: 30 24 27; --settings-page: 20 18 19; --settings-card: 26 24 25; }
 }

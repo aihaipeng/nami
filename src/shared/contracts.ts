@@ -42,6 +42,7 @@ export interface TranslationPreferences {
   secondaryLanguage: string;
   proxyUrl: string;
   proxyEnabled: boolean;
+  selectionEnabled: boolean;
   shortcuts: TranslationShortcuts;
 }
 
@@ -74,6 +75,7 @@ export const initialSnapshot: AppSnapshot = {
     secondaryLanguage: 'zh-CN',
     proxyUrl: '',
     proxyEnabled: false,
+    selectionEnabled: true,
     shortcuts: defaultTranslationShortcuts('control'),
   },
   storageError: null,
