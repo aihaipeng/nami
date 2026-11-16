@@ -912,20 +912,19 @@ pub async fn translation_run(
     };
     let source_app =
         crate::translation::source_app_for_translation(&text, previous.as_ref(), captured);
-    let translated = if missing.is_empty() {
-        Vec::new()
+    let (translated, resolved_source) = if missing.is_empty() {
+        (Vec::new(), source.clone())
     } else {
         let request = crate::translation::translate(&engine, &text, &source, &missing);
         tokio::pin!(request);
-        let translated = loop {
+        loop {
             tokio::select! {
                 result = &mut request => break result?,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
                     if state.translation_revision.load(Ordering::SeqCst) != revision { return Err("cancelled".into()); }
                 }
             }
-        };
-        translated
+        }
     };
     let mut fresh = translated.into_iter();
     let translated = retained
@@ -935,7 +934,7 @@ pub async fn translation_run(
     let record = crate::model::HistoryRecord {
         id: uuid::Uuid::new_v4().to_string(),
         text,
-        source_language: source,
+        source_language: resolved_source,
         target_languages: targets,
         translations: translated,
         date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),

@@ -151,12 +151,58 @@ fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn catalog_language(code: &str) -> Option<String> {
+    let lower = code.trim().to_ascii_lowercase();
+    let mapped = match lower.as_str() {
+        "zh" | "zh-cn" | "zh-hans" | "zh-chs" => "zh-CN",
+        "zh-tw" | "zh-hant" | "zh-hk" | "zh-mo" | "zh-cht" => "zh-TW",
+        "pt-br" | "pt-pt" => "pt",
+        other => other,
+    };
+    LANGUAGES
+        .iter()
+        .find(|language| language.eq_ignore_ascii_case(mapped))
+        .copied()
+        .or_else(|| {
+            let primary = mapped.split('-').next()?;
+            if primary == "zh" {
+                return None;
+            }
+            LANGUAGES
+                .iter()
+                .find(|language| language.eq_ignore_ascii_case(primary))
+                .copied()
+        })
+        .map(str::to_string)
+}
+
+fn matched_language(codes: &[Option<String>]) -> Option<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut best: Option<(String, usize)> = None;
+    for code in codes.iter().flatten() {
+        let count = if let Some(entry) = counts.iter_mut().find(|(name, _)| name == code) {
+            entry.1 += 1;
+            entry.1
+        } else {
+            counts.push((code.clone(), 1));
+            1
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_count)| count > *best_count)
+        {
+            best = Some((code.clone(), count));
+        }
+    }
+    best.map(|(code, _)| code)
+}
+
 fn parse_response(
     engine: &str,
     data: &[u8],
     count: usize,
     source: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<Option<String>>), String> {
     let malformed = || "The translation service returned an invalid response.".to_string();
     let root: Value = serde_json::from_slice(data).map_err(|_| malformed())?;
     if engine == "edge" {
@@ -166,17 +212,36 @@ fn parse_response(
             .ok_or_else(malformed)?;
         rows.iter()
             .map(|row| {
-                if source == "auto" && row["detectedLanguage"]["language"].as_str().is_none() {
-                    return Err(malformed());
-                }
-                row["translations"]
+                let detected = if source == "auto" {
+                    Some(
+                        row["detectedLanguage"]["language"]
+                            .as_str()
+                            .map(catalog_language)
+                            .ok_or_else(malformed)?,
+                    )
+                } else {
+                    None
+                };
+                let text = row["translations"]
                     .as_array()
                     .and_then(|translations| translations.first())
                     .and_then(|translation| translation["text"].as_str())
                     .map(String::from)
-                    .ok_or_else(malformed)
+                    .ok_or_else(malformed)?;
+                Ok((text, detected.flatten()))
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map(|rows| {
+                let (texts, detected) = rows.into_iter().unzip();
+                (
+                    texts,
+                    if source == "auto" {
+                        detected
+                    } else {
+                        Vec::new()
+                    },
+                )
+            })
     } else {
         let root = root.as_array().ok_or_else(malformed)?;
         let texts = root
@@ -184,24 +249,28 @@ fn parse_response(
             .and_then(Value::as_array)
             .filter(|texts| texts.len() == count)
             .ok_or_else(malformed)?;
-        if source == "auto" {
+        let detected = if source == "auto" {
             let detected = root
                 .get(1)
                 .and_then(Value::as_array)
                 .filter(|codes| codes.len() == count)
                 .ok_or_else(malformed)?;
-            if detected.iter().any(|code| code.as_str().is_none()) {
-                return Err(malformed());
-            }
-        }
-        texts
+            detected
+                .iter()
+                .map(|code| code.as_str().map(catalog_language).ok_or_else(malformed))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let texts = texts
             .iter()
             .map(|text| {
                 text.as_str()
                     .map(|text| html_escape::decode_html_entities(text).into_owned())
                     .ok_or_else(malformed)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((texts, detected))
     }
 }
 
@@ -289,13 +358,16 @@ pub async fn translate(
     text: &str,
     source: &str,
     targets: &[String],
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, String), String> {
     validate_text(text)?;
     validate_options(engine, source, targets)?;
     let lines = split_lines(text);
     let batches = batches(&lines.texts);
     if batches.is_empty() {
-        return Ok(targets.iter().map(|_| text.to_string()).collect());
+        return Ok((
+            targets.iter().map(|_| text.to_string()).collect(),
+            source.to_string(),
+        ));
     }
     let client = Client::builder()
         .user_agent("Nami/0.1")
@@ -304,7 +376,8 @@ pub async fn translate(
         .build()
         .map_err(|_| "Unable to initialize the translation service.".to_string())?;
     let mut results = Vec::with_capacity(targets.len());
-    for target in targets {
+    let mut detected = Vec::new();
+    for (target_index, target) in targets.iter().enumerate() {
         let mut translations: Vec<String> =
             lines.texts.iter().map(|text| text.to_string()).collect();
         for batch in &batches {
@@ -314,14 +387,22 @@ pub async fn translate(
                 .await
                 .map_err(network_error)?;
             let data = response_bytes(response).await?;
-            let translated = parse_response(engine, &data, batch.len(), source)?;
+            let (translated, languages) = parse_response(engine, &data, batch.len(), source)?;
+            if target_index == 0 && source == "auto" {
+                detected.extend(languages);
+            }
             for (index, translated) in batch.iter().zip(translated) {
                 translations[*index] = translated;
             }
         }
         results.push(join_lines(&translations, &lines.endings));
     }
-    Ok(results)
+    let source_language = if source == "auto" {
+        matched_language(&detected).unwrap_or_else(|| source.to_string())
+    } else {
+        source.to_string()
+    };
+    Ok((results, source_language))
 }
 
 #[cfg(test)]
@@ -519,7 +600,9 @@ mod tests {
     #[test]
     fn parses_strict_provider_responses_and_html_once() {
         let edge = br#"[{"detectedLanguage":{"language":"en"},"translations":[{"text":"Hello"}]}]"#;
-        assert_eq!(parse_response("edge", edge, 1, "auto").unwrap(), ["Hello"]);
+        let (texts, detected) = parse_response("edge", edge, 1, "auto").unwrap();
+        assert_eq!(texts, ["Hello"]);
+        assert_eq!(detected, [Some("en".to_string())]);
         assert!(parse_response("edge", edge, 2, "auto").is_err());
         assert!(
             parse_response("edge", br#"[{"translations":[{"text":"x"}]}]"#, 1, "auto").is_err()
@@ -527,14 +610,42 @@ mod tests {
         assert!(parse_response("edge", br#"[{"translations":[{"text":2}]}]"#, 1, "en").is_err());
         assert_eq!(escape_html("A & B < C > D"), "A &amp; B &lt; C &gt; D");
         let google = br#"[["&lt;b&gt;&amp; &#39; &#x1F600; &amp;lt;"],["en"]]"#;
-        assert_eq!(
-            parse_response("google", google, 1, "auto").unwrap(),
-            ["<b>& ' 😀 &lt;"]
-        );
+        let (texts, detected) = parse_response("google", google, 1, "auto").unwrap();
+        assert_eq!(texts, ["<b>& ' 😀 &lt;"]);
+        assert_eq!(detected, [Some("en".to_string())]);
         assert!(parse_response("google", google, 2, "auto").is_err());
         assert!(parse_response("google", br#"[["x"],["en","ja"]]"#, 1, "auto").is_err());
         assert!(parse_response("google", br#"[[2]]"#, 1, "en").is_err());
         assert!(parse_response("google", b"invalid", 1, "en").is_err());
+    }
+
+    #[test]
+    fn auto_detection_uses_the_most_common_catalog_language() {
+        let edge = br#"[{"detectedLanguage":{"language":"zh-Hans"},"translations":[{"text":"A"}]},{"detectedLanguage":{"language":"en-US"},"translations":[{"text":"B"}]},{"detectedLanguage":{"language":"en"},"translations":[{"text":"C"}]},{"detectedLanguage":{"language":"la"},"translations":[{"text":"D"}]}]"#;
+        let (texts, detected) = parse_response("edge", edge, 4, "auto").unwrap();
+        assert_eq!(texts, ["A", "B", "C", "D"]);
+        assert_eq!(
+            detected,
+            [
+                Some("zh-CN".to_string()),
+                Some("en".to_string()),
+                Some("en".to_string()),
+                None
+            ]
+        );
+        assert_eq!(matched_language(&detected), Some("en".to_string()));
+        assert_eq!(
+            matched_language(&[Some("ja".into()), Some("fr".into())]),
+            Some("ja".to_string())
+        );
+        let google = r#"[["甲","乙"],["zh-Hans","zh-Hant"]]"#.as_bytes();
+        assert_eq!(
+            parse_response("google", google, 2, "auto").unwrap().1,
+            [Some("zh-CN".to_string()), Some("zh-TW".to_string())]
+        );
+        let (texts, detected) = parse_response("edge", edge, 4, "fr").unwrap();
+        assert_eq!(texts, ["A", "B", "C", "D"]);
+        assert!(detected.is_empty());
     }
 
     #[test]
@@ -561,10 +672,11 @@ mod tests {
         let input = "Nami synthetic test.\n\nHello & <world>\r\n";
         let targets = vec!["zh-CN".to_string(), "ja".to_string()];
         for engine in ["edge", "google"] {
-            let results = translate(engine, input, "auto", &targets)
+            let (results, detected) = translate(engine, input, "auto", &targets)
                 .await
                 .unwrap_or_else(|error| panic!("{engine} synthetic smoke failed: {error}"));
             assert_eq!(results.len(), targets.len());
+            assert!(LANGUAGES.contains(&detected.as_str()));
             for output in results {
                 let lines = split_lines(&output);
                 assert_eq!(lines.texts.len(), 4);

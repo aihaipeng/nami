@@ -194,7 +194,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
       if (requestRevision.current !== revision) return;
       completedRecord.current = record;
-      setCachedResults(record.translations); setSelectedId(record.id);
+      setCachedResults(record.translations); setSelectedId(record.id); setSource(record.sourceLanguage);
     } catch (error) {
       if (requestRevision.current === revision && String(error) !== 'cancelled') setServiceError(String(error));
     } finally { activity(-1); }

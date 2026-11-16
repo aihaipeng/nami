@@ -122,6 +122,20 @@ describe('translation input and shortcuts', () => {
     fireEvent.compositionEnd(source());
   });
 
+  it('replaces Auto-Detect with the language recognized for the translation', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      const result = await original(name, args);
+      if (name !== 'translation_run' || !result || typeof result !== 'object') return result;
+      return { ...result, sourceLanguage: 'ja' };
+    });
+    await mount();
+    fireEvent.change(source(), { target: { value: 'こんにちは' } });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Source language: Japanese' })).toBeTruthy());
+    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.sourceLabel).toBe('Japanese');
+  });
+
   it('keeps DOM controls available until native installation is acknowledged, then routes native actions', async () => {
     await mount();
     expect(screen.getByRole('button', { name: 'Source language: Auto-Detect' })).toBeTruthy();
