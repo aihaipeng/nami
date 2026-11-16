@@ -531,7 +531,7 @@ impl HistoryDatabase {
             kind: record.kind,
             width: None,
             height: None,
-            file_size: None,
+            size: None,
             files: Vec::new(),
         })
     }
@@ -596,6 +596,15 @@ impl HistoryDatabase {
     }
 
     pub fn clipboard_update(&mut self, id: &str, action: &str) -> Result<(), String> {
+        self.clipboard_update_allowing(id, action, false)
+    }
+
+    pub fn clipboard_update_allowing(
+        &mut self,
+        id: &str,
+        action: &str,
+        allow_protected: bool,
+    ) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -612,7 +621,9 @@ impl HistoryDatabase {
         let sql = match action {
             "favorite" => "UPDATE clipboard_records SET is_favorite=NOT is_favorite WHERE id=?1",
             "pin" => "UPDATE clipboard_records SET is_pinned=NOT is_pinned WHERE id=?1",
-            "delete" if favorite || pinned => return Err("clipboard_protected".into()),
+            "delete" if (favorite || pinned) && !allow_protected => {
+                return Err("clipboard_protected".into())
+            }
             "delete" => "DELETE FROM clipboard_records WHERE id=?1",
             _ => return Err("invalid_argument".into()),
         };
@@ -1554,6 +1565,13 @@ mod tests {
         assert!(database.clipboard_update("first", "delete").is_err());
         database.clipboard_update("first", "pin").unwrap();
         database.clipboard_update("first", "delete").unwrap();
+        assert_eq!(database.clipboard_record("first").unwrap_err(), "not_found");
+        database.clipboard_insert(&item).unwrap();
+        database.clipboard_update("first", "favorite").unwrap();
+        database.clipboard_update("first", "pin").unwrap();
+        database
+            .clipboard_update_allowing("first", "delete", true)
+            .unwrap();
         assert_eq!(database.clipboard_record("first").unwrap_err(), "not_found");
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();

@@ -19,19 +19,21 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
     ...(onNote ? [{ id: 'note', label: 'Note', icon: 'note' as const, onClick: onNote }] : []),
     { id: 'favorite', label: favorite ? t('unfavorite') : t('favorite'), icon: favorite ? 'star.fill' as const : 'star' as const, pressed: favorite, onClick: () => onUpdate('favorite') },
     { id: 'pin', label: pinned ? t('unpinRecord') : t('pinRecord'), icon: pinned ? 'pin.fill' as const : 'pin' as const, pressed: pinned, onClick: () => onUpdate('pin') },
-    ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, disabled: retainDelete && protectedRecord, onClick: () => onUpdate('delete') }] : []),
+    ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, onClick: () => onUpdate('delete') }] : []),
   ];
+  const buttons = actions.map((action) => {
+    const button = <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : ''}`} title={action.label} aria-label={action.label}
+      aria-pressed={'pressed' in action ? action.pressed : undefined} disabled={!native || ('disabled' in action && action.disabled)} onClick={action.onClick}><HistoryIcon name={action.icon} /></ActionButton>;
+    // Detail actions stay mounted. Layout projection shares transform with the x motion and leaves an exit ghost beside Delete while records change quickly.
+    if (retainDelete) return <span key={action.id} className="history-action" data-action={action.id}>{button}</span>;
+    return <motion.span key={action.id} className="history-action" data-action={action.id}
+      initial={reduceMotion ? false : { opacity: 0, width: 0 }}
+      animate={{ opacity: 1, width: 24 }}
+      exit={reduceMotion ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, width: 0 }}
+      transition={{ duration: reduceMotion ? 0 : .16, ease: 'easeOut' }}>{button}</motion.span>;
+  });
   return <div className="history-row-actions" role="group" aria-label={t('actions')}>
-    <AnimatePresence initial={false} mode="popLayout">
-      {actions.map((action) => <motion.span key={action.id} className="history-action" data-action={action.id} layout layoutDependency={`${favorite}:${pinned}:${!!onTranslate}:${!!onOcr}:${!!onNote}`}
-        initial={{ opacity: 0, scale: reduceMotion ? 1 : .9, width: 0, x: reduceMotion ? 0 : 4 }}
-        animate={{ opacity: 1, scale: 1, width: 24, x: 0 }}
-        exit={{ opacity: 0, scale: reduceMotion ? 1 : .9, width: 0, x: reduceMotion ? 0 : 4 }}
-        transition={{ duration: reduceMotion ? 0 : .16, ease: 'easeOut' }}>
-        <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : ''}`} title={action.label} aria-label={action.label}
-          aria-pressed={'pressed' in action ? action.pressed : undefined} disabled={!native || ('disabled' in action && action.disabled)} onClick={action.onClick}><HistoryIcon name={action.icon} /></ActionButton>
-      </motion.span>)}
-    </AnimatePresence>
+    {retainDelete ? buttons : <AnimatePresence initial={false} mode="popLayout">{buttons}</AnimatePresence>}
   </div>;
 }
 

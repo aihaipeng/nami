@@ -226,8 +226,8 @@
   .history-action { display: flex; overflow: hidden; flex-shrink: 0; }
   .history-row:hover .history-languages, .history-row:focus-within .history-languages { transition: margin-right 160ms ease-out; }
   .history-row:hover .history-row-actions, .history-row:focus-within .history-row-actions { opacity: 1; visibility: visible; transform: translateX(0); transition-duration: 150ms; }
-  .history-row time { visibility: visible; opacity: 1; transform: translateX(0); transition: opacity 150ms ease-out, transform 150ms ease-out; transition-delay: 0ms; }
-  .history-row:hover time, .history-row:focus-within time { opacity: 0; transform: translateX(-4px); }
+  .history-row time { visibility: visible; opacity: 1; transition: opacity 150ms ease-out; transition-delay: 0ms; }
+  .history-row:hover time, .history-row:focus-within time { opacity: 0; }
   .history-row:hover .history-languages, .history-row:focus-within .history-languages { margin-right: calc(var(--history-actions-width) - 36px); -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); }
   .history-row-actions .icon-button, .history-row-actions .icon-button[aria-pressed=true] { background: transparent; color: var(--history-label); }
   .history-row-actions .icon-button:hover, .history-row-actions .icon-button:active { background: transparent; }

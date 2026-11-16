@@ -13,9 +13,9 @@ const first = () => records.find(({ id }) => id === 'first')!;
 beforeEach(() => {
   fetchDetail = undefined;
   records = [
-    { id: 'pinned', kind: 'text', title: '', text: 'Pinned text', date: '2026-11-16T10:00:00Z', isFavorite: false, isPinned: true, width: null, height: null, fileSize: null, characterCount: 11, files: [] },
-    { id: 'first', kind: 'text', title: '', text: 'Complete first text\n'.repeat(60), date: '2026-11-16T09:00:00Z', isFavorite: false, isPinned: false, sourceApp: { name: 'An application with its complete long name', iconDataUrl: 'data:image/png;base64,abc' }, width: null, height: null, fileSize: null, characterCount: 1200, files: [] },
-    { id: 'second', kind: 'text', title: '', text: 'Second text', date: '2026-11-16T08:00:00Z', isFavorite: false, isPinned: false, width: null, height: null, fileSize: null, characterCount: 11, files: [] },
+    { id: 'pinned', kind: 'text', title: '', text: 'Pinned text', date: '2026-11-16T10:00:00Z', isFavorite: false, isPinned: true, width: null, height: null, size: null, characterCount: 11, files: [] },
+    { id: 'first', kind: 'text', title: '', text: 'Complete first text\n'.repeat(60), date: '2026-11-16T09:00:00Z', isFavorite: false, isPinned: false, sourceApp: { name: 'An application with its complete long name', iconDataUrl: 'data:image/png;base64,abc' }, width: null, height: null, size: null, characterCount: 1200, files: [] },
+    { id: 'second', kind: 'text', title: '', text: 'Second text', date: '2026-11-16T08:00:00Z', isFavorite: false, isPinned: false, width: null, height: null, size: null, characterCount: 11, files: [] },
   ];
   bridge.snapshot.capabilities.nativeHistory = false;
   bridge.snapshot.capabilities.nativeChrome = false;
@@ -65,7 +65,7 @@ describe('clipboard details', () => {
     expect(within(pane()).getByText('An application with its complete long name')).toBeTruthy();
     expect(within(pane()).getByText('1,200')).toBeTruthy();
     expect(within(pane()).queryByText('Dimensions')).toBeNull();
-    expect(within(pane()).queryByText('File size')).toBeNull();
+    expect(within(pane()).queryByText('Size')).toBeNull();
     expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['copy', 'translate', 'note', 'favorite', 'pin', 'delete']);
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
     expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')?.getAttribute('style')).toBe(row('first').querySelector('[data-action=note] .history-symbol')?.getAttribute('style'));
@@ -85,6 +85,17 @@ describe('clipboard details', () => {
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+  });
+
+  it('drops conditional detail actions immediately while sliding between records', async () => {
+    records[2] = { ...records[2], kind: 'files', text: '[]', characterCount: null, size: null, files: [{ path: '/tmp/a.txt', name: 'a.txt', exists: true, isDir: false, isImage: false, iconDataUrl: null }] };
+    await open();
+    expect(within(pane()).getByRole('button', { name: 'Translate' })).toBeTruthy();
+    fireEvent.mouseEnter(row('second'));
+    await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
+    expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
+    expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
   });
 
   it('does not show a loading beam while the next record detail is still loading', async () => {
@@ -123,13 +134,12 @@ describe('clipboard details', () => {
     fireEvent.click(within(pane()).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
     expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
-    expect(remove).toHaveProperty('disabled', true);
+    expect(remove).toHaveProperty('disabled', false);
     fireEvent.click(remove);
-    expect(calls('clipboard_record_update').filter(([, args]) => (args as { action?: string })?.action === 'delete')).toHaveLength(0);
+    expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'delete', allowProtected: true });
     fireEvent.mouseEnter(row('pinned'));
     await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
-    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
-    expect(remove).toHaveProperty('disabled', true);
+    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toHaveProperty('disabled', false);
     fireEvent.click(within(pane()).getByRole('button', { name: 'Note' }));
     expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
     await waitFor(() => expect(pane().hasAttribute('inert')).toBe(true));
@@ -148,7 +158,7 @@ describe('clipboard details', () => {
   });
 
   it.each([['image-text', true], ['image-blank', false]] as const)('only exposes recognized image actions for %s', async (id, text) => {
-    records[1] = { ...first(), id, kind: 'image', text: 'Image', width: 2400, height: 1600, characterCount: null };
+    records[1] = { ...first(), id, kind: 'image', text: 'Image', width: 2400, height: 1600, characterCount: null, size: 1536 * 1024 };
     bridge.snapshot.window.clipboardDetailId = id;
     bridge.snapshot.window.translationVisible = true;
     render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
@@ -158,15 +168,17 @@ describe('clipboard details', () => {
     expect(!!within(pane()).queryByRole('button', { name: 'Extract text' })).toBe(text);
     expect(!!within(pane()).queryByRole('button', { name: 'Translate' })).toBe(text);
     expect(within(pane()).queryByText('Characters')).toBeNull();
-    expect(within(pane()).queryByText('File size')).toBeNull();
+    expect(within(pane()).getByText('Size')).toBeTruthy();
+    expect(within(pane()).getByText('1.5 MB')).toBeTruthy();
     const actions = [...pane().querySelectorAll('[data-action]')].map((element) => (element as HTMLElement).dataset.action);
     if (text) expect(actions.indexOf('note')).toBe(actions.indexOf('ocr') + 1);
   });
 
   it('shows every file and only the applicable size metadata', async () => {
-    records[1] = { ...first(), kind: 'files', text: '[]', characterCount: null, fileSize: 1536 * 1024, files: Array.from({ length: 5 }, (_, i) => ({ path: `/tmp/file-${i}.txt`, name: `file-${i}.txt`, exists: true, isDir: false, isImage: false, iconDataUrl: null })) };
+    records[1] = { ...first(), kind: 'files', text: '[]', characterCount: null, size: 1536 * 1024, files: Array.from({ length: 5 }, (_, i) => ({ path: `/tmp/file-${i}.txt`, name: `file-${i}.txt`, exists: true, isDir: false, isImage: false, iconDataUrl: null })) };
     direct();
     await waitFor(() => expect(pane().querySelectorAll('.clipboard-file')).toHaveLength(5));
+    expect(within(pane()).getByText('Size')).toBeTruthy();
     expect(within(pane()).getByText('1.5 MB')).toBeTruthy();
     expect(within(pane()).queryByText('Characters')).toBeNull();
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
@@ -176,7 +188,7 @@ describe('clipboard details', () => {
     ['Copy', 'clipboard_record_use', { recordId: 'first', action: 'copy' }],
     ['Translate', 'clipboard_record_process', { recordId: 'first', action: 'translate' }],
     ['Pin record', 'clipboard_record_update', { recordId: 'first', action: 'pin' }],
-    ['Delete clipboard record', 'clipboard_record_update', { recordId: 'first', action: 'delete' }],
+    ['Delete clipboard record', 'clipboard_record_update', { recordId: 'first', action: 'delete', allowProtected: true }],
   ] as const)('executes the detail %s action for the displayed complete record', async (label, name, args) => {
     direct();
     const button = await within(pane()).findByRole('button', { name: label });

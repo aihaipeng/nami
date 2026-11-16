@@ -77,7 +77,7 @@ pub struct ClipboardDetail {
     pub source_app: Option<serde_json::Value>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub file_size: Option<u64>,
+    pub size: Option<u64>,
     pub character_count: Option<usize>,
     pub files: Vec<FileEntry>,
     #[serde(skip)]

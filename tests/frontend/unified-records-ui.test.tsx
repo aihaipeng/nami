@@ -50,6 +50,7 @@ describe('unified records workspace', () => {
     const onUpdate = vi.fn();
     const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate };
     const view = render(<RecordActions {...props} favorite={false} />);
+    expect(view.container.querySelector('[data-action=pin]')?.getAttribute('style') ?? '').not.toMatch(/translate/i);
     const button = screen.getByRole('button', { name: 'Delete' }) as HTMLButtonElement;
     view.rerender(<RecordActions {...props} favorite />);
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();

@@ -873,14 +873,20 @@ pub async fn clipboard_record_detail(
     record_id: String,
 ) -> Result<nami::clipboard::ClipboardDetail, String> {
     authorize(&window, &["clipboard", "translation"])?;
-    let detail = crate::clipboard_runtime::database(&app, move |database| {
-        database.clipboard_detail(&record_id)
+    let (detail, measure_files) = crate::clipboard_runtime::database(&app, move |database| {
+        let detail = database.clipboard_detail(&record_id)?;
+        let measure_files = database
+            .clipboard_file_representation(&record_id)?
+            .is_none();
+        Ok((detail, measure_files))
     })
     .await?;
     let root = crate::clipboard_runtime::image_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || crate::clipboard_detail::enrich(detail, &root))
-        .await
-        .map_err(|_| "storage_worker")?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::clipboard_detail::enrich(detail, &root, measure_files)
+    })
+    .await
+    .map_err(|_| "storage_worker")?
 }
 
 #[tauri::command]
@@ -926,6 +932,7 @@ pub async fn clipboard_record_update(
     action: String,
     title: Option<String>,
     text: Option<String>,
+    allow_protected: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
     let state = app.state::<AppState>();
@@ -953,7 +960,11 @@ pub async fn clipboard_record_update(
             if title.is_some() || text.is_some() {
                 return Err("invalid_argument".into());
             }
-            database.clipboard_update(&record_id, &action)?;
+            database.clipboard_update_allowing(
+                &record_id,
+                &action,
+                allow_protected.unwrap_or(false) && action == "delete",
+            )?;
         }
         let mut unreferenced = Vec::new();
         for path in images {

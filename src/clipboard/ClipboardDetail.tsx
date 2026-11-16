@@ -16,12 +16,12 @@ import './clipboard.css';
 export interface ClipboardDetailData extends ClipboardRecord {
   width: number | null;
   height: number | null;
-  fileSize: number | null;
+  size: number | null;
   characterCount: number | null;
   files: FileEntry[];
 }
 
-function fileSize(bytes: number) {
+function formatSize(bytes: number) {
   return bytes < 1024 * 1024 ? `${(bytes / 1024).toLocaleString('en', { maximumFractionDigits: 1 })} KB` : `${(bytes / (1024 * 1024)).toLocaleString('en', { maximumFractionDigits: 1 })} MB`;
 }
 
@@ -67,7 +67,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId: current.id, action: 'copy' });
         if (result.copyStatus === 'superseded' || result.status !== 'copied' && result.status !== 'dispatched') throw new Error('copy_failed');
       } else if (type === 'translate' || type === 'ocr') await invoke('clipboard_record_process', { recordId: current.id, action: type });
-      else await invoke('clipboard_record_update', { recordId: current.id, action: type });
+      else await invoke('clipboard_record_update', { recordId: current.id, action: type, ...(type === 'delete' ? { allowProtected: true } : {}) });
     } catch (error) {
       if (operation.current === revision && String(error) !== 'cancelled') setFeedback('Unable to complete this action. Try again.');
     } finally { if (operation.current === revision) setBusy(false); }
@@ -99,7 +99,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     {current && <footer className="clipboard-detail-metadata">
       <div><span>Application</span><RecordHeading date={current.date} label={current.sourceApp?.name ?? 'Nami'} sourceApp={current.sourceApp} /></div>
       {current.width != null && current.height != null && <div><span>Dimensions</span><span>{current.width} × {current.height}</span></div>}
-      {current.kind === 'files' && current.fileSize != null && <div><span>File size</span><span>{fileSize(current.fileSize)}</span></div>}
+      {current.size != null && <div><span>Size</span><span>{formatSize(current.size)}</span></div>}
       {current.kind === 'text' && <div><span>Characters</span><span>{current.characterCount?.toLocaleString('en')}</span></div>}
     </footer>}
     <RecordFeedback message={feedback} />

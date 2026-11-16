@@ -2,19 +2,31 @@ use crate::platform;
 use nami::clipboard::{self, ClipboardDetail};
 use std::path::Path;
 
-pub(crate) fn enrich(mut detail: ClipboardDetail, root: &Path) -> Result<ClipboardDetail, String> {
+pub(crate) fn enrich(
+    mut detail: ClipboardDetail,
+    root: &Path,
+    measure_files: bool,
+) -> Result<ClipboardDetail, String> {
     let image = match detail.kind.as_str() {
-        "image" => detail
-            .image_path
-            .as_deref()
-            .and_then(|path| clipboard::read_image(root, path).ok()),
+        "image" => {
+            let bytes = detail
+                .image_path
+                .as_deref()
+                .and_then(|path| clipboard::read_image(root, path).ok());
+            if let Some(bytes) = &bytes {
+                detail.size = Some(bytes.len() as u64);
+            }
+            bytes
+        }
         "files" => {
             detail.files = clipboard::all_file_entries(&detail.text)?;
-            detail.file_size = detail.files.iter().try_fold(0u64, |total, entry| {
-                let metadata = std::fs::metadata(&entry.path).ok()?;
-                metadata.is_file().then_some(())?;
-                total.checked_add(metadata.len())
-            });
+            if measure_files {
+                detail.size = detail.files.iter().try_fold(0u64, |total, entry| {
+                    let metadata = std::fs::metadata(&entry.path).ok()?;
+                    metadata.is_file().then_some(())?;
+                    total.checked_add(metadata.len())
+                });
+            }
             if detail.files.len() == 1 && detail.files[0].exists && detail.files[0].is_image {
                 clipboard::read_file_preview(Path::new(&detail.files[0].path)).ok()
             } else {
@@ -57,12 +69,12 @@ mod tests {
     #[test]
     fn text_detail_returns_complete_unicode_content_and_record_metadata() {
         let text = "Full 🌊\n中文 text ".repeat(200);
-        let result = enrich(detail("text", &text), Path::new("unused")).unwrap();
+        let result = enrich(detail("text", &text), Path::new("unused"), true).unwrap();
         assert_eq!(result.text, text);
         assert_eq!(result.character_count, Some(text.chars().count()));
         assert_eq!(result.id, "detail");
         assert_eq!(result.source_app.unwrap()["name"], "Synthetic Application");
-        assert!(result.width.is_none() && result.height.is_none() && result.file_size.is_none());
+        assert!(result.width.is_none() && result.height.is_none() && result.size.is_none());
         assert!(result.files.is_empty());
     }
 
@@ -75,18 +87,22 @@ mod tests {
             std::fs::write(path, b"synthetic").unwrap();
         }
         let text = serde_json::to_string(&paths).unwrap();
-        let result = enrich(detail("files", &text), &root).unwrap();
+        let result = enrich(detail("files", &text), &root, true).unwrap();
         assert_eq!(result.files.len(), 5);
-        assert_eq!(result.file_size, Some(45));
+        assert_eq!(result.size, Some(45));
+        assert!(enrich(detail("files", &text), &root, false)
+            .unwrap()
+            .size
+            .is_none());
         assert!(result.character_count.is_none() && result.width.is_none());
         std::fs::remove_file(&paths[1]).unwrap();
-        let missing = enrich(detail("files", &text), &root).unwrap();
+        let missing = enrich(detail("files", &text), &root, true).unwrap();
         assert!(!missing.files[1].exists);
-        assert!(missing.file_size.is_none());
+        assert!(missing.size.is_none());
         let directory = serde_json::to_string(&vec![root.clone()]).unwrap();
-        assert!(enrich(detail("files", &directory), &root)
+        assert!(enrich(detail("files", &directory), &root, true)
             .unwrap()
-            .file_size
+            .size
             .is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -100,7 +116,7 @@ mod tests {
         let path = root.join("synthetic.png");
         std::fs::write(&path, bytes).unwrap();
         let text = serde_json::to_string(&vec![path]).unwrap();
-        let result = enrich(detail("files", &text), &root).unwrap();
+        let result = enrich(detail("files", &text), &root, true).unwrap();
         assert_eq!(
             result.width,
             Some(u32::from_be_bytes(bytes[16..20].try_into().unwrap()))
@@ -109,7 +125,7 @@ mod tests {
             result.height,
             Some(u32::from_be_bytes(bytes[20..24].try_into().unwrap()))
         );
-        assert_eq!(result.file_size, Some(bytes.len() as u64));
+        assert_eq!(result.size, Some(bytes.len() as u64));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -127,12 +143,17 @@ mod tests {
             value.image_path = Some(relative.clone());
             value
         };
-        let result = enrich(make_detail(), &root).unwrap();
+        let result = enrich(make_detail(), &root, true).unwrap();
         assert!(result.width.is_some() && result.height.is_some());
-        assert!(result.file_size.is_none() && result.character_count.is_none());
+        assert_eq!(result.size, Some(bytes.len() as u64));
+        assert!(result.character_count.is_none());
         std::fs::write(root.join(&relative), b"changed").unwrap();
-        let unavailable = enrich(make_detail(), &root).unwrap();
-        assert!(unavailable.width.is_none() && unavailable.height.is_none());
+        let unavailable = enrich(make_detail(), &root, true).unwrap();
+        assert!(
+            unavailable.width.is_none()
+                && unavailable.height.is_none()
+                && unavailable.size.is_none()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -141,8 +162,12 @@ mod tests {
         let mut value = detail("text", "");
         value.kind = "image".into();
         value.image_path = Some("../outside.png".into());
-        let unavailable = enrich(value, Path::new("unused")).unwrap();
-        assert!(unavailable.width.is_none() && unavailable.height.is_none());
+        let unavailable = enrich(value, Path::new("unused"), true).unwrap();
+        assert!(
+            unavailable.width.is_none()
+                && unavailable.height.is_none()
+                && unavailable.size.is_none()
+        );
         let mut value = detail("text", "");
         value.kind = "image".into();
         value.image_path = Some("private/path".into());
