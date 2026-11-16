@@ -1411,6 +1411,39 @@ mod tests {
     }
 
     #[test]
+    fn recopying_an_image_sorts_it_ahead_of_images_copied_earlier() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let mut older = image_record("older");
+        older.date = "2026-11-17T01:00:00.000Z".into();
+        older.fingerprint = fingerprint("image", b"older-image");
+        older.image_path = Some(format!("origin/aa/{}.png", "aa".repeat(32)));
+        let mut newer = image_record("newer");
+        newer.date = "2026-11-17T02:00:00.000Z".into();
+        newer.fingerprint = fingerprint("image", b"newer-image");
+        newer.image_path = Some(format!("origin/bb/{}.png", "bb".repeat(32)));
+        db.clipboard_insert(&older).unwrap();
+        db.clipboard_insert(&newer).unwrap();
+        let mut again = older.clone();
+        again.id = "older-again".into();
+        again.date = "2026-11-17T03:00:00.000Z".into();
+        assert_eq!(db.clipboard_insert(&again).unwrap().id, "older");
+        let mut fresh = image_record("fresh");
+        fresh.date = "2026-11-17T04:00:00.000Z".into();
+        fresh.fingerprint = fingerprint("image", b"fresh-image");
+        fresh.image_path = Some(format!("origin/cc/{}.png", "cc".repeat(32)));
+        assert_eq!(db.clipboard_insert(&fresh).unwrap().id, "fresh");
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["fresh", "older", "newer"]
+        );
+    }
+
+    #[test]
     fn broad_search_preserves_literal_matching_and_favorite_cursor_order() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         for index in 0..1100 {

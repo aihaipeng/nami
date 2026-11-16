@@ -3,8 +3,47 @@ use crate::{
     platform, windows, AppState,
 };
 use serde::Serialize;
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, Webview};
+
+const IMAGE_PASTE_SETTLE: Duration = Duration::from_millis(200);
+const PASTE_KEY_GAP: Duration = Duration::from_millis(15);
+
+fn image_history_paste(payload: &platform::ClipboardPayload) -> bool {
+    matches!(
+        payload,
+        platform::ClipboardPayload::Image { .. }
+            | platform::ClipboardPayload::FilesImage {
+                image_fallback: true,
+                ..
+            }
+    )
+}
+
+fn remaining_image_settle(image: bool, elapsed: Duration) -> Duration {
+    if image {
+        IMAGE_PASTE_SETTLE.saturating_sub(elapsed)
+    } else {
+        Duration::ZERO
+    }
+}
+
+// Keyup has already been posted. A changed clipboard wins over a lost focus so
+// the caller does not report the paste as delivered.
+fn paste_release_result(focused: bool, version_matches: bool) -> Result<(), &'static str> {
+    if !version_matches {
+        Err("clipboard_changed")
+    } else if !focused {
+        Err("target_unavailable")
+    } else {
+        Ok(())
+    }
+}
+
+enum PasteAttempt {
+    Wait(Duration),
+    Posted,
+}
 
 fn authorize(window: &Webview, labels: &[&str]) -> Result<(), String> {
     if labels.contains(&window.label()) {
@@ -564,6 +603,12 @@ pub async fn clipboard_record_use(
     .await?;
     let promote_id = record_id.clone();
     let payload = crate::clipboard_runtime::payload(&app, record_id, true).await?;
+    // Transcode TIFF before taking the main thread. PNG bytes are left unchanged.
+    let payload =
+        tauri::async_runtime::spawn_blocking(move || platform::prepare_image_paste(payload))
+            .await
+            .map_err(|_| "storage_worker".to_string())?;
+    let image_paste = image_history_paste(&payload);
     let initial = on_main(&app, move |app| {
         let state = app.state::<AppState>();
         if state.operation.load(Ordering::SeqCst) != operation {
@@ -587,6 +632,7 @@ pub async fn clipboard_record_use(
         if action == "copy" {
             return Err(OperationResult::copied());
         }
+        let written_at = std::time::Instant::now();
         let Some(target) = *state.target.lock().unwrap() else {
             return Err(OperationResult::failed(
                 "target_unavailable",
@@ -618,10 +664,10 @@ pub async fn clipboard_record_use(
                 platform::clipboard_version(),
             ));
         }
-        Ok((target, version))
+        Ok((target, version, written_at))
     })
     .await?;
-    let (target, version) = match initial {
+    let (target, version, written_at) = match initial {
         Ok(values) => {
             // Clicking a row writes the clipboard before it pastes. That write is the same copy.
             promote_used_record(&app, promote_id.clone()).await?;
@@ -649,8 +695,9 @@ pub async fn clipboard_record_use(
             return Ok(result);
         }
     };
+    let mut keys_down = false;
     for _ in 0..30 {
-        let result = on_main(&app, move |app| {
+        let attempt = on_main(&app, move |app| {
             let state = app.state::<AppState>();
             let current = platform::clipboard_version();
             let code = if state.operation.load(Ordering::SeqCst) != operation {
@@ -663,37 +710,75 @@ pub async fn clipboard_record_use(
                 None
             };
             if let Some(code) = code {
-                return Some(OperationResult::failed(code, Some(version), current));
+                return Some(Err(OperationResult::failed(code, Some(version), current)));
             }
             if !platform::target_focused(target) {
                 return None;
             }
-            Some(match platform::send_paste(target, version) {
-                Ok(()) => OperationResult {
-                    status: "dispatched",
-                    copy_status: "current",
-                    code: None,
-                },
-                Err(code) => {
-                    OperationResult::failed(code, Some(version), platform::clipboard_version())
-                }
+            // Chromium drops an image paste that arrives while its clipboard
+            // notice is still in flight. The remainder waits off the main thread.
+            let settle = remaining_image_settle(image_paste, written_at.elapsed());
+            if !settle.is_zero() {
+                return Some(Ok(PasteAttempt::Wait(settle)));
+            }
+            Some(match platform::paste_keys_down(target, version) {
+                Ok(()) => Ok(PasteAttempt::Posted),
+                Err(code) => Err(OperationResult::failed(
+                    code,
+                    Some(version),
+                    platform::clipboard_version(),
+                )),
             })
         })
         .await?;
-        if let Some(result) = result {
-            reveal_failure(&app, operation, &result).await?;
-            return Ok(result);
+        match attempt {
+            None => tokio::time::sleep(Duration::from_millis(10)).await,
+            Some(Err(result)) => {
+                reveal_failure(&app, operation, &result).await?;
+                return Ok(result);
+            }
+            Some(Ok(PasteAttempt::Wait(delay))) => tokio::time::sleep(delay).await,
+            Some(Ok(PasteAttempt::Posted)) => {
+                keys_down = true;
+                break;
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let result = on_main(&app, move |_| {
-        OperationResult::failed(
-            "focus_timeout",
-            Some(version),
+    if !keys_down {
+        let result = on_main(&app, move |_| {
+            OperationResult::failed(
+                "focus_timeout",
+                Some(version),
+                platform::clipboard_version(),
+            )
+        })
+        .await?;
+        reveal_failure(&app, operation, &result).await?;
+        return Ok(result);
+    }
+    // The gap stays off the main thread. Keyup runs even if focus or the
+    // clipboard changed while it was waiting.
+    tokio::time::sleep(PASTE_KEY_GAP).await;
+    let (released, focused, current) = on_main(&app, move |_| {
+        (
+            platform::paste_keys_up(),
+            platform::target_focused(target),
             platform::clipboard_version(),
         )
     })
     .await?;
+    let result = if let Err(code) = released {
+        OperationResult::failed(code, Some(version), current)
+    } else {
+        match paste_release_result(focused, current == version) {
+            Ok(()) => OperationResult {
+                status: "dispatched",
+                copy_status: "current",
+                code: None,
+            },
+            Err(code) => OperationResult::failed(code, Some(version), current),
+        }
+    };
     reveal_failure(&app, operation, &result).await?;
     Ok(result)
 }
@@ -1120,4 +1205,67 @@ pub async fn clipboard_image(
         bytes,
         mime: "image/png",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{image_history_paste, paste_release_result, remaining_image_settle, PASTE_KEY_GAP};
+    use crate::platform::ClipboardPayload;
+    use std::time::Duration;
+
+    #[test]
+    fn image_click_waits_out_the_clipboard_notice_off_the_main_thread() {
+        let image = ClipboardPayload::Image {
+            bytes: vec![1],
+            extension: "png".into(),
+        };
+        let snapshot = ClipboardPayload::FilesImage {
+            paths: vec!["/tmp/nami-snapshot.png".into()],
+            bytes: vec![1],
+            extension: "png".into(),
+            image_fallback: true,
+        };
+        let text = ClipboardPayload::Text("hello".into());
+        let file = ClipboardPayload::Files(vec!["/tmp/nami-note.txt".into()]);
+        let attached = ClipboardPayload::FilesImage {
+            paths: vec!["/tmp/nami-photo.png".into()],
+            bytes: vec![1],
+            extension: "png".into(),
+            image_fallback: false,
+        };
+        assert!(image_history_paste(&image));
+        assert!(image_history_paste(&snapshot));
+        assert!(!image_history_paste(&text));
+        assert!(!image_history_paste(&file));
+        assert!(!image_history_paste(&attached));
+        assert_eq!(
+            remaining_image_settle(true, Duration::ZERO),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            remaining_image_settle(true, Duration::from_millis(199)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            remaining_image_settle(true, Duration::from_millis(200)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remaining_image_settle(true, Duration::from_millis(500)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remaining_image_settle(false, Duration::ZERO),
+            Duration::ZERO
+        );
+        assert_eq!(PASTE_KEY_GAP, Duration::from_millis(15));
+    }
+
+    #[test]
+    fn paste_release_keeps_a_changed_clipboard_ahead_of_a_lost_focus() {
+        assert_eq!(paste_release_result(true, true), Ok(()));
+        assert_eq!(paste_release_result(true, false), Err("clipboard_changed"));
+        assert_eq!(paste_release_result(false, false), Err("clipboard_changed"));
+        assert_eq!(paste_release_result(false, true), Err("target_unavailable"));
+    }
 }

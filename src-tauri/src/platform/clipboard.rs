@@ -6,6 +6,7 @@ use objc2::{
     runtime::AnyObject,
 };
 use objc2_foundation::{ns_string, NSString};
+use std::borrow::Cow;
 
 const LIMIT: usize = 64 * 1024 * 1024;
 const PRIVATE_TYPES: [&str; 5] = [
@@ -174,11 +175,143 @@ unsafe fn set_image(item: &AnyObject, bytes: &[u8], extension: &str) -> Result<(
     set_bytes(item, kind, bytes)
 }
 
+fn png_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+}
+
+// Decode a stored TIFF (or any bitmap NSBitmapImageRep accepts) into PNG once.
+// Already-PNG bytes are not re-encoded. Undecodable bytes return None so the caller can keep the original type.
+unsafe fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.is_empty() || bytes.len() > LIMIT || png_bytes(bytes) {
+        return None;
+    }
+    let data: Retained<AnyObject> =
+        msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+    let bitmap: Option<Retained<AnyObject>> =
+        msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
+    let bitmap = bitmap?;
+    let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+    let png: Option<Retained<AnyObject>> =
+        msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
+    let png = png?;
+    let length: usize = msg_send![&*png, length];
+    let pointer: *const u8 = msg_send![&*png, bytes];
+    if length == 0 || length > LIMIT || pointer.is_null() {
+        return None;
+    }
+    let encoded = std::slice::from_raw_parts(pointer, length).to_vec();
+    png_bytes(&encoded).then_some(encoded)
+}
+
+// TIFF conversion happens before the main-thread pasteboard write. PNG bytes stay untouched.
+pub fn prepare_image_paste(payload: ClipboardPayload) -> ClipboardPayload {
+    let convert = |bytes: Vec<u8>, extension: String| -> (Vec<u8>, String) {
+        if png_bytes(&bytes) || !matches!(extension.as_str(), "png" | "tiff") {
+            return (bytes, extension);
+        }
+        match unsafe { encode_png(&bytes) } {
+            Some(png) => (png, "png".into()),
+            None => (bytes, extension),
+        }
+    };
+    match payload {
+        ClipboardPayload::Image { bytes, extension } => {
+            let (bytes, extension) = convert(bytes, extension);
+            ClipboardPayload::Image { bytes, extension }
+        }
+        ClipboardPayload::FilesImage {
+            paths,
+            bytes,
+            extension,
+            image_fallback: true,
+        } => {
+            let (bytes, extension) = convert(bytes, extension);
+            ClipboardPayload::FilesImage {
+                paths,
+                bytes,
+                extension,
+                image_fallback: true,
+            }
+        }
+        other => other,
+    }
+}
+
+unsafe fn commit_png(
+    board: *mut AnyObject,
+    bytes: &[u8],
+) -> Result<i64, (&'static str, Option<i64>)> {
+    let data: Retained<AnyObject> =
+        msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+    let owned: isize = msg_send![board, clearContents];
+    let success: bool = msg_send![board, setData: &*data, forType: ns_string!("public.png")];
+    if !success {
+        Err(("clipboard_write", Some(owned as i64)))
+    } else if version(board) != owned as i64 {
+        Err(("clipboard_changed", Some(owned as i64)))
+    } else {
+        Ok(owned as i64)
+    }
+}
+
+fn fallback_paths(paths: &[String], image_len: usize) -> Result<(), &'static str> {
+    if paths.len() != 1
+        || paths
+            .iter()
+            .any(|path| path.contains('\0') || !std::path::Path::new(path).is_absolute())
+        || paths
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+            .checked_add(image_len)
+            .is_none_or(|size| size > LIMIT)
+    {
+        return Err("invalid_argument");
+    }
+    Ok(())
+}
+
+// Image history is published as PNG only. A file URL would make Chromium drop the pixels.
+fn browser_png(payload: &ClipboardPayload) -> Result<Option<Cow<'_, [u8]>>, &'static str> {
+    let (bytes, extension, paths) = match payload {
+        ClipboardPayload::Image { bytes, extension } => {
+            (bytes.as_slice(), extension.as_str(), None)
+        }
+        ClipboardPayload::FilesImage {
+            paths,
+            bytes,
+            extension,
+            image_fallback: true,
+        } => (bytes.as_slice(), extension.as_str(), Some(paths.as_slice())),
+        _ => return Ok(None),
+    };
+    if let Some(paths) = paths {
+        fallback_paths(paths, bytes.len())?;
+    }
+    if !matches!(extension, "png" | "tiff") || bytes.is_empty() || bytes.len() > LIMIT {
+        return Err("invalid_argument");
+    }
+    if png_bytes(bytes) {
+        return Ok(Some(Cow::Borrowed(bytes)));
+    }
+    match unsafe { encode_png(bytes) } {
+        Some(png) => Ok(Some(Cow::Owned(png))),
+        None => Ok(None),
+    }
+}
+
 unsafe fn write(
     board: *mut AnyObject,
     payload: &ClipboardPayload,
 ) -> Result<i64, (&'static str, Option<i64>)> {
     let initial = version(board);
+    let png = browser_png(payload).map_err(|error| (error, None))?;
+    if let Some(png) = png {
+        if version(board) != initial {
+            return Err(("clipboard_changed", None));
+        }
+        return commit_png(board, &png);
+    }
     let objects: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
     let prepared = (|| -> Result<(), &'static str> {
         match payload {
@@ -227,7 +360,7 @@ unsafe fn write(
                         return Err("clipboard_file_missing");
                     }
                     let item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
-                    if exists {
+                    if exists && !image.is_some_and(|(_, _, fallback)| fallback) {
                         let path = NSString::from_str(path);
                         let url: Retained<AnyObject> =
                             msg_send![class!(NSURL), fileURLWithPath: &*path];
@@ -554,6 +687,98 @@ mod tests {
                     extension: "png".into()
                 }
             );
+            let _: () = msg_send![board, releaseGlobally];
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn image_history_publishes_png_and_leaves_out_the_snapshot_file() {
+        unsafe {
+            let name = NSString::from_str(&format!(
+                "dev.local.nami.image-png.{}",
+                uuid::Uuid::new_v4()
+            ));
+            let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+            let png = include_bytes!("../../icons/icon.png").to_vec();
+            let file_url = |board: *mut AnyObject| -> Option<String> {
+                let value: Option<Retained<NSString>> =
+                    msg_send![board, stringForType: ns_string!("public.file-url")];
+                value
+                    .map(|value| value.to_string())
+                    .filter(|value| !value.is_empty())
+            };
+            write(
+                board,
+                &ClipboardPayload::Image {
+                    bytes: png.clone(),
+                    extension: "png".into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                read(board).unwrap().unwrap().1,
+                ClipboardPayload::Image {
+                    bytes: png.clone(),
+                    extension: "png".into()
+                }
+            );
+            assert_eq!(file_url(board), None);
+            let source: Retained<AnyObject> =
+                msg_send![class!(NSData), dataWithBytes: png.as_ptr(), length: png.len()];
+            let bitmap: Option<Retained<AnyObject>> =
+                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*source];
+            let bitmap = bitmap.expect("png fixture must decode");
+            let tiff: Option<Retained<AnyObject>> = msg_send![&*bitmap, TIFFRepresentation];
+            let tiff = tiff.expect("png fixture must encode to tiff");
+            let length: usize = msg_send![&*tiff, length];
+            let pointer: *const u8 = msg_send![&*tiff, bytes];
+            let tiff = std::slice::from_raw_parts(pointer, length).to_vec();
+            let prepared = prepare_image_paste(ClipboardPayload::Image {
+                bytes: tiff,
+                extension: "tiff".into(),
+            });
+            let ClipboardPayload::Image {
+                bytes: converted,
+                extension,
+            } = &prepared
+            else {
+                panic!("tiff image must stay an image");
+            };
+            assert_eq!(extension, "png");
+            assert!(converted.starts_with(b"\x89PNG\r\n\x1a\n"));
+            write(board, &prepared).unwrap();
+            match read(board).unwrap().unwrap().1 {
+                ClipboardPayload::Image { bytes, extension } => {
+                    assert_eq!(extension, "png");
+                    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+                }
+                other => panic!("tiff write must be read back as png, got {other:?}"),
+            }
+            assert_eq!(file_url(board), None);
+            let root =
+                std::env::temp_dir().join(format!("nami-image-png-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let snapshot = root.join("snapshot.png");
+            std::fs::write(&snapshot, &png).unwrap();
+            write(
+                board,
+                &ClipboardPayload::FilesImage {
+                    paths: vec![snapshot.to_string_lossy().into_owned()],
+                    bytes: png.clone(),
+                    extension: "png".into(),
+                    image_fallback: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                read(board).unwrap().unwrap().1,
+                ClipboardPayload::Image {
+                    bytes: png,
+                    extension: "png".into()
+                }
+            );
+            assert_eq!(file_url(board), None);
             let _: () = msg_send![board, releaseGlobally];
             std::fs::remove_dir_all(root).unwrap();
         }

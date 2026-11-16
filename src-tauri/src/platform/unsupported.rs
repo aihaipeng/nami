@@ -41,7 +41,10 @@ pub fn clipboard_version() -> i64 {
 pub fn write_text(_: &str) -> Result<i64, (&'static str, Option<i64>)> {
     Err((UNAVAILABLE, None))
 }
-pub fn send_paste(_: Target, _: i64) -> Result<(), &'static str> {
+pub fn paste_keys_down(_: Target, _: i64) -> Result<(), &'static str> {
+    Err(UNAVAILABLE)
+}
+pub fn paste_keys_up() -> Result<(), &'static str> {
     Err(UNAVAILABLE)
 }
 pub fn read_clipboard() -> Result<Option<super::ClipboardCapture>, &'static str> {
@@ -49,6 +52,10 @@ pub fn read_clipboard() -> Result<Option<super::ClipboardCapture>, &'static str>
 }
 pub fn write_clipboard(_: &super::ClipboardPayload) -> Result<i64, (&'static str, Option<i64>)> {
     Err((UNAVAILABLE, None))
+}
+
+pub fn prepare_image_paste(payload: super::ClipboardPayload) -> super::ClipboardPayload {
+    payload
 }
 
 pub fn clipboard_image_preview(_: &[u8], _: u32) -> Result<Vec<u8>, &'static str> {

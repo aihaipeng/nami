@@ -36,7 +36,8 @@ unsafe extern "C" {
     static kAXTrustedCheckOptionPrompt: *const c_void;
     fn CGEventCreateKeyboardEvent(source: *const c_void, key: u16, down: bool) -> *mut c_void;
     fn CGEventSetFlags(event: *mut c_void, flags: u64);
-    fn CGEventPostToPid(pid: i32, event: *const c_void);
+    fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
+    fn CGEventPost(tap: u32, event: *const c_void);
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -389,38 +390,73 @@ pub fn write_text(text: &str) -> Result<i64, (&'static str, Option<i64>)> {
     }
 }
 
-pub fn send_paste(target: Target, expected_version: i64) -> Result<(), &'static str> {
+// Command down, V down, V up, Command up. Flags match a physical Cmd+V.
+fn paste_chord() -> [(u16, bool, u64); 4] {
+    const COMMAND: u64 = 1 << 20;
+    [
+        (0x37, true, COMMAND),
+        (0x09, true, COMMAND),
+        (0x09, false, COMMAND),
+        (0x37, false, 0),
+    ]
+}
+
+pub fn paste_keys_down(target: Target, expected_version: i64) -> Result<(), &'static str> {
     if !accessibility() {
         return Err("permission_required");
     }
     if !target_focused(target) {
         return Err("target_unavailable");
     }
+    if clipboard_version() != expected_version {
+        return Err("clipboard_changed");
+    }
+    let chord = paste_chord();
+    // Session tap, not the process id: a V event posted only to the pid never
+    // becomes the composer paste event. Keyup is a separate call so the main
+    // thread can return during the gap.
+    post_chord([chord[0], chord[1]])
+}
+
+pub fn paste_keys_up() -> Result<(), &'static str> {
+    let chord = paste_chord();
+    post_chord([chord[2], chord[3]])
+}
+
+fn post_chord(steps: [(u16, bool, u64); 2]) -> Result<(), &'static str> {
     unsafe {
-        let down = CGEventCreateKeyboardEvent(std::ptr::null(), 9, true);
-        let up = CGEventCreateKeyboardEvent(std::ptr::null(), 9, false);
-        if down.is_null() || up.is_null() {
-            if !down.is_null() {
-                CFRelease(down)
+        // HID system state, so the chord is a user key rather than a private event.
+        let source = CGEventSourceCreate(1);
+        let mut events = [std::ptr::null_mut(); 2];
+        for (index, (key, down, flags)) in steps.into_iter().enumerate() {
+            let event = CGEventCreateKeyboardEvent(source, key, down);
+            if event.is_null() {
+                release_events(&events);
+                if !source.is_null() {
+                    CFRelease(source);
+                }
+                return Err("event_creation");
             }
-            if !up.is_null() {
-                CFRelease(up)
-            }
-            return Err("event_creation");
+            CGEventSetFlags(event, flags);
+            events[index] = event;
         }
-        CGEventSetFlags(down, 1 << 20);
-        CGEventSetFlags(up, 1 << 20);
-        if clipboard_version() != expected_version {
-            CFRelease(down);
-            CFRelease(up);
-            return Err("clipboard_changed");
+        if !source.is_null() {
+            CFRelease(source);
         }
-        CGEventPostToPid(target.pid, down);
-        CGEventPostToPid(target.pid, up);
-        CFRelease(down);
-        CFRelease(up);
+        for event in events {
+            CGEventPost(2, event);
+        }
+        release_events(&events);
     }
     Ok(())
+}
+
+unsafe fn release_events(events: &[*mut c_void; 2]) {
+    for event in events {
+        if !event.is_null() {
+            CFRelease(*event);
+        }
+    }
 }
 
 // NSWorkspace file icons may be queried on a worker; no window/view API is touched.
@@ -445,7 +481,22 @@ pub fn file_icon_data_url(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ax_range_length, resolve_selection, selection_result, AXValue, CFRange};
+    use super::{
+        ax_range_length, paste_chord, resolve_selection, selection_result, AXValue, CFRange,
+    };
+
+    #[test]
+    fn image_paste_chord_matches_a_physical_command_v() {
+        let chord = paste_chord();
+        assert_eq!(
+            chord.map(|(key, down, _)| (key, down)),
+            [(0x37, true), (0x09, true), (0x09, false), (0x37, false)]
+        );
+        assert!(chord.iter().take(3).all(|(_, _, flags)| *flags == 1 << 20));
+        assert_eq!(chord[3].2, 0);
+        assert!(chord[..2].iter().all(|(_, down, _)| *down));
+        assert!(chord[2..].iter().all(|(_, down, _)| !*down));
+    }
 
     #[test]
     fn native_ax_range_distinguishes_empty_invalid_and_non_range_values() {

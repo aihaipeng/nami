@@ -1058,6 +1058,75 @@ describe('database clipboard history', () => {
     expect(ids()).toEqual(['pin-new', 'pin-old', 'plain-old', 'plain-new']);
   });
 
+  it('keeps a newly copied image ahead of an image copied earlier', async () => {
+    records = [
+      { id: 'img-b', kind: 'image', text: '', date: '2020-01-02T00:00:00.000Z', isFavorite: true, isPinned: false },
+      { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
+    ];
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['img-b', 'img-a']));
+    await act(async () => fireEvent.click(within(row('img-a')).getByRole('button', { name: 'Copy' })));
+    expect(ids()).toEqual(['img-a', 'img-b']);
+    records = [
+      { id: 'img-c', kind: 'image', text: '', date: '2099-01-01T00:00:00.000Z', isFavorite: false, isPinned: false },
+      { id: 'img-b', kind: 'image', text: '', date: '2020-01-02T00:00:00.000Z', isFavorite: true, isPinned: false },
+      { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
+    ];
+    await emit('clipboard_changed', 3);
+    await waitFor(() => expect(ids()).toEqual(['img-c', 'img-b', 'img-a']));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(ids()).toEqual(['img-b', 'img-a']);
+  });
+
+  it('keeps the clicked record first while the returned page is still older', async () => {
+    records = [
+      { id: 'img-b', kind: 'image', text: '', date: '2020-01-02T00:00:00.000Z', isFavorite: false, isPinned: false },
+      { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: false, isPinned: false },
+    ];
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['img-b', 'img-a']));
+    await act(async () => fireEvent.click(within(row('img-a')).getByRole('button', { name: 'Copy' })));
+    records = [
+      { id: 'img-b', kind: 'image', text: 'refreshed', date: '2020-01-02T00:00:00.000Z', isFavorite: false, isPinned: false },
+      { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: false, isPinned: false },
+    ];
+    await emit('clipboard_changed', 4);
+    await waitFor(() => expect(within(row('img-b')).getByRole('button', { name: 'Clipboard: refreshed' })).toBeTruthy());
+    expect(ids()).toEqual(['img-a', 'img-b']);
+  });
+
+  it('keeps a stale click on this page and a newer favorite on the other page', async () => {
+    records = [
+      { id: 'img-new', kind: 'image', text: '', date: '2099-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
+      { id: 'img-b', kind: 'image', text: '', date: '2020-01-02T00:00:00.000Z', isFavorite: true, isPinned: false },
+      { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
+    ];
+    let refreshed = false;
+    queryHandler = async (request) => request.favoritesOnly
+      ? page(request.query, true)
+      : {
+          records: [
+            { id: 'img-b', kind: 'image', text: refreshed ? 'refreshed' : '', date: '2020-01-02T00:00:00.000Z', isFavorite: true, isPinned: false },
+            { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
+          ],
+          cursor: null,
+          hasMore: false,
+          totalRecords: 2,
+        };
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['img-b', 'img-a']));
+    await act(async () => fireEvent.click(within(row('img-a')).getByRole('button', { name: 'Copy' })));
+    refreshed = true;
+    await emit('clipboard_changed', 5);
+    await waitFor(() => expect(within(row('img-b')).getByRole('button', { name: 'Clipboard: refreshed' })).toBeTruthy());
+    expect(ids()).toEqual(['img-a', 'img-b']);
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    expect(ids()).toEqual(['img-new', 'img-b', 'img-a']);
+  });
+
   it('still moves a copied record to the top when closing the panel ends the session first', async () => {
     records = [
       { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },

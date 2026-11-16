@@ -26,15 +26,40 @@ function hydrate(page: ClipboardWirePage): ClipboardPage {
   return { ...page, records: page.records.map(({ sourceAppId, ...record }) => ({ ...record, sourceApp: sourceAppId === null ? null : page.sources[sourceAppId] })) };
 }
 const emptyPage: ClipboardPage = { records: [], cursor: null, hasMore: false, totalRecords: 0 };
-function placeCopied(records: ClipboardRecord[], mark: { id: string; date: string } | null) {
-  if (!mark) return records;
-  const current = records.find((record) => record.id === mark.id);
-  if (!current) return records;
-  const record = { ...current, date: mark.date };
-  const rest = records.filter((item) => item.id !== mark.id);
-  const pinned = rest.filter((item) => item.isPinned);
-  const plain = rest.filter((item) => !item.isPinned);
-  return record.isPinned ? [record, ...pinned, ...plain] : [...pinned, record, ...plain];
+function placeCopied(records: ClipboardRecord[], mark: { id: string; date: string }) {
+  const index = records.findIndex((record) => record.id === mark.id);
+  if (index < 0) return records;
+  const current = records[index];
+  const record = current.date === mark.date ? current : { ...current, date: mark.date };
+  let insert = 0;
+  if (!record.isPinned) while (insert < records.length && records[insert].isPinned) insert += 1;
+  if (insert === index && record === current) return records;
+  const next = records.slice();
+  next.splice(index, 1);
+  next.splice(insert > index ? insert - 1 : insert, 0, record);
+  return next;
+}
+
+// Server order is pinned, then latest copy. A refresh keeps that array. The clicked
+// row moves only while this page's group head is still older than the click.
+function retainCopied(records: ClipboardRecord[], mark: { id: string; date: string }) {
+  const index = records.findIndex((record) => record.id === mark.id);
+  if (index < 0) return { records, drop: false };
+  let head = 0;
+  while (head < records.length && records[head].isPinned !== records[index].isPinned) head += 1;
+  if (head === index || Date.parse(records[head].date) >= Date.parse(mark.date)) return { records, drop: true };
+  return { records: placeCopied(records, mark), drop: false };
+}
+
+function insertByLastCopy(records: ClipboardRecord[], record: ClipboardRecord) {
+  const time = Date.parse(record.date);
+  let index = 0;
+  if (!record.isPinned) while (index < records.length && records[index].isPinned) index += 1;
+  let limit = index;
+  if (record.isPinned) while (limit < records.length && records[limit].isPinned) limit += 1;
+  else limit = records.length;
+  while (index < limit && Date.parse(records[index].date) >= time) index += 1;
+  records.splice(index, 0, record);
 }
 
 export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean, kind: ClipboardKind | null = null) {
@@ -79,17 +104,20 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       const next = hydrate(result.page);
       if (!active.current || current !== request.current) return;
       const merged = append ? { ...next, records: [...latest.current.records, ...next.records.filter((record) => !latest.current.records.some(({ id }) => id === record.id))] } : next;
-      const mark = copiedMark.current;
-      if (mark && epochAtStart === copyEpoch.current) {
-        const pinned = merged.records.find((record) => record.id === mark.id)?.isPinned;
-        if (merged.records.find((record) => record.isPinned === pinned)?.id === mark.id) copiedMark.current = null;
+      if (epochAtStart === copyEpoch.current && copiedMark.current) {
+        const applied = retainCopied(merged.records, copiedMark.current);
+        merged.records = applied.records;
+        if (applied.drop) copiedMark.current = null;
       }
-      merged.records = placeCopied(merged.records, copiedMark.current);
       if (!append) {
         loadedFilters.current = queryFilters;
         const alternate = result.alternate ? hydrate(result.alternate) : null;
         if (alternate) {
-          alternate.records = placeCopied(alternate.records, mark);
+          if (epochAtStart === copyEpoch.current && copiedMark.current) {
+            const applied = retainCopied(alternate.records, copiedMark.current);
+            alternate.records = applied.records;
+            if (applied.drop) copiedMark.current = null;
+          }
           const retained = pages.current.get(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly));
           if (!retained || retained.records.length <= alternate.records.length) pages.current.set(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly), alternate);
         }
@@ -190,11 +218,13 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         for (const [key, cached] of pages.current) {
           const before = matchesCache(previous, key);
           const after = updated !== null && matchesCache(updated, key);
-          let records = cached.records.filter((record) => record.id !== recordId);
+          const records = cached.records.filter((record) => record.id !== recordId);
           if (after && updated) {
-            const oldIndex = cached.records.findIndex((record) => record.id === recordId);
-            records.splice(oldIndex < 0 ? records.length : oldIndex, 0, updated);
-            records = records.sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || Date.parse(b.date) - Date.parse(a.date));
+            if (action === 'pin') insertByLastCopy(records, updated);
+            else {
+              const oldIndex = cached.records.findIndex((record) => record.id === recordId);
+              records.splice(oldIndex < 0 ? records.length : oldIndex, 0, updated);
+            }
           }
           pages.current.set(key, { ...cached, records, totalRecords: cached.totalRecords + Number(after) - Number(before) });
         }
@@ -207,8 +237,9 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
 
   const noteCopied = useCallback((recordId: string) => {
     copyEpoch.current += 1;
-    copiedMark.current = { id: recordId, date: new Date().toISOString() };
-    const reorder = (cached: ClipboardPage): ClipboardPage => ({ ...cached, records: placeCopied(cached.records, copiedMark.current) });
+    const mark = { id: recordId, date: new Date().toISOString() };
+    copiedMark.current = mark;
+    const reorder = (cached: ClipboardPage): ClipboardPage => ({ ...cached, records: placeCopied(cached.records, mark) });
     for (const [key, cached] of pages.current) pages.current.set(key, reorder(cached));
     if (defaultPage.current) defaultPage.current = { ...defaultPage.current, page: reorder(defaultPage.current.page) };
     latest.current = reorder(latest.current);
