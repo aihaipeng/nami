@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
@@ -6,7 +6,7 @@ import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { languages } from '../shared/languages';
 import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
-import { displaySource, editSource } from '../shared/source';
+import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
@@ -16,6 +16,16 @@ import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
 type Popup = 'source' | 'primary' | 'secondary' | 'actions';
+
+let sourceMeasure: CanvasRenderingContext2D | null | undefined;
+
+function sourcePrefixWidth(field: HTMLTextAreaElement, prefix: string) {
+  sourceMeasure ??= document.createElement('canvas').getContext('2d');
+  if (!sourceMeasure) return prefix.length;
+  const style = getComputedStyle(field);
+  sourceMeasure.font = style.font || `${style.fontSize} ${style.fontFamily}`;
+  return sourceMeasure.measureText(prefix).width;
+}
 
 function Keycaps({ keys }: { keys: string[] }) {
   return <span className="keycaps" aria-hidden="true">{keys.map((key) => <kbd key={key}>{key}</kbd>)}</span>;
@@ -45,6 +55,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const input = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const normalizedCaret = useRef<number | null>(null);
+  const sourceDrag = useRef({ active: false, taken: false, anchor: 0, pointer: 0, frame: 0 });
   const select = useRef<(record: HistoryRecord, retranslate: boolean) => void>(() => {});
   const state = snapshot.window;
   const clipboardDetails = state.recordView === 'clipboard';
@@ -137,6 +148,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [draft]);
 
   useEffect(() => { setPopup(null); }, [snapshot.locale, state.historyWidth, state.translationVisible]);
+  useEffect(() => () => { sourceDrag.current.active = false; cancelAnimationFrame(sourceDrag.current.frame); }, []);
   useEffect(() => {
     const close = () => setPopup(null);
     window.addEventListener('blur', close);
@@ -167,6 +179,49 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     measure();
     return () => observer.disconnect();
   }, [source, secondary, primary, snapshot.locale, state.translationVisible, capabilities.nativeHistory]);
+
+  function stepSourceDrag() {
+    const field = input.current;
+    const drag = sourceDrag.current;
+    if (!drag.active || !field) return;
+    const rect = field.getBoundingClientRect();
+    if (!drag.taken && sourceDragDelta(drag.pointer, rect.left, rect.right) !== 0) {
+      drag.taken = true;
+      drag.anchor = field.selectionDirection === 'backward' ? field.selectionEnd : field.selectionStart;
+    }
+    if (drag.taken) {
+      dragSourceSelection(field, {
+        pointerX: drag.pointer, left: rect.left, right: rect.right,
+        paddingLeft: Number.parseFloat(getComputedStyle(field).paddingLeft) || 0,
+        anchor: drag.anchor, width: (prefix) => sourcePrefixWidth(field, prefix),
+      });
+    }
+    drag.frame = requestAnimationFrame(stepSourceDrag);
+  }
+
+  function beginSourceDrag(event: PointerEvent<HTMLTextAreaElement>) {
+    if (event.button !== 0 || event.detail > 1 || composing.current) return;
+    const drag = sourceDrag.current;
+    drag.active = true; drag.taken = false; drag.pointer = event.clientX;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    cancelAnimationFrame(drag.frame);
+    drag.frame = requestAnimationFrame(stepSourceDrag);
+  }
+
+  function moveSourceDrag(event: PointerEvent<HTMLTextAreaElement>) {
+    const drag = sourceDrag.current;
+    if (!drag.active) return;
+    drag.pointer = event.clientX;
+    if (drag.taken) event.preventDefault();
+  }
+
+  function stopSourceDrag(field?: HTMLTextAreaElement, pointerId?: number) {
+    const drag = sourceDrag.current;
+    if (!drag.active) return;
+    drag.active = false;
+    cancelAnimationFrame(drag.frame);
+    if (pointerId !== undefined) field?.releasePointerCapture?.(pointerId);
+  }
 
   function clearSelection() {
     if (native && selectedId !== null) void command('history_sample_select', { sampleId: null, retranslate: false });
@@ -323,7 +378,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             setDraft(editSource(draft, next)); setNotice(null); clearSelection(); setCachedResults([]);
           }}
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current && !primaryPressed(event)) event.preventDefault(); }} />
+          onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current && !primaryPressed(event)) event.preventDefault(); }}
+          onPointerDown={beginSourceDrag} onPointerMove={moveSourceDrag} onPointerUp={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onPointerCancel={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onBlur={() => stopSourceDrag()} />
         {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
       </header>
       <div className={cn('result-columns', secondary === 'none' && 'single-column')}>

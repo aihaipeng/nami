@@ -86,6 +86,34 @@ describe('translation input and shortcuts', () => {
     for (const text of document.querySelectorAll('.result-column > span')) expect(text.getAttribute('data-tauri-drag-region')).toBe('false');
     expect(document.querySelectorAll('.result-column > span')).toHaveLength(2);
   });
+  it('scrolls hidden source text while dragging a selection past either edge', async () => {
+    await mount();
+    const text = 'a'.repeat(80);
+    fireEvent.change(source(), { target: { value: text, selectionStart: text.length, selectionEnd: text.length } });
+    const field = source();
+    field.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 120, bottom: 32, width: 120, height: 32, toJSON() { return {}; } });
+    Object.defineProperty(field, 'clientWidth', { configurable: true, value: 120 });
+    Object.defineProperty(field, 'scrollWidth', { configurable: true, value: text.length * 6 });
+    field.setSelectionRange(8, 8);
+    fireEvent.pointerDown(field, { button: 0, clientX: 60, pointerId: 1, detail: 1 });
+    await flushFrames();
+    expect(field.scrollLeft).toBe(0);
+    expect([field.selectionStart, field.selectionEnd]).toEqual([8, 8]);
+    fireEvent.pointerMove(field, { clientX: 200, pointerId: 1 });
+    await flushFrames();
+    expect(field.scrollLeft).toBeGreaterThan(0);
+    expect(field.selectionEnd).toBeGreaterThan(8);
+    const forward = field.scrollLeft;
+    fireEvent.pointerMove(field, { clientX: -40, pointerId: 1 });
+    await flushFrames();
+    expect(field.scrollLeft).toBeLessThan(forward);
+    expect(field.selectionStart).toBeLessThan(8);
+    fireEvent.pointerUp(field, { pointerId: 1, button: 0 });
+    const stopped = field.scrollLeft;
+    await flushFrames();
+    expect(field.scrollLeft).toBe(stopped);
+  });
+
   it('does not rewind the caret after typing or overwrite a newer selection', async () => {
     const user = userEvent.setup(); await mount();
     await user.type(source(), 'abc');
