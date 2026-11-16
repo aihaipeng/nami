@@ -3771,7 +3771,7 @@ return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getB
             ("File clipboard records", "kind-files"),
         ] {
             evaluate_view_dom(app,"clipboard",&format!("document.querySelector('.clipboard-panel [aria-label={}]').click();return true;",serde_json::to_string(label).unwrap()))?;
-            samples.push(wait_records(app,&format!(r#"const p=document.querySelector('.clipboard-panel'),rows=[...p.querySelectorAll('.history-row:not([hidden])')];return {{ready:rows.length===1&&rows[0].dataset.recordId==='{id}'&&p.querySelector('.history-record-count').textContent==='1 record',id:rows[0]?.dataset.recordId,total:p.querySelector('.history-record-count').textContent,favorite:p.querySelector('.history-favorites').getAttribute('aria-pressed'),query:p.querySelector('.history-search input').value}};"#))?);
+            samples.push(wait_records(app,&format!(r#"const p=document.querySelector('.clipboard-panel'),rows=[...p.querySelectorAll('.history-row:not([hidden])')];return {{ready:rows.length===1&&rows[0].dataset.recordId==='{id}'&&p.querySelector('.history-record-count').textContent==='1 record'&&p.querySelector('.history-favorites').getAttribute('aria-pressed')==='false',id:rows[0]?.dataset.recordId,total:p.querySelector('.history-record-count').textContent,favorite:p.querySelector('.history-favorites').getAttribute('aria-pressed'),query:p.querySelector('.history-search input').value}};"#))?);
         }
         evaluate_view_dom(
             app,
@@ -3784,7 +3784,7 @@ return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getB
 const p=document.querySelector('.clipboard-panel'),rows=[...p.querySelectorAll('.history-row:not([hidden])')];
 const actions=id=>[...p.querySelectorAll(`[data-record-id="${id}"] .history-action:not([aria-hidden=true])`)].map(a=>a.dataset.action);
 const text=actions('kind-text-favorite'),image=actions('kind-image-text'),blank=actions('kind-image-blank'),files=actions('kind-files');
-return {ready:rows.length===4&&image.includes('ocr'),text,image,blank,files,icons:[...p.querySelectorAll('.history-action .history-symbol')].map(i=>({width:getComputedStyle(i).width,height:getComputedStyle(i).height}))};
+return {ready:rows.length===5&&image.includes('ocr'),text,image,blank,files,icons:[...p.querySelectorAll('.history-action .history-symbol')].map(i=>({width:getComputedStyle(i).width,height:getComputedStyle(i).height}))};
 "#,
             1500,
         )?;
@@ -3848,7 +3848,7 @@ return {ready:rows.length===4&&image.includes('ocr'),text,image,blank,files,icon
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"document.querySelector('.clipboard-panel [aria-label="Favorite clipboard records"]').click();(async()=>{for(const recordId of ['kind-text-favorite','kind-image-text'])await window.__TAURI_INTERNALS__.invoke('clipboard_record_update',{recordId,action:'favorite'});})();return true;"#,
+            r#"(async()=>{for(const recordId of ['kind-text-favorite','kind-image-text'])await window.__TAURI_INTERNALS__.invoke('clipboard_record_update',{recordId,action:'favorite'});})();return true;"#,
         )?;
         samples.push(wait_records(app, r#"
 const p=document.querySelector('.clipboard-panel');

@@ -40,7 +40,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
   const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, () => clipboard.displayReady, () => clipboard.page.records, kindFilter);
-  const { query, setQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember, restoreScroll } = browser;
+  const { query, setQuery, favoritesOnly, setFavoritesOnly, remember, restoreScroll } = browser;
   const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0, kindFilter);
   const records = clipboard.page.records;
   const imageText = useClipboardImageText(records, active && native && snapshot.capabilities.imageOcr);
@@ -193,7 +193,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
       {clipboard.retainedRecords.filter((record) => !record.isPinned).map(row)}
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status"><p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardCaptureOff')}</p>{!query && !favoritesOnly && !snapshot.clipboardCaptureEnabled && <button onClick={() => void command('window_show', { target: 'settings' })}>{t('openSettings')}</button>}</div>}
     </HistoryList>
-    <HistoryFooter key={session} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} kind={kindFilter} onKindChange={(next) => { remember(); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
+    <HistoryFooter key={session} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard primaryModifier={snapshot.capabilities.primaryModifier} />
     {menu && menuRecord && <ClipboardMenu record={menuRecord} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
       if (action === 'paste') void useRecord(menuRecord.id, 'paste');

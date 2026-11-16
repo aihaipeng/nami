@@ -71,24 +71,29 @@ beforeEach(() => {
 });
 
 describe('clipboard type filters', () => {
-  it('filters the actual list by type with Favorites and resets the category on a new records session', async () => {
+  it('switches favorite and type filters without combining them and resets on a new records session', async () => {
     records.push({ ...records[0], id: 'picture', kind: 'image', isFavorite: true });
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    const pressed = (name: string) => screen.getByRole('button', { name }).getAttribute('aria-pressed');
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(3));
     fireEvent.click(screen.getByRole('button', { name: 'File clipboard records' }));
-    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['pinned']));
+    await waitFor(() => expect(ids()).toEqual(['pinned']));
+    expect(pressed('Favorite clipboard records')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
-    expect(listRows()).toHaveLength(1);
+    await waitFor(() => expect(ids()).toEqual(['pinned', 'picture']));
+    expect(pressed('File clipboard records')).toBe('false');
+    expect(pressed('Favorite clipboard records')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
-    await waitFor(() => expect(listRows()).toHaveLength(0));
-    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
-    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['first']));
+    await waitFor(() => expect(ids()).toEqual(['first']));
+    expect(pressed('Favorite clipboard records')).toBe('false');
     expect(document.querySelector('.history-record-count')?.textContent).toBe('1 record');
+    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
+    await waitFor(() => expect(ids()).toEqual(['pinned', 'first', 'picture']));
     fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
-    await waitFor(() => expect([...listRows()].map((element) => (element as HTMLElement).dataset.recordId)).toEqual(['picture']));
+    await waitFor(() => expect(ids()).toEqual(['picture']));
     await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
     await waitFor(() => expect(listRows()).toHaveLength(3));
-    for (const name of ['Text clipboard records', 'Image clipboard records', 'File clipboard records', 'Favorite clipboard records']) expect(screen.getByRole('button', { name }).getAttribute('aria-pressed')).toBe('false');
+    for (const name of ['Text clipboard records', 'Image clipboard records', 'File clipboard records', 'Favorite clipboard records']) expect(pressed(name)).toBe('false');
     expect(document.querySelector('.history-record-count')?.textContent).toBe('3 records');
   });
 

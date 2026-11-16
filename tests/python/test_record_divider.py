@@ -20,3 +20,9 @@ def test_detail_metadata_and_pane_seams_match_the_pinned_divider():
     assert '[0.0_f64, 0.28, 0.28, 0.28, 0.0]' in native
     assert 'bounds.size.height * 0.03' in native
     assert 'bounds.size.height * 0.94' in native
+
+
+def test_detail_metadata_height_stays_three_rows():
+    clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
+    assert 'height: calc(10px + 16px * 3 + 5px * 2)' in clipboard
+    assert '.clipboard-detail-metadata { position: relative; flex: 0 0 auto;' in clipboard
