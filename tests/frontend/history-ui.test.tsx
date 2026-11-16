@@ -94,7 +94,7 @@ describe('history list and session actions', () => {
     await mount('history');
     expect(records()).toHaveLength(20);
     expect(document.querySelectorAll('.history-pinned article')).toHaveLength(2);
-    expect(document.querySelectorAll('.history-list article')).toHaveLength(18);
+    expect(document.querySelectorAll('.history-items article')).toHaveLength(18);
     expect(screen.queryByRole('textbox', { name: 'Source text' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Translations' }).getAttribute('aria-pressed')).toBe('true');
   });
@@ -307,8 +307,8 @@ describe('history list and session actions', () => {
 
   it('does not scroll a fully visible row and respects reduced motion for clipped rows', async () => {
     const user = userEvent.setup(); await mount('history');
-    const article = row('sample-01'); const pinned = article.closest<HTMLElement>('.history-pinned')!;
-    vi.spyOn(pinned, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 300 } as DOMRect);
+    const article = row('sample-01'); const list = article.closest<HTMLElement>('.history-list')!;
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 300 } as DOMRect);
     const measure = vi.spyOn(article, 'getBoundingClientRect').mockReturnValue({ top: 110, bottom: 200 } as DOMRect);
     scrollTo.mockClear();
     await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
@@ -316,7 +316,7 @@ describe('history list and session actions', () => {
     preferReducedMotion(); measure.mockReturnValue({ top: 250, bottom: 320 } as DOMRect);
     await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).toHaveBeenCalledWith({ top: 24, behavior: 'instant' });
-    expect(scrollTo.mock.contexts.at(-1)).toBe(pinned);
+    expect(scrollTo.mock.contexts.at(-1)).toBe(list);
   });
 });
 

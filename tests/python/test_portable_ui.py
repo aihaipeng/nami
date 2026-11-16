@@ -12,6 +12,8 @@ EXPECTED_CASES = {
     'shared history startup',
     'shared record presentation and menus',
     'shared loading animation in both record views',
+    'single record scroll owner and protected action exit',
+    'adjacent notes use measured reversible height transitions',
     'React actions update shared Rust history',
     'shared history protects favorite and pinned records',
     'React selection restores cached translation through IPC',

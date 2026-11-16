@@ -17,15 +17,14 @@
 .clipboard-record-body .clipboard-files, .clipboard-record-body .clipboard-media-placeholder { margin-top: 0; }
 
 
-.clipboard-record-body { position: relative; display: grid; margin-top: 6px; overflow: hidden; }
-.clipboard-record-title, .clipboard-record-content { grid-area: 1 / 1; min-width: 0; }
-.clipboard-record-title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 2px; font-size: 13px; line-height: normal; opacity: 1; transition: opacity 180ms ease-out; }
-.clipboard-record-content { display: grid; grid-template-rows: 0fr; align-self: start; opacity: 0; transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out; }
+.clipboard-record-body { position: relative; display: block; margin-top: 6px; overflow: hidden; }
+.clipboard-record-title, .clipboard-record-content { position: absolute; top: 0; left: 0; right: 0; min-width: 0; }
+.clipboard-record-title { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 2px; font-size: 13px; line-height: normal; }
+.clipboard-record-content { display: block; }
 .clipboard-record-original { display: block; min-height: 0; overflow: hidden; }
 .clipboard-record-original .history-preview { display: block; -webkit-line-clamp: unset; }
 .clipboard-record-body .history-preview, .clipboard-record-body .clipboard-image-preview { margin-top: 0; }
-.clipboard-record-body[data-expanded=true] .clipboard-record-title { opacity: 0; }
-.clipboard-record-body[data-expanded=true] .clipboard-record-content { grid-template-rows: 1fr; opacity: 1; }
+.clipboard-record-body[data-expanded=true] .clipboard-record-title, .clipboard-record-body[data-expanded=false] .clipboard-record-content { visibility: hidden; pointer-events: none; }
 .clipboard-editor-layer { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / .12); opacity: 0; transition: opacity 160ms ease-out; }
 .clipboard-editor.floating-panel { position: relative; width: min(340px, 100%); max-height: calc(100vh - 32px); padding: 12px; overflow: auto; opacity: 0; transform: translateY(5px) scale(.98); transition: opacity 180ms ease-out, transform 180ms cubic-bezier(.2,.8,.2,1); }
 .clipboard-editor-label { display: block; width: 100%; font-weight: 600; }

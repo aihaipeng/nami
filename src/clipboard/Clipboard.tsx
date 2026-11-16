@@ -34,7 +34,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
-  const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, pinnedList, () => clipboard.displayReady);
+  const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, pinnedList, () => clipboard.displayReady, () => clipboard.page.records);
   const { query, setQuery, favoritesOnly, setFavoritesOnly, toggleFavorites, remember } = browser;
   const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0);
   const records = clipboard.page.records;

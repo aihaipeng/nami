@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { motion } from 'motion/react';
 
 // The scrollbar spans the complete viewport while pinned rows stay above the scrolling list.
 export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, active = true }: {
@@ -29,28 +30,30 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
     setScrollbarVisible(false);
   }, [active]);
   const viewport = useRef<HTMLDivElement>(null);
-  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0 });
+  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, pinned: 0 });
   function measure() {
     const element = list.current;
     if (!element) return;
-    const next = { top: Math.max(0, Math.min(element.scrollHeight - element.clientHeight, element.scrollTop)), height: element.clientHeight, content: element.scrollHeight, track: viewport.current?.clientHeight ?? 0 };
+    const next = { top: Math.max(0, Math.min(element.scrollHeight - element.clientHeight, element.scrollTop)), height: element.clientHeight, content: element.scrollHeight, pinned: pinnedList.current?.offsetHeight ?? 0 };
     setScroll((old) => Object.keys(next).every((key) => old[key as keyof typeof old] === next[key as keyof typeof next]) ? old : next);
   }
   useLayoutEffect(() => {
     measure();
     const observer = new ResizeObserver(measure);
-    for (const element of [viewport.current, list.current, pinnedList.current, ...Array.from(list.current?.children ?? [])]) if (element) observer.observe(element);
+    for (const element of [list.current, pinnedList.current, list.current?.querySelector('.history-items')]) if (element) observer.observe(element);
     return () => observer.disconnect();
   }, [children, pinned, active]);
   const maximum = Math.max(0, scroll.content - scroll.height);
-  const thumb = Math.min(scroll.track, Math.max(24, scroll.track * scroll.height / Math.max(1, scroll.content)));
-  const travel = scroll.track - thumb;
+  const thumb = Math.min(scroll.height, Math.max(24, scroll.height * scroll.height / Math.max(1, scroll.content)));
+  const travel = scroll.height - thumb;
   function move(top: number) { list.current?.scrollTo({ top: Math.max(0, Math.min(maximum, top)) }); }
   return <div ref={viewport} className="history-viewport" onWheel={showScrollbar} onTouchMove={showScrollbar} onKeyDownCapture={(event) => {
     if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.nativeEvent.isComposing && ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) showScrollbar();
   }}>
-    <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} onScroll={(event) => { onScroll?.(); onNearEnd(event.currentTarget); }}>{pinned}</div>
-    <div ref={list} id={listId} className="history-list" onScroll={(event) => { measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); } }}>{children}</div>
+    <motion.div layoutScroll ref={list} id={listId} className="history-list" onScroll={(event) => { measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); } }}>
+      <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.height > 0 && scroll.pinned >= scroll.height}>{pinned}</div>
+      <div className="history-items">{children}</div>
+    </motion.div>
     {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={showScrollbar} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;

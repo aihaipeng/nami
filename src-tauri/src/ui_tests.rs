@@ -1973,13 +1973,13 @@ window.__recordNodeIds??=new WeakMap();window.__recordNodeSequence??=0;
 const nodeId=node=>{if(!window.__recordNodeIds.has(node))window.__recordNodeIds.set(node,++window.__recordNodeSequence);return window.__recordNodeIds.get(node);};
 const box=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
 const icon=e=>{const s=getComputedStyle(e),i=e.querySelector('.history-symbol')||e;return {symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,color:s.color,opacity:s.opacity,...box(i)};};
-const row=p.querySelector('.history-list .history-row:not([hidden])')||p.querySelector('.history-row:not([hidden])');
+const row=p.querySelector('.history-items .history-row:not([hidden])')||p.querySelector('.history-row:not([hidden])');
 const search=p.querySelector('.history-search'),input=search.querySelector('input'),footer=p.querySelector('.history-footer'),scroller=p.querySelector('[role=scrollbar]');
 return {ready:true,kind:p.id==='translation-history'?'translation':'clipboard',panel:nodeId(p),width:p.getBoundingClientRect().width,
 rows:[...p.querySelectorAll('.history-row:not([hidden])')].map(r=>({id:r.dataset.recordId,node:nodeId(r),selected:r.classList.contains('selected'),pinned:r.classList.contains('pinned')})),
 search:{...box(search),border:getComputedStyle(search).borderTopWidth,radius:getComputedStyle(search).borderRadius,shadow:getComputedStyle(search).boxShadow,font:getComputedStyle(input).fontSize,caret:getComputedStyle(input).caretColor},query:input.value,
 toolbar:[...p.querySelectorAll('.history-toolbar > button')].map(b=>({...box(b),...icon(b),pressed:b.getAttribute('aria-pressed'),expanded:b.getAttribute('aria-expanded'),disabled:b.disabled})),
-actions:[...row.querySelectorAll('.history-row-actions button')].map(icon),actionDuration:getComputedStyle(row.querySelector('.history-row-actions')).transitionDuration,
+actions:[...row.querySelectorAll('.history-row-actions button:not([aria-hidden="true"])')].map(icon),actionDuration:getComputedStyle(row.querySelector('.history-row-actions')).transitionDuration,
 timeDuration:getComputedStyle(row.querySelector('time')).transitionDuration,previewFont:getComputedStyle(row.querySelector('.history-preview')).fontSize,
 origin:{...box(row.querySelector('.history-origin')),fit:getComputedStyle(row.querySelector('.history-origin')).objectFit,radius:getComputedStyle(row.querySelector('.history-origin')).borderRadius},
 footer:{...box(footer),star:icon(footer.querySelector('.history-favorites')),keyboard:icon(footer.querySelector('.history-shortcuts')),count:footer.querySelector('.history-record-count').textContent},
@@ -1996,7 +1996,7 @@ fn run_record_action_timing(app: &AppHandle, mode: &'static str, name: &'static 
             r#"
 const panel=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));
 if(!panel)return {ready:false};
-const row=panel.querySelector('.history-list .history-row:not([hidden])')||panel.querySelector('.history-row');if(!row)return {ready:false};
+const row=panel.querySelector('.history-items .history-row:not([hidden])')||panel.querySelector('.history-row');if(!row)return {ready:false};
 const button=row.querySelector('.history-row-select'),actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
 button.focus();
 return {ready:row.matches(':focus-within'),duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,timeDuration:getComputedStyle(time).transitionDuration,symbols:[...actions.querySelectorAll('.history-symbol')].map(i=>i.dataset.symbol),icons:[...actions.querySelectorAll('.history-symbol')].map(i=>({width:getComputedStyle(i).width,height:getComputedStyle(i).height})),color:getComputedStyle(actions.querySelector('button')).color,deleteColor:getComputedStyle(actions.querySelector('.history-delete')||actions.lastElementChild).color};
@@ -2114,6 +2114,23 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             .as_mut()
             .ok_or("isolated database")?
             .insert(&translation_record, "edge", || true)?;
+        for index in 0..200 {
+            let mut record = translation_record.clone();
+            record.id = format!("selection-load-{index}");
+            record.date = "2098-01-01T00:00:00Z".into();
+            record.text = "Synthetic long history text ".repeat(1000);
+            record.translations = vec!["Synthetic long result ".repeat(1000)];
+            record.source_app = Some(
+                serde_json::json!({"name":"Synthetic source","iconDataUrl":format!("data:image/png;base64,{}", "A".repeat(65536))}),
+            );
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("isolated database")?
+                .insert(&record, "edge", || true)?;
+        }
         on_main(app, move |app| history_add(app, translation_record))?;
         records_mode(app, "clipboard")?;
         let clipboard = wait_records(app, RECORDS_SNAPSHOT)?;
@@ -2124,7 +2141,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"window.__fixtureQueried=false;window.__TAURI_INTERNALS__.invoke('history_query',{query:'',favoritesOnly:false}).then(()=>{window.__fixtureQueried=true;});return true;"#,
+            r#"window.__fixtureQueried=false;(async()=>{await window.__TAURI_INTERNALS__.invoke('history_query',{query:'',favoritesOnly:false});await window.__TAURI_INTERNALS__.invoke('history_load_more');await window.__TAURI_INTERNALS__.invoke('history_load_more');window.__fixtureQueried=true;})();return true;"#,
         )?;
         wait_records(
             app,
@@ -2237,7 +2254,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             evaluate_view_dom(
                 app,
                 "clipboard",
-                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));const row=p.querySelector('.history-list .history-row:not([hidden])');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;"#,
+                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));const row=p.querySelector('.history-items .history-row:not([hidden])');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;"#,
             )?;
             let menu = wait_records(
                 app,
@@ -2269,11 +2286,45 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             }
         }
         records_mode(app, "translation")?;
+        evaluate_dom(
+            app,
+            r#"window.__selectionTiming={};const timing=window.__selectionTiming;const poll=()=>{const clip=document.querySelector('.translation-clip');if(document.querySelector('.source-input')?.value==='Synthetic shared record input'&&document.querySelector('.result-column')?.textContent==='Synthetic shared output'&&clip?.getAttribute('aria-hidden')==='false'){timing.readyAt=Date.now();}else requestAnimationFrame(poll);};requestAnimationFrame(poll);return true;"#,
+        )?;
+        let selection_broadcasts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let broadcasts = selection_broadcasts.clone();
+        let selection_listener = app.listen_any("history_changed", move |_| {
+            broadcasts.fetch_add(1, Ordering::SeqCst);
+        });
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
+            r#"window.__selectionStarted=Date.now();document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
         )?;
+        let selection_timing = wait_dom(
+            app,
+            "return {ready:!!window.__selectionTiming.readyAt,...window.__selectionTiming};",
+        )?;
+        let selection_started =
+            evaluate_view_dom(app, "clipboard", "return window.__selectionStarted;")?;
+        let elapsed = selection_timing["readyAt"]
+            .as_i64()
+            .ok_or("selection ready timestamp")?
+            - selection_started
+                .as_i64()
+                .ok_or("selection start timestamp")?;
+        app.unlisten(selection_listener);
+        let broadcasts = selection_broadcasts.load(Ordering::SeqCst);
+        samples.push(serde_json::json!({"selectionReadyMs":elapsed,"selectionFullPageBroadcasts":broadcasts}));
+        if broadcasts != 0 {
+            return Err(format!(
+                "selection rebroadcast {broadcasts} complete history pages before opening"
+            ));
+        }
+        if elapsed > 150 {
+            return Err(format!(
+                "selected translation was not ready during opening: {elapsed}ms"
+            ));
+        }
         wait_motion(app)?;
         wait_records(
             app,

@@ -20,6 +20,7 @@ export interface HistorySnapshot {
 }
 
 export interface HistorySelection {
+  revision: number;
   sampleId: string | null;
   retranslate: boolean;
   record?: HistoryRecord | null;

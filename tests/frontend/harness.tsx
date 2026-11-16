@@ -46,6 +46,7 @@ export const releasePointerCapture = vi.fn();
 export let reducedMotion = false;
 
 beforeAll(() => {
+  window.scrollTo = vi.fn();
   Object.defineProperty(document, 'fonts', { configurable: true, value: { ready: Promise.resolve() } });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({
     font: '', measureText: (text: string) => ({ width: text.length * 6 }),
@@ -136,8 +137,7 @@ beforeEach(() => {
         deliver('window_state', structuredClone(bridge.snapshot.window));
       }
       bridge.history.selectedId = selected.sampleId; ++bridge.history.revision;
-      deliver('history_changed', historySnapshot());
-      deliver('history_sample_selected', { ...selected, record });
+      deliver('history_sample_selected', { ...selected, record, revision: bridge.history.revision });
     }
     return undefined;
   });
@@ -160,7 +160,7 @@ export async function emit(name: string, payload: unknown) {
   await act(async () => {
     if (name === 'history_sample_selected') {
       bridge.history.selectedId = (payload as { sampleId: string | null }).sampleId; ++bridge.history.revision;
-      deliver('history_changed', historySnapshot());
+      payload = { revision: bridge.history.revision, ...payload as object };
     }
     deliver(name, payload);
   });

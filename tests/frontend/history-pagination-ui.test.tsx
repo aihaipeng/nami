@@ -28,6 +28,30 @@ function deferred<T>() {
 }
 
 describe('paged database history', () => {
+  it('applies selection without replacing loaded rows and preserves it across delayed data', async () => {
+    const initial = deferred<HistorySnapshot>();
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_snapshot' ? initial.promise : original(name, args));
+    const view = renderHook(() => useHistory(true));
+    await waitFor(() => expect(calls('history_snapshot')).toHaveLength(1));
+    await act(async () => bridge.listeners.get('history_sample_selected')?.forEach((listener) => listener({ payload: { sampleId: 'sample-03', retranslate: false, revision: 2 } })));
+    await act(async () => initial.resolve({ ...bridge.history, revision: 1 }));
+    expect(view.result.current.snapshot.selectedId).toBe('sample-03');
+    expect(view.result.current.snapshot.records).toHaveLength(20);
+    const loaded = view.result.current.snapshot.records;
+    await act(async () => bridge.listeners.get('history_sample_selected')?.forEach((listener) => listener({ payload: { sampleId: null, retranslate: false, revision: 3 } })));
+    expect(view.result.current.snapshot.selectedId).toBeNull();
+    expect(view.result.current.snapshot.records).toBe(loaded);
+    await act(async () => bridge.listeners.get('history_sample_selected')?.forEach((listener) => listener({ payload: { sampleId: 'sample-03', retranslate: false, revision: 2 } })));
+    expect(view.result.current.snapshot.selectedId).toBeNull();
+    await emit('history_changed', { ...bridge.history, revision: 2 });
+    expect(view.result.current.snapshot.selectedId).toBeNull();
+    await emit('history_changed', { ...bridge.history, selectedId: 'sample-04', revision: 4 });
+    expect(view.result.current.snapshot.selectedId).toBe('sample-04');
+    view.unmount();
+    expect(bridge.listeners.get('history_sample_selected')?.size).toBe(0);
+  });
+
   it.each(['select', 'copy', 'favorite', 'delete', 'retranslate'] as const)('waits for the cached page query before executing %s on a record outside the backend projection', async (action) => {
     populate(3); bridge.snapshot.window.recordView = 'translation'; await mount('clipboard');
     const favorite = screen.getByRole('button', { name: 'Favorite history' });
@@ -60,6 +84,26 @@ describe('paged database history', () => {
     if (change === 'failure') await act(async () => pending.reject(new Error('storage_unavailable')));
     else await act(async () => pending.resolve({ ...bridge.history, revision: bridge.history.revision + 1, generation: bridge.history.generation + 1, totalRecords: 3, hasMore: false }));
     expect(calls('history_sample_select')).toHaveLength(0);
+  });
+
+  it('cleans up a partially connected selection subscription and retries both listeners', async () => {
+    const original = bridge.listen.getMockImplementation()!;
+    let fail = true;
+    bridge.listen.mockImplementation((name: string, callback: (event: { payload: unknown }) => void) => {
+      if (name === 'history_sample_selected' && fail) { fail = false; return Promise.reject(new Error('listen_failed')); }
+      return original(name, callback);
+    });
+    const view = renderHook(() => useHistory(true));
+    await waitFor(() => expect(view.result.current.error).toBe(true));
+    expect(bridge.listeners.get('history_changed')?.size).toBe(0);
+    act(() => view.result.current.refresh('', false));
+    await waitFor(() => expect(view.result.current.snapshot.records).toHaveLength(20));
+    expect(view.result.current.error).toBe(false);
+    expect(bridge.listeners.get('history_changed')?.size).toBe(1);
+    expect(bridge.listeners.get('history_sample_selected')?.size).toBe(1);
+    view.unmount();
+    expect(bridge.listeners.get('history_changed')?.size).toBe(0);
+    expect(bridge.listeners.get('history_sample_selected')?.size).toBe(0);
   });
 
   it('reconnects a failed history subscription before retrying and continues receiving events', async () => {
@@ -259,12 +303,12 @@ describe('paged database history', () => {
     expect(view.result.current.snapshot.records).toHaveLength(1);
   });
 
-  it('loads more from the pinned scroll region and coalesces repeated scroll events', async () => {
+  it('loads more when pinned records fill the shared scroll region and coalesces repeated scroll events', async () => {
     populate(140); bridge.history.records.forEach((record) => { record.isPinned = true; });
     const pending = deferred<HistorySnapshot>(); const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_load_more' ? pending.promise : original(name, args));
     await mount('history');
-    const scroller = document.querySelector<HTMLElement>('.history-pinned')!;
+    const scroller = document.querySelector<HTMLElement>('.history-list')!;
     bottom(scroller); bottom(scroller); bottom(scroller);
     expect(calls('history_load_more')).toHaveLength(1);
     expect(screen.getByRole('progressbar')).toBeTruthy();

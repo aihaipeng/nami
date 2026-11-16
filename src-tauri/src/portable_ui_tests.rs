@@ -59,6 +59,27 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             image_path: None,
             fingerprint: nami::clipboard::fingerprint("text", b"Synthetic portable clipboard text"),
         })?;
+    for (id, title, lines) in [
+        ("portable-note-one", "First note", 8),
+        ("portable-note-two", "Second note", 12),
+    ] {
+        let text = format!("Synthetic original {id}\n").repeat(lines);
+        let state = app.state::<AppState>();
+        let mut database = state.database.lock().unwrap();
+        let database = database.as_mut().ok_or("missing isolated test database")?;
+        database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+            id: id.into(),
+            kind: "text".into(),
+            text: text.clone(),
+            date: "2098-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+        })?;
+        database.clipboard_edit(id, title, Some(&text))?;
+    }
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
@@ -191,6 +212,7 @@ const SCRIPT: &str = r#"
         assert(style.borderTopWidth === '0px' && style.boxShadow === 'none', 'record search gained a border or focus ring');
       }
       const menuAppearance = async (recordNode, expectedFirst) => {
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
         recordNode.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));
         await waitFor(()=>document.querySelector('[role="menu"]'), 'shared context menu did not open');
         const menu=document.querySelector('[role="menu"]');
@@ -251,6 +273,79 @@ const SCRIPT: &str = r#"
       await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');
       pass(currentCase);
 
+      currentCase = 'single record scroll owner and protected action exit';
+      const scroller=historyPanel.querySelector('.history-list'),pinned=historyPanel.querySelector('.history-pinned');
+      assert(pinned.parentElement===scroller && historyPanel.querySelector('.history-items').parentElement===scroller,'records still have split scroll owners');
+      assert(getComputedStyle(pinned).position==='sticky' && !['auto','scroll'].includes(getComputedStyle(pinned).overflowY),'pinned records still scroll independently');
+      const assertOpaquePinned=(layer,view)=>{
+        const style=getComputedStyle(layer),color=style.backgroundColor;
+        assert(color.startsWith('rgb(')||/rgba\([^)]*,\s*1\)$/.test(color),'ordinary records can show through '+view+' pinned background: '+color);
+        assert(Number(style.opacity)===1,'pinned layer is translucent in '+view);
+        assert((style.backdropFilter||style.webkitBackdropFilter)==='none','ordinary records still feed the '+view+' pinned blur');
+      };
+      assertOpaquePinned(pinned,'translation');
+      assert(scroller.scrollHeight>scroller.clientHeight,'scroll fixture does not overflow');
+      const pinnedTop=pinned.getBoundingClientRect().top,ordinary=historyPanel.querySelector('.history-items .history-row'),ordinaryTop=ordinary.getBoundingClientRect().top;
+      scroller.scrollTop=80;
+      await new Promise(requestAnimationFrame);
+      const track=historyPanel.querySelector('.history-scrollbar');
+      assert(track && Math.abs(track.getBoundingClientRect().height-scroller.clientHeight)<=1,'scrollbar does not span the scroll viewport');
+      assert(Math.abs(pinned.getBoundingClientRect().top-pinnedTop)<=1,'ordinary scrolling moved pinned records');
+      assert(Math.abs(ordinary.getBoundingClientRect().top-ordinaryTop+80)<=1,'ordinary records did not follow the shared scroll position');
+      scroller.scrollTop=0;
+      await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
+      await invoke('records_view_set',{view:'clipboard'});
+      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden&&clipboardPanel.querySelector('.history-pinned [data-record-id="portable-clipboard-sample"]'),'clipboard pin fixture did not appear');
+      assertOpaquePinned(clipboardPanel.querySelector('.history-pinned'),'clipboard');
+      await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
+      await invoke('records_view_set',{view:'translation'});
+      await waitFor(()=>!historyPanel.closest('.record-view').hidden,'translation view did not restore');
+      row('sample-03').querySelector('.history-row-select').focus({preventScroll:true});
+      await waitFor(()=>getComputedStyle(row('sample-03').querySelector('.history-row-actions')).opacity==='1','record actions did not become visible');
+      const deleteBefore=row('sample-03').querySelector('.history-delete'),deleteBoxBefore=deleteBefore.getBoundingClientRect();
+      clickAction('sample-03',1);
+      await waitFor(()=>row('sample-03').querySelector('.history-action[data-action="delete"] button')?.getAttribute('aria-hidden')==='true','protected delete did not start its exit');
+      assert(row('sample-03').querySelector('.history-delete')===deleteBefore && deleteBefore.disabled,'delete disappeared before its exit or remained usable');
+      await pause(60);
+      const exiting=deleteBefore.parentElement,exitStyle=getComputedStyle(exiting),exitBox=deleteBefore.getBoundingClientRect();
+      if(!matchMedia('(prefers-reduced-motion: reduce)').matches) assert(Number(exitStyle.opacity)<1 && exitBox.left>deleteBoxBefore.left && Math.abs(exitBox.top-deleteBoxBefore.top)<2,'delete did not move right and fade on protection: '+JSON.stringify({opacity:exitStyle.opacity,transform:exitStyle.transform,width:exitStyle.width,dx:exitBox.left-deleteBoxBefore.left,dy:exitBox.top-deleteBoxBefore.top,connected:exiting.isConnected}));
+      await waitFor(()=>!row('sample-03').querySelector('.history-delete'),'delete exit did not finish');
+      clickAction('sample-03',1);
+      await flag('sample-03','isFavorite',false);
+      await waitFor(()=>row('sample-03').querySelector('.history-delete') && !row('sample-03').querySelector('.history-delete').disabled,'delete did not return after removing protection');
+      pass(currentCase);
+
+      currentCase = 'adjacent notes use measured reversible height transitions';
+      await invoke('records_view_set',{view:'clipboard'});
+      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden,'note view did not activate');
+      const notes=['portable-note-one','portable-note-two'].map(id=>clipboardPanel.querySelector(`[data-record-id="${id}"]`));
+      assert(notes.every(Boolean),'adjacent note fixtures missing');
+      const noteBody=node=>node.querySelector('.clipboard-record-body');
+      const hover=(node,enter)=>node.dispatchEvent(new MouseEvent(enter?'mouseover':'mouseout',{bubbles:true,relatedTarget:document.body}));
+      for(const node of notes) {
+        const title=node.querySelector('.clipboard-record-title'),content=node.querySelector('.clipboard-record-content');
+        assert(getComputedStyle(title).position==='absolute'&&getComputedStyle(content).position==='absolute','hidden note layers still take part in layout');
+        await waitFor(()=>Math.abs(noteBody(node).getBoundingClientRect().height-title.getBoundingClientRect().height)<1,'collapsed note height does not match its title');
+        hover(node,true);
+        await waitFor(()=>noteBody(node).dataset.expanded==='true','note original did not load');
+        await waitFor(()=>Math.abs(noteBody(node).getBoundingClientRect().height-content.getBoundingClientRect().height)<1,'expanded note height does not match complete content');
+        hover(node,false);
+        await waitFor(()=>Math.abs(noteBody(node).getBoundingClientRect().height-title.getBoundingClientRect().height)<1,'note did not settle back to title height');
+      }
+      for(let index=0;index<4;index++) {
+        const current=notes[index%2],other=notes[(index+1)%2];
+        hover(other,false);hover(current,true);
+        await waitFor(()=>noteBody(current).dataset.expanded==='true','cached adjacent note failed to reopen');
+        await pause(40);
+        const before=noteBody(current).getBoundingClientRect().height;
+        hover(current,false);hover(other,true);
+        await new Promise(requestAnimationFrame);
+        assert(Math.abs(noteBody(current).getBoundingClientRect().height-before)<32,'reversing a note snapped its measured height');
+        hover(other,false);
+      }
+      await invoke('records_view_set',{view:'translation'});
+      pass(currentCase);
+
       currentCase = 'React actions update shared Rust history';
       const id = 'sample-03';
       const original = await record(id);
@@ -272,7 +367,7 @@ const SCRIPT: &str = r#"
       assert(rejected, 'protected deletion was accepted');
       const after = await snapshot();
       assert(after.revision === before.revision && after.records.length === 20, 'protected deletion changed history');
-      assert(row(id)?.querySelectorAll('.history-row-actions button').length === 3, 'protected record still exposes delete');
+      assert(row(id)?.querySelectorAll('.history-row-actions button:not([aria-hidden="true"])').length === 3, 'protected record still exposes delete');
       clickAction(id, 2);
       await flag(id, 'isPinned', false);
       await waitFor(() => !row(id)?.classList.contains('pinned'), 'unpin did not update DOM');

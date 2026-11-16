@@ -278,6 +278,7 @@ pub fn translation_chrome_update(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistorySelection {
+    revision: u64,
     sample_id: Option<String>,
     retranslate: bool,
     record: Option<crate::model::HistoryRecord>,
@@ -366,7 +367,7 @@ pub(crate) fn select_history_sample(
         .selected_id()
         .map(str::to_owned)
         == sample_id;
-    windows::select_native_history(app, sample_id.as_deref())?;
+    let revision = windows::select_native_history(app, sample_id.as_deref())?;
     if sample_id.is_some() {
         let visible = {
             let state = app.state::<AppState>();
@@ -387,6 +388,7 @@ pub(crate) fn select_history_sample(
         }
     }
     let selection = HistorySelection {
+        revision,
         sample_id,
         retranslate,
         record,

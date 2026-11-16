@@ -284,6 +284,34 @@ describe('database clipboard history', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('switches adjacent notes without repeatedly restoring the scroll anchor or reloading their content', async () => {
+    records = [0, 1].map((index) => ({ ...records[0], id: `adjacent-${index}`, title: `Note ${index}`, text: `Complete adjacent text ${index}` }));
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const scroller = document.querySelector<HTMLElement>('.history-list')!;
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 1000 } });
+    const first = row('adjacent-0'), second = row('adjacent-1');
+    Object.defineProperties(first, { offsetTop: { configurable: true, value: 100 }, offsetHeight: { configurable: true, value: 40 } });
+    Object.defineProperties(second, { offsetTop: { configurable: true, value: 200 }, offsetHeight: { configurable: true, value: 40 } });
+    scroller.scrollTop = 120;
+    fireEvent.scroll(scroller);
+    let top = 120;
+    const writes = vi.fn((value: number) => { top = value; });
+    Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => top, set: writes });
+    Object.defineProperty(first, 'offsetTop', { configurable: true, value: 80 });
+    for (let index = 0; index < 4; index++) {
+      fireEvent.mouseEnter(first);
+      await waitFor(() => expect(first.querySelector('.clipboard-record-body')?.getAttribute('data-expanded')).toBe('true'));
+      fireEvent.mouseLeave(first);
+      fireEvent.mouseEnter(second);
+      await waitFor(() => expect(second.querySelector('.clipboard-record-body')?.getAttribute('data-expanded')).toBe('true'));
+      expect(first.querySelector('.clipboard-record-body')?.getAttribute('data-expanded')).toBe('false');
+      fireEvent.mouseLeave(second);
+    }
+    expect(writes).not.toHaveBeenCalled();
+    expect(calls('clipboard_record_detail')).toHaveLength(2);
+  });
+
   it.each([false, true])('uses full workspace sessions to dismiss drafts and restore defaults when pinned=%s', async (pinned) => {
     bridge.snapshot.window.clipboardPinned = pinned;
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
@@ -356,18 +384,19 @@ describe('database clipboard history', () => {
 
   it('drags the full viewport scrollbar without moving pinned records and releases its handler', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
-    Object.defineProperty(document.querySelector('.history-viewport'), 'clientHeight', { value: 400 });
     scrollNearEnd();
+    Object.defineProperty(document.querySelector('.history-list'), 'clientHeight', { configurable: true, value: 400 });
+    fireEvent.scroll(document.querySelector('.history-list')!);
     const scrollbar = screen.getByRole('scrollbar');
     const thumb = scrollbar.firstElementChild!;
     fireEvent.pointerDown(thumb, { pointerId: 9, button: 0, clientY: 300 });
-    fireEvent.pointerMove(scrollbar, { pointerId: 9, clientY: 150 });
+    fireEvent.pointerMove(scrollbar, { pointerId: 9, clientY: 270 });
     const element = document.querySelector('.history-list')!;
-    expect(element.scrollTop).toBe(212.5);
+    expect(element.scrollTop).toBe(62.5);
     expect(document.querySelector('.history-pinned')!.scrollTop).toBe(0);
     fireEvent.lostPointerCapture(scrollbar, { pointerId: 9 });
     fireEvent.pointerMove(scrollbar, { pointerId: 9, clientY: 0 });
-    expect(element.scrollTop).toBe(212.5);
+    expect(element.scrollTop).toBe(62.5);
   });
 
   it('hides the scrollbar after inactivity, reveals it on scroll and keeps it visible during drag', async () => {

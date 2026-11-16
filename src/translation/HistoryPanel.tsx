@@ -37,7 +37,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const pinnedList = useRef<HTMLDivElement>(null);
   const state = snapshot.window;
   const lastQuery = useRef({ query: '', favoritesOnly: false });
-  const { query, setQuery, favoritesOnly, toggleFavorites, remember } = useRecordBrowser(state.recordsSession, active, list, pinnedList, () => !native || history.displayReady(query, favoritesOnly));
+  const { query, setQuery, favoritesOnly, toggleFavorites, remember } = useRecordBrowser(state.recordsSession, active, list, pinnedList, () => !native || history.displayReady(query, favoritesOnly), () => history.snapshot.records);
   const displayed = history.displaySnapshot(query, favoritesOnly);
   const records = displayed.records;
   const selection = snapshot.window.translationVisible ? native ? history.snapshot.selectedId : selectedId : null;
@@ -70,10 +70,10 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   useEffect(() => {
     if (!active || !selection) return;
     const row = [...(pinnedList.current?.querySelectorAll<HTMLElement>('.history-row') ?? []), ...(list.current?.querySelectorAll<HTMLElement>('.history-row') ?? [])].find((row) => row.dataset.recordId === selection);
-    const scroller = row?.closest<HTMLElement>('.history-list, .history-pinned');
+    const scroller = list.current;
     if (!row || !scroller) return;
     const viewport = scroller.getBoundingClientRect();
-    const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
+    const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + (row.closest('.history-pinned') || pinnedList.current?.dataset.overflow === 'true' ? 0 : Math.min(pinnedList.current?.offsetHeight ?? 0, (viewport.bottom - viewport.top))) + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
     if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }, [active, selection]);
   useEffect(() => {
@@ -121,10 +121,10 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         }
       }} aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
         const row = event.currentTarget.closest<HTMLElement>('.history-row');
-        const scroller = row?.closest<HTMLElement>('.history-list, .history-pinned');
+        const scroller = list.current;
         if (row && scroller) {
           const viewport = scroller.getBoundingClientRect();
-          const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
+          const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + (row.closest('.history-pinned') || pinnedList.current?.dataset.overflow === 'true' ? 0 : Math.min(pinnedList.current?.offsetHeight ?? 0, (viewport.bottom - viewport.top))) + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
           if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         }
         whenReady(record.id, () => onSelect(record));

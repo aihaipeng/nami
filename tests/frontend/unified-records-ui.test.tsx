@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { bridge, calls, emit, mount, windowState } from './harness';
+import { RecordActions } from '../../src/shared/RecordActions';
+import { translator } from '../../src/shared/i18n';
 
 const clipboardRecords = [
   { id: 'clip-first', kind: 'text', title: '', text: 'Saved text', date: '2026-11-15T12:00:00Z', isFavorite: false, isPinned: false, sourceAppId: null },
@@ -42,6 +44,35 @@ async function switchView(kind: 'clipboard' | 'translation') {
 }
 
 describe('unified records workspace', () => {
+  it('keeps a protected delete button for its exit animation, blocks it immediately and can reverse the exit', () => {
+    const onUpdate = vi.fn();
+    const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate };
+    const view = render(<RecordActions {...props} favorite={false} />);
+    const button = screen.getByRole('button', { name: 'Delete' }) as HTMLButtonElement;
+    view.rerender(<RecordActions {...props} favorite />);
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(view.container.querySelector('[data-action=delete] button')).toBe(button);
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-hidden')).toBe('true');
+    fireEvent.click(button);
+    expect(onUpdate).not.toHaveBeenCalled();
+    view.rerender(<RecordActions {...props} favorite={false} />);
+    expect(screen.getByRole('button', { name: 'Delete' })).toBe(button);
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
+  });
+
+  it.each(['clipboard', 'translation'] as const)('uses a single full-height %s scroll owner for pinned and ordinary records', async (kind) => {
+    await mount('clipboard');
+    if (kind === 'translation') await switchView(kind);
+    const pane = panel(kind);
+    const scroller = pane.querySelector('.history-list')!;
+    expect(pane.querySelector('.history-pinned')?.parentElement).toBe(scroller);
+    expect(pane.querySelector('.history-items')?.parentElement).toBe(scroller);
+    expect(pane.querySelector('.history-viewport')?.querySelectorAll('.history-list')).toHaveLength(1);
+  });
+
   it('uses the same React record workspace in the macOS child WebView and retains both panes', async () => {
     bridge.snapshot.capabilities.nativeHistory = true;
     bridge.history.records[2].date = clipboardRecords[0].date;

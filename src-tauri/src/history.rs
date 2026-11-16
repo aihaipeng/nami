@@ -153,6 +153,10 @@ impl HistoryStore {
         }
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn record(&self, id: &str) -> Option<HistoryRecord> {
         self.indices
             .get(id)

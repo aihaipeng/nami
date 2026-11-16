@@ -29,9 +29,11 @@ fn storage_failure(app: &AppHandle, error: String) -> String {
     })
 }
 
-pub(crate) fn select_native_history(app: &AppHandle, id: Option<&str>) -> Result<(), String> {
-    app.state::<AppState>().history.lock().unwrap().select(id)?;
-    publish_history(app)
+pub(crate) fn select_native_history(app: &AppHandle, id: Option<&str>) -> Result<u64, String> {
+    let state = app.state::<AppState>();
+    let mut history = state.history.lock().unwrap();
+    history.select(id)?;
+    Ok(history.revision())
 }
 
 pub(crate) fn history_record(app: &AppHandle, id: &str) -> Option<HistoryRecord> {
