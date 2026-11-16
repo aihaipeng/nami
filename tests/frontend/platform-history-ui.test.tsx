@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import type { HistorySnapshot } from '../../src/translation/history';
+import { defaultTranslationShortcuts } from '../../src/shared/shortcuts';
 
 function portable(platform: 'windows' | 'linux' = 'windows') {
   bridge.snapshot.window.recordView = 'translation';
@@ -12,6 +13,7 @@ function portable(platform: 'windows' | 'linux' = 'windows') {
     selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false,
     primaryModifier: 'control',
   };
+  bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts: defaultTranslationShortcuts('control') };
 }
 
 const rows = () => screen.queryAllByRole('button', { name: /^Translation:/ });
