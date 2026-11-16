@@ -29,6 +29,19 @@ def test_clipboard_record_type_is_bright_white():
     assert "color: '#fff', WebkitTextFillColor: '#fff'" in heading
 
 
+def test_translation_results_use_the_clipboard_detail_font():
+    styles = (ROOT / 'src/styles.css').read_text()
+    clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
+    family = "-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+    result = next(block for block in styles.split('}') if '.result-column {' in block)
+    detail = next(block for block in clipboard.split('}') if '.clipboard-detail-text {' in block)
+    records = next(block for block in styles.split('}') if '.history-panel {' in block)
+    assert 'font-size: 13px' in result and 'font-size: 13px' in detail
+    assert 'line-height: 1.5' in result and 'line-height: 1.5' in detail
+    assert f'font-family: {family}' in result
+    assert f'font-family: {family}' in records
+
+
 def test_detail_metadata_height_stays_three_rows():
     clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
     assert 'height: calc(10px + 16px * 3 + 5px * 2)' in clipboard
