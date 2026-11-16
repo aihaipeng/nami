@@ -6,6 +6,12 @@ pub const MAX_FILE_COUNT: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardFileRepresentation {
+    pub paths: Vec<String>,
+    pub image_path: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardRecord {
@@ -167,7 +173,7 @@ pub fn fingerprint(kind: &str, bytes: &[u8]) -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn valid_image_name(relative: &str) -> bool {
+pub(crate) fn valid_image_name(relative: &str) -> bool {
     let parts: Vec<_> = relative.split('/').collect();
     if parts.len() != 3 || parts[0] != "origin" || parts[1].len() != 2 {
         return false;

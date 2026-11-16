@@ -1,8 +1,17 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipboardPayload {
     Text(String),
-    Image { bytes: Vec<u8>, extension: String },
+    Image {
+        bytes: Vec<u8>,
+        extension: String,
+    },
     Files(Vec<String>),
+    FilesImage {
+        paths: Vec<String>,
+        bytes: Vec<u8>,
+        extension: String,
+        image_fallback: bool,
+    },
 }
 
 pub struct ClipboardCapture {

@@ -1,6 +1,7 @@
 use super::{storage_error, HistoryDatabase};
 use crate::clipboard::{
-    ClipboardCursor, ClipboardPage, ClipboardRecord, MAX_FILE_COUNT, MAX_TEXT_BYTES,
+    valid_image_name, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage, ClipboardRecord,
+    MAX_FILE_COUNT, MAX_TEXT_BYTES,
 };
 use rusqlite::{params, OptionalExtension, Row, TransactionBehavior};
 
@@ -98,6 +99,45 @@ pub(super) fn migrate_v3(connection: &mut rusqlite::Connection) -> Result<(), St
         END;
         PRAGMA user_version=3;").map_err(storage_error)?;
     tx.commit().map_err(storage_error)
+}
+
+pub(super) fn migrate_v5(connection: &mut rusqlite::Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch(
+        "CREATE TABLE clipboard_file_representations (
+        sequence INTEGER PRIMARY KEY REFERENCES clipboard_records(sequence) ON DELETE CASCADE,
+        paths TEXT NOT NULL, image_path TEXT NOT NULL
+    );
+    CREATE INDEX clipboard_image_resources ON clipboard_records(image_path) WHERE image_path IS NOT NULL;
+    CREATE INDEX clipboard_file_image_resources ON clipboard_file_representations(image_path);
+    PRAGMA user_version=5;",
+    )
+    .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
+fn valid_file_representation(
+    record: &ClipboardRecord,
+    representation: &ClipboardFileRepresentation,
+) -> bool {
+    !representation.paths.is_empty()
+        && representation.paths.len() <= MAX_FILE_COUNT
+        && representation
+            .paths
+            .iter()
+            .all(|path| std::path::Path::new(path).is_absolute() && !path.contains('\0'))
+        && valid_image_name(&representation.image_path)
+        && match record.kind.as_str() {
+            "image" => {
+                representation.paths.len() == 1
+                    && record.image_path.as_ref() == Some(&representation.image_path)
+            }
+            "files" => serde_json::from_str::<Vec<String>>(&record.text)
+                .is_ok_and(|paths| paths == representation.paths),
+            _ => false,
+        }
 }
 
 fn decode(row: &Row<'_>) -> rusqlite::Result<ClipboardRecord> {
@@ -312,6 +352,14 @@ impl HistoryDatabase {
         &mut self,
         record: &ClipboardRecord,
     ) -> Result<ClipboardRecord, String> {
+        self.clipboard_insert_with_file_representation(record, None)
+    }
+
+    pub fn clipboard_insert_with_file_representation(
+        &mut self,
+        record: &ClipboardRecord,
+        representation: Option<&ClipboardFileRepresentation>,
+    ) -> Result<ClipboardRecord, String> {
         if record.id.is_empty()
             || !["text", "image", "files"].contains(&record.kind.as_str())
             || record.text.len() > MAX_TEXT_BYTES
@@ -321,6 +369,19 @@ impl HistoryDatabase {
         {
             return Err("invalid_argument".into());
         }
+        let paths = representation
+            .map(|representation| {
+                if !valid_file_representation(record, representation) {
+                    return Err("invalid_argument");
+                }
+                let paths =
+                    serde_json::to_string(&representation.paths).map_err(|_| "invalid_argument")?;
+                if paths.len() > MAX_TEXT_BYTES {
+                    return Err("invalid_argument");
+                }
+                Ok(paths)
+            })
+            .transpose()?;
         let (summary, search_text) = if record.kind == "files" {
             let paths: Vec<String> =
                 serde_json::from_str(&record.text).map_err(|_| "invalid_argument")?;
@@ -403,11 +464,48 @@ impl HistoryDatabase {
                 .map_err(storage_error)?;
             record.id.clone()
         };
+        if let (Some(representation), Some(paths)) = (representation, paths) {
+            transaction.execute("INSERT INTO clipboard_file_representations(sequence,paths,image_path) VALUES((SELECT sequence FROM clipboard_records WHERE id=?1),?2,?3) ON CONFLICT(sequence) DO UPDATE SET paths=excluded.paths,image_path=excluded.image_path", params![id,paths,representation.image_path]).map_err(storage_error)?;
+        } else {
+            transaction.execute("DELETE FROM clipboard_file_representations WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1)", [&id]).map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         if inserted {
             self.clipboard_total_records += 1;
         }
         self.clipboard_record(&id)
+    }
+
+    pub fn clipboard_file_representation(
+        &self,
+        id: &str,
+    ) -> Result<Option<ClipboardFileRepresentation>, String> {
+        let stored: Option<(String, String)> = self.connection.query_row(
+            "SELECT f.paths,f.image_path FROM clipboard_file_representations f JOIN clipboard_records r USING(sequence) WHERE r.id=?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(storage_error)?;
+        let Some((paths, image_path)) = stored else {
+            return Ok(None);
+        };
+        if paths.len() > MAX_TEXT_BYTES {
+            return Err("storage_corrupt".into());
+        }
+        let representation = ClipboardFileRepresentation {
+            paths: serde_json::from_str(&paths).map_err(|_| "storage_corrupt")?,
+            image_path,
+        };
+        let record = self.clipboard_record(id)?;
+        if !valid_file_representation(&record, &representation) {
+            return Err("storage_corrupt".into());
+        }
+        Ok(Some(representation))
+    }
+
+    pub fn clipboard_image_referenced(&self, path: &str) -> Result<bool, String> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM clipboard_records WHERE image_path=?1 UNION ALL SELECT 1 FROM clipboard_file_representations WHERE image_path=?1)",
+            [path], |row| row.get(0),
+        ).map_err(storage_error)
     }
 
     pub fn clipboard_detail(&self, id: &str) -> Result<crate::clipboard::ClipboardDetail, String> {
@@ -583,7 +681,7 @@ mod tests {
         db.clipboard_update("edit", "favorite").unwrap();
         db.connection
             .execute_batch(
-                "ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
+                "DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
             )
             .unwrap();
         drop(db);
@@ -694,6 +792,353 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    fn image_record(id: &str) -> ClipboardRecord {
+        let mut image = record(id, "");
+        image.kind = "image".into();
+        image.image_path = Some(format!("origin/ab/{}.png", "ab".repeat(32)));
+        image.fingerprint = fingerprint("image", b"synthetic image");
+        image
+    }
+
+    fn representation(image: &ClipboardRecord, file: &str) -> ClipboardFileRepresentation {
+        ClipboardFileRepresentation {
+            paths: vec![file_path(file)],
+            image_path: image.image_path.clone().unwrap(),
+        }
+    }
+
+    #[test]
+    fn file_representations_migrate_v4_without_changing_records_and_reopen() {
+        let root = std::env::temp_dir().join(format!("nami-files-v4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        let original = record("text", &"完整正文🌊".repeat(200));
+        db.clipboard_insert(&original).unwrap();
+        db.clipboard_edit("text", "Preserved title", None).unwrap();
+        db.clipboard_update("text", "favorite").unwrap();
+        db.clipboard_capture_set(true).unwrap();
+        let mut image = image_record("image");
+        image.source_app = Some(serde_json::json!({"name":"Synthetic source"}));
+        db.clipboard_insert(&image).unwrap();
+        let paths = vec![file_path("photo.png")];
+        let mut files = record("files", &serde_json::to_string(&paths).unwrap());
+        files.kind = "files".into();
+        db.clipboard_insert(&files).unwrap();
+        db.connection
+            .execute_batch("DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; PRAGMA user_version=4;")
+            .unwrap();
+        drop(db);
+
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            db.connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(db.clipboard_record("text").unwrap().text, original.text);
+        assert!(db.clipboard_record("text").unwrap().is_favorite);
+        assert_eq!(
+            db.clipboard_detail("text").unwrap().title,
+            "Preserved title"
+        );
+        assert_eq!(
+            db.clipboard_record("image").unwrap().source_app,
+            image.source_app
+        );
+        assert_eq!(
+            db.clipboard_record("image").unwrap().image_path,
+            image.image_path
+        );
+        assert_eq!(db.clipboard_record("files").unwrap().text, files.text);
+        assert!(db.clipboard_capture_enabled().unwrap());
+        assert_eq!(db.clipboard_file_representation("image").unwrap(), None);
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            3
+        );
+        let attachment = representation(&image, "photo.png");
+        assert_eq!(
+            db.clipboard_insert_with_file_representation(&image, Some(&attachment))
+                .unwrap()
+                .id,
+            "image"
+        );
+        drop(db);
+        let db = HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            db.clipboard_file_representation("image").unwrap(),
+            Some(attachment)
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            3
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_representations_replace_deduplicated_id_and_roll_back_atomically() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let image = image_record("image");
+        let original = representation(&image, "original.png");
+        db.clipboard_insert_with_file_representation(&image, Some(&original))
+            .unwrap();
+        let mut duplicate = image.clone();
+        duplicate.id = "incoming-id".into();
+        duplicate.date = "2026-11-16T12:00:00.000Z".into();
+        duplicate.source_app = Some(serde_json::json!({"name":"Replacement source"}));
+        let replacement = representation(&image, "replacement.png");
+        db.connection.execute_batch("CREATE TRIGGER reject_attachment_update BEFORE UPDATE ON clipboard_file_representations BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        assert!(db
+            .clipboard_insert_with_file_representation(&duplicate, Some(&replacement))
+            .is_err());
+        assert_eq!(db.clipboard_record("image").unwrap().date, image.date);
+        assert_eq!(db.clipboard_record("image").unwrap().source_app, None);
+        assert_eq!(
+            db.clipboard_file_representation("image").unwrap(),
+            Some(original)
+        );
+        assert_eq!(
+            db.connection
+                .query_row("SELECT count(*) FROM source_apps", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        db.connection.execute_batch("DROP TRIGGER reject_attachment_update; CREATE TRIGGER reject_attachment_insert BEFORE INSERT ON clipboard_file_representations BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        let mut fresh = duplicate.clone();
+        fresh.fingerprint = "new-image".into();
+        assert!(db
+            .clipboard_insert_with_file_representation(&fresh, Some(&replacement))
+            .is_err());
+        assert_eq!(db.clipboard_record("incoming-id").unwrap_err(), "not_found");
+        assert_eq!(
+            db.connection
+                .query_row("SELECT count(*) FROM source_apps", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            1
+        );
+        db.connection
+            .execute_batch("DROP TRIGGER reject_attachment_insert")
+            .unwrap();
+        assert_eq!(
+            db.clipboard_insert_with_file_representation(&duplicate, Some(&replacement))
+                .unwrap()
+                .id,
+            "image"
+        );
+        assert_eq!(
+            db.clipboard_file_representation("image").unwrap(),
+            Some(replacement)
+        );
+        assert_eq!(
+            db.clipboard_file_representation("incoming-id").unwrap(),
+            None
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            1
+        );
+        assert_eq!(db.clipboard_insert(&duplicate).unwrap().id, "image");
+        assert_eq!(db.clipboard_file_representation("image").unwrap(), None);
+    }
+
+    #[test]
+    fn file_representations_validate_paths_size_kind_and_stored_corruption() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let image = image_record("image");
+        let valid = representation(&image, "photo.png");
+        for paths in [
+            Vec::new(),
+            vec![file_path("first.png"), file_path("second.png")],
+            vec![file_path("photo.png"); MAX_FILE_COUNT + 1],
+            vec!["relative.png".into()],
+            vec![file_path("bad\0.png")],
+            vec![format!("/{}", "x".repeat(MAX_TEXT_BYTES))],
+        ] {
+            let invalid = ClipboardFileRepresentation {
+                paths,
+                ..valid.clone()
+            };
+            assert_eq!(
+                db.clipboard_insert_with_file_representation(&image, Some(&invalid))
+                    .unwrap_err(),
+                "invalid_argument"
+            );
+        }
+        for image_path in [
+            "origin/ab/abcdef.png",
+            "../outside.png",
+            "origin/ab/wrong.jpg",
+        ] {
+            let invalid = ClipboardFileRepresentation {
+                image_path: image_path.into(),
+                ..valid.clone()
+            };
+            assert_eq!(
+                db.clipboard_insert_with_file_representation(&image, Some(&invalid))
+                    .unwrap_err(),
+                "invalid_argument"
+            );
+        }
+        let mismatched = ClipboardFileRepresentation {
+            image_path: format!("origin/cd/{}.png", "cd".repeat(32)),
+            ..valid.clone()
+        };
+        assert_eq!(
+            db.clipboard_insert_with_file_representation(&image, Some(&mismatched))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_insert_with_file_representation(&record("text", "text"), Some(&valid))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        let mut files = record(
+            "files",
+            &serde_json::to_string(&vec![file_path("other.png")]).unwrap(),
+        );
+        files.kind = "files".into();
+        assert_eq!(
+            db.clipboard_insert_with_file_representation(&files, Some(&valid))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        db.clipboard_insert_with_file_representation(&image, Some(&valid))
+            .unwrap();
+        for corrupt in [
+            "not JSON".to_owned(),
+            "[]".to_owned(),
+            "[\"relative.png\"]".to_owned(),
+            "x".repeat(MAX_TEXT_BYTES + 1),
+        ] {
+            db.connection
+                .execute(
+                    "UPDATE clipboard_file_representations SET paths=?1",
+                    [&corrupt],
+                )
+                .unwrap();
+            assert_eq!(
+                db.clipboard_file_representation("image").unwrap_err(),
+                "storage_corrupt"
+            );
+        }
+        db.connection
+            .execute(
+                "UPDATE clipboard_file_representations SET paths=?1,image_path='../invalid.png'",
+                [serde_json::to_string(&valid.paths).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(
+            db.clipboard_file_representation("image").unwrap_err(),
+            "storage_corrupt"
+        );
+        db.connection
+            .execute_batch("DROP TABLE clipboard_file_representations")
+            .unwrap();
+        let page = db
+            .clipboard_page_filtered("", false, Some("image"), None, 100)
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].kind, "image");
+        assert!(db
+            .clipboard_page_filtered("", false, Some("files"), None, 100)
+            .unwrap()
+            .records
+            .is_empty());
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(
+                db.clipboard_page_filtered("", false, Some("image"), None, 100)
+                    .unwrap()
+                    .records
+                    .len(),
+                1
+            );
+        }
+        println!(
+            "isolated image first-page query, attachment table absent: 100 queries in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn deleting_file_representations_cascades_and_preserves_shared_image_references() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let image = image_record("image");
+        let attachment = representation(&image, "photo.png");
+        let mut files = record("files", &serde_json::to_string(&attachment.paths).unwrap());
+        files.kind = "files".into();
+        db.clipboard_insert(&image).unwrap();
+        db.clipboard_insert_with_file_representation(&files, Some(&attachment))
+            .unwrap();
+        let mut statement = db.connection.prepare("EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM clipboard_records WHERE image_path=?1 UNION ALL SELECT 1 FROM clipboard_file_representations WHERE image_path=?1)").unwrap();
+        let plan = statement
+            .query_map([&attachment.image_path], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        drop(statement);
+        assert!(
+            plan.contains("clipboard_image_resources")
+                && plan.contains("clipboard_file_image_resources"),
+            "resource cleanup must use both indexes: {plan}"
+        );
+        assert!(db
+            .clipboard_image_referenced(&attachment.image_path)
+            .unwrap());
+        db.clipboard_update("image", "delete").unwrap();
+        assert!(db
+            .clipboard_image_referenced(&attachment.image_path)
+            .unwrap());
+        assert_eq!(
+            db.clipboard_file_representation("files").unwrap(),
+            Some(attachment.clone())
+        );
+        db.clipboard_update("files", "delete").unwrap();
+        assert!(!db
+            .clipboard_image_referenced(&attachment.image_path)
+            .unwrap());
+        assert_eq!(db.clipboard_file_representation("files").unwrap(), None);
+        assert_eq!(
+            db.connection
+                .query_row(
+                    "SELECT count(*) FROM clipboard_file_representations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(!db
+            .clipboard_image_referenced("origin/ab/absent.png")
+            .unwrap());
+    }
+
     #[test]
     fn version_two_migration_preserves_all_content_and_rolls_back_on_bad_data() {
         for corrupt in [false, true] {
@@ -702,7 +1147,7 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join("test.sqlite3");
             let mut db = HistoryDatabase::open(&path).unwrap();
-            db.connection.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
+            db.connection.execute_batch("DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
             migrate(&mut db.connection).unwrap();
             let source =
                 serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,test"})
@@ -939,11 +1384,19 @@ mod tests {
                 tx.execute("INSERT INTO source_apps(payload) VALUES(?1)", [&source])
                     .unwrap();
                 let source_id = tx.last_insert_rowid();
-                let mut metadata=tx.prepare("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,fingerprint) VALUES(?1,'text',?2,'2026-11-15T00:00:00Z',?3,?4,?5,?6,?1)").unwrap();
+                let mut metadata=tx.prepare("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,fingerprint,image_path) VALUES(?1,?7,?2,'2026-11-15T00:00:00Z',?3,?4,?5,?6,?1,?8)").unwrap();
                 let mut contents=tx.prepare("INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?2)").unwrap();
+                let mut representations=tx.prepare("INSERT INTO clipboard_file_representations(sequence,paths,image_path) VALUES(?1,?2,?3)").unwrap();
+                let image_path = format!("origin/00/{}.png", "0".repeat(64));
+                let image_files =
+                    serde_json::to_string(&vec![file_path("benchmark-image.png")]).unwrap();
                 for index in 0..size {
-                    let text =
-                        format!("common synthetic clipboard {index:06} {}", "x".repeat(1000));
+                    let image = index % 7 == 0;
+                    let text = if image {
+                        String::new()
+                    } else {
+                        format!("common synthetic clipboard {index:06} {}", "x".repeat(1000))
+                    };
                     metadata
                         .execute(params![
                             format!("item-{index}"),
@@ -951,15 +1404,22 @@ mod tests {
                             index,
                             index % 10 == 0,
                             index % 1000 == 0,
-                            source_id
+                            source_id,
+                            if image { "image" } else { "text" },
+                            image.then_some(&image_path)
                         ])
                         .unwrap();
-                    contents
-                        .execute(params![tx.last_insert_rowid(), text])
-                        .unwrap();
+                    let sequence = tx.last_insert_rowid();
+                    contents.execute(params![sequence, text]).unwrap();
+                    if image {
+                        representations
+                            .execute(params![sequence, image_files, image_path])
+                            .unwrap();
+                    }
                 }
                 drop(metadata);
                 drop(contents);
+                drop(representations);
                 tx.commit().unwrap();
             }
             drop(db);
@@ -1021,7 +1481,7 @@ mod tests {
             drop(db);
             std::fs::remove_dir_all(directory).unwrap();
         }
-        let report = serde_json::json!({"scope":"isolated synthetic clipboard; database+summary JSON, not click-to-frame or physical disk cold start","runs":reports});
+        let report = serde_json::json!({"scope":"isolated synthetic clipboard with one image+file representation per seven rows; database+summary JSON, not click-to-frame or physical disk cold start","runs":reports});
         let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/clipboard-benchmark.json");
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         println!("{report}");
@@ -1411,7 +1871,7 @@ mod tests {
             source_app: None,
         };
         database.insert(&translation, "edge", || true).unwrap();
-        database.connection.execute_batch("DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
+        database.connection.execute_batch("DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
         database
             .connection
             .execute(

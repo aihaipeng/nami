@@ -92,18 +92,36 @@ unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>,
             }
         }
     }
-    let payload = if !files.is_empty() {
+    let mut image = None;
+    for (kind, extension) in [("public.png", "png"), ("public.tiff", "tiff")] {
+        let data = match bytes(board, kind) {
+            Err("clipboard_capture_limit") if !files.is_empty() => continue,
+            result => result?,
+        };
+        if let Some(bytes) = data.filter(|bytes| !bytes.is_empty()) {
+            if total
+                .checked_add(bytes.len())
+                .is_none_or(|size| size > LIMIT)
+            {
+                continue;
+            }
+            image = Some((bytes, extension.to_owned()));
+            break;
+        }
+    }
+    let payload = if let Some((bytes, extension)) = image {
+        Some(if files.is_empty() {
+            ClipboardPayload::Image { bytes, extension }
+        } else {
+            ClipboardPayload::FilesImage {
+                paths: files,
+                bytes,
+                extension,
+                image_fallback: false,
+            }
+        })
+    } else if !files.is_empty() {
         Some(ClipboardPayload::Files(files))
-    } else if let Some(bytes) = bytes(board, "public.png")? {
-        Some(ClipboardPayload::Image {
-            bytes,
-            extension: "png".into(),
-        })
-    } else if let Some(bytes) = bytes(board, "public.tiff")? {
-        Some(ClipboardPayload::Image {
-            bytes,
-            extension: "tiff".into(),
-        })
     } else if let Some(bytes) = bytes(board, "public.utf8-plain-text")? {
         let text = String::from_utf8(bytes).map_err(|_| "clipboard_text_encoding")?;
         (!text.trim().is_empty()).then_some(ClipboardPayload::Text(text))
@@ -144,6 +162,18 @@ unsafe fn set_bytes(item: &AnyObject, kind: &str, bytes: &[u8]) -> Result<(), &'
     }
 }
 
+unsafe fn set_image(item: &AnyObject, bytes: &[u8], extension: &str) -> Result<(), &'static str> {
+    let kind = match extension {
+        "png" => "public.png",
+        "tiff" => "public.tiff",
+        _ => return Err("invalid_argument"),
+    };
+    if bytes.is_empty() || bytes.len() > LIMIT {
+        return Err("invalid_argument");
+    }
+    set_bytes(item, kind, bytes)
+}
+
 unsafe fn write(
     board: *mut AnyObject,
     payload: &ClipboardPayload,
@@ -161,33 +191,54 @@ unsafe fn write(
                 let _: () = msg_send![&*objects, addObject: &*item];
             }
             ClipboardPayload::Image { bytes, extension } => {
-                let kind = match extension.as_str() {
-                    "png" => "public.png",
-                    "tiff" => "public.tiff",
-                    _ => return Err("invalid_argument"),
-                };
-                if bytes.is_empty() || bytes.len() > LIMIT {
-                    return Err("invalid_argument");
-                }
                 let item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
-                set_bytes(&item, kind, bytes)?;
+                set_image(&item, bytes, extension)?;
                 let _: () = msg_send![&*objects, addObject: &*item];
             }
-            ClipboardPayload::Files(paths) => {
-                if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
+            ClipboardPayload::Files(paths) | ClipboardPayload::FilesImage { paths, .. } => {
+                let image = match payload {
+                    ClipboardPayload::FilesImage {
+                        bytes,
+                        extension,
+                        image_fallback,
+                        ..
+                    } => Some((bytes, extension, *image_fallback)),
+                    _ => None,
+                };
+                if paths.is_empty()
+                    || paths.len() > MAX_FILE_COUNT
+                    || image.is_some_and(|(_, _, fallback)| fallback && paths.len() != 1)
+                    || paths.iter().any(|path| {
+                        path.contains('\0') || !std::path::Path::new(path).is_absolute()
+                    })
+                    || paths
+                        .iter()
+                        .map(String::len)
+                        .sum::<usize>()
+                        .checked_add(image.map_or(0, |(bytes, _, _)| bytes.len()))
+                        .is_none_or(|size| size > LIMIT)
+                {
                     return Err("invalid_argument");
                 }
-                for path in paths {
+                for (index, path) in paths.iter().enumerate() {
                     let filesystem_path = std::path::Path::new(path);
-                    if !filesystem_path.is_absolute() || !filesystem_path.exists() {
+                    let exists = filesystem_path.exists();
+                    if !exists && !image.is_some_and(|(_, _, fallback)| fallback) {
                         return Err("clipboard_file_missing");
                     }
-                    let path = NSString::from_str(path);
-                    let url: Retained<AnyObject> =
-                        msg_send![class!(NSURL), fileURLWithPath: &*path];
-                    let value: Retained<NSString> = msg_send![&*url, absoluteString];
                     let item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
-                    set_bytes(&item, "public.file-url", value.to_string().as_bytes())?;
+                    if exists {
+                        let path = NSString::from_str(path);
+                        let url: Retained<AnyObject> =
+                            msg_send![class!(NSURL), fileURLWithPath: &*path];
+                        let value: Retained<NSString> = msg_send![&*url, absoluteString];
+                        set_bytes(&item, "public.file-url", value.to_string().as_bytes())?;
+                    }
+                    if index == 0 {
+                        if let Some((bytes, extension, _)) = image {
+                            set_image(&item, bytes, extension)?;
+                        }
+                    }
                     let _: () = msg_send![&*objects, addObject: &*item];
                 }
             }
@@ -415,6 +466,126 @@ pub fn test_clipboard_history() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn image_and_file_representations_are_not_discarded_during_capture() {
+        unsafe {
+            let name =
+                NSString::from_str(&format!("dev.local.nami.mixed.{}", uuid::Uuid::new_v4()));
+            let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+            let paths = vec![std::env::temp_dir()
+                .to_string_lossy()
+                .trim_end_matches('/')
+                .to_owned()];
+            write(board, &ClipboardPayload::Files(paths.clone())).unwrap();
+            let image = include_bytes!("../../icons/icon.png");
+            let data: Retained<AnyObject> =
+                msg_send![class!(NSData), dataWithBytes: image.as_ptr(), length: image.len()];
+            let _: bool = msg_send![board, setData: &*data, forType: ns_string!("public.png")];
+            let captured = read(board).unwrap().unwrap().1;
+            let _: () = msg_send![board, releaseGlobally];
+            assert_eq!(
+                captured,
+                ClipboardPayload::FilesImage {
+                    paths,
+                    bytes: image.to_vec(),
+                    extension: "png".into(),
+                    image_fallback: false
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_copy_restores_both_formats_and_only_images_can_fall_back_when_files_disappear() {
+        unsafe {
+            let name = NSString::from_str(&format!(
+                "dev.local.nami.mixed-copy.{}",
+                uuid::Uuid::new_v4()
+            ));
+            let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+            let root =
+                std::env::temp_dir().join(format!("nami-mixed-copy-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let first = root.join("first #一.png");
+            let second = root.join("second %二.txt");
+            let image = include_bytes!("../../icons/icon.png").to_vec();
+            std::fs::write(&first, &image).unwrap();
+            std::fs::write(&second, b"synthetic").unwrap();
+            let paths = vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ];
+            let mixed = ClipboardPayload::FilesImage {
+                paths: paths.clone(),
+                bytes: image.clone(),
+                extension: "png".into(),
+                image_fallback: false,
+            };
+            write(board, &mixed).unwrap();
+            assert_eq!(read(board).unwrap().unwrap().1, mixed);
+            let items: Retained<AnyObject> = msg_send![board, pasteboardItems];
+            let count: usize = msg_send![&*items, count];
+            assert_eq!(count, 2);
+            for kind in PRIVATE_TYPES {
+                write(board, &mixed).unwrap();
+                let kind = NSString::from_str(kind);
+                let _: bool = msg_send![board, setString: ns_string!(""), forType: &*kind];
+                assert!(read(board).unwrap().is_none());
+            }
+            write(board, &mixed).unwrap();
+            std::fs::remove_file(&second).unwrap();
+            let previous = read(board).unwrap();
+            assert_eq!(write(board, &mixed), Err(("clipboard_file_missing", None)));
+            assert_eq!(read(board).unwrap(), previous);
+            std::fs::remove_file(&first).unwrap();
+            let fallback = ClipboardPayload::FilesImage {
+                paths: vec![paths[0].clone()],
+                bytes: image.clone(),
+                extension: "png".into(),
+                image_fallback: true,
+            };
+            write(board, &fallback).unwrap();
+            assert_eq!(
+                read(board).unwrap().unwrap().1,
+                ClipboardPayload::Image {
+                    bytes: image,
+                    extension: "png".into()
+                }
+            );
+            let _: () = msg_send![board, releaseGlobally];
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_oversized_optional_file_icon_does_not_discard_the_files() {
+        unsafe {
+            let name = NSString::from_str(&format!(
+                "dev.local.nami.icon-limit.{}",
+                uuid::Uuid::new_v4()
+            ));
+            let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+            let paths = vec![std::env::temp_dir()
+                .to_string_lossy()
+                .trim_end_matches('/')
+                .to_owned()];
+            write(board, &ClipboardPayload::Files(paths.clone())).unwrap();
+            let data: Retained<AnyObject> =
+                msg_send![class!(NSMutableData), dataWithLength: LIMIT + 1];
+            let _: bool = msg_send![board, setData: &*data, forType: ns_string!("public.png")];
+            assert_eq!(
+                read(board).unwrap().unwrap().1,
+                ClipboardPayload::Files(paths)
+            );
+            let _: isize = msg_send![board, clearContents];
+            let _: bool = msg_send![board, setData: &*data, forType: ns_string!("public.png")];
+            assert_eq!(read(board), Err("clipboard_capture_limit"));
+            let _: () = msg_send![board, releaseGlobally];
+        }
+    }
+
     #[test]
     fn synthetic_clipboard_roundtrips_and_protects_private_and_missing_files() {
         super::test_clipboard_history().unwrap();

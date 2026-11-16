@@ -562,7 +562,7 @@ pub async fn clipboard_record_use(
             + 1
     })
     .await?;
-    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
+    let payload = crate::clipboard_runtime::payload(&app, record_id, true).await?;
     let initial = on_main(&app, move |app| {
         let state = app.state::<AppState>();
         if state.operation.load(Ordering::SeqCst) != operation {
@@ -931,12 +931,18 @@ pub async fn clipboard_record_update(
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let root = crate::clipboard_runtime::image_root(&app)?;
-    let image = crate::clipboard_runtime::database(&app, move |database| {
-        let image = if action == "delete" {
-            database.clipboard_record(&record_id)?.image_path
-        } else {
-            None
-        };
+    let images = crate::clipboard_runtime::database(&app, move |database| {
+        let mut images = Vec::new();
+        if action == "delete" {
+            images.extend(database.clipboard_record(&record_id)?.image_path);
+            images.extend(
+                database
+                    .clipboard_file_representation(&record_id)?
+                    .map(|representation| representation.image_path),
+            );
+            images.sort();
+            images.dedup();
+        }
         if action == "edit" {
             database.clipboard_edit(
                 &record_id,
@@ -949,15 +955,26 @@ pub async fn clipboard_record_update(
             }
             database.clipboard_update(&record_id, &action)?;
         }
-        Ok(image)
+        let mut unreferenced = Vec::new();
+        for path in images {
+            if !database.clipboard_image_referenced(&path)? {
+                unreferenced.push(path);
+            }
+        }
+        Ok(unreferenced)
     })
     .await?;
     crate::clipboard_runtime::changed(&app)?;
-    if let Some(path) = image {
-        tauri::async_runtime::spawn_blocking(move || nami::clipboard::remove_image(&root, &path))
-            .await
-            .map_err(|_| "storage_worker")?
-            .map_err(|_| "clipboard_cleanup_failed")?;
+    if !images.is_empty() {
+        tauri::async_runtime::spawn_blocking(move || {
+            for path in images {
+                nami::clipboard::remove_image(&root, &path)?;
+            }
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|_| "storage_worker")?
+        .map_err(|_| "clipboard_cleanup_failed")?;
     }
     Ok(())
 }
@@ -1038,11 +1055,19 @@ pub async fn clipboard_image(
     if !(128..=2048).contains(&max_pixels) {
         return Err("invalid_argument".into());
     }
-    let payload = crate::clipboard_runtime::payload(&app, record_id).await?;
+    let payload = crate::clipboard_runtime::payload(&app, record_id, false).await?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let bytes = match payload {
-            platform::ClipboardPayload::Image { bytes, .. } => bytes,
-            platform::ClipboardPayload::Files(paths) if paths.len() == 1 => {
+            platform::ClipboardPayload::Image { bytes, .. }
+            | platform::ClipboardPayload::FilesImage {
+                bytes,
+                image_fallback: true,
+                ..
+            } => bytes,
+            platform::ClipboardPayload::Files(paths)
+            | platform::ClipboardPayload::FilesImage { paths, .. }
+                if paths.len() == 1 =>
+            {
                 nami::clipboard::read_file_preview(std::path::Path::new(&paths[0]))?
             }
             _ => return Err("invalid_argument".into()),

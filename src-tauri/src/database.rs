@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 pub const PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -157,6 +157,9 @@ impl HistoryDatabase {
                 .map_err(storage_error)?;
             tx.execute_batch("ALTER TABLE clipboard_records ADD COLUMN title TEXT NOT NULL DEFAULT ''; PRAGMA user_version=4;").map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
+        }
+        if version < 5 {
+            clipboard::migrate_v5(&mut connection)?;
         }
         clipboard::ensure_filter_indexes(&connection)?;
         let clipboard_total_records = connection
