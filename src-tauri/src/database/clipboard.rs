@@ -635,6 +635,23 @@ impl HistoryDatabase {
         Ok(())
     }
 
+    pub fn clipboard_promote(&mut self, id: &str) -> Result<(), String> {
+        let now = chrono::Utc::now();
+        let date = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let created = now.timestamp_millis();
+        let updated = self
+            .connection
+            .execute(
+                "UPDATE clipboard_records SET date=?1,created_at=?2 WHERE id=?3",
+                params![date, created, id],
+            )
+            .map_err(storage_error)?;
+        if updated == 0 {
+            return Err("not_found".into());
+        }
+        Ok(())
+    }
+
     pub fn clipboard_capture_enabled(&self) -> Result<bool, String> {
         let value: String = self
             .connection
@@ -1331,6 +1348,66 @@ mod tests {
             .unwrap();
         assert_eq!(next.records[0].id, "earlier");
         assert!(!next.has_more);
+    }
+
+    #[test]
+    fn copying_moves_a_record_to_the_front_of_its_pin_group() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        for (id, date, pinned) in [
+            ("pin-new", "2026-11-15T03:00:00.000Z", true),
+            ("pin-old", "2026-11-15T01:00:00.000Z", true),
+            ("plain-new", "2026-11-15T04:00:00.000Z", false),
+            ("plain-old", "2026-11-15T02:00:00.000Z", false),
+        ] {
+            let mut item = record(id, id);
+            item.date = date.into();
+            item.is_pinned = pinned;
+            item.is_favorite = pinned;
+            db.clipboard_insert(&item).unwrap();
+        }
+        let before: i64 = db
+            .connection
+            .query_row(
+                "SELECT created_at FROM clipboard_records WHERE id='pin-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        db.clipboard_promote("pin-old").unwrap();
+        let promoted = db.clipboard_record("pin-old").unwrap();
+        assert!(promoted.is_pinned && promoted.is_favorite);
+        assert_eq!(promoted.text, "pin-old");
+        assert!(promoted.date > "2026-11-15T03:00:00.000Z".to_owned());
+        let created: i64 = db
+            .connection
+            .query_row(
+                "SELECT created_at FROM clipboard_records WHERE id='pin-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(created > before);
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pin-old", "pin-new", "plain-new", "plain-old"]
+        );
+        db.clipboard_promote("plain-old").unwrap();
+        assert!(!db.clipboard_record("plain-old").unwrap().is_pinned);
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pin-old", "pin-new", "plain-old", "plain-new"]
+        );
+        assert_eq!(db.clipboard_promote("missing").unwrap_err(), "not_found");
     }
 
     #[test]

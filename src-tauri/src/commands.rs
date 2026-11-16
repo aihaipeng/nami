@@ -562,6 +562,7 @@ pub async fn clipboard_record_use(
             + 1
     })
     .await?;
+    let promote_id = record_id.clone();
     let payload = crate::clipboard_runtime::payload(&app, record_id, true).await?;
     let initial = on_main(&app, move |app| {
         let state = app.state::<AppState>();
@@ -584,9 +585,6 @@ pub async fn clipboard_record_use(
         };
         state.clipboard_version.store(version, Ordering::SeqCst);
         if action == "copy" {
-            if !state.windows.lock().unwrap().history_pinned {
-                let _ = windows::hide_after_clipboard_use(&app);
-            }
             return Err(OperationResult::copied());
         }
         let Some(target) = *state.target.lock().unwrap() else {
@@ -624,8 +622,29 @@ pub async fn clipboard_record_use(
     })
     .await?;
     let (target, version) = match initial {
-        Ok(values) => values,
+        Ok(values) => {
+            // Clicking a row writes the clipboard before it pastes. That write is the same copy.
+            promote_used_record(&app, promote_id.clone()).await?;
+            values
+        }
         Err(result) => {
+            if result.copy_status == "current" {
+                promote_used_record(&app, promote_id).await?;
+                if result.status == "copied" {
+                    let pinned = app
+                        .state::<AppState>()
+                        .windows
+                        .lock()
+                        .unwrap()
+                        .history_pinned;
+                    if !pinned {
+                        on_main(&app, |app| {
+                            let _ = windows::hide_after_clipboard_use(&app);
+                        })
+                        .await?;
+                    }
+                }
+            }
             reveal_failure(&app, operation, &result).await?;
             return Ok(result);
         }
@@ -677,6 +696,16 @@ pub async fn clipboard_record_use(
     .await?;
     reveal_failure(&app, operation, &result).await?;
     Ok(result)
+}
+
+async fn promote_used_record(app: &AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    crate::clipboard_runtime::database(app, move |database| database.clipboard_promote(&id))
+        .await?;
+    crate::clipboard_runtime::changed(app)?;
+    drop(_write);
+    Ok(())
 }
 
 async fn reveal_failure(

@@ -1,4 +1,5 @@
 .clipboard-panel.history-panel { position: relative; width: 100%; right: auto; }
+.clipboard-panel .history-row .history-languages { color: #fff; -webkit-text-fill-color: #fff; }
 .clipboard-panel .history-row-select:disabled { opacity: 1; }
 .clipboard-empty { flex-direction: column; gap: 10px; }
 .clipboard-empty p { margin: 0; }

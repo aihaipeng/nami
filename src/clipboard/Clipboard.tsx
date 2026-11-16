@@ -122,7 +122,10 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
     activity(1); setSelected(recordId); setFeedback(null);
     try {
       const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId, action });
-      if (!mounted.current || operation.current !== current) return;
+      if (!mounted.current) return;
+      // Closing the panel bumps the operation generation before this returns. A row click writes the clipboard too.
+      if (result.copyStatus === 'current') clipboard.noteCopied(recordId);
+      if (operation.current !== current) return;
       if (result.copyStatus === 'superseded') setFeedback('clipboardChanged');
       else if (result.status === 'dispatched' || result.status === 'copied') setFeedback(null);
       else setFeedback(result.code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : result.code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : result.copyStatus === 'current' ? null : 'copyFailed');
@@ -176,7 +179,7 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
         if (event.key === 'ArrowDown' && ordered[index + 1]) { event.preventDefault(); focusRow(ordered[index + 1].id); }
         else if (event.key === 'ArrowUp') { event.preventDefault(); if (ordered[index - 1]) focusRow(ordered[index - 1].id); else search.current?.focus(); }
       }}>
-        <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} />
+        <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} brightLabel />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : undefined} /> : record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : <span className="history-preview">{historyPreview(record.text)}</span>}
       </button>
       <RecordActions t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}

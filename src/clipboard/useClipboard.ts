@@ -26,6 +26,16 @@ function hydrate(page: ClipboardWirePage): ClipboardPage {
   return { ...page, records: page.records.map(({ sourceAppId, ...record }) => ({ ...record, sourceApp: sourceAppId === null ? null : page.sources[sourceAppId] })) };
 }
 const emptyPage: ClipboardPage = { records: [], cursor: null, hasMore: false, totalRecords: 0 };
+function placeCopied(records: ClipboardRecord[], mark: { id: string; date: string } | null) {
+  if (!mark) return records;
+  const current = records.find((record) => record.id === mark.id);
+  if (!current) return records;
+  const record = { ...current, date: mark.date };
+  const rest = records.filter((item) => item.id !== mark.id);
+  const pinned = rest.filter((item) => item.isPinned);
+  const plain = rest.filter((item) => !item.isPinned);
+  return record.isPinned ? [record, ...pinned, ...plain] : [...pinned, record, ...plain];
+}
 
 export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean, kind: ClipboardKind | null = null) {
   const [page, setPage] = useState(emptyPage);
@@ -49,12 +59,15 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const deferred = useRef(false);
   const localWrites = useRef(0);
   const writeQueue = useRef(Promise.resolve());
+  const copiedMark = useRef<{ id: string; date: string } | null>(null);
+  const copyEpoch = useRef(0);
   const shouldDefer = useRef(deferRefresh);
   shouldDefer.current = deferRefresh;
 
   const fetchPage = useCallback(async (append = false, animate = true) => {
     if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || loadedFilters.current.kind !== filters.current.kind || !latest.current.hasMore))) return;
     const current = append ? request.current : ++request.current;
+    const epochAtStart = copyEpoch.current;
     const cursor = append ? latest.current.cursor : null;
     const queryFilters = { ...filters.current };
     const cacheRevision = defaultRevision.current;
@@ -66,10 +79,17 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       const next = hydrate(result.page);
       if (!active.current || current !== request.current) return;
       const merged = append ? { ...next, records: [...latest.current.records, ...next.records.filter((record) => !latest.current.records.some(({ id }) => id === record.id))] } : next;
+      const mark = copiedMark.current;
+      if (mark && epochAtStart === copyEpoch.current) {
+        const pinned = merged.records.find((record) => record.id === mark.id)?.isPinned;
+        if (merged.records.find((record) => record.isPinned === pinned)?.id === mark.id) copiedMark.current = null;
+      }
+      merged.records = placeCopied(merged.records, copiedMark.current);
       if (!append) {
         loadedFilters.current = queryFilters;
         const alternate = result.alternate ? hydrate(result.alternate) : null;
         if (alternate) {
+          alternate.records = placeCopied(alternate.records, mark);
           const retained = pages.current.get(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly));
           if (!retained || retained.records.length <= alternate.records.length) pages.current.set(cacheKey(queryFilters.kind, !queryFilters.favoritesOnly), alternate);
         }
@@ -185,6 +205,16 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     finally { --localWrites.current; release(); }
   }, [native, fetchPage]);
 
+  const noteCopied = useCallback((recordId: string) => {
+    copyEpoch.current += 1;
+    copiedMark.current = { id: recordId, date: new Date().toISOString() };
+    const reorder = (cached: ClipboardPage): ClipboardPage => ({ ...cached, records: placeCopied(cached.records, copiedMark.current) });
+    for (const [key, cached] of pages.current) pages.current.set(key, reorder(cached));
+    if (defaultPage.current) defaultPage.current = { ...defaultPage.current, page: reorder(defaultPage.current.page) };
+    latest.current = reorder(latest.current);
+    setPage(latest.current);
+  }, []);
+
   function applyEdit(recordId: string, detail: { title: string; text: string }) {
     ++defaultRevision.current;
     const previous = latest.current.records.find((record) => record.id === recordId);
@@ -210,5 +240,5 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const displayedIds = new Set(displayedPage.records.map(({ id }) => id));
   const retained = [...(defaultPage.current?.page.records ?? []), ...[...pages.current.values()].flatMap((cached) => cached.records)];
   const retainedRecords = [...displayedPage.records, ...new Map(retained.filter(({ id }) => !displayedIds.has(id)).map((record) => [record.id, record])).values()];
-  return { applyEdit, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

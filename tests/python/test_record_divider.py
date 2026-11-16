@@ -22,6 +22,13 @@ def test_detail_metadata_and_pane_seams_match_the_pinned_divider():
     assert 'bounds.size.height * 0.94' in native
 
 
+def test_clipboard_record_type_is_bright_white():
+    clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
+    heading = (ROOT / 'src/shared/RecordHeading.tsx').read_text()
+    assert '.clipboard-panel .history-row .history-languages { color: #fff; -webkit-text-fill-color: #fff; }' in clipboard
+    assert "color: '#fff', WebkitTextFillColor: '#fff'" in heading
+
+
 def test_detail_metadata_height_stays_three_rows():
     clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
     assert 'height: calc(10px + 16px * 3 + 5px * 2)' in clipboard

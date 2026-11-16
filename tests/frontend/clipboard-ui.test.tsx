@@ -1040,6 +1040,72 @@ describe('database clipboard history', () => {
     expect(document.querySelectorAll('.clipboard-panel .history-row')).toHaveLength(pageSize + 1);
   });
 
+  it('moves a copied or clicked record to the top of its pin group', async () => {
+    records = [
+      { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'pin-new', kind: 'files', text: '/tmp/newer.txt', date: '2020-01-02T00:00:00Z', isFavorite: true, isPinned: true },
+      { id: 'pin-old', kind: 'files', text: '/tmp/older.txt', date: '2020-01-01T00:00:00Z', isFavorite: true, isPinned: true },
+    ];
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['pin-new', 'pin-old', 'plain-new', 'plain-old']));
+    await act(async () => fireEvent.click(within(row('pin-old')).getByRole('button', { name: 'Copy' })));
+    expect(ids()).toEqual(['pin-old', 'pin-new', 'plain-new', 'plain-old']);
+    await act(async () => fireEvent.click(within(row('pin-new')).getByRole('button', { name: 'Clipboard: /tmp/newer.txt' })));
+    expect(ids()).toEqual(['pin-new', 'pin-old', 'plain-new', 'plain-old']);
+    await act(async () => fireEvent.click(within(row('plain-old')).getByRole('button', { name: 'Clipboard: Older text' })));
+    expect(ids()).toEqual(['pin-new', 'pin-old', 'plain-old', 'plain-new']);
+  });
+
+  it('still moves a copied record to the top when closing the panel ends the session first', async () => {
+    records = [
+      { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish: (value: { status: string; copyStatus: string; code: null }) => void = () => {};
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['plain-new', 'plain-old']));
+    fireEvent.click(within(row('plain-old')).getByRole('button', { name: 'Copy' }));
+    await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
+    await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
+    expect(ids()).toEqual(['plain-old', 'plain-new']);
+  });
+
+  it('still moves a clicked record to the top when closing the panel ends the session first', async () => {
+    records = [
+      { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish: (value: { status: string; copyStatus: string; code: null }) => void = () => {};
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['plain-new', 'plain-old']));
+    fireEvent.click(within(row('plain-old')).getByRole('button', { name: 'Clipboard: Older text' }));
+    await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
+    await act(async () => finish({ status: 'dispatched', copyStatus: 'current', code: null }));
+    expect(ids()).toEqual(['plain-old', 'plain-new']);
+  });
+
+  it('leaves the order unchanged when a click does not write the clipboard', async () => {
+    records = [
+      { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? { status: 'failed', copyStatus: 'not_written', code: 'clipboard_write' } : original(name, args));
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await mount('clipboard');
+    await waitFor(() => expect(ids()).toEqual(['plain-new', 'plain-old']));
+    await act(async () => fireEvent.click(within(row('plain-old')).getByRole('button', { name: 'Clipboard: Older text' })));
+    expect(ids()).toEqual(['plain-new', 'plain-old']);
+  });
+
   it('omits successful copy, paste and manual-paste footer messages', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     let status = 'copied';
