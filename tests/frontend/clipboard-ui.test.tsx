@@ -19,9 +19,10 @@ function scrollNearEnd() {
   const element = document.querySelector<HTMLElement>('.history-list')!;
   Object.defineProperties(element, { clientHeight: { value: 100, configurable: true }, scrollHeight: { value: 500, configurable: true } });
   element.scrollTop = 400;
+  fireEvent.wheel(element);
   fireEvent.scroll(element);
 }
-const listRows = () => document.querySelectorAll('.history-row:not([hidden])');
+const listRows = () => document.querySelectorAll('.clipboard-panel .history-row:not([hidden])');
 
 beforeEach(() => {
   records = [
@@ -379,6 +380,7 @@ describe('database clipboard history', () => {
       expect(scrollbar.classList.contains('visible')).toBe(true);
       act(() => vi.advanceTimersByTime(1000));
       expect(scrollbar.classList.contains('visible')).toBe(false);
+      fireEvent.wheel(document.querySelector('.history-list')!);
       fireEvent.scroll(document.querySelector('.history-list')!);
       expect(scrollbar.classList.contains('visible')).toBe(true);
       fireEvent.pointerDown(scrollbar.firstElementChild!, { pointerId: 7, button: 0, clientY: 20 });
@@ -393,8 +395,11 @@ describe('database clipboard history', () => {
       fireEvent.blur(scrollbar);
       act(() => vi.advanceTimersByTime(1000));
       expect(scrollbar.classList.contains('visible')).toBe(false);
+      fireEvent.wheel(document.querySelector('.history-list')!);
       fireEvent.scroll(document.querySelector('.history-list')!);
       mounted.unmount();
+      // jsdom schedules focus repair on the rendering frame after focused DOM is removed.
+      act(() => vi.advanceTimersToNextFrame());
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
@@ -674,7 +679,7 @@ describe('database clipboard history', () => {
       expect(original.querySelector('img')).toBe(source);
     }
     expect(calls('clipboard_query')).toHaveLength(queries);
-    expect(document.querySelectorAll('.history-row')).toHaveLength(101);
+    expect(document.querySelectorAll('.clipboard-panel .history-row')).toHaveLength(101);
   });
 
   it('omits successful copy, paste and manual-paste footer messages', async () => {
@@ -684,7 +689,7 @@ describe('database clipboard history', () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     for (status of ['copied', 'dispatched', 'manual']) {
       await act(async () => fireEvent.click(within(row('first')).getByRole('button', { name: 'Copy' })));
-      expect(document.querySelector('.clipboard-feedback')).toBeNull();
+      expect(document.querySelector('.record-feedback')).toBeNull();
     }
   });
 
@@ -924,6 +929,22 @@ describe('database clipboard history', () => {
     expect(create).toHaveBeenCalledTimes(1);
     result.unmount();
     expect(revoke).toHaveBeenCalledWith('blob:synthetic-image');
+  });
+
+  it('uses shared nonblocking feedback for a rejected copy without adding a global error', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_record_use') throw new Error('clipboard_write');
+      return original(name, args);
+    });
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
+    fireEvent.click(within(row('first')).getByRole('button', { name: 'Copy' }));
+    const feedback = await screen.findByText('Content was not copied. Try again.');
+    expect(feedback.className).toBe('record-feedback');
+    expect(feedback.closest('.clipboard-panel')).toBeTruthy();
+    expect(document.querySelector('.global-error')).toBeNull();
+    await windowState({ recordsSession: 1 });
+    expect(screen.queryByText('Content was not copied. Try again.')).toBeNull();
   });
 
   it('disables native copy and paste when the platform does not implement them', async () => {

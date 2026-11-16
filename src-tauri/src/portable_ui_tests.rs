@@ -42,6 +42,23 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     {
         return Err("portable tests require run ID and report path".into());
     }
+    app.state::<AppState>()
+        .database
+        .lock()
+        .unwrap()
+        .as_mut()
+        .ok_or("missing isolated test database")?
+        .clipboard_insert(&nami::clipboard::ClipboardRecord {
+            id: "portable-clipboard-sample".into(),
+            kind: "text".into(),
+            text: "Synthetic portable clipboard text".into(),
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: nami::clipboard::fingerprint("text", b"Synthetic portable clipboard text"),
+        })?;
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
@@ -148,14 +165,100 @@ const SCRIPT: &str = r#"
       assert(source().value === '', 'translation source must start empty');
       pass(currentCase);
 
+      currentCase = 'shared record presentation and menus';
+      const historyPanel = document.querySelector('#translation-history');
+      const clipboardPanel = document.querySelector('.clipboard-panel');
+      await waitFor(() => clipboardPanel.querySelector('[data-record-id="portable-clipboard-sample"]'), 'isolated clipboard fixture did not render');
+      const historyNode = row('sample-03');
+      const clipboardNode = clipboardPanel.querySelector('[data-record-id="portable-clipboard-sample"]');
+      const iconStyle = (node) => {
+        const style = getComputedStyle(node);
+        return {width:style.width,height:style.height,mask:style.maskImage||style.webkitMaskImage,color:style.color,opacity:style.opacity};
+      };
+      for (const name of ['doc.on.doc','star','pin','trash']) {
+        const left = historyNode.querySelector(`[data-symbol="${name}"]`), right = clipboardNode.querySelector(`[data-symbol="${name}"]`);
+        assert(left && right, 'shared row icon missing: '+name);
+        assert(JSON.stringify(iconStyle(left)) === JSON.stringify(iconStyle(right)), 'row icon appearance differs: '+name);
+        assert(getComputedStyle(left).width === '14px' && getComputedStyle(left).height === '14px', 'shared row icon must remain 14pt: '+name);
+        assert(getComputedStyle(left.parentElement).opacity === getComputedStyle(right.parentElement).opacity, 'disabled icon opacity differs: '+name);
+      }
+      assert(!historyNode.querySelector('.history-row-actions [data-symbol="languages"]'), 'inline retranslation icon returned');
+      for (const selector of ['.history-search > .history-symbol','.history-search button .history-symbol','.history-shortcuts .history-symbol','.history-favorites .history-symbol']) {
+        assert(JSON.stringify(iconStyle(historyPanel.querySelector(selector))) === JSON.stringify(iconStyle(clipboardPanel.querySelector(selector))), 'shared panel icon differs: '+selector);
+      }
+      for (const panel of [historyPanel,clipboardPanel]) {
+        const style=getComputedStyle(panel.querySelector('.history-search'));
+        assert(style.borderTopWidth === '0px' && style.boxShadow === 'none', 'record search gained a border or focus ring');
+      }
+      const menuAppearance = async (recordNode, expectedFirst) => {
+        recordNode.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));
+        await waitFor(()=>document.querySelector('[role="menu"]'), 'shared context menu did not open');
+        const menu=document.querySelector('[role="menu"]');
+        const entries=[...menu.querySelectorAll('[role="menuitem"]')];
+        assert(entries[0].textContent === expectedFirst, 'wrong context menu action for record type');
+        const common={};
+        for(const name of ['star','pin','trash']) {
+          const icon=menu.querySelector(`[data-symbol="${name}"]`);
+          assert(icon, 'menu icon missing: '+name);
+          common[name]=iconStyle(icon);
+        }
+        const style=getComputedStyle(menu);
+        common.surface={background:style.backgroundColor,border:style.borderColor,radius:style.borderRadius,shadow:style.boxShadow,blur:style.backdropFilter||style.webkitBackdropFilter};
+        menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+        await waitFor(()=>!document.querySelector('[role="menu"]'), 'Escape did not close context menu');
+        return common;
+      };
+      const historyMenu = await menuAppearance(historyNode, 'Retranslate');
+      await invoke('records_view_set',{view:'clipboard'});
+      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden, 'clipboard presentation did not activate');
+      const clipboardMenu = await menuAppearance(clipboardNode, 'Paste');
+      assert(JSON.stringify(historyMenu) === JSON.stringify(clipboardMenu), 'shared menu colors, icons or material differ');
+      await invoke('records_view_set',{view:'translation'});
+      await waitFor(()=>!historyPanel.closest('.record-view').hidden, 'translation presentation did not restore');
+      pass(currentCase);
+
+      currentCase = 'shared loading animation in both record views';
+      const internalFetch = window.fetch;
+      const loadingStyles=[];
+      function setSearch(panel,value){
+        const input=panel.querySelector('.history-search input');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      }
+      try {
+        for(const [view,panel,command,query] of [['translation',historyPanel,'history_query','train'],['clipboard',clipboardPanel,'clipboard_query','Synthetic']]) {
+          await invoke('records_view_set',{view});
+          await waitFor(()=>!panel.closest('.record-view').hidden, 'loading view did not activate');
+          let release;
+          window.fetch=(input,options)=>new URL(typeof input==='string'?input:input.url,location.href).pathname.endsWith('/'+command)?new Promise((resolve,reject)=>{release=()=>internalFetch(input,options).then(resolve,reject);}):internalFetch(input,options);
+          setSearch(panel,query);
+          await waitFor(()=>typeof release==='function' && panel.querySelector('.activity-beam > span'), 'record query did not expose shared loading animation in '+view);
+          const track=panel.querySelector('.activity-beam'),beam=track.firstElementChild,style=getComputedStyle(beam),parent=getComputedStyle(track);
+          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,trackHeight:parent.height,left:parent.left,right:parent.right});
+          window.fetch=internalFetch;
+          release();
+          await waitFor(()=>!panel.querySelector('.activity-beam'), 'record query loading animation did not finish');
+          setSearch(panel,'');
+          await waitFor(()=>!panel.querySelector('.activity-beam') && panel.querySelector('.history-search input').value==='', 'record search did not clear');
+        }
+      } finally { window.fetch=internalFetch; }
+      assert(JSON.stringify(loadingStyles[0])===JSON.stringify(loadingStyles[1]), 'record loading effects differ: '+JSON.stringify(loadingStyles));
+      assert(loadingStyles[0].height==='2px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
+      if(!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        assert(loadingStyles[0].animation==='beam-travel, beam-pulse' && loadingStyles[0].duration==='1.3s, 0.55s', 'shared loading motion parameters changed');
+      }
+      await invoke('records_view_set',{view:'translation'});
+      await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');
+      pass(currentCase);
+
       currentCase = 'React actions update shared Rust history';
       const id = 'sample-03';
       const original = await record(id);
       assert(!original.isFavorite && !original.isPinned, 'fixture action record must be unprotected');
-      clickAction(id, 2);
+      clickAction(id, 1);
       await flag(id, 'isFavorite', true);
-      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button')[2]?.getAttribute('aria-pressed') === 'true', 'favorite did not render from shared state');
-      clickAction(id, 3);
+      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button')[1]?.getAttribute('aria-pressed') === 'true', 'favorite did not render from shared state');
+      clickAction(id, 2);
       await flag(id, 'isPinned', true);
       await waitFor(() => row(id)?.classList.contains('pinned'), 'pinned record did not render in pinned section');
       await waitFor(() => events.some((event) => event.records.some((record) => record.id === id && record.isPinned && record.isFavorite)), 'history_changed event missing authoritative flags');
@@ -169,13 +272,13 @@ const SCRIPT: &str = r#"
       assert(rejected, 'protected deletion was accepted');
       const after = await snapshot();
       assert(after.revision === before.revision && after.records.length === 20, 'protected deletion changed history');
-      assert(row(id)?.querySelectorAll('.history-row-actions button').length === 4, 'protected record still exposes delete');
-      clickAction(id, 3);
+      assert(row(id)?.querySelectorAll('.history-row-actions button').length === 3, 'protected record still exposes delete');
+      clickAction(id, 2);
       await flag(id, 'isPinned', false);
       await waitFor(() => !row(id)?.classList.contains('pinned'), 'unpin did not update DOM');
-      clickAction(id, 2);
+      clickAction(id, 1);
       await flag(id, 'isFavorite', false);
-      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button').length === 5, 'unprotected record did not restore delete');
+      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button').length === 4, 'unprotected record did not restore delete');
       pass(currentCase);
 
       currentCase = 'React selection restores cached translation through IPC';
@@ -185,7 +288,7 @@ const SCRIPT: &str = r#"
       pass(currentCase);
 
       currentCase = 'React deletion removes shared record and preserves selection';
-      clickAction('sample-05', 4);
+      clickAction('sample-05', 3);
       await waitFor(async () => !row('sample-05') && !(await record('sample-05')), 'deleted record remained in DOM or shared store');
       assert((await snapshot()).records.length === 19, 'shared deletion changed unexpected records');
       assert((await snapshot()).selectedId === id && source().value === original.text, 'deleting another record lost selection');

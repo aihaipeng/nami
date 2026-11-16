@@ -89,7 +89,7 @@ pub fn translation_sample_copy(
     sample_id: String,
     part: String,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     let record = windows::history_record(&app, &sample_id).ok_or("invalid_argument")?;
     let text = match part.as_str() {
         "source" => Some(record.text),
@@ -176,12 +176,28 @@ pub fn records_navigation_resolve(
 #[tauri::command]
 pub fn history_toggle(window: Webview, app: AppHandle) -> Result<(), String> {
     authorize(&window, &["translation", "history"])?;
-    app.state::<AppState>()
-        .windows
-        .lock()
-        .unwrap()
-        .toggle_history();
-    windows::apply_translation(&app)
+    {
+        let state = app.state::<AppState>();
+        let mut windows = state.windows.lock().unwrap();
+        windows.toggle_history();
+        if windows.history_visible {
+            windows.records_focus += 1;
+        }
+    }
+    windows::apply_translation(&app)?;
+    if platform::capabilities().native_history
+        && app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .history_visible
+    {
+        if let Some(view) = app.get_webview("clipboard") {
+            view.set_focus().map_err(|_| "window_focus")?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -272,7 +288,7 @@ pub fn history_snapshot(
     window: Webview,
     app: AppHandle,
 ) -> Result<crate::history::HistorySnapshot, String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     let state = app.state::<AppState>();
     if let Some(error) = state.storage_error.lock().unwrap().clone() {
         return Err(error);
@@ -288,7 +304,7 @@ pub async fn history_query(
     query: String,
     favorites_only: bool,
 ) -> Result<crate::history::HistorySnapshot, String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     crate::history_runtime::query_history(&app, query, favorites_only).await
 }
 
@@ -297,7 +313,7 @@ pub async fn history_load_more(
     window: Webview,
     app: AppHandle,
 ) -> Result<crate::history::HistorySnapshot, String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     crate::history_runtime::load_more(&app).await
 }
 
@@ -308,7 +324,7 @@ pub async fn history_record_update(
     record_id: String,
     action: String,
 ) -> Result<crate::history::HistorySnapshot, String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     update_history_record(&app, &record_id, &action).await
 }
 
@@ -327,7 +343,7 @@ pub fn history_sample_select(
     sample_id: Option<String>,
     retranslate: bool,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation", "history", "clipboard"])?;
     select_history_sample(&app, sample_id, retranslate)
 }
 
@@ -362,7 +378,9 @@ pub(crate) fn select_history_sample(
             windows::apply_translation(app)?;
             if let Some(view) = app.get_webview("translation") {
                 view.window().show().map_err(|_| "window_show")?;
-                view.set_focus().map_err(|_| "window_focus")?;
+                if retranslate {
+                    view.set_focus().map_err(|_| "window_focus")?;
+                }
             }
         } else {
             windows::apply_translation(app)?;
@@ -373,7 +391,7 @@ pub(crate) fn select_history_sample(
         retranslate,
         record,
     };
-    for label in ["translation", "history"] {
+    for label in ["translation", "history", "clipboard"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("history_sample_selected", &selection)
                 .map_err(|_| "event_emit")?;

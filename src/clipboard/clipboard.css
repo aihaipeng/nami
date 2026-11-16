@@ -1,7 +1,5 @@
 .clipboard-panel.history-panel { position: relative; width: 100%; right: auto; }
 .clipboard-panel .history-row-select:disabled { opacity: 1; }
-.clipboard-panel .history-row-actions button:disabled { opacity: .4; }
-.clipboard-panel .clipboard-feedback { position: absolute; z-index: 3; bottom: 32px; left: 18px; right: 40px; pointer-events: none; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .clipboard-empty { flex-direction: column; gap: 10px; }
 .clipboard-empty p { margin: 0; }
 .clipboard-empty button, .clipboard-load-more { padding: 6px 10px; border-radius: 7px; font-size: 12px; }

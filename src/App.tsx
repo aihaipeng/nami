@@ -7,7 +7,7 @@ import { initialSnapshot, type AppSnapshot, type Locale, type WindowState, type 
 import { resolveLanguage, translator } from './shared/i18n';
 import { Translation } from './translation/Translation';
 import { HistoryView } from './translation/HistoryView';
-import { Clipboard } from './clipboard/Clipboard';
+import { RecordsWorkspace } from './shared/RecordsWorkspace';
 import { Settings } from './settings/Settings';
 import { Waves } from 'lucide-react';
 import { cn } from './lib/utils';
@@ -134,7 +134,7 @@ export default function App() {
       {(!connected || pending > 0) && <ActivityBeam label={t('working')} />}
       {connected && target === 'translation' && <Translation {...common} />}
       {connected && target === 'history' && <HistoryView {...common} />}
-      {connected && target === 'clipboard' && <Clipboard {...common} active={snapshot.window.recordView === undefined || snapshot.window.recordView === 'clipboard' && snapshot.window.historyVisible} />}
+      {connected && target === 'clipboard' && <RecordsWorkspace {...common} />}
       {connected && target === 'settings' && <Settings {...common} />}
     </main>
   </>;

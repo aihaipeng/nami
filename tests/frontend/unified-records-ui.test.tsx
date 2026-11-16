@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { bridge, calls, emit, mount, windowState } from './harness';
 
 const clipboardRecords = [
@@ -41,6 +42,136 @@ async function switchView(kind: 'clipboard' | 'translation') {
 }
 
 describe('unified records workspace', () => {
+  it('uses the same React record workspace in the macOS child WebView and retains both panes', async () => {
+    bridge.snapshot.capabilities.nativeHistory = true;
+    bridge.history.records[2].date = clipboardRecords[0].date;
+    await mount('clipboard');
+    const workspace = document.querySelector('.records-workspace')!;
+    const clipboardPane = panel('clipboard');
+    const translationPane = panel('translation');
+    const clipboardRow = clipboardPane.querySelector<HTMLElement>('[data-record-id="clip-first"]')!;
+    const icons = (row: HTMLElement) => [...row.querySelectorAll<HTMLElement>('.history-row-actions .history-symbol')].map((icon) => [icon.dataset.symbol, icon.style.getPropertyValue('--symbol-url')]);
+    await switchView('translation');
+    expect(workspace.getAttribute('data-record-view')).toBe('translation');
+    expect(clipboardPane.closest<HTMLElement>('.record-view')!.hidden).toBe(true);
+    expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
+    expect(document.activeElement).toBe(search('translation'));
+    const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
+    expect(icons(translationRow)).toEqual(icons(clipboardRow));
+    expect(translationRow.querySelector('time')?.textContent).toBe(clipboardRow.querySelector('time')?.textContent);
+    expect(translationRow.querySelector('.history-origin')?.getAttribute('style')).toBe(clipboardRow.querySelector('.history-origin')?.getAttribute('style'));
+    fireEvent.contextMenu(translationRow);
+    expect(screen.getByRole('menu').classList.contains('record-context-menu')).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(calls('window_hide')).toHaveLength(0);
+    await switchView('clipboard');
+    expect(panel('clipboard')).toBe(clipboardPane);
+    expect(panel('translation')).toBe(translationPane);
+  });
+
+  it.each(['clipboard', 'translation'] as const)('keeps %s scrollbars hidden during restoration and reveals them only for user scrolling', async (kind) => {
+    await mount('clipboard');
+    if (kind === 'translation') await switchView(kind);
+    const pane = panel(kind);
+    const list = pane.querySelector<HTMLElement>('.history-list')!;
+    const viewport = pane.querySelector<HTMLElement>('.history-viewport')!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 1000 } });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 100 });
+    list.scrollTop = 260; fireEvent.scroll(list);
+    const scrollbar = within(pane).getByRole('scrollbar');
+    expect(scrollbar.classList.contains('visible')).toBe(false);
+    fireEvent.wheel(list);
+    expect(scrollbar.classList.contains('visible')).toBe(true);
+    await switchView(kind === 'clipboard' ? 'translation' : 'clipboard');
+    await switchView(kind);
+    expect(list.scrollTop).toBe(260);
+    fireEvent.scroll(list);
+    expect(scrollbar.classList.contains('visible')).toBe(false);
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerMove(scrollbar, { pointerId: 3 });
+      expect(scrollbar.classList.contains('visible')).toBe(true);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(scrollbar.classList.contains('visible')).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps translation keyboard navigation in the record pane until Return and respects IME before hiding', async () => {
+    await mount('clipboard'); await switchView('translation');
+    const input = search('translation');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    const selected = document.activeElement as HTMLButtonElement;
+    expect(selected.classList.contains('history-row-select')).toBe(true);
+    expect(calls('history_sample_select')).toHaveLength(0);
+    fireEvent.keyDown(selected, { key: 'ArrowDown' });
+    expect(calls('history_sample_select')).toHaveLength(0);
+    fireEvent.click(document.activeElement!);
+    expect(calls('history_sample_select')).toHaveLength(1);
+    fireEvent.keyDown(window, { key: 'Escape', isComposing: true });
+    expect(calls('window_hide')).toHaveLength(0);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'translation' });
+  });
+
+  it('reveals a newly selected translation without stealing row focus or showing the scrollbar', async () => {
+    await mount('clipboard'); await switchView('translation');
+    const pane = panel('translation');
+    const input = search('translation');
+    const list = pane.querySelector<HTMLElement>('.history-list')!;
+    const row = pane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 1000 } });
+    list.getBoundingClientRect = () => ({ top: 50, bottom: 150 } as DOMRect);
+    row.getBoundingClientRect = () => ({ top: 20, bottom: 100 } as DOMRect);
+    list.scrollTop = 100;
+    await windowState({ translationVisible: true, translationExtent: 920 });
+    await emit('history_sample_selected', { sampleId: 'sample-03', retranslate: false });
+    expect(list.scrollTop).toBe(66);
+    expect(document.activeElement).toBe(input);
+    fireEvent.scroll(list);
+    expect(within(pane).getByRole('scrollbar').classList.contains('visible')).toBe(false);
+    await switchView('clipboard');
+    list.scrollTop = 100;
+    await emit('history_sample_selected', { sampleId: 'sample-04', retranslate: false });
+    expect(list.scrollTop).toBe(100);
+  });
+
+  it('keeps row focus when opening details and focuses the translation input only for retranslation', async () => {
+    const user = userEvent.setup();
+    await mount('translation'); await switchView('translation');
+    const row = panel('translation').querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
+    const button = row.querySelector<HTMLButtonElement>('.history-row-select')!;
+    await user.click(button);
+    expect(document.activeElement).toBe(button);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    fireEvent.contextMenu(row);
+    await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Source text' }));
+  });
+
+  it('uses the same search layout and detail artwork in both record views', async () => {
+    await mount('translation');
+    const clipboardSearch = search('clipboard');
+    const clear = clipboardSearch.parentElement!.querySelector<HTMLButtonElement>('button')!;
+    expect(clear.hidden).toBe(true);
+    fireEvent.change(clipboardSearch, { target: { value: 'text' } });
+    expect(clipboardSearch.parentElement!.querySelector('button')).toBe(clear);
+    expect(clear.hidden).toBe(false);
+    fireEvent.click(clear);
+    expect(document.activeElement).toBe(clipboardSearch);
+    expect(clear.hidden).toBe(true);
+    const clipboardIcon = panel('clipboard').querySelector<HTMLElement>('.records-details .history-symbol')!;
+    expect(clipboardIcon.dataset.symbol).toBe('chevron.right');
+    await switchView('translation');
+    expect(panel('translation').querySelector('.history-search')?.className).toBe(clipboardSearch.parentElement!.className);
+    const translationIcon = panel('translation').querySelector<HTMLElement>('.records-details .history-symbol')!;
+    expect(translationIcon.style.getPropertyValue('--symbol-url')).toBe(clipboardIcon.style.getPropertyValue('--symbol-url'));
+    fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(translationIcon.dataset.symbol).toBe('chevron.left'));
+    expect(panel('translation').querySelector('.records-details')?.getAttribute('aria-expanded')).toBe('true');
+    const actions = panel('translation').querySelector<HTMLElement>('.history-row:not(.pinned) .history-row-actions')!;
+    expect([...actions.querySelectorAll('.history-symbol')].map((icon) => (icon as HTMLElement).dataset.symbol)).toEqual(['doc.on.doc', 'star', 'pin', 'trash']);
+  });
+
   it('has one ordered toolbar, mutually exclusive modes and centered footer favorites', async () => {
     await mount('translation');
     const toolbar = panel('clipboard').querySelector<HTMLElement>('.history-toolbar')!;

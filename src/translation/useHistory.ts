@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { historySamples, type HistorySnapshot } from './history';
 
+type HistoryPage = Pick<HistorySnapshot, 'records' | 'totalRecords' | 'hasMore'>;
+
 export function useHistory(native: boolean) {
   const [snapshot, setSnapshot] = useState<HistorySnapshot>({ revision: -1, records: native ? [] : historySamples, selectedId: null, totalRecords: native ? 0 : historySamples.length, hasMore: false, generation: 0 });
   const [error, setError] = useState(false);
@@ -10,6 +12,9 @@ export function useHistory(native: boolean) {
   const [querying, setQuerying] = useState(false);
   const [quietQuery, setQuietQuery] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [connectionKey, setConnectionKey] = useState(0);
+  const ready = useRef(false);
+  const retryFilters = useRef<{ query: string; favoritesOnly: boolean } | null>(null);
   const active = useRef(false);
   const lifecycle = useRef(0);
   const revision = useRef(-1);
@@ -17,14 +22,55 @@ export function useHistory(native: boolean) {
   const queryRequest = useRef(0);
   const moreRequest = useRef(false);
   const queryPending = useRef(false);
+  const queryTask = useRef<{ query: string; favoritesOnly: boolean; done: Promise<boolean> } | null>(null);
+  const cacheQuery = useRef('');
+  const pages = useRef(new Map<boolean, HistoryPage>());
+  const projection = useRef({ query: '', favoritesOnly: false, generation: 0 });
 
   const accept = useCallback((next: HistorySnapshot) => {
     if (!active.current || next.revision <= revision.current) return;
+    if (revision.current < 0) projection.current.generation = next.generation;
+    if (next.generation === projection.current.generation && cacheQuery.current === projection.current.query) {
+      // An unchanged filtered page can still hide a newly added record in the alternate view.
+      pages.current.clear();
+      pages.current.set(projection.current.favoritesOnly, next);
+    } else if (next.generation === latest.current.generation || !queryPending.current) {
+      pages.current.clear();
+    }
     revision.current = next.revision;
     latest.current = next;
     setSnapshot(next);
-    setConnecting(false);
+    setConnecting(false); setError(false);
   }, []);
+
+  const setQuery = useCallback(async (query: string, favoritesOnly: boolean, quiet = false) => {
+    if (!native || !active.current) return;
+    if (!ready.current) { retryFilters.current = { query, favoritesOnly }; return; }
+    const request = ++queryRequest.current;
+    const connection = lifecycle.current;
+    if (cacheQuery.current !== query) { pages.current.clear(); cacheQuery.current = query; }
+    queryPending.current = true;
+    let settled!: (ready: boolean) => void;
+    queryTask.current = { query, favoritesOnly, done: new Promise<boolean>((resolve) => { settled = resolve; }) };
+    let accepted = false;
+    setError(false); setQuietQuery(quiet); setQuerying(true);
+    try {
+      const next = await invoke<HistorySnapshot>('history_query', { query, favoritesOnly });
+      if (active.current && lifecycle.current === connection && request === queryRequest.current) {
+        accept(next);
+        if (next.generation === latest.current.generation) {
+          projection.current = { query, favoritesOnly, generation: next.generation };
+          pages.current.set(favoritesOnly, latest.current);
+          accepted = true;
+        }
+      }
+    } catch {
+      if (active.current && lifecycle.current === connection && request === queryRequest.current) setError(true);
+    } finally {
+      if (active.current && lifecycle.current === connection && request === queryRequest.current) { queryPending.current = false; setQuerying(false); }
+      settled(accepted && active.current && lifecycle.current === connection && request === queryRequest.current);
+    }
+  }, [native, accept]);
 
   useEffect(() => {
     active.current = true;
@@ -37,35 +83,25 @@ export function useHistory(native: boolean) {
         if (!disposed) accept(payload);
       });
       if (disposed) { remove(); return; }
-      unlisten = remove;
-      const initial = await invoke<HistorySnapshot>('history_snapshot');
-      if (!disposed) accept(initial);
+      unlisten = remove; ready.current = true;
+      const retry = retryFilters.current; retryFilters.current = null;
+      if (retry) await setQuery(retry.query, retry.favoritesOnly);
+      else {
+        const initial = await invoke<HistorySnapshot>('history_snapshot');
+        if (!disposed) accept(initial);
+      }
+      if (!disposed) setConnecting(false);
     }
     void connect().catch(() => { if (!disposed) { setError(true); setConnecting(false); } });
     return () => {
       disposed = true;
-      if (lifecycle.current === connection) active.current = false;
+      if (lifecycle.current === connection) { active.current = false; ready.current = false; pages.current.clear(); }
       unlisten?.();
     };
-  }, [native, accept]);
+  }, [native, accept, setQuery, connectionKey]);
 
-  const setQuery = useCallback(async (query: string, favoritesOnly: boolean, quiet = false) => {
-    if (!native || !active.current) return;
-    const request = ++queryRequest.current;
-    const connection = lifecycle.current;
-    queryPending.current = true;
-    setError(false); setQuietQuery(quiet); setQuerying(true);
-    try {
-      const next = await invoke<HistorySnapshot>('history_query', { query, favoritesOnly });
-      if (active.current && lifecycle.current === connection && request === queryRequest.current) accept(next);
-    } catch {
-      if (active.current && lifecycle.current === connection && request === queryRequest.current) setError(true);
-    } finally {
-      if (active.current && lifecycle.current === connection && request === queryRequest.current) { queryPending.current = false; setQuerying(false); }
-    }
-  }, [native, accept]);
-
-  const loadMore = useCallback(async () => {
+  const loadMore = useCallback(async (text?: string, favoritesOnly?: boolean) => {
+    if (text !== undefined && (projection.current.query !== text || projection.current.favoritesOnly !== favoritesOnly)) return;
     if (!native || !active.current || !latest.current.hasMore || moreRequest.current || queryPending.current) return;
     const query = queryRequest.current;
     const generation = latest.current.generation;
@@ -92,5 +128,21 @@ export function useHistory(native: boolean) {
     } catch { if (active.current && lifecycle.current === connection) setError(true); }
   }, [native, accept]);
 
-  return { snapshot, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, setQuery, loadMore, update };
+  function refresh(query: string, favoritesOnly: boolean) {
+    if (ready.current) { void setQuery(query, favoritesOnly); return; }
+    retryFilters.current = { query, favoritesOnly };
+    setError(false); setConnecting(native); setConnectionKey((value) => value + 1);
+  }
+
+  function displaySnapshot(query: string, favoritesOnly: boolean): HistorySnapshot {
+    const cached = cacheQuery.current === query ? pages.current.get(favoritesOnly) : undefined;
+    return cached ? { ...snapshot, records: cached.records, totalRecords: cached.totalRecords, hasMore: cached.hasMore } : snapshot;
+  }
+  function whenReady(query: string, favoritesOnly: boolean, recordId: string): boolean | Promise<boolean> {
+    const current = () => active.current && ready.current && !queryPending.current && projection.current.query === query && projection.current.favoritesOnly === favoritesOnly && latest.current.records.some((record) => record.id === recordId);
+    if (!queryPending.current) return current();
+    const task = queryTask.current;
+    return task?.query === query && task.favoritesOnly === favoritesOnly ? task.done.then((accepted) => accepted && current()) : false;
+  }
+  return { snapshot, displaySnapshot, displayReady: (query: string, favoritesOnly: boolean) => !connecting && cacheQuery.current === query && pages.current.has(favoritesOnly), whenReady, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, refresh, setQuery, loadMore, update };
 }

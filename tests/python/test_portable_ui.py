@@ -10,6 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_CASES = {
     'shared history startup',
+    'shared record presentation and menus',
+    'shared loading animation in both record views',
     'React actions update shared Rust history',
     'shared history protects favorite and pinned records',
     'React selection restores cached translation through IPC',
@@ -22,6 +24,7 @@ EXPECTED_CASES = {
 def check_portable_report(result, run_id):
     assert result['runId'] == run_id, 'Portable report belongs to an older run'
     assert result['passed'] is True, result.get('error')
+    assert len(result['cases']) == len(EXPECTED_CASES), 'Portable cases are duplicated or missing'
     assert {case['name'] for case in result['cases']} == EXPECTED_CASES
     assert all(case['passed'] is True for case in result['cases'])
     assert 'real Tauri IPC' in result['scope']
@@ -52,7 +55,7 @@ def test_portable_shared_history_in_real_webview():
     print('Windows/Linux OS interactions, real mouse drags and material pixel quality remain unverified.')
 
 
-@pytest.mark.parametrize('change', ['old-run', 'failed', 'missing-case'])
+@pytest.mark.parametrize('change', ['old-run', 'failed', 'missing-case', 'missing-loading-case', 'duplicate-case', 'failed-case'])
 @pytest.mark.dfx_diagnostics
 @pytest.mark.dfx_compatibility
 def test_portable_report_rejects_stale_failed_or_missing_coverage(change):
@@ -64,6 +67,12 @@ def test_portable_report_rejects_stale_failed_or_missing_coverage(change):
         result['runId'] = 'old'
     elif change == 'failed':
         result['passed'] = False
+    elif change == 'missing-loading-case':
+        result['cases'] = [case for case in result['cases'] if case['name'] != 'shared loading animation in both record views']
+    elif change == 'duplicate-case':
+        result['cases'].append(result['cases'][0].copy())
+    elif change == 'failed-case':
+        result['cases'][0]['passed'] = False
     else:
         result['cases'].pop()
     with pytest.raises(AssertionError):

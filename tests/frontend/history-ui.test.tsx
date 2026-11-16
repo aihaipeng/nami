@@ -14,6 +14,29 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('uses shared nonblocking copy failure feedback for inline and menu actions and clears it on hide', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'translation_sample_copy') throw new Error('clipboard_write');
+      return original(name, args);
+    });
+    const user = userEvent.setup();
+    await mount('history');
+    await user.click(within(row('sample-03')).getByRole('button', { name: 'Copy source text' }));
+    const feedback = await screen.findByText('Content was not copied. Try again.');
+    expect(feedback.className).toBe('record-feedback');
+    expect(feedback.closest('#translation-history')).toBeTruthy();
+    expect(document.querySelector('.global-error')).toBeNull();
+    await windowState({ historyVisible: false, recordsSession: 1 });
+    expect(screen.queryByText('Content was not copied. Try again.')).toBeNull();
+    await windowState({ historyVisible: true });
+    fireEvent.contextMenu(row('sample-03'));
+    await user.click(screen.getByRole('menuitem', { name: 'Copy source text' }));
+    expect(await screen.findByText('Content was not copied. Try again.')).toBeTruthy();
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.querySelector('.global-error')).toBeNull();
+  });
+
   it('opens the shared five-action context menu without selecting or translating the row', async () => {
     await mount('history');
     const before = calls('history_sample_select').length;
@@ -129,7 +152,7 @@ describe('history list and session actions', () => {
     expect(screen.getByRole('button', { name: 'Clipboard' }).querySelector('[data-symbol="list.bullet"]')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Pin records' }).classList.contains('history-pin')).toBe(true);
     const target = row('sample-03');
-    expect(target.querySelector('[data-symbol="languages"]')).toBeTruthy();
+    expect(target.querySelector('[data-symbol="languages"]')).toBeNull();
     expect(target.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
     expect(target.querySelector('[data-symbol="trash"]')).toBeTruthy();
     await user.click(within(target).getByRole('button', { name: 'Favorite' }));
@@ -144,9 +167,14 @@ describe('history list and session actions', () => {
     expect(row('sample-03').classList.contains('pinned')).toBe(false);
   });
 
-  it('uses the provided language icon for retranslation with the shared size and stroke', async () => {
+  it('keeps retranslation in the context menu and aligns row actions with clipboard', async () => {
     await mount('history');
-    const button = within(row('sample-03')).getByRole('button', { name: 'Retranslate' });
+    const target = row('sample-03');
+    expect(within(target).queryByRole('button', { name: 'Retranslate' })).toBeNull();
+    expect([...target.querySelectorAll('.history-row-actions button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Copy source text', 'Favorite', 'Pin record', 'Delete history record']);
+    expect(target.style.getPropertyValue('--history-actions-width')).toBe('99px');
+    fireEvent.contextMenu(target);
+    const button = screen.getByRole('menuitem', { name: 'Retranslate' });
     const icon = button.querySelector<HTMLElement>('.history-symbol')!;
     expect(icon.dataset.symbol).toBe('languages');
     expect(icon.style.getPropertyValue('--symbol-url')).toContain('reference-languages.png');
@@ -222,7 +250,8 @@ describe('history list and session actions', () => {
     await user.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: false }]);
     expect(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('true');
-    await user.click(within(row('sample-03')).getByRole('button', { name: 'Retranslate' }));
+    fireEvent.contextMenu(row('sample-03'));
+    await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: true }]);
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Copy source text' }));
     expect(calls('translation_sample_copy').at(-1)).toEqual(['translation_sample_copy', { sampleId: 'sample-03', part: 'source' }]);

@@ -8,8 +8,7 @@ import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, editSource } from '../shared/source';
 import { cn } from '../lib/utils';
-import { HistoryPanel } from './HistoryPanel';
-import { Clipboard } from '../clipboard/Clipboard';
+import { RecordsWorkspace } from '../shared/RecordsWorkspace';
 import { HistoryIcon } from './HistoryIcon';
 import { historySamples, type HistoryRecord, type HistorySelection } from './history';
 import { HistoryDivider } from './HistoryDivider';
@@ -110,7 +109,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useEffect(() => { void command('translation_columns_set', { secondaryEnabled: secondary !== 'none' }); }, [secondary]);
 
   useEffect(() => {
-    if (state.translationVisible) input.current?.focus({ preventScroll: true });
+    if (state.translationVisible && !state.historyVisible) input.current?.focus({ preventScroll: true });
   }, [state.translationVisible]);
 
   useLayoutEffect(() => {
@@ -212,7 +211,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setNotice(null);
     if (retranslate) void translateText(record.text, record.sourceLanguage, record.targetLanguages, false);
     if (!native) void command('window_show', { target: 'translation' });
-    input.current?.focus({ preventScroll: true });
+    if (retranslate) input.current?.focus({ preventScroll: true });
   }
 
   select.current = selectHistory;
@@ -282,10 +281,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   return <div className={cn('translation-shell', state.historyVisible && 'with-history', !state.translationVisible && 'history-only')} style={shellStyle}>
     {!capabilities.nativeHistory && <div className="history-clip" style={historyWidthChanged ? { transition: 'none' } : undefined} hidden={!state.historyVisible && state.historyExtent === 0} aria-hidden={!state.historyVisible} inert={!state.historyVisible}>
-    <div className="record-view" hidden={state.recordView === 'clipboard'} inert={state.recordView === 'clipboard'}>
-    <HistoryPanel active={state.recordView !== 'clipboard' && state.historyVisible} t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId} onSelect={native ? (record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); } : selectHistory} onKeyDown={(event) => keydown(event, 'history')} />
-    </div>
-    <div className="record-view" hidden={state.recordView !== 'clipboard'} inert={state.recordView !== 'clipboard'}><Clipboard t={t} snapshot={snapshot} command={command} native={native} activity={activity} active={state.recordView === 'clipboard' && state.historyVisible} /></div>
+    <RecordsWorkspace t={t} snapshot={snapshot} command={command} native={native} activity={activity} selectedId={selectedId} onSelect={native ? undefined : selectHistory} />
     </div>}
     <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
     <section className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}

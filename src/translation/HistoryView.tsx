@@ -5,7 +5,7 @@ import { HistoryPanel } from './HistoryPanel';
 import { HistoryDivider } from './HistoryDivider';
 import type { HistorySelection } from './history';
 
-export function HistoryView({ t, snapshot, command, native }: ViewProps) {
+export function HistoryView({ t, snapshot, command, native, activity }: ViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   useEffect(() => {
     let disposed = false;
@@ -21,7 +21,7 @@ export function HistoryView({ t, snapshot, command, native }: ViewProps) {
       event.preventDefault(); void command('window_hide', { region: 'translation' });
     }
   }}>
-    <HistoryPanel t={t} snapshot={snapshot} command={command} native={native} selectedId={selectedId}
+    <HistoryPanel t={t} snapshot={snapshot} command={command} native={native} activity={activity} selectedId={selectedId}
       onSelect={(record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); }}
       onKeyDown={() => {}} />
     {snapshot.window.translationVisible && <HistoryDivider t={t} width={snapshot.window.historyWidth} command={command} />}

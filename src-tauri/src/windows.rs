@@ -3,6 +3,7 @@ use crate::{
     platform, AppState,
 };
 use objc2::{rc::Retained, runtime::AnyObject, DefinedClass, MainThreadOnly};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::{cell::Cell, sync::atomic::Ordering};
 use tauri::{
     window::{Effect, EffectState, EffectsBuilder},
@@ -13,29 +14,18 @@ use tauri::{
 const TRANSLATION_WIDTH: f64 = 920.0;
 const HISTORY_MIN_WIDTH: f64 = 280.0;
 const HISTORY_MAX_WIDTH: f64 = 720.0;
-const STAGE_HISTORY_TAG: isize = 1;
 const STAGE_TRANSLATION_TAG: isize = 2;
 const STAGE_CLIPBOARD_TAG: isize = 3;
 
 #[path = "windows/native_controls.rs"]
 mod native_controls;
 pub use native_controls::update as update_translation_chrome;
-#[path = "windows/native_history.rs"]
-mod native_history;
 #[path = "windows/native_resize.rs"]
 mod native_resize;
 
 #[cfg(feature = "ui-tests")]
 pub(crate) use crate::history_runtime::history_add;
 pub(crate) use crate::history_runtime::{history_record, select_native_history};
-
-pub(crate) fn refresh_history(app: &AppHandle) -> Result<(), String> {
-    let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();
-    if let Some(window) = app.get_window("translation") {
-        native_history::apply_snapshot(&window, &snapshot)?;
-    }
-    Ok(())
-}
 
 unsafe extern "C" {
     fn objc_getAssociatedObject(object: *mut AnyObject, key: *const u8) -> *mut AnyObject;
@@ -209,6 +199,62 @@ struct StageFrames {
     translation: StageFrame,
 }
 
+struct RecordsDividerState {
+    app: AppHandle,
+    last_x: Cell<f64>,
+}
+
+objc2::define_class!(
+    #[unsafe(super = objc2_app_kit::NSView)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = RecordsDividerState]
+    struct RecordsDivider;
+    impl RecordsDivider {
+        #[unsafe(method(tag))]
+        fn tag(&self) -> isize { 206 }
+        #[unsafe(method(drawRect:))]
+        fn draw(&self, _: NSRect) {
+            unsafe {
+                let bounds: NSRect = objc2::msg_send![self, bounds];
+                let base: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), labelColor];
+                let colors: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSMutableArray), new];
+                for alpha in [0.0_f64, 0.04, 0.12, 0.04, 0.0] {
+                    let color: *mut AnyObject = objc2::msg_send![base, colorWithAlphaComponent: alpha];
+                    let _: () = objc2::msg_send![&*colors, addObject: color];
+                }
+                let positions = [0.0_f64, 0.25, 0.5, 0.75, 1.0];
+                let space: *mut AnyObject = objc2::msg_send![objc2::class!(NSColorSpace), sRGBColorSpace];
+                let gradient: *mut AnyObject = objc2::msg_send![objc2::class!(NSGradient), alloc];
+                let gradient: *mut AnyObject = objc2::msg_send![gradient, initWithColors: &*colors, atLocations: positions.as_ptr(), colorSpace: space];
+                if let Some(gradient) = Retained::from_raw(gradient) {
+                    let _: () = objc2::msg_send![&*gradient, drawInRect: NSRect::new(NSPoint::new(bounds.size.width - 1.0, 0.0), NSSize::new(1.0, bounds.size.height)), angle: 90.0_f64];
+                }
+            }
+        }
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn appearance(&self) { unsafe { let _: () = objc2::msg_send![super(self), viewDidChangeEffectiveAppearance]; } self.setNeedsDisplay(true); }
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn first_mouse(&self, _: *mut AnyObject) -> bool { true }
+        #[unsafe(method(mouseDown:))]
+        fn down(&self, _: *mut AnyObject) { unsafe { let mouse: NSPoint = objc2::msg_send![objc2::class!(NSEvent), mouseLocation]; self.ivars().last_x.set(mouse.x); } }
+        #[unsafe(method(mouseDragged:))]
+        fn dragged(&self, _: *mut AnyObject) {
+            unsafe {
+                let mouse: NSPoint = objc2::msg_send![objc2::class!(NSEvent), mouseLocation];
+                let delta = mouse.x - self.ivars().last_x.replace(mouse.x);
+                let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width;
+                let _ = resize_history(&self.ivars().app, width + delta, false);
+            }
+        }
+        #[unsafe(method(resetCursorRects))]
+        fn cursor(&self) { unsafe { let bounds: NSRect = objc2::msg_send![self, bounds]; let cursor: *mut AnyObject = objc2::msg_send![objc2::class!(NSCursor), resizeLeftRightCursor]; let _: () = objc2::msg_send![self, addCursorRect: bounds, cursor: cursor]; } }
+        #[unsafe(method(accessibilityPerformIncrement))]
+        fn increment(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width; resize_history(&self.ivars().app, width + 24.0, false).is_ok() }
+        #[unsafe(method(accessibilityPerformDecrement))]
+        fn decrement(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width; resize_history(&self.ivars().app, width - 24.0, false).is_ok() }
+    }
+);
+
 #[derive(Default)]
 struct StageState {
     mode: Cell<u32>,
@@ -217,7 +263,6 @@ struct StageState {
     translation_width: Cell<f64>,
     history_visible: Cell<bool>,
     translation_visible: Cell<bool>,
-    history_view: Cell<usize>,
     translation_view: Cell<usize>,
     clipboard_view: Cell<usize>,
 }
@@ -280,7 +325,6 @@ objc2::define_class!(
         #[unsafe(method(setStageView:forTag:))]
         fn set_stage_view(&self, view: *mut AnyObject, tag: isize) {
             match tag {
-                STAGE_HISTORY_TAG => self.ivars().history_view.set(view as usize),
                 STAGE_TRANSLATION_TAG => self.ivars().translation_view.set(view as usize),
                 STAGE_CLIPBOARD_TAG => self.ivars().clipboard_view.set(view as usize),
                 _ => {}
@@ -304,7 +348,6 @@ impl TranslationStage {
             let bounds: objc2_foundation::NSRect = objc2::msg_send![self, bounds];
             let frames = geometry.frames(bounds.size.width);
             for (pointer, frame) in [
-                (state.history_view.get(), frames.history),
                 (state.clipboard_view.get(), frames.history),
                 (state.translation_view.get(), frames.translation),
             ] {
@@ -320,6 +363,11 @@ impl TranslationStage {
                 if current != rect {
                     let _: () = objc2::msg_send![view, setFrame: rect];
                 }
+            }
+            let divider: *mut AnyObject = objc2::msg_send![self, viewWithTag: 206isize];
+            if !divider.is_null() {
+                let _: () = objc2::msg_send![divider, setFrame: NSRect::new(NSPoint::new(frames.translation.x - 6.0, bounds.size.height * 0.07), NSSize::new(6.0, bounds.size.height * 0.86))];
+                let _: () = objc2::msg_send![divider, setHidden: !state.history_visible.get() || !state.translation_visible.get()];
             }
             native_controls::layout(
                 self,
@@ -429,12 +477,6 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
     };
 
     let stage_pointer = Retained::as_ptr(&stage) as usize;
-    let history = native_history::create(window.app_handle())?;
-    unsafe {
-        let _: () = objc2::msg_send![&*history, setAutoresizingMask: 0usize];
-        let _: () = objc2::msg_send![&*stage, addSubview: &*history];
-        let _: () = objc2::msg_send![&*stage, setStageView: &*history, forTag: STAGE_HISTORY_TAG];
-    }
     {
         let view = window
             .app_handle()
@@ -475,6 +517,18 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
         })
         .map_err(|_| "window_geometry")?;
 
+    unsafe {
+        let divider = RecordsDivider::alloc(marker).set_ivars(RecordsDividerState {
+            app: window.app_handle().clone(),
+            last_x: Cell::new(0.0),
+        });
+        let divider: Retained<RecordsDivider> =
+            objc2::msg_send![super(divider), initWithFrame: NSRect::ZERO];
+        let _: () = objc2::msg_send![&*divider, setAccessibilityElement: true];
+        let _: () = objc2::msg_send![&*divider, setAccessibilityRole: objc2_foundation::ns_string!("AXSplitter")];
+        let _: () = objc2::msg_send![&*divider, setAccessibilityLabel: objc2_foundation::ns_string!("Resize translation history")];
+        let _: () = objc2::msg_send![&*stage, addSubview: &*divider];
+    }
     native_controls::install(window.app_handle(), &stage)?;
     native_resize::install(window.app_handle(), &stage)?;
     let state = window
@@ -641,17 +695,6 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
         WindowEvent::Focused(false) => {
             if owned_label == "translation" {
                 handle.state::<AppState>().windows.lock().unwrap().blur();
-                if !handle
-                    .state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .history_visible
-                {
-                    if let Some(window) = handle.get_window("translation") {
-                        let _ = native_history::dismiss_transient(&window);
-                    }
-                }
                 let _ = apply_translation(&handle);
             } else if owned_label == "clipboard"
                 && !handle
@@ -692,9 +735,6 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
             .lock()
             .unwrap()
             .take();
-        if let Some(window) = app.get_window("translation") {
-            native_history::reset_session(&window)?;
-        }
         crate::clipboard_runtime::visibility(app, false)?;
     }
     if !state.translation_visible {
@@ -704,11 +744,8 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
             crate::history_runtime::publish_history(app)?;
         }
     }
-    if let Some(window) = app.get_window("translation") {
-        native_history::sync(&window, state.history_visible)?;
-    }
     if let Some(view) = app.get_webview("clipboard") {
-        let hidden = !state.history_visible || state.record_view != RecordView::Clipboard;
+        let hidden = !state.history_visible && state.history_extent <= 0.0;
         view.with_webview(move |webview| unsafe {
             let _: () = objc2::msg_send![webview.inner().cast::<AnyObject>(), setHidden: hidden];
         })
@@ -1237,17 +1274,14 @@ pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
     )? {
         return Ok(());
     }
-    app.state::<AppState>()
-        .windows
-        .lock()
-        .unwrap()
-        .set_record_view(view);
+    {
+        let state = app.state::<AppState>();
+        let mut windows = state.windows.lock().unwrap();
+        windows.set_record_view(view);
+        windows.records_focus += 1;
+    }
     apply_translation(app)?;
-    if view == RecordView::Translation {
-        if let Some(window) = app.get_window("translation") {
-            native_history::focus_search(&window)?;
-        }
-    } else if let Some(view) = app.get_webview("clipboard") {
+    if let Some(view) = app.get_webview("clipboard") {
         view.set_focus().map_err(|_| "window_focus")?;
     }
     Ok(())
@@ -1265,7 +1299,6 @@ pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
             state.history.lock().unwrap().restore_visual_selection();
         }
     }
-    refresh_history(app)?;
     crate::history_runtime::publish_history(app)?;
     apply_translation(app)
 }
@@ -1363,9 +1396,6 @@ pub fn reveal_without_focus(window: &Window) -> Result<(), String> {
 pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
     match region {
         "translation" | "history" | "clipboard" => {
-            if let Some(window) = app.get_window("translation") {
-                native_history::dismiss_transient(&window)?;
-            }
             if region == "clipboard" {
                 app.state::<AppState>()
                     .operation

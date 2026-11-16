@@ -129,7 +129,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       void fetchPage(false, false);
       return;
     }
-    setLoading(true); setShowActivity(true);
+    setLoading(true); setShowActivity(false);
     const timer = window.setTimeout(() => { void fetchPage(); }, 150);
     return () => window.clearTimeout(timer);
   }, [query, favoritesOnly, fetchPage]);

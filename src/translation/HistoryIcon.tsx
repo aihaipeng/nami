@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 
 const symbols = import.meta.glob<string>('../assets/history/*.png', { eager: true, query: '?url', import: 'default' });
-type HistorySymbol = 'keyboard' | 'clock' | 'list.bullet' | 'star' | 'star.fill' | 'pin' | 'pin.fill' | 'languages' | 'doc.on.doc' | 'trash' | 'magnifyingglass' | 'xmark.circle.fill';
+type HistorySymbol = 'keyboard' | 'clock' | 'list.bullet' | 'star' | 'star.fill' | 'pin' | 'pin.fill' | 'languages' | 'doc.on.doc' | 'trash' | 'magnifyingglass' | 'xmark.circle.fill' | 'chevron.left' | 'chevron.right';
 const reference: Partial<Record<HistorySymbol, string>> = {
   clock: 'reference-clock',
   keyboard: 'reference-keyboard',

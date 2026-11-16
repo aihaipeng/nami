@@ -10,11 +10,6 @@ use tauri::{
 
 pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
-// The shared React view consumes history_changed; this host owns no native list.
-pub(crate) fn refresh_history(_: &AppHandle) -> Result<(), String> {
-    Ok(())
-}
-
 pub fn update_translation_chrome(
     _: &AppHandle,
     _: String,

@@ -34,6 +34,7 @@ pub use unsupported::*;
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     pub platform: &'static str,
+    // Native split-pane host; records content is shared React.
     pub native_history: bool,
     pub native_chrome: bool,
     pub native_material: bool,

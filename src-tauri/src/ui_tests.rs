@@ -4,17 +4,6 @@ use serde::Serialize;
 use std::{sync::mpsc, time::Duration};
 use tauri::Listener;
 
-objc2::define_class!(
-    #[unsafe(super = objc2_foundation::NSObject)]
-    #[thread_kind = objc2::MainThreadOnly]
-    #[ivars = bool]
-    struct SearchCommandFixture;
-    impl SearchCommandFixture {
-        #[unsafe(method(hasMarkedText))]
-        fn marked_text(&self) -> bool { *self.ivars() }
-    }
-);
-
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LayerFrame {
@@ -129,15 +118,11 @@ fn on_main<T: Send + 'static>(
 }
 
 fn view_frame(app: &AppHandle, label: &str) -> Result<objc2_foundation::NSRect, String> {
-    if label == "history" {
-        let window = app.get_window("translation").ok_or("missing_test_window")?;
-        let stage = translation_stage(&window)?;
-        let pointer = stage.ivars().history_view.get() as *mut AnyObject;
-        if pointer.is_null() {
-            return Err("missing_native_history".into());
-        }
-        return unsafe { Ok(objc2::msg_send![pointer, frame]) };
-    }
+    let label = if label == "history" {
+        "clipboard"
+    } else {
+        label
+    };
     let view = app.get_webview(label).ok_or("missing_test_webview")?;
     let (send, receive) = mpsc::sync_channel(1);
     view.with_webview(move |view| unsafe {
@@ -153,39 +138,11 @@ fn view_frame(app: &AppHandle, label: &str) -> Result<objc2_foundation::NSRect, 
 }
 
 fn view_layer(app: &AppHandle, label: &str) -> Result<Option<LayerSample>, String> {
-    if label == "history" {
-        let window = app.get_window("translation").ok_or("missing_test_window")?;
-        let stage = translation_stage(&window)?;
-        let pointer = stage.ivars().history_view.get() as *mut AnyObject;
-        if pointer.is_null() {
-            return Err("missing_native_history".into());
-        }
-        return unsafe {
-            let layer: *mut AnyObject = objc2::msg_send![pointer, layer];
-            if layer.is_null() {
-                return Ok(None);
-            }
-            let model: objc2_foundation::NSRect = objc2::msg_send![layer, frame];
-            let presentation: *mut AnyObject = objc2::msg_send![layer, presentationLayer];
-            let presented = if presentation.is_null() {
-                None
-            } else {
-                let frame: objc2_foundation::NSRect = objc2::msg_send![presentation, frame];
-                Some(frame.into())
-            };
-            let keys: *mut AnyObject = objc2::msg_send![layer, animationKeys];
-            let animation_count: usize = if keys.is_null() {
-                0
-            } else {
-                objc2::msg_send![keys, count]
-            };
-            Ok(Some(LayerSample {
-                model: model.into(),
-                presentation: presented,
-                animation_count,
-            }))
-        };
-    }
+    let label = if label == "history" {
+        "clipboard"
+    } else {
+        label
+    };
     let view = app.get_webview(label).ok_or("missing_test_webview")?;
     let (send, receive) = mpsc::sync_channel(1);
     view.with_webview(move |view| unsafe {
@@ -359,6 +316,25 @@ fn run(app: &AppHandle) -> Vec<Case> {
         |samples| {
             let baseline = on_main(app, |app| {
                 reset(app, 360.0, 700.0)?;
+                if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
+                    let window = app.get_window("translation").ok_or("window")?;
+                    let scale = window.scale_factor().map_err(|_| "scale")?;
+                    if let Some(monitor) = window.current_monitor().map_err(|_| "monitor")? {
+                        let area = monitor.work_area();
+                        let mut frame = native_translation_frame(&window)?;
+                        // Keep the sweep on screen, outside AppKit's off-screen placement constraints.
+                        frame.origin.x = (area.position.x as f64 + area.size.width as f64) / scale
+                            - 20.0
+                            - frame.size.width;
+                        unsafe {
+                            let native = window
+                                .ns_window()
+                                .map_err(|_| "native window")?
+                                .cast::<AnyObject>();
+                            let _: () = objc2::msg_send![native,setFrame:frame,display:false];
+                        }
+                    }
+                }
                 owner(app, true)?;
                 geometry(app)
             })?;
@@ -1368,62 +1344,6 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
     Ok(value)
 }
 
-fn history_snapshot(app: &AppHandle) -> Result<serde_json::Value, String> {
-    let window = app.get_window("translation").ok_or("missing_test_window")?;
-    native_history::snapshot(&window)
-}
-
-fn history_object(app: &AppHandle, tag: isize) -> Result<*mut AnyObject, String> {
-    let window = app.get_window("translation").ok_or("missing_test_window")?;
-    let stage = translation_stage(&window)?;
-    let pointer: *mut AnyObject = unsafe { objc2::msg_send![&*stage, viewWithTag: tag] };
-    if pointer.is_null() {
-        Err(format!("missing native history control {tag}"))
-    } else {
-        Ok(pointer)
-    }
-}
-
-fn history_search(app: &AppHandle, query: &str) -> Result<(), String> {
-    unsafe {
-        let search = history_object(app, 205)?;
-        let value = objc2_foundation::NSString::from_str(query);
-        let _: () = objc2::msg_send![search, setStringValue: &*value];
-        let root = history_object(app, 201)?;
-        let _: () = objc2::msg_send![root, controlTextDidChange: std::ptr::null::<AnyObject>()];
-    }
-    Ok(())
-}
-
-fn history_click(app: &AppHandle, tag: isize) -> Result<(), String> {
-    unsafe {
-        if tag >= 1000 {
-            let index = (tag - 1000) / 10;
-            let row = history_object(app, 3000 + index)?;
-            let _: () = objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()];
-        }
-        let button = history_object(app, tag)?;
-        // performClick runs a nested AppKit loop while Tao holds its event-handler lock.
-        let enabled: bool = objc2::msg_send![button, isEnabled];
-        if enabled {
-            let action: objc2::runtime::Sel = objc2::msg_send![button, action];
-            let target: *mut AnyObject = objc2::msg_send![button, target];
-            let sent: bool = objc2::msg_send![button, sendAction: action, to: target];
-            if !sent {
-                return Err("native button action was not sent".into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn history_all(app: &AppHandle) -> Result<(), String> {
-    if history_snapshot(app)?["favoritesOnly"] == true {
-        history_click(app, 203)?;
-    }
-    Ok(())
-}
-
 fn clipboard_host(app: &AppHandle) -> Result<Window, String> {
     create(app, "translation")?;
     {
@@ -1442,17 +1362,6 @@ fn clipboard_host(app: &AppHandle) -> Result<Window, String> {
         .clone())
 }
 
-fn history_select(app: &AppHandle, index: isize) -> Result<(), String> {
-    unsafe {
-        let row = history_object(app, 3000 + index)?;
-        let pressed: bool = objc2::msg_send![row, accessibilityPerformPress];
-        if !pressed {
-            return Err("native history row rejected accessibility press".into());
-        }
-    }
-    Ok(())
-}
-
 fn wait_motion(app: &AppHandle) -> Result<(), String> {
     for _ in 0..100 {
         if on_main(app, |app| {
@@ -1469,779 +1378,6 @@ fn wait_motion(app: &AppHandle) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(10));
     }
     Err("real animation driver did not settle".into())
-}
-
-fn assert_same_history_nodes(a: &serde_json::Value, b: &serde_json::Value) -> Result<(), String> {
-    if a["rootPointer"] != b["rootPointer"] {
-        return Err("history root was replaced".into());
-    }
-    let a = a["rows"].as_array().ok_or("missing history rows")?;
-    let b = b["rows"].as_array().ok_or("missing history rows")?;
-    if a.len() != b.len() || a.iter().zip(b).any(|(a, b)| a["pointer"] != b["pointer"]) {
-        return Err("history row instances were rebuilt".into());
-    }
-    Ok(())
-}
-
-fn run_history_native_resize(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        let mut layouts = Vec::new();
-        for fixed_right in [true, false] {
-            let baseline = on_main(app, |app| {
-                reset(app, 440.0, 920.0)?;
-                app.state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .translation_visible = false;
-                layout_translation(app, false)?;
-                owner(app, true)?;
-                Ok((geometry(app)?, history_snapshot(app)?))
-            })?;
-            let mut edge_layouts = Vec::new();
-            for index in 0..80 {
-                let width = 280.0 + (index % 41) as f64 * 11.0;
-                let value = on_main(app, move |app| {
-                    set_native_width(app, width, fixed_right)?;
-                    track_translation_resize(app, &app.get_window("translation").unwrap())?;
-                    Ok((geometry(app)?, history_snapshot(app)?))
-                })?;
-                let (current, snapshot) = value;
-                equal(
-                    current.history_width,
-                    width,
-                    "standalone history fills width",
-                )?;
-                equal(current.history_x, 0.0, "standalone history origin")?;
-                equal(
-                    if fixed_right {
-                        current.window_right
-                    } else {
-                        current.window_left
-                    },
-                    if fixed_right {
-                        baseline.0.window_right
-                    } else {
-                        baseline.0.window_left
-                    },
-                    "standalone opposite edge anchor",
-                )?;
-                assert_same_history_nodes(&baseline.1, &snapshot)?;
-                let rows = snapshot["rows"].as_array().ok_or("missing native rows")?;
-                let layout = rows.iter().filter(|row| row["hidden"] == false).map(|row| {
-                    let actions = row["actions"].as_array().unwrap().iter().map(|action| serde_json::json!({"x":action["x"],"y":action["y"],"width":action["width"],"height":action["height"],"drawnWidth":action["drawnWidth"],"drawnHeight":action["drawnHeight"]})).collect::<Vec<_>>();
-                    serde_json::json!({"x":row["x"],"y":row["y"],"width":row["width"],"height":row["height"],"actions":actions})
-                }).collect::<Vec<_>>();
-                edge_layouts.push(layout);
-                samples.push(
-                    serde_json::json!({"fixedRight":fixed_right,"width":width,"history":snapshot}),
-                );
-            }
-            layouts.push(edge_layouts);
-            on_main(app, |app| {
-                end_translation_resize(app, &app.get_window("translation").unwrap())
-            })?;
-        }
-        if layouts[0] != layouts[1] {
-            return Err("left/right standalone resizing used different internal layouts".into());
-        }
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
-        Ok::<(), String>(())
-    })();
-    DomCase {
-        name: "native standalone history: identical left/right layouts and stable row instances",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn run_history_driver(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        on_main(app, |app| {
-            reset(app, 360.0, 920.0)?;
-            history_search(app, "quiet")
-        })?;
-        wait_history_query(app)?;
-        let baseline = on_main(app, history_snapshot)?;
-        let initial_layout = baseline["layoutCount"].clone();
-        for (delay, open) in [
-            (0, false),
-            (30, true),
-            (35, false),
-            (45, true),
-            (30, false),
-            (65, true),
-        ] {
-            if delay > 0 {
-                std::thread::sleep(Duration::from_millis(delay));
-            }
-            let sample = on_main(app, move |app| {
-                let before = geometry(app)?;
-                app.state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .history_visible = open;
-                layout_translation(app, true)?;
-                let after = geometry(app)?;
-                equal(
-                    before.history_x,
-                    after.history_x,
-                    "retarget keeps current history frame",
-                )?;
-                equal(
-                    before.window_left,
-                    after.window_left,
-                    "retarget keeps current window origin",
-                )?;
-                after.adjacent()?;
-                equal(
-                    after.history_width,
-                    360.0,
-                    "animation keeps history internal width",
-                )?;
-                equal(
-                    after.translation_width,
-                    920.0,
-                    "animation keeps translation internal width",
-                )?;
-                history_snapshot(app)
-            })?;
-            assert_same_history_nodes(&baseline, &sample)?;
-            if sample["query"] != baseline["query"] || sample["selected"] != baseline["selected"] {
-                return Err("animation discarded history query or selection".into());
-            }
-            if sample["layoutCount"] != initial_layout {
-                return Err("origin-only animation relaid out history rows".into());
-            }
-            samples.push(sample);
-        }
-        wait_motion(app)?;
-        let final_sample = on_main(app, |app| {
-            let g = geometry(app)?;
-            equal(g.history_x, 0.0, "latest revision ends expanded")?;
-            g.adjacent()?;
-            history_snapshot(app)
-        })?;
-        assert_same_history_nodes(&baseline, &final_sample)?;
-        samples.push(final_sample);
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible = false;
-            layout_translation(app, true)
-        })?;
-        std::thread::sleep(Duration::from_millis(35));
-        let closing = on_main(app, |app| {
-            let state = app.state::<AppState>().windows.lock().unwrap().clone();
-            if state.translation_extent <= 0.5 {
-                return Err("translation animation had no intermediate sample".into());
-            }
-            let chrome = native_chrome_sample(app)?;
-            if chrome["buttons"][0]["hidden"] != false {
-                return Err(
-                    "source native chrome disappeared before translation finished closing".into(),
-                );
-            }
-            Ok(chrome)
-        })?;
-        samples.push(closing);
-        wait_motion(app)?;
-        let closed = on_main(app, native_chrome_sample)?;
-        if closed["buttons"]
-            .as_array()
-            .ok_or("missing native chrome")?
-            .iter()
-            .any(|button| button["hidden"] != true)
-        {
-            return Err("translation native chrome remained after closing".into());
-        }
-        samples.push(closed);
-        on_main(app, |app| {
-            history_search(app, "")?;
-            reset(app, 360.0, 920.0)
-        })?;
-        wait_history_query(app)?;
-        Ok::<(), String>(())
-    })();
-    DomCase {
-        name: "real spring driver: rapid reversals preserve instances and closing chrome",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn assert_history_store_projection(app: &AppHandle) -> Result<(), String> {
-    let shared = app.state::<AppState>().history.lock().unwrap().snapshot();
-    let native = history_snapshot(app)?;
-    let rows = native["rows"].as_array().ok_or("missing native rows")?;
-    let live = rows
-        .iter()
-        .filter(|row| row["id"].as_str().is_some_and(|id| !id.is_empty()))
-        .count();
-    if live != shared.records.len() {
-        return Err("native projection record count differs from shared history".into());
-    }
-    for record in &shared.records {
-        let row = rows
-            .iter()
-            .find(|row| row["id"].as_str() == Some(&record.id))
-            .ok_or("shared history record missing from native projection")?;
-        if row["favorite"] != record.is_favorite || row["pinned"] != record.is_pinned {
-            return Err("native history flags differ from shared history".into());
-        }
-    }
-    if native["selected"].as_str() != shared.selected_id.as_deref() {
-        return Err("native selected row differs from shared history".into());
-    }
-    Ok(())
-}
-
-fn wait_history_query(app: &AppHandle) -> Result<(), String> {
-    for _ in 0..200 {
-        let snapshot = on_main(app, history_snapshot)?;
-        if snapshot["queryPending"] == false && snapshot["loadPending"] == false {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    Err("native history query timed out".into())
-}
-
-fn run_history_native_actions(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        on_main(app, |app| {
-            reset(app, 360.0, 920.0)?;
-            history_search(app, "")?;
-            history_all(app)
-        })?;
-        wait_history_query(app)?;
-        samples.push(on_main(app, |app| unsafe {
-            let window = app.get_window("translation").ok_or("missing_test_window")?;
-            let native = window.ns_window().map_err(|_| "window_geometry")?.cast::<AnyObject>();
-            let search = history_object(app, 205)?;
-            let container: *mut AnyObject = objc2::msg_send![search, superview];
-            let layer: *mut AnyObject = objc2::msg_send![container, layer];
-            let _: bool = objc2::msg_send![native, makeFirstResponder: std::ptr::null::<AnyObject>()];
-            let idle: f64 = objc2::msg_send![layer, borderWidth];
-            let _: () = objc2::msg_send![search, selectText: std::ptr::null::<AnyObject>()];
-            let focused: f64 = objc2::msg_send![layer, borderWidth];
-            let _: bool = objc2::msg_send![native, makeFirstResponder: std::ptr::null::<AnyObject>()];
-            let blurred: f64 = objc2::msg_send![layer, borderWidth];
-            equal(idle, 1.0, "idle search border")?;
-            equal(focused, 2.0, "search focus ring appears before typing")?;
-            equal(blurred, 1.0, "search focus ring clears after blur")?;
-            let delete = history_object(app, 1024)?;
-            let tint: *mut AnyObject = objc2::msg_send![delete, contentTintColor];
-            let red: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), systemRedColor];
-            let is_red: bool = !tint.is_null() && objc2::msg_send![tint, isEqual: red];
-            if !is_red {
-                return Err("history delete icon must use destructive red".into());
-            }
-            Ok(serde_json::json!({"searchIdleBorder":idle,"searchFocusedBorder":focused,"searchBlurredBorder":blurred,"deleteRed":is_red}))
-        })?);
-        let initial = on_main(app, history_snapshot)?;
-        on_main(app, |app| {
-            native_history::verify_flag_icons(
-                &app.get_window("translation")
-                    .ok_or("missing translation window")?,
-            )
-        })?;
-
-        if initial["pinnedCount"] != 2 || initial["ordinaryCount"] != 18 {
-            return Err("native history did not load 20 samples with pinned records first".into());
-        }
-        if initial["countText"] != "20 records" || initial["shortcutsHidden"] != true {
-            return Err(
-                "history footer did not show the total and hide shortcuts initially".into(),
-            );
-        }
-        for (hidden, description) in [(false, "open"), (true, "close")] {
-            let footer = on_main(app, |app| {
-                history_click(app, 207)?;
-                history_snapshot(app)
-            })?;
-            if footer["shortcutsHidden"] != hidden {
-                return Err(format!(
-                    "history keyboard button did not {description} shortcuts"
-                ));
-            }
-        }
-        let scrollbar_top = initial["scrollbarY"]
-            .as_f64()
-            .ok_or("missing scrollbar position")?;
-        let pinned_top = initial["pinnedY"]
-            .as_f64()
-            .ok_or("missing pinned position")?;
-        if (scrollbar_top - pinned_top).abs() > 8.0 {
-            return Err("history scrollbar does not start at the top of the pinned section".into());
-        }
-        for row in initial["rows"]
-            .as_array()
-            .ok_or("missing native history rows")?
-        {
-            for field in ["headingCenterY", "timeCenterY"] {
-                equal(
-                    row[field].as_f64().ok_or("missing heading center")?,
-                    16.0,
-                    "FinderX source icon and text center",
-                )?;
-            }
-            for (actual, required) in [
-                ("timeWidth", "timeRequiredWidth"),
-                ("timeHeight", "timeRequiredHeight"),
-            ] {
-                if row[actual].as_f64().unwrap_or(0.0)
-                    < row[required].as_f64().unwrap_or(f64::INFINITY)
-                {
-                    return Err(format!("history timestamp clipped: {}", row["id"]));
-                }
-            }
-            for action in row["actions"]
-                .as_array()
-                .ok_or("missing history actions")?
-                .iter()
-            {
-                for dimension in ["imageWidth", "imageHeight", "drawnWidth", "drawnHeight"] {
-                    let size = action[dimension].as_f64().unwrap_or(0.0);
-                    let expected = 14.0;
-                    if size != expected {
-                        return Err(format!("history symbol size {size}, expected {expected}"));
-                    }
-                }
-            }
-        }
-        for button in initial["toolbar"]
-            .as_array()
-            .ok_or("missing history toolbar")?
-        {
-            for dimension in ["drawnWidth", "drawnHeight"] {
-                equal(
-                    button[dimension]
-                        .as_f64()
-                        .ok_or("missing toolbar image rectangle")?,
-                    14.0,
-                    "toolbar image rectangle",
-                )?;
-            }
-        }
-        samples.push(initial.clone());
-        let scrolled = on_main(app, |app| unsafe {
-            let row = history_object(app, 3002)?;
-            let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
-            let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
-            let _: () =
-                objc2::msg_send![clip, scrollToPoint: objc2_foundation::NSPoint::new(0.0, 64.0)];
-            let _: () = objc2::msg_send![scroll, reflectScrolledClipView: clip];
-            history_snapshot(app)
-        })?;
-        if scrolled["rows"][2]["parentPointer"] == scrolled["rows"][0]["parentPointer"] {
-            return Err("pinned and ordinary records share a scroll document".into());
-        }
-        for (index, expected) in [(0usize, 0.0), (2, 64.0)] {
-            equal(
-                initial["rows"][index]["viewportY"]
-                    .as_f64()
-                    .ok_or("missing row viewport")?
-                    - scrolled["rows"][index]["viewportY"]
-                        .as_f64()
-                        .ok_or("missing scrolled viewport")?,
-                expected,
-                "pinned record remains fixed while ordinary history scrolls",
-            )?;
-        }
-        samples.push(scrolled);
-        on_main(app, |app| history_search(app, ""))?;
-        for showing in [true, false, true, false] {
-            let value = on_main(app, move |app| unsafe {
-                let row = history_object(app, 3002)?;
-                if showing {
-                    let _: () = objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()];
-                } else {
-                    let _: () = objc2::msg_send![row, mouseExited: std::ptr::null::<AnyObject>()];
-                }
-                history_snapshot(app)
-            })?;
-            for action in value["rows"][2]["actions"]
-                .as_array()
-                .ok_or("missing actions")?
-            {
-                equal(
-                    action["opacity"].as_f64().ok_or("missing opacity")?,
-                    if showing { 1.0 } else { 0.0 },
-                    "hover target opacity",
-                )?;
-                equal(
-                    action["offset"].as_f64().ok_or("missing offset")?,
-                    if showing { 0.0 } else { 4.0 },
-                    "hover target slide",
-                )?;
-                if action["enabled"] != showing || action["hidden"] != false {
-                    return Err("hover actions must animate without hidden toggles and disable when retracted".into());
-                }
-                let duration = action["animationDuration"]
-                    .as_f64()
-                    .ok_or("missing animation duration")?;
-                if duration != 0.0 {
-                    equal(duration, 0.15, "shared EcoPaste hover duration")?;
-                }
-            }
-            samples.push(value);
-        }
-        for (query, expected) in [
-            ("安静", 1),
-            ("100%_literal", 1),
-            ("not in synthetic examples", 0),
-        ] {
-            on_main(app, move |app| history_search(app, query))?;
-            wait_history_query(app)?;
-            let value = on_main(app, history_snapshot)?;
-            let count = value["pinnedCount"].as_u64().unwrap_or(0)
-                + value["ordinaryCount"].as_u64().unwrap_or(0);
-            if count != expected {
-                return Err(format!(
-                    "native history search {query} expected {expected}, got {count}"
-                ));
-            }
-            samples.push(value);
-        }
-        on_main(app, |app| {
-            history_search(app, "")?;
-            history_click(app, 203)
-        })?;
-        wait_history_query(app)?;
-        let favorites = on_main(app, history_snapshot)?;
-        if favorites["pinnedCount"].as_u64().unwrap_or(0)
-            + favorites["ordinaryCount"].as_u64().unwrap_or(0)
-            != 5
-        {
-            return Err("native favorites filter count".into());
-        }
-        samples.push(favorites);
-        on_main(app, history_all)?;
-        wait_history_query(app)?;
-        let all_nodes = on_main(app, history_snapshot)?;
-        for _ in 0..6 {
-            let favorites = on_main(app, |app| {
-                history_click(app, 203)?;
-                history_snapshot(app)
-            })?;
-            if favorites["queryPending"] != false
-                || favorites["rows"].as_array().map(Vec::len) != Some(5)
-            {
-                return Err("cached favorites did not switch synchronously".into());
-            }
-            for favorite in favorites["rows"].as_array().unwrap() {
-                let original = all_nodes["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| row["id"] == favorite["id"])
-                    .ok_or("missing original favorite row")?;
-                if original["pointer"] != favorite["pointer"] {
-                    return Err("favorites rebuilt an existing native row".into());
-                }
-            }
-            let restored = on_main(app, |app| {
-                history_all(app)?;
-                history_snapshot(app)
-            })?;
-            if restored["queryPending"] != false {
-                return Err("cached all records waited for a worker".into());
-            }
-            assert_same_history_nodes(&all_nodes, &restored)?;
-        }
-        for (tag, field, expected) in [
-            (1022, "favorite", true),
-            (1023, "pinned", true),
-            (1023, "pinned", false),
-            (1022, "favorite", false),
-        ] {
-            on_main(app, move |app| history_click(app, tag))?;
-            let mut value = serde_json::Value::Null;
-            for _ in 0..100 {
-                value = on_main(app, |app| {
-                    assert_history_store_projection(app)?;
-                    history_snapshot(app)
-                })?;
-                if value["rows"][2][field] == expected {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if value["rows"][2][field] != expected {
-                return Err(format!("native flag {field} did not toggle"));
-            }
-            assert_same_history_nodes(&all_nodes, &value)?;
-            samples.push(value);
-        }
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_pinned = false;
-            update_translation_level(app)?;
-            history_select(app, 2)
-        })?;
-        wait_dom(app,"return {ready:document.querySelector('.source-input').value === 'The next train leaves in ten minutes.'};")?;
-        wait_motion(app)?;
-        let selection = on_main(app, history_snapshot)?;
-        if selection["selected"] != "sample-03" {
-            return Err("native selection did not synchronize".into());
-        }
-        samples.push(selection);
-        on_main(app, |app| history_select(app, 2))?;
-        for _ in 0..80 {
-            if on_main(app, |app| {
-                Ok(!app
-                    .state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .translation_visible)
-            })? {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        wait_motion(app)?;
-        if on_main(app, |app| {
-            Ok(app
-                .state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible)
-        })? {
-            return Err("repeat native selection did not collapse translation".into());
-        }
-        on_main(app, |app| history_select(app, 2))?;
-        for _ in 0..80 {
-            if on_main(app, |app| {
-                Ok(app
-                    .state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .translation_visible)
-            })? {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        wait_motion(app)?;
-        if !on_main(app, |app| {
-            Ok(app
-                .state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible)
-        })? {
-            return Err("native selection did not restore translation".into());
-        }
-        on_main(app, |app| {
-            crate::commands::select_history_sample(app, None, false)
-        })?;
-        if !on_main(app, history_snapshot)?["selected"].is_null() {
-            return Err("native selection did not clear".into());
-        }
-        let exposed = on_main(app, |app| {
-            unsafe {
-                let row = history_object(app, 3004)?;
-                let frame: objc2_foundation::NSRect = objc2::msg_send![row, frame];
-                let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
-                let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
-                let _: () = objc2::msg_send![clip, scrollToPoint: objc2_foundation::NSPoint::new(0.0, frame.origin.y + 15.0)];
-                let _: () = objc2::msg_send![scroll, reflectScrolledClipView: clip];
-                history_select(app, 4)?;
-                let bounds: objc2_foundation::NSRect = objc2::msg_send![clip, bounds];
-                equal(
-                    bounds.origin.y,
-                    frame.origin.y,
-                    "partially covered row scrolls minimally into view",
-                )?;
-            }
-            history_snapshot(app)
-        })?;
-        samples.push(exposed);
-        wait_motion(app)?;
-        let protected = on_main(app, |app| {
-            let revision = app
-                .state::<AppState>()
-                .history
-                .lock()
-                .unwrap()
-                .snapshot()
-                .revision;
-            history_click(app, 1004)?;
-            if app
-                .state::<AppState>()
-                .history
-                .lock()
-                .unwrap()
-                .snapshot()
-                .revision
-                != revision
-            {
-                return Err("protected native deletion changed shared history".into());
-            }
-            assert_history_store_projection(app)?;
-            history_snapshot(app)
-        })?;
-        if protected["rows"][0]["id"] != "sample-01"
-            || protected["rows"][0]["actions"][4]["enabled"] != false
-        {
-            return Err("pinned sample deletion was not protected".into());
-        }
-        samples.push(protected);
-        on_main(app, |app| history_click(app, 1024))?;
-        let mut deleted = serde_json::Value::Null;
-        for _ in 0..100 {
-            deleted = on_main(app, |app| {
-                assert_history_store_projection(app)?;
-                history_snapshot(app)
-            })?;
-            if deleted["rows"]
-                .as_array()
-                .is_some_and(|rows| rows.iter().all(|row| row["id"] != "sample-03"))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if on_main(app, |app| Ok(history_record(app, "sample-03").is_some()))? {
-            return Err("deleted record remained in shared history".into());
-        }
-        if deleted["ordinaryCount"] != 17 {
-            return Err("unprotected sample was not deleted".into());
-        }
-        if deleted["countText"] != "19 records" {
-            return Err("history footer did not update after deletion".into());
-        }
-        samples.push(deleted);
-        let expected = {
-            let state = app.state::<AppState>();
-            let store = state.history.lock().unwrap();
-            store
-                .snapshot()
-                .records
-                .iter()
-                .map(|record| store.record(&record.id).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let saved = app
-            .state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or("test_database")?
-            .load()?;
-        let mut saved = saved;
-        let mut expected = expected;
-        saved.sort_by(|a, b| a.id.cmp(&b.id));
-        expected.sort_by(|a, b| a.id.cmp(&b.id));
-        if serde_json::to_value(saved).map_err(|_| "serialize")?
-            != serde_json::to_value(&expected).map_err(|_| "serialize")?
-        {
-            return Err("SQLite commit differs from native history".into());
-        }
-        samples.push(serde_json::json!({"sqliteCommitVerified":true,"records":expected.len()}));
-        samples.push(on_main(app, move |app| {
-            let state = app.state::<AppState>();
-            let mut records = expected;
-            let old = records
-                .iter()
-                .find(|record| !record.is_pinned)
-                .ok_or("missing ordinary record")?
-                .clone();
-            let mut new = old.clone();
-            new.id = "synthetic-retranslation-focus".into();
-            new.date = "2099-01-01T00:00:00.000Z".into();
-            records.sort_by(|a, b| b.date.cmp(&a.date));
-            let mut temporary = crate::history::HistoryStore::new(records);
-            temporary.select(Some(&old.id))?;
-            let original = std::mem::replace(&mut *state.history.lock().unwrap(), temporary);
-            let result = (|| {
-                refresh_history(app)?;
-                let before = history_snapshot(app)?;
-                let index = before["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .position(|row| row["id"] == old.id)
-                    .ok_or("missing retranslation source")?;
-                state.history.lock().unwrap().select(None)?;
-                refresh_history(app)?;
-                unsafe {
-                    let row = history_object(app, 3000 + index as isize)?;
-                    let _: () = objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()];
-                }
-                state.history.lock().unwrap().select(Some(&old.id))?;
-                refresh_history(app)?;
-                if history_snapshot(app)?["rows"][index]["hovered"] != true {
-                    return Err("missing source hover setup".into());
-                }
-                state.history.lock().unwrap().add_completed(
-                    new,
-                    true,
-                    &crate::database::HistoryQuery::default(),
-                )?;
-                refresh_history(app)?;
-                let after = history_snapshot(app)?;
-                let old_row = after["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| row["id"] == old.id)
-                    .ok_or("missing original row")?;
-                let new_row = after["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| row["id"] == "synthetic-retranslation-focus")
-                    .ok_or("missing new row")?;
-                if old_row["selected"] != false
-                    || old_row["hovered"] != false
-                    || new_row["selected"] != true
-                {
-                    return Err("retranslation retained the original highlight".into());
-                }
-                let selected = after["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|row| row["selected"] == true)
-                    .count();
-                if selected != 1 || new_row["viewportY"].as_f64().unwrap_or(-1.0) < 48.0 {
-                    return Err(
-                        "new translation did not become the visible single selection".into(),
-                    );
-                }
-                Ok(after)
-            })();
-            *state.history.lock().unwrap() = original;
-            refresh_history(app)?;
-            result
-        })?);
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
-        Ok::<(), String>(())
-    })();
-    DomCase {
-        name: "native history actions: search, flags, selection, persistence and delete protection",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
 }
 
 fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
@@ -2292,35 +1428,6 @@ fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
                     if !edge {
                         return Err(format!("corner or outer-edge priority missed at {x},{y}"));
                     }
-                }
-                let root = stage.ivars().history_view.get() as *mut AnyObject;
-                let wordmark: *mut AnyObject = objc2::msg_send![root,viewWithTag:208isize];
-                let image_view: bool =
-                    objc2::msg_send![wordmark,isKindOfClass:objc2::class!(NSImageView)];
-                if !image_view {
-                    return Err(
-                        "history header wordmark must use outlined artwork, not a font label"
-                            .into(),
-                    );
-                }
-                let mark: *mut AnyObject = objc2::msg_send![wordmark, image];
-                let template: bool = !mark.is_null() && objc2::msg_send![mark, isTemplate];
-                if mark.is_null() || template {
-                    return Err("history header must use fixed white artwork without adaptive template recoloring".into());
-                }
-                let tint: *mut AnyObject = objc2::msg_send![wordmark, contentTintColor];
-                let white: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), whiteColor];
-                let bright_white: bool = !tint.is_null() && objc2::msg_send![tint, isEqual: white];
-                if !bright_white {
-                    return Err("history header wordmark must stay bright white".into());
-                }
-                let bounds: objc2_foundation::NSRect = objc2::msg_send![wordmark, bounds];
-                equal(bounds.size.width, 44.0, "history artwork width")?;
-                equal(bounds.size.height, 20.0, "history artwork height")?;
-                let center: objc2_foundation::NSPoint = objc2::msg_send![wordmark,convertPoint:objc2_foundation::NSPoint::new(bounds.size.width/2.0,bounds.size.height/2.0),toView:&*stage];
-                let hit: *mut AnyObject = objc2::msg_send![root,hitTest:center];
-                if hit != root {
-                    return Err("history wordmark does not route to native window drag".into());
                 }
                 Ok(
                     serde_json::json!({"seamSamples":9,"outerEdgeSamples":4,"cornerAndPrioritySamples":6,"wordmarkDraggable":true}),
@@ -2405,721 +1512,6 @@ fn run_source_editing(app: &AppHandle) -> DomCase {
     }
 }
 
-fn run_runtime_history(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        on_main(app, |app| {
-            reset(app, 360.0, 920.0)?;
-            history_search(app, "")?;
-            history_all(app)
-        })?;
-        wait_history_query(app)?;
-        on_main(app, |app| {
-            let record = crate::model::HistoryRecord {
-                id: "runtime-native-test".into(),
-                text: "Synthetic runtime selection".into(),
-                source_language: "en".into(),
-                target_languages: vec!["zh-CN".into()],
-                translations: vec!["合成原生译文".into()],
-                date: "2099-01-01T12:34:00+08:00".into(),
-                is_favorite: false,
-                is_pinned: false,
-                source_app: Some(
-                    serde_json::json!({"bundleId":"dev.local.nami.ui-tests", "name":"Synthetic source", "iconDataUrl":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII="}),
-                ),
-            };
-            history_add(app, record.clone())?;
-            let restored = history_record(app, &record.id).ok_or("runtime history missing")?;
-            if restored.source_app != record.source_app
-                || restored.translations != record.translations
-            {
-                return Err("runtime history content changed".into());
-            }
-            crate::commands::select_history_sample(app, Some(record.id), false)?;
-            assert_history_store_projection(app)?;
-            Ok(())
-        })?;
-        let dom = wait_dom(app, "const source=document.querySelector('.source-input');const result=document.querySelector('.result-column');return {ready:source?.value==='Synthetic runtime selection' && result?.textContent==='合成原生译文',source:source?.value,result:result?.textContent};")?;
-        samples.push(dom);
-        samples.push(on_main(app, history_snapshot)?);
-        Ok::<(), String>(())
-    })();
-    DomCase {
-        name: "runtime history: native append, source icon and WebView restoration",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn run_clipboard_history_view(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        let text = format!(
-            "Synthetic clipboard complete content {} tail-token",
-            "🌊".repeat(300)
-        );
-        let record = nami::clipboard::ClipboardRecord {
-            id: "clipboard-view-regression".into(),
-            kind: "text".into(),
-            text: text.clone(),
-            date: "2099-01-01T00:00:00.000Z".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-            image_path: None,
-            fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
-        };
-        app.state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_mut()
-            .ok_or("missing_test_database")?
-            .clipboard_insert(&record)?;
-        for index in 0..24 {
-            let mut extra = record.clone();
-            extra.id = format!("clipboard-style-{index}");
-            extra.text = format!("Synthetic style record {index}");
-            extra.fingerprint = nami::clipboard::fingerprint("text", extra.text.as_bytes());
-            extra.is_pinned = index == 0;
-            app.state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("missing_test_database")?
-                .clipboard_insert(&extra)?;
-        }
-        for index in 0..128 {
-            let mut extra = record.clone();
-            extra.id = format!("clipboard-old-{index}");
-            extra.text = format!("Synthetic older record {index}");
-            extra.date = "2000-01-01T00:00:00Z".into();
-            extra.is_favorite = index == 0;
-            extra.fingerprint = nami::clipboard::fingerprint("text", extra.text.as_bytes());
-            app.state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("missing_test_database")?
-                .clipboard_insert(&extra)?;
-        }
-        on_main(app, |app| {
-            // Create an isolated WebView without capturing a real paste target or reading general pasteboard.
-            clipboard_host(app)?;
-            Ok(())
-        })?;
-        let script = r#"const wordmark=document.querySelector('.clipboard-panel .history-wordmark');const row=document.querySelector('[data-record-id="clipboard-view-regression"]');if(!wordmark||!row)return {ready:false};const style=getComputedStyle(wordmark);return {ready:true,width:wordmark.getBoundingClientRect().width,height:wordmark.getBoundingClientRect().height,background:style.backgroundColor,mask:style.maskImage||style.webkitMaskImage,text:wordmark.textContent,draggable:wordmark.hasAttribute('data-tauri-drag-region'),preview:row.querySelector('.history-preview').textContent};"#;
-        let mut value = serde_json::Value::Null;
-        for _ in 0..80 {
-            value = evaluate_view_dom(app, "clipboard", script)?;
-            if value["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if value["ready"] != true
-            || value["text"] != ""
-            || value["draggable"] != true
-            || value["background"] != "rgb(255, 255, 255)"
-            || !value["mask"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("nami-wordmark")
-        {
-            return Err(format!(
-                "clipboard wordmark does not match the white native artwork: {value}"
-            ));
-        }
-        equal(
-            value["width"].as_f64().ok_or("wordmark width")?,
-            44.0,
-            "wordmark width",
-        )?;
-        equal(
-            value["height"].as_f64().ok_or("wordmark height")?,
-            20.0,
-            "wordmark height",
-        )?;
-        let chrome = evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const panel=document.querySelector('.clipboard-panel'), viewport=panel.querySelector('.history-viewport'), list=panel.querySelector('.history-list'), pinned=panel.querySelector('.history-pinned'), footer=panel.querySelector('.history-footer'), keyboard=footer.querySelector('button'), search=panel.querySelector('.history-search'), preview=panel.querySelector('.history-preview'), actions=panel.querySelector('.history-row-actions');
-const bounds=panel.getBoundingClientRect(), vr=viewport.getBoundingClientRect(), kr=keyboard.getBoundingClientRect(), fr=footer.getBoundingClientRect();
-const style=getComputedStyle(search), idle=style.borderTopColor; search.querySelector('input').focus();
-const focus=getComputedStyle(search).boxShadow; const focused=document.hasFocus(); search.querySelector('input').blur();
-const rules=(sheets)=>[...sheets].flatMap(sheet=>[...(sheet.cssRules||[])].flatMap(rule=>rule.selectorText?[rule]:rule.cssRules?rules([rule]):[]));
-const focusRule=rules(document.styleSheets).find(rule=>rule.selectorText==='.history-search:focus-within')?.style.boxShadow;
-keyboard.click();
-const color=(value)=>{const c=document.createElement('canvas');c.width=c.height=1;const ctx=c.getContext('2d');ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
-return {top:vr.top-bounds.top,bottom:bounds.bottom-vr.bottom,footerCenter:bounds.bottom-(fr.top+fr.height/2),keyboardCenter:bounds.bottom-(kr.top+kr.height/2),keyboardRight:bounds.right-kr.right,keyboardSize:[kr.width,kr.height],footerFont:getComputedStyle(footer).fontSize,mask:getComputedStyle(list).webkitMaskImage,pinnedMask:getComputedStyle(pinned).webkitMaskImage,scrollbars:panel.querySelectorAll('[role=scrollbar]').length,scrollbarTop:panel.querySelector('[role=scrollbar]')?.getBoundingClientRect().top-vr.top,searchRadius:style.borderRadius,idle,focus,focused,focusRule,caret:getComputedStyle(search.querySelector('input')).caretColor,previewFont:getComputedStyle(preview).fontSize,previewLine:getComputedStyle(preview).lineHeight,actionDuration:getComputedStyle(actions).transitionDuration,actionOffset:getComputedStyle(actions).transform,actionDelay:getComputedStyle(actions).transitionDelay,actionEasing:getComputedStyle(actions).transitionTimingFunction,timeDuration:getComputedStyle(panel.querySelector('time')).transitionDuration,iconSize:[getComputedStyle(keyboard.firstElementChild).width,getComputedStyle(keyboard.firstElementChild).height],secondary:color(getComputedStyle(footer).color),delete:color(getComputedStyle(panel.querySelector('.history-delete')).color)};
-"#,
-        )?;
-        for (key, expected) in [
-            ("top", 48.0),
-            ("bottom", 28.0),
-            ("footerCenter", 16.0),
-            ("keyboardCenter", 16.0),
-            ("keyboardRight", 12.0),
-            ("scrollbarTop", 0.0),
-        ] {
-            equal(
-                chrome[key]
-                    .as_f64()
-                    .ok_or_else(|| format!("missing {key}: {chrome}"))?,
-                expected,
-                key,
-            )?;
-        }
-        if chrome["keyboardSize"] != serde_json::json!([24, 24])
-            || chrome["scrollbars"] != 1
-            || chrome["searchRadius"] != "10px"
-            || chrome["iconSize"] != serde_json::json!(["14px", "14px"])
-            || chrome["previewFont"] != "13px"
-            || chrome["previewLine"] != "normal"
-            || chrome["footerFont"] != "11px"
-            || !chrome["mask"].as_str().unwrap_or_default().contains("8px")
-            || !chrome["pinnedMask"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("8px")
-            || !chrome["focusRule"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("2px")
-            || (chrome["focused"] == true
-                && !chrome["focus"].as_str().unwrap_or_default().contains("2px"))
-            || chrome["actionDuration"] != "0.15s, 0.15s, 0.15s"
-            || chrome["actionDelay"] != "0s, 0s, 0s"
-            || chrome["actionEasing"] != "ease-out, ease-out, ease"
-            || chrome["timeDuration"] != "0.15s, 0.15s"
-        {
-            return Err(format!(
-                "clipboard chrome differs from native history: {chrome}"
-            ));
-        }
-        on_main(app, |app| {
-            reset(app, 360.0, 920.0)?;
-            history_search(app, "")?;
-            history_all(app)
-        })?;
-        wait_history_query(app)?;
-        for (index, text) in [
-            "Short text",
-            "第一行\n第二行",
-            "Line one\nLine two\nLine three",
-            "Synthetic wrapped clipboard text ".repeat(20).as_str(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let id = format!("clipboard-layout-{index}");
-            let native_id = id.clone();
-            let native_text = text.to_owned();
-            on_main(app, move |app| {
-                history_add(
-                    app,
-                    crate::model::HistoryRecord {
-                        id: native_id,
-                        text: native_text,
-                        source_language: "en".into(),
-                        target_languages: vec!["zh-CN".into()],
-                        translations: vec!["合成译文".into()],
-                        date: "2099-01-01T00:00:00Z".into(),
-                        is_favorite: false,
-                        is_pinned: false,
-                        source_app: None,
-                    },
-                )
-            })?;
-            let native = on_main(app, history_snapshot)?;
-            let native_row = native["rows"]
-                .as_array()
-                .ok_or("missing native layout rows")?
-                .iter()
-                .find(|row| row["id"] == id)
-                .ok_or("missing native layout row")?;
-            let script = format!(
-                "const sample={};{}",
-                serde_json::json!({"text":text.replace("\r\n", "\n").trim().chars().take(256).collect::<String>(),"width":native_row["width"]}),
-                r#"
-const original=document.querySelector('.clipboard-panel .history-row');
-const row=original.cloneNode(true);row.style.cssText=`position:absolute;left:-10000px;top:0;width:${sample.width}px;`;
-row.querySelector('.history-preview').textContent=sample.text;document.querySelector('.clipboard-panel').append(row);
-const bounds=row.getBoundingClientRect(),preview=row.querySelector('.history-preview').getBoundingClientRect();
-const result={height:bounds.height,x:preview.left-bounds.left,y:preview.top-bounds.top,previewHeight:preview.height,font:getComputedStyle(row).fontFamily};row.remove();return result;
-"#
-            );
-            let layout = evaluate_view_dom(app, "clipboard", &script)?;
-            samples.push(serde_json::json!({"native":native_row,"clipboard":layout}));
-            for (actual, expected, label) in [
-                (
-                    layout["height"].as_f64(),
-                    native_row["height"].as_f64(),
-                    "clipboard row height",
-                ),
-                (
-                    layout["x"].as_f64(),
-                    native_row["previewFrame"]["x"].as_f64(),
-                    "clipboard preview x",
-                ),
-                (
-                    layout["y"].as_f64(),
-                    native_row["previewFrame"]["y"].as_f64(),
-                    "clipboard preview y",
-                ),
-                (
-                    layout["previewHeight"].as_f64(),
-                    native_row["previewFrame"]["height"].as_f64(),
-                    "clipboard preview height",
-                ),
-            ] {
-                equal(
-                    actual.ok_or("missing clipboard geometry")?,
-                    expected.ok_or("missing native geometry")?,
-                    label,
-                )?;
-            }
-        }
-        let colors = on_main(app, |_| unsafe {
-            let space: *mut AnyObject =
-                objc2::msg_send![objc2::class!(NSColorSpace), sRGBColorSpace];
-            let mut values = Vec::new();
-            for selector in [
-                objc2::sel!(secondaryLabelColor),
-                objc2::sel!(systemRedColor),
-            ] {
-                let color: *mut AnyObject =
-                    objc2::msg_send![objc2::class!(NSColor), performSelector: selector];
-                let color: *mut AnyObject = objc2::msg_send![color, colorUsingColorSpace: space];
-                let (mut r, mut g, mut b, mut a) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
-                let _: () = objc2::msg_send![color, getRed: &mut r, green: &mut g, blue: &mut b, alpha: &mut a];
-                // Canvas resolves transparent system colors against transparent black.
-                values.push([r, g, b, a].map(|value| (value * 255.0).round() as i64));
-            }
-            Ok(values)
-        })?;
-        for (key, expected) in [("secondary", colors[0]), ("delete", colors[1])] {
-            let actual: Vec<i64> = chrome[key]
-                .as_array()
-                .ok_or("missing color")?
-                .iter()
-                .filter_map(|v| v.as_i64())
-                .collect();
-            if actual.len() != 4
-                || actual
-                    .iter()
-                    .zip(expected)
-                    .any(|(value, expected)| (value - expected).abs() > 2)
-            {
-                return Err(format!(
-                    "clipboard {key} token differs from AppKit {expected:?}: {chrome}"
-                ));
-            }
-        }
-        let mut help = serde_json::Value::Null;
-        for _ in 0..20 {
-            help = evaluate_view_dom(app, "clipboard", "const panel=document.querySelector('.history-shortcuts-panel');if(!panel)return {ready:false};const r=panel.getBoundingClientRect();return {ready:true,width:r.width,height:r.height};")?;
-            if help["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if help["width"] != 230 || help["height"] != 136 {
-            return Err(format!("shortcut panel size: {help}"));
-        }
-        evaluate_view_dom(app,"clipboard","document.querySelector('.history-shortcuts').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
-        let closed = evaluate_view_dom(
-            app,
-            "clipboard",
-            "return !document.querySelector('.history-shortcuts-panel');",
-        )?;
-        if closed != true {
-            return Err("shortcut help did not close with Escape".into());
-        }
-        samples.push(chrome);
-        samples.push(help);
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-window.__clipboardSwitch={done:false};
-(async()=>{
- const panel=document.querySelector('.clipboard-panel');
- const initial=[...panel.querySelectorAll('.history-row')];
- const nodes=new Map(initial.map(row=>[row.dataset.recordId,row]));
- const favorite=panel.querySelector('[aria-label="Favorite clipboard records"]');
- const all=panel.querySelector('[aria-label="Favorite clipboard records"]');
- const durations=[];
- try {
-  for(let index=0;index<20;index++){
-   const start=performance.now();
-   await new Promise((resolve,reject)=>{
-    let timer;const observer=new MutationObserver(check);
-    function check(){
-     const visible=[...panel.querySelectorAll('.history-row:not([hidden])')];
-     const ready=index%2===0?visible.length===1&&visible[0].dataset.recordId==='clipboard-old-0':visible.length===100;
-     if(ready){observer.disconnect();clearTimeout(timer);resolve();}
-    }
-    observer.observe(panel,{subtree:true,attributes:true,childList:true});
-    timer=setTimeout(()=>{observer.disconnect();reject(Error('list did not reach requested mode'));},1000);
-    (index%2===0?favorite:all).click();check();
-   });
-   if([...nodes].some(([id,node])=>panel.querySelector(`[data-record-id="${id}"]`)!==node))throw Error('switch rebuilt a record node');
-   if(panel.querySelector('[role=progressbar]'))throw Error('switch started loading activity');
-   durations.push(performance.now()-start);
-  }
-  window.__clipboardSwitch={done:true,durations,nodeCount:nodes.size,scope:'script click to DOM update in isolated WKWebView; no OS mouse or visible frame measurement'};
- }catch(error){window.__clipboardSwitch={done:true,error:String(error)};}
-})();return true;
-"#,
-        )?;
-        let mut switching = serde_json::Value::Null;
-        for _ in 0..100 {
-            switching = evaluate_view_dom(app, "clipboard", "return window.__clipboardSwitch;")?;
-            if switching["done"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if switching["done"] != true || switching.get("error").is_some() {
-            return Err(format!("clipboard switch regression: {switching}"));
-        }
-        let mut durations: Vec<f64> = switching["durations"]
-            .as_array()
-            .ok_or("switch timing missing")?
-            .iter()
-            .filter_map(serde_json::Value::as_f64)
-            .collect();
-        durations.sort_by(f64::total_cmp);
-        if durations.len() != 20 || durations[18] > 100.0 {
-            return Err(format!("clipboard switch p95 exceeded 100ms: {switching}"));
-        }
-        samples.push(switching);
-        let visible_note = std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1");
-        if visible_note {
-            on_main(app, |app| {
-                let window = app
-                    .get_webview("clipboard")
-                    .ok_or("missing clipboard view")?
-                    .window()
-                    .clone();
-                window
-                    .set_always_on_top(true)
-                    .map_err(|_| "clipboard test visibility")?;
-                window.show().map_err(|_| "clipboard test visibility")?;
-                app.get_webview("clipboard")
-                    .ok_or("missing clipboard view")?
-                    .set_focus()
-                    .map_err(|_| "clipboard test focus")?;
-                Ok(())
-            })?;
-        }
-        if visible_note {
-            let action_hover = evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"
-const panel=document.querySelector('.clipboard-panel'),row=panel.querySelector('.history-row'),button=row.querySelector('button');
-button.focus();const actions=getComputedStyle(row.querySelector('.history-row-actions')),time=getComputedStyle(row.querySelector('time'));
-const result={focused:row.matches(':focus-within'),duration:actions.transitionDuration,delay:actions.transitionDelay,timeDuration:time.transitionDuration};
-button.blur();return result;
-"#,
-            )?;
-            if action_hover["focused"] != true
-                || action_hover["duration"] != "0.15s"
-                || action_hover["delay"] != "0s, 0s, 0s"
-                || action_hover["timeDuration"] != "0.15s, 0.15s"
-            {
-                return Err(format!(
-                    "clipboard hover action timing regression: {action_hover}"
-                ));
-            }
-            samples.push(action_hover);
-        }
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
-row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:innerWidth-2,clientY:innerHeight-2}));return true;
-"#,
-        )?;
-        let mut menu = serde_json::Value::Null;
-        for _ in 0..80 {
-            menu = evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"
- const menu=document.querySelector('.clipboard-context-menu');
- if(!menu)return {done:false};
- const rect=menu.getBoundingClientRect(),items=[...menu.querySelectorAll('[role=menuitem]')];
- const icons=items.map(item=>{const rect=item.firstElementChild.getBoundingClientRect();return [rect.width,rect.height];});
- return {done:true,labels:items.map(item=>item.textContent),icons,inside:rect.left>=7&&rect.right<=innerWidth-7&&rect.top>=7&&rect.bottom<=innerHeight-7,deleteColor:getComputedStyle(items[4]).color};
-"#,
-            )?;
-            if menu["done"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-context-menu')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));return true;")?;
-        if menu["done"] != true
-            || menu.get("error").is_some()
-            || menu["inside"] != true
-            || menu["labels"]
-                != serde_json::json!(["Paste", "Favorite", "Pin record", "Note", "Delete"])
-            || menu["icons"]
-                != serde_json::json!([[14, 14], [14, 14], [14, 14], [14, 14], [14, 14]])
-            || menu["deleteColor"] != "rgb(255, 95, 87)"
-        {
-            return Err(format!("clipboard context menu regression: {menu}"));
-        }
-        samples.push(menu);
-        evaluate_view_dom(app, "clipboard", "document.querySelector('[data-record-id=\"clipboard-view-regression\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:60}));return true;")?;
-        for _ in 0..80 {
-            let opened = evaluate_view_dom(app, "clipboard", "const button=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');if(!button)return false;button.click();return true;")?;
-            if opened == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let mut editor = serde_json::Value::Null;
-        for _ in 0..80 {
-            editor = evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"
-const card=document.querySelector('.clipboard-editor'),title=card?.querySelector('input'),content=card?.querySelector('textarea');
-if(!title||!content||title.disabled)return {ready:false};const style=getComputedStyle(card);
-const actions=card.querySelector('.clipboard-editor-actions');
-return {ready:true,title:title.value,content:content.value,readOnly:content.readOnly,transition:style.transitionDuration,background:style.backgroundColor,radius:style.borderRadius,height:card.offsetHeight,contentHeight:content.offsetHeight,footerGap:actions.offsetTop-content.offsetTop-content.offsetHeight};
-"#,
-            )?;
-            if editor["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if editor["ready"] != true
-            || editor["title"] != ""
-            || editor["content"] != text
-            || editor["readOnly"] != false
-            || editor["transition"] != "0.18s, 0.18s"
-            || editor["radius"] != "12px"
-            || editor["height"]
-                .as_f64()
-                .is_none_or(|height| height > 290.0)
-            || editor["contentHeight"]
-                .as_f64()
-                .is_none_or(|height| height > 120.0)
-            || editor["footerGap"]
-                .as_f64()
-                .is_none_or(|gap| !(6.0..=16.0).contains(&gap))
-        {
-            return Err(format!("clipboard note card regression: {editor}"));
-        }
-        evaluate_view_dom(app,"clipboard", "const input=document.querySelector('.clipboard-editor input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Synthetic title');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            "document.querySelector('.clipboard-editor button[type=submit]').click();return true;",
-        )?;
-        let mut saved = false;
-        for _ in 0..100 {
-            let result = evaluate_view_dom(app, "clipboard", "return !document.querySelector('.clipboard-editor')&&document.querySelector('[data-record-id=\"clipboard-view-regression\"] .clipboard-record-title')?.textContent==='Synthetic title';")?;
-            if result == true {
-                saved = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !saved {
-            return Err("clipboard note did not save through real IPC".into());
-        }
-        samples.push(editor);
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            if visible_note {
-                "window.__noteFinishTransitions=false;return true;"
-            } else {
-                "window.__noteFinishTransitions=true;return true;"
-            },
-        )?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
-let next=row.nextElementSibling;while(next?.hidden)next=next.nextElementSibling;
-window.__noteGeometry={height:row.offsetHeight,next:next?.offsetTop};
-row.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return true;
-"#,
-        )?;
-        let mut expansion = serde_json::Value::Null;
-        for _ in 0..100 {
-            expansion = evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"
-const row=document.querySelector('[data-record-id="clipboard-view-regression"]');
-let next=row.nextElementSibling;while(next?.hidden)next=next.nextElementSibling;
-const content=row.querySelector('.clipboard-record-content'),body=row.querySelector('.clipboard-record-body');
-// Hidden WK views pause transitions; assert final geometry there, and natural pacing in the visible run.
-getComputedStyle(content).opacity;
-if(window.__noteFinishTransitions&&body.dataset.expanded==='true')for(const animation of row.getAnimations({subtree:true}))animation.finish();
-return {revealed:row.dataset.noteRevealed,expanded:body.dataset.expanded,opacity:getComputedStyle(content).opacity,duration:getComputedStyle(content).transitionDuration,easing:getComputedStyle(content).transitionTimingFunction,loading:!!row.querySelector('[role=progressbar]'),ready:body.dataset.expanded==='true'&&getComputedStyle(content).opacity==='1'&&!content.getAnimations().some(animation=>animation.playState==='running'),heightDelta:row.offsetHeight-window.__noteGeometry.height,nextDelta:next?.offsetTop-window.__noteGeometry.next,text:content.textContent,clamp:getComputedStyle(content.querySelector('.history-preview')).webkitLineClamp};
-"#,
-            )?;
-            if expansion["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let growth = expansion["heightDelta"].as_f64().unwrap_or_default();
-        let movement = expansion["nextDelta"].as_f64().unwrap_or_default();
-        if expansion["ready"] != true
-            || growth < 30.0
-            || (growth - movement).abs() > 1.0
-            || expansion["text"] != text
-            || expansion["clamp"] != "none"
-            || expansion["duration"] != "0.18s, 0.18s"
-            || expansion["easing"] != "ease-out, ease-out"
-        {
-            return Err(format!("clipboard note expansion regression: {expansion}"));
-        }
-        evaluate_view_dom(app,"clipboard","document.querySelector('[data-record-id=\"clipboard-view-regression\"]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true,relatedTarget:document.body}));return true;")?;
-        let mut collapsed = false;
-        for _ in 0..100 {
-            let done = evaluate_view_dom(app,"clipboard","const row=document.querySelector('[data-record-id=\"clipboard-view-regression\"]');getComputedStyle(row.querySelector('.clipboard-record-content')).opacity;if(window.__noteFinishTransitions)for(const animation of row.getAnimations({subtree:true}))animation.finish();return row.querySelector('.clipboard-record-body').dataset.expanded==='false'&&Math.abs(row.offsetHeight-window.__noteGeometry.height)<=1;")?;
-            if done == true {
-                collapsed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !collapsed {
-            return Err("clipboard note did not restore collapsed height".into());
-        }
-        samples.push(serde_json::json!({"noteExpanded":true,"heightDelta":growth,"followingRowDelta":movement,"collapsed":collapsed,"naturalTransitions":visible_note}));
-        if visible_note {
-            on_main(app, |app| {
-                app.get_webview("clipboard")
-                    .ok_or("missing clipboard view")?
-                    .window()
-                    .clone()
-                    .hide()
-                    .map_err(|_| "clipboard test visibility".into())
-            })?;
-        }
-        let state = app.state::<AppState>();
-        let database_guard = state.database.lock().unwrap();
-        let database = database_guard.as_ref().ok_or("missing_test_database")?;
-        if database.clipboard_record(&record.id)?.text != text
-            || value["preview"]
-                .as_str()
-                .unwrap_or_default()
-                .chars()
-                .count()
-                > 256
-        {
-            return Err("clipboard summary replaced complete content".into());
-        }
-        samples.push(value);
-        drop(database_guard);
-        let state = app.state::<AppState>();
-        crate::clipboard_runtime::persist_capture(
-            state
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("missing_test_database")?,
-            &crate::clipboard_runtime::image_root(app)?,
-            crate::platform::ClipboardCapture {
-                version: 123,
-                payload: crate::platform::ClipboardPayload::Text(
-                    "Synthetic newly copied clipboard text".into(),
-                ),
-                source_app: None,
-            },
-        )?;
-        crate::clipboard_runtime::changed(app)?;
-        let mut updated = serde_json::Value::Null;
-        for _ in 0..80 {
-            updated = evaluate_view_dom(app, "clipboard", "const texts=[...document.querySelectorAll('.clipboard-panel .history-preview')].map(node=>node.textContent);return {ready:texts.includes('Synthetic newly copied clipboard text'),count:texts.length};")?;
-            if updated["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if updated["ready"] != true {
-            return Err(
-                "new clipboard capture did not appear through database event and WebView query"
-                    .into(),
-            );
-        }
-        samples.push(updated);
-        for pinned in [false, true] {
-            on_main(app, move |app| {
-                let view = app
-                    .get_webview("clipboard")
-                    .ok_or("missing clipboard view")?;
-                crate::commands::window_pin(view.clone(), app.clone(), "clipboard".into(), pinned)?;
-                let window = app
-                    .get_webview("clipboard")
-                    .ok_or("missing clipboard view")?
-                    .window()
-                    .clone();
-                window.show().map_err(|_| "window_show")?;
-                window.set_focus().map_err(|_| "window_focus")?;
-                activate_application();
-                view.set_focus().map_err(|_| "window_focus")?;
-                Ok(())
-            })?;
-            evaluate_view_dom(app,"clipboard","document.activeElement?.blur();document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
-            let mut hidden = false;
-            for _ in 0..40 {
-                hidden = on_main(app, |app| {
-                    Ok(!app
-                        .get_webview("clipboard")
-                        .ok_or("missing clipboard view")?
-                        .window()
-                        .clone()
-                        .is_visible()
-                        .map_err(|_| "window_visibility")?)
-                })?;
-                if hidden {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if !hidden {
-                return Err(format!("Escape did not hide clipboard pinned={pinned}"));
-            }
-            samples.push(serde_json::json!({"escapeHidden":hidden,"pinned":pinned}));
-        }
-        on_main(app, |app| {
-            let view = app
-                .get_webview("clipboard")
-                .ok_or("missing clipboard view")?;
-            crate::commands::window_pin(view, app.clone(), "clipboard".into(), false)
-        })?;
-
-        Ok::<(), String>(())
-    })();
-    DomCase {
-        name: "clipboard WebView: native history wordmark, complete content and new capture event",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
 fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -3194,325 +1586,6 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     })();
     DomCase {
         name: "clipboard capture setting: clickable WebView switch, visible state and durable IPC",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn run_history_pagination(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let mut original_store = None;
-    let original_database = app.state::<AppState>().database.lock().unwrap().take();
-    let original_page = app.state::<AppState>().history_page.lock().unwrap().clone();
-    let result = (|| {
-        let mut db = crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
-        for index in 0..250 {
-            let record = crate::model::HistoryRecord {
-                id: format!("pagination-{index}"),
-                text: format!("Synthetic page token-{index:04}"),
-                source_language: "en".into(),
-                target_languages: vec!["fr".into()],
-                translations: vec!["Synthetic output".into()],
-                date: "2099-01-01T00:00:00.000Z".into(),
-                is_favorite: false,
-                is_pinned: false,
-                source_app: None,
-            };
-            db.insert(&record, "edge", || true)?;
-        }
-        let page = db.page(&crate::database::HistoryQuery::default(), None, 100)?;
-        *app.state::<AppState>().database.lock().unwrap() = Some(db);
-        {
-            let state = app.state::<AppState>();
-            let mut paging = state.history_page.lock().unwrap();
-            *paging = Default::default();
-            paging.cursor = page.cursor.clone();
-            paging.cache.insert(Default::default(), page.clone());
-        }
-        let mut store = crate::history::HistoryStore::new(Vec::new());
-        store.apply_page(page, true);
-        original_store = Some(on_main(app, move |app| {
-            let previous =
-                std::mem::replace(&mut *app.state::<AppState>().history.lock().unwrap(), store);
-            refresh_history(app)?;
-            Ok(previous)
-        })?);
-        let first = on_main(app, history_snapshot)?;
-        if first["rows"].as_array().map(|rows| rows.len()) != Some(100)
-            || first["totalRecords"] != 250
-            || first["hasMore"] != true
-        {
-            return Err("native history loaded beyond the first page".into());
-        }
-        let before = on_main(app, |app| {
-            unsafe {
-                let row = history_object(app, 3099)?;
-                let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
-                let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
-                let document: *mut AnyObject = objc2::msg_send![scroll, documentView];
-                let viewport: objc2_foundation::NSRect = objc2::msg_send![clip, bounds];
-                let content: objc2_foundation::NSRect = objc2::msg_send![document, bounds];
-                let _: () = objc2::msg_send![clip,scrollToPoint:objc2_foundation::NSPoint::new(0.0,(content.size.height-viewport.size.height).max(0.0))];
-                let _: () = objc2::msg_send![scroll,reflectScrolledClipView:clip];
-            }
-            let mut snapshot = history_snapshot(app)?;
-            unsafe {
-                let row = history_object(app, 3099)?;
-                let scroll: *mut AnyObject = objc2::msg_send![row, enclosingScrollView];
-                let clip: *mut AnyObject = objc2::msg_send![scroll, contentView];
-                let document: *mut AnyObject = objc2::msg_send![scroll, documentView];
-                let viewport: objc2_foundation::NSRect = objc2::msg_send![clip, bounds];
-                let content: objc2_foundation::NSRect = objc2::msg_send![document, bounds];
-                let hidden: bool = objc2::msg_send![scroll, isHiddenOrHasHiddenAncestor];
-                let parent: *mut AnyObject = objc2::msg_send![scroll, superview];
-                let tag: isize = objc2::msg_send![parent, tag];
-                snapshot["paginationGeometry"] = serde_json::json!({"hidden":hidden,"parentTag":tag,"viewportY":viewport.origin.y,"viewportHeight":viewport.size.height,"documentHeight":content.size.height});
-            }
-            Ok(snapshot)
-        })?;
-        let visible = on_main(app, |app| {
-            app.get_window("translation")
-                .ok_or_else(|| "window_unavailable".to_owned())?
-                .is_visible()
-                .map_err(|_| "window_visible".to_owned())
-        })?;
-        if !visible {
-            tauri::async_runtime::block_on(crate::history_runtime::load_more(app))?;
-        }
-        wait_history_query(app)?;
-        let second = on_main(app, history_snapshot)?;
-        samples.extend([first.clone(), before.clone(), second.clone()]);
-        if second["rows"].as_array().map(|rows| rows.len()) != Some(200) {
-            return Err(format!("native pagination expected 200 rows, got {}; visible={visible}, pending={}, more={}",second["rows"].as_array().map_or(0,Vec::len),second["loadPending"],second["hasMore"]));
-        }
-        if first["rootPointer"] != second["rootPointer"]
-            || first["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .zip(second["rows"].as_array().unwrap())
-                .any(|(a, b)| a["pointer"] != b["pointer"])
-        {
-            return Err("native append replaced existing row instances".into());
-        }
-        equal(
-            before["scrollY"].as_f64().ok_or("scrollY")?,
-            second["scrollY"].as_f64().ok_or("scrollY")?,
-            "pagination preserves scroll position",
-        )?;
-        samples.extend([
-            first,
-            before,
-            second,
-            serde_json::json!({"nativeScrollTriggerVerified":visible}),
-        ]);
-        on_main(app, |app| history_search(app, "token-0000"))?;
-        wait_history_query(app)?;
-        let found = on_main(app, history_snapshot)?;
-        if found["rows"].as_array().map(|rows| rows.len()) != Some(1)
-            || found["rows"][0]["id"] != "pagination-0"
-            || found["totalRecords"] != 1
-        {
-            return Err("native query did not find an unloaded database record".into());
-        }
-        samples.push(found);
-        Ok::<(), String>(())
-    })();
-    *app.state::<AppState>().database.lock().unwrap() = original_database;
-    *app.state::<AppState>().history_page.lock().unwrap() = original_page;
-    if let Some(store) = original_store {
-        let _ = on_main(app, move |app| {
-            *app.state::<AppState>().history.lock().unwrap() = store;
-            refresh_history(app)
-        });
-    }
-    DomCase {
-        name:
-            "native database pagination: bounded first page, stable scroll append and global search",
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn run_translation_action_timing(app: &AppHandle) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        on_main(app, |app| {
-            create(app, "translation")?;
-            reset(app, 360.0, 920.0)
-        })?;
-        for _ in 0..100 {
-            if evaluate_view_dom(
-                app,
-                "translation",
-                "return !!document.querySelector('.translation-panel');",
-            )? == true
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        for index in [0usize, 2] {
-            let sample = on_main(app, move |app| {
-                let window = app.get_window("translation").ok_or("missing window")?;
-                let initial = history_snapshot(app)?;
-                let menu = native_history::context_menu_snapshot(&window, index)?;
-                Ok(serde_json::json!({"row":initial["rows"][index],"menu":menu}))
-            })?;
-            let menu = sample["menu"].as_array().ok_or("missing menu")?;
-            if menu.len() != 5
-                || menu[0]["title"] != "Retranslate"
-                || menu[1]["title"] != "Copy source text"
-                || menu[4]["title"] != "Delete"
-                || menu[4]["red"] != true
-            {
-                return Err(format!("native context menu: {sample}"));
-            }
-            let protected = sample["row"]["pinned"] == true || sample["row"]["favorite"] == true;
-            if menu[4]["enabled"] != !protected {
-                return Err(format!("native protected delete: {sample}"));
-            }
-            for (action, item) in menu.iter().enumerate() {
-                if item["iconWidth"].as_f64() != Some(14.0)
-                    || item["iconHeight"].as_f64() != Some(14.0)
-                    || item["tag"] != action
-                    || item["recordId"] != sample["row"]["id"]
-                {
-                    return Err(format!("native menu action/icon: {sample}"));
-                }
-            }
-            samples.push(sample);
-        }
-        let id = on_main(app, |app| {
-            let state = history_snapshot(app)?;
-            let id = state["rows"][2]["id"].as_str().ok_or("record")?.to_owned();
-            let window = app.get_window("translation").ok_or("window")?;
-            native_history::invoke_context_menu_action(&window, 2, 2)?;
-            Ok(id)
-        })?;
-        let mut updated = false;
-        for _ in 0..100 {
-            let value = on_main(app, history_snapshot)?;
-            if value["rows"]
-                .as_array()
-                .ok_or("rows")?
-                .iter()
-                .any(|row| row["id"] == id && row["favorite"] == true)
-            {
-                updated = true;
-                samples.push(value);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !updated {
-            return Err("native menu favorite did not reach shared history".into());
-        }
-        for showing in [true, false, true, false] {
-            let sample = on_main(app, move |app| unsafe {
-                let row = history_object(app, 3002)?;
-                let _: () = if showing {
-                    objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()]
-                } else {
-                    objc2::msg_send![row, mouseExited: std::ptr::null::<AnyObject>()]
-                };
-                history_snapshot(app)
-            })?;
-            let row = &sample["rows"][2];
-            for (index, action) in row["actions"]
-                .as_array()
-                .ok_or("actions")?
-                .iter()
-                .enumerate()
-            {
-                equal(
-                    action["offset"].as_f64().unwrap(),
-                    if showing { 0.0 } else { 4.0 },
-                    "action offset",
-                )?;
-                equal(
-                    action["opacity"].as_f64().unwrap(),
-                    if showing { 1.0 } else { 0.0 },
-                    "action opacity",
-                )?;
-                let duration = action["animationDuration"].as_f64().unwrap();
-                if duration != 0.0 {
-                    equal(duration, 0.15, "action duration")?;
-                }
-                if action["enabled"] != (showing && index != 4) {
-                    return Err("retracted action remains enabled".into());
-                }
-            }
-            equal(
-                row["timeOffset"].as_f64().unwrap(),
-                if showing { -4.0 } else { 0.0 },
-                "time offset",
-            )?;
-            equal(
-                row["timeOpacity"].as_f64().unwrap(),
-                if showing { 0.0 } else { 1.0 },
-                "time opacity",
-            )?;
-            let duration = row["timeDuration"].as_f64().unwrap();
-            if duration != 0.0 {
-                equal(duration, 0.15, "time duration")?;
-            }
-            samples.push(sample);
-        }
-        on_main(app, |app| {
-            app.get_window("translation")
-                .ok_or("window")?
-                .show()
-                .map_err(|_| "show")?;
-            app.get_window("translation")
-                .ok_or("window")?
-                .set_focus()
-                .map_err(|_| "focus")?;
-            activate_application();
-            app.get_webview("translation")
-                .ok_or("view")?
-                .set_focus()
-                .map_err(|_| "focus")?;
-            Ok(())
-        })?;
-        let css = evaluate_view_dom(
-            app,
-            "translation",
-            r#"
-const panel=document.createElement('div');panel.className='history-panel';
-const row=document.createElement('article');row.className='history-row';row.innerHTML='<button>Fixture</button><time>12:00</time><div class="history-row-actions"><button>Copy</button></div>';panel.append(row);document.body.append(panel);
-const actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
-const read=()=>({duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,timeDuration:getComputedStyle(time).transitionDuration,offset:getComputedStyle(actions).transform});
-const idle=read();row.querySelector('button').focus();const active=read(),focused=row.matches(':focus-within');panel.remove();return {idle,active,focused};
-"#,
-        )?;
-        if css["idle"]["duration"] != "0.15s, 0.15s, 0.15s"
-            || css["active"]["duration"] != "0.15s"
-            || css["focused"] != true
-            || css["idle"]["delay"] != "0s, 0s, 0s"
-            || css["idle"]["timeDuration"] != "0.15s, 0.15s"
-        {
-            return Err(format!("shared history timing: {css}"));
-        }
-        samples.push(css);
-        let cleanup = on_main(app, |app| unsafe {
-            let row = history_object(app, 3002)?;
-            let _: () = objc2::msg_send![row, mouseEntered: std::ptr::null::<AnyObject>()];
-            history_click(app, 207)?;
-            hide(app, "translation")?;
-            history_snapshot(app)
-        })?;
-        if cleanup["shortcutsHidden"] != true || cleanup["rows"][2]["hovered"] != false {
-            return Err("history transient UI survived hide".into());
-        }
-        samples.push(cleanup);
-
-        Ok(())
-    })();
-    DomCase {
-        name: "translation action timing",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -3840,387 +1913,435 @@ return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.
     }
 }
 
+fn wait_records(app: &AppHandle, script: &str) -> Result<serde_json::Value, String> {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..120 {
+        last = evaluate_view_dom(app, "clipboard", script)?;
+        if last["ready"] == true {
+            return Ok(last);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!("records WebView did not settle: {last}"))
+}
+
+fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+    on_main(app, move |app| {
+        let window = create(app, "translation")?;
+        {
+            let state = app.state::<AppState>();
+            let mut state = state.windows.lock().unwrap();
+            state.set_record_view(if mode == "clipboard" {
+                crate::model::RecordView::Clipboard
+            } else {
+                crate::model::RecordView::Translation
+            });
+            state.records_focus += 1;
+            state.history_pinned = true;
+            state.translation_pinned = true;
+        }
+        apply_translation(app)?;
+        update_translation_level(app)?;
+        window.show().map_err(|_| "window_show")?;
+        window.set_focus().map_err(|_| "window_focus")?;
+        activate_application();
+        app.get_webview("clipboard")
+            .ok_or("records child")?
+            .set_focus()
+            .map_err(|_| "records focus")?;
+        Ok(())
+    })?;
+    wait_motion(app)?;
+    let selector = if mode == "clipboard" {
+        ".clipboard-panel"
+    } else {
+        "#translation-history"
+    };
+    wait_records(app, &format!("const p=document.querySelector('{selector}');return {{ready:!!p&&p.getClientRects().length>0&&!p.closest('[hidden]')&&!!p.querySelector('.history-row')&&document.hasFocus()&&document.activeElement===p.querySelector('.history-search input')}};"))?;
+    evaluate_view_dom(app,"clipboard","window.__recordsPresented=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__recordsPresented=true;}));return true;")?;
+    wait_records(
+        app,
+        "return {ready:window.__recordsPresented&&document.fonts.status==='loaded'};",
+    )?;
+    Ok(())
+}
+
+const RECORDS_SNAPSHOT: &str = r#"
+const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));
+if(!p||!p.querySelector('.history-row'))return {ready:false};
+window.__recordNodeIds??=new WeakMap();window.__recordNodeSequence??=0;
+const nodeId=node=>{if(!window.__recordNodeIds.has(node))window.__recordNodeIds.set(node,++window.__recordNodeSequence);return window.__recordNodeIds.get(node);};
+const box=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
+const icon=e=>{const s=getComputedStyle(e),i=e.querySelector('.history-symbol')||e;return {symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,color:s.color,opacity:s.opacity,...box(i)};};
+const row=p.querySelector('.history-list .history-row:not([hidden])')||p.querySelector('.history-row:not([hidden])');
+const search=p.querySelector('.history-search'),input=search.querySelector('input'),footer=p.querySelector('.history-footer'),scroller=p.querySelector('[role=scrollbar]');
+return {ready:true,kind:p.id==='translation-history'?'translation':'clipboard',panel:nodeId(p),width:p.getBoundingClientRect().width,
+rows:[...p.querySelectorAll('.history-row:not([hidden])')].map(r=>({id:r.dataset.recordId,node:nodeId(r),selected:r.classList.contains('selected'),pinned:r.classList.contains('pinned')})),
+search:{...box(search),border:getComputedStyle(search).borderTopWidth,radius:getComputedStyle(search).borderRadius,shadow:getComputedStyle(search).boxShadow,font:getComputedStyle(input).fontSize,caret:getComputedStyle(input).caretColor},query:input.value,
+toolbar:[...p.querySelectorAll('.history-toolbar > button')].map(b=>({...box(b),...icon(b),pressed:b.getAttribute('aria-pressed'),expanded:b.getAttribute('aria-expanded'),disabled:b.disabled})),
+actions:[...row.querySelectorAll('.history-row-actions button')].map(icon),actionDuration:getComputedStyle(row.querySelector('.history-row-actions')).transitionDuration,
+timeDuration:getComputedStyle(row.querySelector('time')).transitionDuration,previewFont:getComputedStyle(row.querySelector('.history-preview')).fontSize,
+origin:{...box(row.querySelector('.history-origin')),fit:getComputedStyle(row.querySelector('.history-origin')).objectFit,radius:getComputedStyle(row.querySelector('.history-origin')).borderRadius},
+footer:{...box(footer),star:icon(footer.querySelector('.history-favorites')),keyboard:icon(footer.querySelector('.history-shortcuts')),count:footer.querySelector('.history-record-count').textContent},
+scrollbar:scroller?{...box(scroller),visible:scroller.classList.contains('visible'),transition:getComputedStyle(scroller.firstElementChild).transitionDuration}:null,
+mask:getComputedStyle(p.querySelector('.history-list')).webkitMaskImage,error:document.querySelector('.global-error')?.textContent};
+"#;
+
+fn run_record_action_timing(app: &AppHandle, mode: &'static str, name: &'static str) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        records_mode(app, mode)?;
+        let sample = wait_records(
+            app,
+            r#"
+const panel=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));
+if(!panel)return {ready:false};
+const row=panel.querySelector('.history-list .history-row:not([hidden])')||panel.querySelector('.history-row');if(!row)return {ready:false};
+const button=row.querySelector('.history-row-select'),actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
+button.focus();
+return {ready:row.matches(':focus-within'),duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,timeDuration:getComputedStyle(time).transitionDuration,symbols:[...actions.querySelectorAll('.history-symbol')].map(i=>i.dataset.symbol),icons:[...actions.querySelectorAll('.history-symbol')].map(i=>({width:getComputedStyle(i).width,height:getComputedStyle(i).height})),color:getComputedStyle(actions.querySelector('button')).color,deleteColor:getComputedStyle(actions.querySelector('.history-delete')||actions.lastElementChild).color};
+"#,
+        )?;
+        if sample["duration"] != "0.15s"
+            || sample["delay"] != "0s, 0s, 0s"
+            || sample["timeDuration"] != "0.15s, 0.15s"
+        {
+            return Err(format!("record action timing: {sample}"));
+        }
+        if sample["symbols"]
+            .as_array()
+            .ok_or("symbols")?
+            .iter()
+            .any(|s| s == "languages")
+        {
+            return Err("record hover actions retained Retranslate".into());
+        }
+        for icon in sample["icons"].as_array().ok_or("icons")? {
+            if icon["width"] != "14px" || icon["height"] != "14px" {
+                return Err(format!("icon dimensions: {icon}"));
+            }
+        }
+        samples.push(sample);
+        Ok(())
+    })();
+    DomCase {
+        name,
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_translation_action_timing(app: &AppHandle) -> DomCase {
+    run_record_action_timing(app, "translation", "translation action timing")
+}
+
+fn run_records_geometry(app: &AppHandle) -> DomCase {
+    if let Err(error) = on_main(app, |app| {
+        let window = create(app, "translation")?;
+        if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
+            let app_state = app.state::<AppState>();
+            let mut state = app_state.windows.lock().unwrap();
+            state.history_pinned = true;
+            state.translation_pinned = true;
+            drop(state);
+            window.show().map_err(|_| "window_show")?;
+            window.set_always_on_top(true).map_err(|_| "window_pin")?;
+        }
+        Ok(())
+    }) {
+        return DomCase {
+            name: "records geometry",
+            passed: false,
+            error: Some(error),
+            samples: Vec::new(),
+        };
+    }
+    let mut cases = run(app);
+    if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
+        cases.extend(run_visible_paced(app));
+    }
+    let hits = run_resize_hit_targets(app);
+    let error = cases
+        .iter()
+        .find(|case| !case.passed)
+        .map(|case| format!("{}: {:?}", case.name, case.error))
+        .or(hits.error.clone());
+    DomCase {
+        name: "records geometry",
+        passed: error.is_none(),
+        error,
+        samples: vec![serde_json::json!({"geometry":cases,"hitTargets":hits})],
+    }
+}
+
 fn run_unified_records(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
-    let original_database = app.state::<AppState>().database.lock().unwrap().take();
-    let original_page = app.state::<AppState>().history_page.lock().unwrap().clone();
-    let original_store = std::mem::replace(
-        &mut *app.state::<AppState>().history.lock().unwrap(),
-        crate::history::HistoryStore::new(crate::model::initial_history_records()),
-    );
     let result = (|| {
-        let mut database =
-            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
-        for record in crate::model::initial_history_records() {
-            database.insert(&record, "edge", || true)?;
+        let record = nami::clipboard::ClipboardRecord {
+            id: "unified-clipboard-one".into(),
+            kind: "text".into(),
+            text: "Synthetic shared record input".into(),
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: nami::clipboard::fingerprint("text", b"Synthetic shared record input"),
+        };
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated database")?
+            .clipboard_insert(&record)?;
+        let translation_record = crate::model::HistoryRecord {
+            id: "unified-translation".into(),
+            text: "Synthetic shared record input".into(),
+            source_language: "en".into(),
+            target_languages: vec!["fr".into()],
+            translations: vec!["Synthetic shared output".into()],
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+        };
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated database")?
+            .insert(&translation_record, "edge", || true)?;
+        on_main(app, move |app| history_add(app, translation_record))?;
+        records_mode(app, "clipboard")?;
+        let clipboard = wait_records(app, RECORDS_SNAPSHOT)?;
+        if clipboard["error"].is_string() {
+            return Err(format!("clipboard IPC failed: {clipboard}"));
         }
-        *app.state::<AppState>().database.lock().unwrap() = Some(database);
-        *app.state::<AppState>().history_page.lock().unwrap() = Default::default();
-        for (id, text, favorite) in [
-            (
-                "unified-clipboard-one",
-                "Synthetic unified clipboard record one",
-                false,
-            ),
-            (
-                "unified-clipboard-two",
-                "Synthetic unified clipboard record two",
-                true,
-            ),
+        records_mode(app, "translation")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"window.__fixtureQueried=false;window.__TAURI_INTERNALS__.invoke('history_query',{query:'',favoritesOnly:false}).then(()=>{window.__fixtureQueried=true;});return true;"#,
+        )?;
+        wait_records(
+            app,
+            r#"return {ready:window.__fixtureQueried&&!!document.querySelector('#translation-history [data-record-id="unified-translation"]')};"#,
+        )?;
+        let translation = wait_records(app, RECORDS_SNAPSHOT)?;
+        if translation["error"].is_string() {
+            return Err(format!("translation IPC failed: {translation}"));
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"window.__recordsPermission={done:false};(async()=>{try{await window.__TAURI_INTERNALS__.invoke('locale_set',{locale:'zh-CN'});window.__recordsPermission={done:true,denied:false};}catch(error){window.__recordsPermission={done:true,denied:true};}})();return true;"#,
+        )?;
+        let permission = wait_records(
+            app,
+            "return {ready:window.__recordsPermission?.done,...window.__recordsPermission};",
+        )?;
+        if permission["denied"] != true {
+            return Err("record child gained settings command permission".into());
+        }
+        samples.push(permission);
+        for key in [
+            "search",
+            "actionDuration",
+            "timeDuration",
+            "previewFont",
+            "mask",
         ] {
-            app.state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("missing isolated database")?
-                .clipboard_insert(&nami::clipboard::ClipboardRecord {
-                    id: id.into(),
-                    kind: "text".into(),
-                    text: text.into(),
-                    date: "2099-01-01T00:00:00Z".into(),
-                    is_favorite: favorite,
-                    is_pinned: false,
-                    source_app: None,
-                    image_path: None,
-                    fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
-                })?;
-        }
-        on_main(app, |app| {
-            let record = crate::model::HistoryRecord {
-                id: "unified-translation".into(),
-                text: "Synthetic unified translation input".into(),
-                source_language: "en".into(),
-                target_languages: vec!["zh-CN".into()],
-                translations: vec!["合并原生测试译文".into()],
-                date: "2099-01-01T00:00:00Z".into(),
-                is_favorite: false,
-                is_pinned: false,
-                source_app: None,
-            };
-            app.state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("isolated database")?
-                .insert(&record, "edge", || true)?;
-            history_add(app, record)?;
-            create(app, "translation")?;
-            {
-                let state = app.state::<AppState>();
-                let mut windows = state.windows.lock().unwrap();
-                windows.history_width = 420.0;
-                windows.history_width_initialized = true;
-                windows.history_pinned = true;
-                windows.translation_pinned = true;
+            if clipboard[key] != translation[key] {
+                return Err(format!(
+                    "record {key} differs: clipboard={}, translation={}",
+                    clipboard[key], translation[key]
+                ));
             }
-            let window = clipboard_host(app)?;
-            window.show().map_err(|_| "test window show")?;
-            window.set_focus().map_err(|_| "test window focus")?;
-            activate_application();
-            app.get_webview("clipboard")
-                .ok_or("clipboard child")?
-                .set_focus()
-                .map_err(|_| "clipboard focus")?;
-            Ok(())
-        })?;
-        wait_motion(app)?;
-        let mut initial = serde_json::Value::Null;
-        for _ in 0..100 {
-            initial = evaluate_view_dom(
+        }
+        for (a, b) in clipboard["actions"]
+            .as_array()
+            .ok_or("clipboard actions")?
+            .iter()
+            .zip(
+                translation["actions"]
+                    .as_array()
+                    .ok_or("translation actions")?,
+            )
+        {
+            for key in ["symbol", "mask", "color", "opacity", "width", "height"] {
+                if a[key] != b[key] {
+                    return Err(format!("record icon {key} differs: {a} / {b}"));
+                }
+            }
+        }
+        for (a, b) in clipboard["toolbar"]
+            .as_array()
+            .ok_or("clipboard toolbar")?
+            .iter()
+            .zip(
+                translation["toolbar"]
+                    .as_array()
+                    .ok_or("translation toolbar")?,
+            )
+        {
+            for key in ["x", "y", "width", "height", "symbol", "mask"] {
+                if a[key] != b[key] {
+                    return Err(format!("toolbar {key} differs: {a} / {b}"));
+                }
+            }
+        }
+        for key in ["x", "y", "width", "height"] {
+            if clipboard["footer"][key] != translation["footer"][key] {
+                return Err(format!("footer {key} differs"));
+            }
+        }
+        for key in ["star", "keyboard"] {
+            if clipboard["footer"][key] != translation["footer"][key] {
+                return Err(format!("footer {key} differs"));
+            }
+        }
+        samples.extend([clipboard.clone(), translation.clone()]);
+        let baseline = on_main(app, geometry)?;
+        for mode in ["clipboard", "translation", "clipboard", "translation"] {
+            records_mode(app, mode)?;
+            let state = wait_records(app, RECORDS_SNAPSHOT)?;
+            let expected = if mode == "clipboard" {
+                &clipboard
+            } else {
+                &translation
+            };
+            if state["panel"] != expected["panel"] || state["rows"] != expected["rows"] {
+                return Err("mode switch replaced record nodes or selection".into());
+            }
+            if state["scrollbar"].is_object() && state["scrollbar"]["visible"] != false {
+                return Err("mode switch revealed scrollbar".into());
+            }
+            let current = on_main(app, geometry)?;
+            equal(
+                current.window_width,
+                baseline.window_width,
+                "mode switch window width",
+            )?;
+            equal(
+                current.history_width,
+                baseline.history_width,
+                "mode switch list width",
+            )?;
+        }
+        let mut menus = Vec::new();
+        for mode in ["clipboard", "translation"] {
+            records_mode(app, mode)?;
+            evaluate_view_dom(
                 app,
                 "clipboard",
-                r#"
-const panel=document.querySelector('.clipboard-panel');
-if(!panel||!panel.querySelector('[data-record-id="unified-clipboard-one"]'))return {ready:false};
-const toolbar=[...panel.querySelectorAll('.history-toolbar > button')].map(b=>({label:b.getAttribute('aria-label'),active:b.getAttribute('aria-pressed'),disabled:b.disabled}));
-const footer=panel.querySelector('.history-footer'),star=footer.querySelector('.history-favorites'),keyboard=footer.querySelector('.history-shortcuts'),count=footer.querySelector('.history-record-count');
-const r=footer.getBoundingClientRect(),f=star.getBoundingClientRect(),k=keyboard.getBoundingClientRect(),c=count.getBoundingClientRect();
-return {ready:true,toolbar,centerDelta:Math.abs((f.left+f.right)/2-(r.left+r.right)/2),ordered:c.right<f.left&&f.right<k.left,count:count.textContent};
-"#,
+                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));const row=p.querySelector('.history-list .history-row:not([hidden])');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;"#,
             )?;
-            if initial["ready"] == true {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if initial["ready"] != true
-            || initial["centerDelta"].as_f64().unwrap_or(99.0) > 0.5
-            || initial["ordered"] != true
-            || initial["count"] != "2 records"
-        {
-            return Err(format!("unified clipboard footer: {initial}"));
-        }
-        let labels = initial["toolbar"]
-            .as_array()
-            .ok_or("missing clipboard toolbar")?
-            .iter()
-            .map(|button| button["label"].as_str().unwrap_or(""))
-            .collect::<Vec<_>>();
-        if labels
-            != [
-                "Clipboard",
-                "Translations",
-                "Unpin records",
-                "Details unavailable",
-            ]
-            || initial["toolbar"][0]["active"] != "true"
-            || initial["toolbar"][3]["disabled"] != true
-        {
-            return Err(format!("unified clipboard toolbar: {initial}"));
-        }
-        samples.push(initial);
-        let mounted = on_main(app, |app| {
-            if app.get_window("clipboard").is_some() {
-                return Err("clipboard retained a separate native window".into());
-            }
-            let window = app.get_window("translation").ok_or("missing shared host")?;
-            let clipboard = app
-                .get_webview("clipboard")
-                .ok_or("missing clipboard child")?;
-            if clipboard.window().label() != window.label() {
-                return Err("clipboard belongs to another host".into());
-            }
-            let stage = translation_stage(&window)?;
-            let expected_parent = Retained::as_ptr(&stage) as usize;
-            let (send, receive) = mpsc::sync_channel(1);
-            clipboard
-                .with_webview(move |view| unsafe {
-                    let parent: *mut AnyObject =
-                        objc2::msg_send![view.inner().cast::<AnyObject>(), superview];
-                    let _ = send.send(parent as usize);
-                })
-                .map_err(|_| "clipboard native parent")?;
-            if receive
-                .try_recv()
-                .map_err(|_| "deferred clipboard parent")?
-                != expected_parent
-            {
-                return Err("clipboard native child not mounted in shared stage".into());
-            }
-            let child = view_frame(app, "clipboard")?;
-            let history = view_frame(app, "history")?;
-            equal(child.origin.x, history.origin.x, "shared left frame x")?;
-            equal(
-                child.size.width,
-                history.size.width,
-                "shared left frame width",
+            let menu = wait_records(
+                app,
+                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu);return {ready:true,background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin record','Delete'].includes(b.textContent)).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:b.textContent,color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
             )?;
-            equal(
-                child.size.height,
-                history.size.height,
-                "shared left frame height",
-            )?;
-            Ok(
-                serde_json::json!({"sharedHost":window.label(),"width":child.size.width,"stage":expected_parent}),
-            )
-        })?;
-        samples.push(mounted);
-        samples.push(on_main(app, |app| {
-            let window=app.get_window("translation").ok_or("host")?;
-            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(-36.0,0.0))?;
-            let child=view_frame(app,"clipboard")?;
-            let history=view_frame(app,"history")?;
-            equal(child.origin.x,history.origin.x,"resized child left")?;
-            equal(child.size.width,history.size.width,"resized child width")?;
-            equal(child.size.height,history.size.height,"resized child height")?;
-            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(36.0,0.0))?;
-            let restored=view_frame(app,"clipboard")?;
-            equal(restored.size.width,420.0,"restored clipboard width")?;
-            Ok(serde_json::json!({"clipboardOnlyResizeChildMatches":true,"expandedWidth":child.size.width,"restoredWidth":restored.size.width}))
-        })?);
-        evaluate_view_dom(app, "clipboard", "document.querySelector('.history-toolbar [aria-label=\"Translations\"]').click();return true;")?;
-        for _ in 0..100 {
-            if on_main(app, |app| {
-                Ok(app.state::<AppState>().windows.lock().unwrap().record_view
-                    == crate::model::RecordView::Translation)
-            })? {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+            menus.push(menu);
+            evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
         }
-        wait_motion(app)?;
-        on_main(app, |app| unsafe {
-            let window = app.get_window("translation").ok_or("host")?;
-            let native = window
-                .ns_window()
-                .map_err(|_| "native host")?
-                .cast::<AnyObject>();
-            let search = history_object(app, 205)?;
-            let responder: *mut AnyObject = objc2::msg_send![native, firstResponder];
-            let editor: *mut AnyObject = objc2::msg_send![search, currentEditor];
-            if responder.is_null()
-                || (responder != search && (editor.is_null() || responder != editor))
-            {
-                return Err(
-                    "native translation mode retained another view's keyboard responder".into(),
-                );
-            }
-            Ok(())
-        })?;
-        let toolbar = on_main(app, history_snapshot)?;
-        let buttons = toolbar["toolbar"].as_array().ok_or("native toolbar")?;
-        if buttons
-            .iter()
-            .map(|b| b["tag"].as_i64().unwrap())
-            .collect::<Vec<_>>()
-            != [202, 211, 204, 212, 203]
-            || buttons[1]["active"] != true
-            || buttons[0]["active"] != false
-        {
-            return Err(format!("native unified toolbar: {toolbar}"));
+        if menus[0] != menus[1] {
+            return Err(format!("record menus differ: {menus:?}"));
         }
-        for pair in buttons[..4].windows(2) {
-            if pair[0]["x"].as_f64().unwrap() >= pair[1]["x"].as_f64().unwrap() {
-                return Err("native header button order is incorrect".into());
-            }
-        }
-        equal(
-            buttons[4]["x"].as_f64().unwrap() + buttons[4]["width"].as_f64().unwrap() / 2.0,
-            210.0,
-            "native footer star center",
-        )?;
-        samples.push(toolbar);
-        let baseline = on_main(app, geometry)?;
-        for _ in 0..4 {
-            for tag in [202isize, 211] {
-                let frame = on_main(app, move |app| {
-                    history_click(app, tag)?;
-                    geometry(app)
+        samples.push(serde_json::json!({"sharedMenus":menus}));
+        for mode in ["clipboard", "translation"] {
+            records_mode(app, mode)?;
+            for width in [320.0, 454.0, 380.0] {
+                on_main(app, move |app| {
+                    let app_state = app.state::<AppState>();
+                    let mut state = app_state.windows.lock().unwrap();
+                    state.history_width = width;
+                    state.history_extent = width;
+                    drop(state);
+                    layout_translation(app, false)?;
+                    let child = view_frame(app, "history")?;
+                    equal(child.size.width, width, "native record child width")?;
+                    Ok(())
                 })?;
-                equal(
-                    frame.window_width,
-                    baseline.window_width,
-                    "mode switch window width",
-                )?;
-                equal(
-                    frame.history_width,
-                    baseline.history_width,
-                    "mode switch left width",
-                )?;
-                equal(
-                    frame.translation_width,
-                    baseline.translation_width,
-                    "mode switch right width",
-                )?;
+                let state=wait_records(app,&format!("const p=document.querySelector('{}');return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width}};",if mode=="clipboard" {".clipboard-panel"} else {"#translation-history"}))?;
+                samples.push(state);
             }
         }
-        on_main(app, |app| {
-            history_click(app, 212)?;
-            Ok(())
-        })?;
+        records_mode(app, "translation")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
+        )?;
         wait_motion(app)?;
+        wait_records(
+            app,
+            r#"return {ready:document.querySelector('[data-record-id="unified-translation"]').classList.contains('selected')};"#,
+        )?;
+        wait_dom(app,"return {ready:document.querySelector('.source-input')?.value==='Synthetic shared record input'&&document.querySelector('.result-column')?.textContent==='Synthetic shared output'};")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
+        )?;
         on_main(app, |app| {
-            geometry(app)?.adjacent()?;
-            let history = view_frame(app, "history")?;
-            let clipboard = view_frame(app, "clipboard")?;
-            equal(
-                history.origin.x,
-                clipboard.origin.x,
-                "hidden child remains left-aligned",
-            )?;
-            crate::commands::select_history_sample(app, Some("unified-translation".into()), false)?;
-            crate::commands::select_history_sample(app, Some("unified-translation".into()), false)?;
-            let state = app.state::<AppState>().windows.lock().unwrap().clone();
-            if !state.history_visible || !state.translation_visible {
-                return Err("repeated record selection collapsed details".into());
-            }
-            Ok(())
-        })?;
-        wait_motion(app)?;
-        samples.push(on_main(app, |app| {
-            let window=app.get_window("translation").ok_or("host")?;
-            let original=geometry(app)?;
-            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(-24.0,0.0))?;
-            let resized=geometry(app)?;
-            resized.adjacent()?;
-            let child=view_frame(app,"clipboard")?;
-            equal(child.origin.x,resized.history_x,"combined resize child left")?;
-            equal(child.size.width,resized.history_width,"combined resize child width")?;
-            native_resize::test_drag(&window,objc2_foundation::NSPoint::new(6.0,100.0),objc2_foundation::NSPoint::new(24.0,0.0))?;
-            equal(geometry(app)?.window_width,original.window_width,"combined resize restores width")?;
-            Ok(serde_json::json!({"combinedResizeChildMatches":true,"historyWidth":child.size.width}))
-        })?);
-        on_main(app, |app| history_search(app, "合并原生测试译文"))?;
-        wait_history_query(app)?;
-        let searched = on_main(app, history_snapshot)?;
-        if searched["totalRecords"] != 1 {
-            return Err(format!("translation full-text search count: {searched}"));
-        }
-        samples.push(searched);
-        let session = on_main(app, |app| {
-            Ok(app
+            if !app
                 .state::<AppState>()
                 .windows
                 .lock()
                 .unwrap()
-                .records_session)
+                .translation_visible
+            {
+                return Err("repeated click collapsed details".into());
+            }
+            Ok(())
         })?;
-        on_main(app, |app| {
-            let view = app.get_webview("translation").ok_or("translation view")?;
-            crate::commands::history_toggle(view, app.clone())
-        })?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            "document.querySelector('#translation-history .records-details').click();return true;",
+        )?;
         wait_motion(app)?;
+        wait_records(
+            app,
+            r#"return {ready:!document.querySelector('#translation-history .history-row.selected')};"#,
+        )?;
+        evaluate_view_dom(app,"clipboard","document.querySelector('#translation-history .history-toolbar [aria-label=Clipboard]').click();return true;")?;
+        wait_records(app,"const p=document.querySelector('.clipboard-panel');return {ready:!!p.getClientRects().length&&!p.closest('[hidden]')};")?;
         on_main(app, |app| {
-            let view = app.get_webview("translation").ok_or("translation view")?;
-            crate::commands::history_toggle(view, app.clone())
-        })?;
-        wait_motion(app)?;
-        let reopened = on_main(app, history_snapshot)?;
-        let reopened_session = on_main(app, |app| {
-            Ok(app
+            if app
                 .state::<AppState>()
                 .windows
                 .lock()
                 .unwrap()
-                .records_session)
-        })?;
-        if reopened["query"] != "合并原生测试译文" || reopened_session != session {
-            return Err(format!(
-                "left-only collapse reset browsing session: {reopened}"
-            ));
-        }
-        samples.push(reopened);
-        on_main(app, |app| show(app, "translation"))?;
-        wait_motion(app)?;
-        on_main(app, |app| {
-            let state = app.state::<AppState>().windows.lock().unwrap().clone();
-            if state.history_visible || !state.translation_visible {
-                return Err("translation summon did not show translation only".into());
+                .translation_visible
+            {
+                return Err("clipboard mode left details visible".into());
             }
-            let view = app.get_webview("translation").ok_or("translation view")?;
-            crate::commands::window_hide(view, app.clone(), "translation".into(), None)
-        })?;
-        wait_motion(app)?;
-        wait_history_query(app)?;
-        let reset = on_main(app, history_snapshot)?;
-        let full_reset = on_main(app, |app| {
-            let state = app.state::<AppState>().windows.lock().unwrap().clone();
-            if state.history_visible || state.translation_visible {
-                return Err("fixed Esc command did not dismiss both cards".into());
-            }
-            Ok(state.records_session)
-        })?;
-        if reset["query"] != "" || reset["favoritesOnly"] != false || full_reset != session + 1 {
-            return Err(format!("complete hide did not reset browsing: {reset}"));
-        }
-        samples.push(reset);
-        on_main(app, |app| {
-            clipboard_host(app)?;
             Ok(())
         })?;
-        wait_motion(app)?;
-        let reset_clipboard = evaluate_view_dom(app,"clipboard","const p=document.querySelector('.clipboard-panel');return {search:p.querySelector('.history-search input').value,favorite:p.querySelector('.history-favorites').getAttribute('aria-pressed'),editor:!!document.querySelector('.clipboard-editor')};")?;
-        if reset_clipboard["search"] != ""
-            || reset_clipboard["favorite"] != "false"
-            || reset_clipboard["editor"] != false
         {
-            return Err(format!(
-                "clipboard browser failed session reset: {reset_clipboard}"
-            ));
+            let state = app.state::<AppState>();
+            crate::clipboard_runtime::persist_capture(
+                state
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .ok_or("isolated database")?,
+                &std::env::temp_dir(),
+                crate::platform::ClipboardCapture {
+                    version: 123,
+                    payload: crate::platform::ClipboardPayload::Text(
+                        "Synthetic newly captured shared clipboard record".into(),
+                    ),
+                    source_app: None,
+                },
+            )?;
         }
-        samples.push(reset_clipboard);
+        crate::clipboard_runtime::changed(app)?;
+        wait_records(app,"return {ready:[...document.querySelectorAll('.clipboard-panel .history-preview')].some(p=>p.textContent==='Synthetic newly captured shared clipboard record')};")?;
         let token = app.state::<AppState>().operation.load(Ordering::SeqCst);
         on_main(app, hide_after_clipboard_use)?;
         wait_motion(app)?;
@@ -4258,7 +2379,7 @@ return {ready:true,toolbar,centerDelta:Math.abs((f.left+f.right)/2-(r.left+r.rig
         })?;
         let mut visible_failure = false;
         for _ in 0..100 {
-            visible_failure=evaluate_view_dom(app,"clipboard","return document.querySelector('.clipboard-feedback')?.textContent==='The original file was moved or deleted and cannot be restored';")?==true;
+            visible_failure=evaluate_view_dom(app,"clipboard","return document.querySelector('.record-feedback')?.textContent==='The original file was moved or deleted and cannot be restored';")?==true;
             if visible_failure {
                 break;
             }
@@ -4397,46 +2518,211 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
             }
             samples.push(serde_json::json!({"noteNavigationAction":action,"guarded":true}));
         }
-        on_main(app, |app| {
-            set_record_view(app, "translation")?;
-            {
-                let state = app.state::<AppState>();
-                let mut windows = state.windows.lock().unwrap();
-                windows.translation_visible = true;
-                windows.history_visible = true;
-                windows.history_pinned = true;
-                windows.translation_pinned = true;
+        for mode in ["clipboard", "translation"] {
+            records_mode(app, mode)?;
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true}));return true;"#,
+            )?;
+            on_main(app, |app| {
+                if !app
+                    .state::<AppState>()
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .history_visible
+                {
+                    return Err("composition Escape hid workspace".into());
+                }
+                Ok(())
+            })?;
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+            )?;
+            for _ in 0..100 {
+                if on_main(app, |app| {
+                    let app_state = app.state::<AppState>();
+                    let s = app_state.windows.lock().unwrap();
+                    Ok(!s.history_visible && !s.translation_visible)
+                })? {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            apply_translation(app)
-        })?;
-        wait_motion(app)?;
-        samples.push(on_main(app, |app| unsafe {
-            let window=app.get_window("translation").ok_or("host")?;
-            native_history::focus_search(&window)?;
-            let root=history_object(app,201)?;
-            let search=history_object(app,205)?;
-            let marker=objc2::MainThreadMarker::new().ok_or("main thread")?;
-            let marked=SearchCommandFixture::alloc(marker).set_ivars(true);
-            let marked:Retained<SearchCommandFixture>=objc2::msg_send![super(marked),init];
-            let consumed:bool=objc2::msg_send![root,control:search,textView:&*marked,doCommandBySelector:objc2::sel!(cancelOperation:)];
-            if consumed {return Err("native search consumed Escape during text composition".into());}
-            let editor:*mut AnyObject=objc2::msg_send![search,currentEditor];
-            if editor.is_null() {return Err("native search missing field editor".into());}
-            let consumed:bool=objc2::msg_send![root,control:search,textView:editor,doCommandBySelector:objc2::sel!(cancelOperation:)];
-            let state=app.state::<AppState>().windows.lock().unwrap().clone();
-            if !consumed||state.history_visible||state.translation_visible {return Err("native search Escape failed to dismiss fixed workspace".into());}
-            Ok(serde_json::json!({"searchEscapeDismissedFixedWorkspace":true,"compositionEscapePreserved":true}))
-        })?);
+            on_main(app, |app| {
+                let app_state = app.state::<AppState>();
+                let s = app_state.windows.lock().unwrap();
+                if s.history_visible || s.translation_visible {
+                    return Err("Escape failed to hide fixed workspace".into());
+                }
+                Ok(())
+            })?;
+        }
+        samples.push(serde_json::json!({"sameRenderer":true,"rapidSwitchStable":true,"menus":true,"nativeResizeChild":true,"detailsRestore":true,"escapePinnedAndComposition":true}));
         Ok(())
     })();
-    *app.state::<AppState>().database.lock().unwrap() = original_database;
-    *app.state::<AppState>().history_page.lock().unwrap() = original_page;
-    let _ = on_main(app, move |app| {
-        *app.state::<AppState>().history.lock().unwrap() = original_store;
-        refresh_history(app)
-    });
     DomCase {
         name: "unified records panel",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_history_pagination(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let original_database = app.state::<AppState>().database.lock().unwrap().take();
+    let original_paging = app.state::<AppState>().history_page.lock().unwrap().clone();
+    let original_loaded = app
+        .state::<AppState>()
+        .history
+        .lock()
+        .unwrap()
+        .loaded_page(original_paging.cursor.clone());
+    let result = (|| {
+        let mut db = crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        for index in 0..250 {
+            db.insert(
+                &crate::model::HistoryRecord {
+                    id: format!("pagination-{index}"),
+                    text: format!("Synthetic page token-{index:04}"),
+                    source_language: "en".into(),
+                    target_languages: vec!["fr".into()],
+                    translations: vec!["Synthetic output".into()],
+                    date: "2099-01-01T00:00:00Z".into(),
+                    is_favorite: false,
+                    is_pinned: false,
+                    source_app: None,
+                },
+                "edge",
+                || true,
+            )?;
+        }
+        let page = db.page(&crate::database::HistoryQuery::default(), None, 100)?;
+        *app.state::<AppState>().database.lock().unwrap() = Some(db);
+        {
+            let app_state = app.state::<AppState>();
+            let mut paging = app_state.history_page.lock().unwrap();
+            *paging = Default::default();
+            paging.cursor = page.cursor.clone();
+            paging.cache.insert(Default::default(), page.clone());
+        }
+        on_main(app, move |app| {
+            app.state::<AppState>()
+                .history
+                .lock()
+                .unwrap()
+                .apply_page(page, true);
+            crate::history_runtime::publish_history(app)
+        })?;
+        records_mode(app, "translation")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Synthetic page token');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+        )?;
+        let mut queried = false;
+        for _ in 0..100 {
+            queried = app
+                .state::<AppState>()
+                .history_page
+                .lock()
+                .unwrap()
+                .query
+                .text
+                == "Synthetic page token";
+            if queried {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !queried {
+            return Err("pagination UI did not establish its own query projection".into());
+        }
+        samples.push(wait_records(app,r#"const p=document.querySelector('#translation-history');const rows=[...p.querySelectorAll('.history-row')];return {ready:rows.length===100&&!p.querySelector('[role=progressbar]'),count:rows.length,total:p.querySelector('.history-record-count').textContent};"#)?);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const p=document.querySelector('#translation-history'),list=p.querySelector('.history-list');window.__pagingNodes=[...list.querySelectorAll('.history-row')];list.scrollTop=list.scrollHeight-list.clientHeight-100;window.__pagingTop=list.scrollTop;list.dispatchEvent(new WheelEvent('wheel',{deltaY:1,bubbles:true}));return true;"#,
+        )?;
+        let appended = wait_records(
+            app,
+            r#"const p=document.querySelector('#translation-history'),list=p.querySelector('.history-list'),rows=[...list.querySelectorAll('.history-row')];return {ready:rows.length===200&&!p.querySelector('[role=progressbar]'),count:rows.length,retained:window.__pagingNodes.every((node,index)=>rows[index]===node),scrollDelta:Math.abs(list.scrollTop-window.__pagingTop),query:p.querySelector('.history-search input').value,favorites:p.querySelector('.history-favorites').getAttribute('aria-pressed'),active:!p.closest('[hidden]'),error:p.querySelector('[role=alert]')?.textContent};"#,
+        )?;
+        if appended["retained"] != true || appended["scrollDelta"].as_f64().unwrap_or(99.0) > 1.0 {
+            return Err(format!(
+                "pagination replaced nodes or moved viewport: {appended}"
+            ));
+        }
+        samples.push(appended);
+        let direct = app
+            .state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("test database")?
+            .page(
+                &crate::database::HistoryQuery {
+                    text: "token-0000".into(),
+                    favorites_only: false,
+                },
+                None,
+                100,
+            )?;
+        if direct.records.len() != 1 || direct.records[0].id != "pagination-0" {
+            return Err(format!(
+                "deep query fixture mismatch: {:?}",
+                direct
+                    .records
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<Vec<_>>()
+            ));
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'token-0000');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+        )?;
+        let found = wait_records(
+            app,
+            r#"const p=document.querySelector('#translation-history'),rows=[...p.querySelectorAll('.history-row')];return {ready:rows.length===1&&rows[0].dataset.recordId==='pagination-0'&&!p.querySelector('[role=progressbar]'),total:p.querySelector('.history-record-count').textContent,query:p.querySelector('.history-search input').value,rows:rows.map(r=>r.dataset.recordId),error:p.querySelector('[role=alert]')?.textContent};"#,
+        )?;
+        if found["total"] != "1 record" {
+            return Err(format!("deep search count: {found}"));
+        }
+        samples.push(found);
+        Ok(())
+    })();
+    let result = result.map_err(|error| {
+        let state = app.state::<AppState>();
+        let query = state.history_page.lock().unwrap().query.clone();
+        format!(
+            "{error}; backend query={:?}, favorites={}",
+            query.text, query.favorites_only
+        )
+    });
+    *app.state::<AppState>().database.lock().unwrap() = original_database;
+    *app.state::<AppState>().history_page.lock().unwrap() = original_paging;
+    let _ = on_main(app, move |app| {
+        app.state::<AppState>()
+            .history
+            .lock()
+            .unwrap()
+            .apply_page(original_loaded, true);
+        crate::history_runtime::publish_history(app)
+    });
+    let _ = evaluate_view_dom(
+        app,
+        "clipboard",
+        r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+    );
+    DomCase {
+        name: "shared record child pagination IPC",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -4464,6 +2750,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-media",
             "translation-actions",
             "unified-records",
+            "records-geometry",
+            "records-pagination",
         ]
         .contains(&case.as_str())
         {
@@ -4471,7 +2759,11 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         }
         let app = app.clone();
         std::thread::spawn(move || {
-            let result = if case == "unified-records" {
+            let result = if case == "records-pagination" {
+                run_history_pagination(&app)
+            } else if case == "records-geometry" {
+                run_records_geometry(&app)
+            } else if case == "unified-records" {
                 run_unified_records(&app)
             } else if case == "translation-actions" {
                 run_translation_action_timing(&app)
@@ -4483,7 +2775,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_clipboard_editor_layout(&app)
             };
             let passed = result.passed;
-            let report = serde_json::json!({"runId":run_id,"testCase":case,"passed":passed,"cases":[],"domCases":[result],"scope":"selected isolated UI case only; no full geometry suite"});
+            let report = serde_json::json!({"runId":run_id,"testCase":case,"passed":passed,"cases":[],"domCases":[result],"scope":"selected synthetic records or native host case; no OS mouse or material pixel verification"});
             let saved = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
             app.exit(if passed && saved.is_ok() { 0 } else { 1 });
         });
@@ -4511,18 +2803,15 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         let mut dom_cases = vec![
             run_native_chrome_geometry(&app),
             run_right_control_dom(&app),
-            run_history_native_resize(&app),
-            run_history_native_actions(&app),
         ];
-        if visible {
-            dom_cases.push(run_history_driver(&app));
-        }
-        dom_cases.push(run_runtime_history(&app));
         dom_cases.push(run_history_pagination(&app));
         dom_cases.push(run_source_editing(&app));
         dom_cases.push(run_resize_hit_targets(&app));
         dom_cases.push(run_unified_records(&app));
-        dom_cases.push(run_clipboard_history_view(&app));
+        dom_cases.push(run_translation_action_timing(&app));
+        dom_cases.push(run_clipboard_action_timing(&app));
+        dom_cases.push(run_clipboard_media_layout(&app));
+        dom_cases.push(run_clipboard_editor_layout(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
         let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());
         dom_cases.push(DomCase {

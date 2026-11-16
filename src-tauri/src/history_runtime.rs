@@ -1,24 +1,36 @@
-use crate::{model::HistoryRecord, windows, AppState};
+use crate::{model::HistoryRecord, AppState};
 use tauri::{AppHandle, Emitter, Manager};
 
-fn storage_failure(app: &AppHandle, error: String) -> String {
+const HISTORY_VIEWS: [&str; 3] = ["translation", "history", "clipboard"];
+
+fn record_storage_failure(
+    error: String,
+    stored_error: &std::sync::Mutex<Option<String>>,
+    mut notify: impl FnMut(&str, &str),
+) -> String {
     if matches!(
         error.as_str(),
         "storage_corrupt" | "storage_schema" | "storage_version"
     ) {
-        *app.state::<AppState>().storage_error.lock().unwrap() = Some(error.clone());
-        for label in ["translation", "history", "settings"] {
-            if let Some(view) = app.get_webview(label) {
-                let _ = view.emit("storage_error", &error);
-            }
+        *stored_error.lock().unwrap() = Some(error.clone());
+        for label in HISTORY_VIEWS.into_iter().chain(std::iter::once("settings")) {
+            notify(label, &error);
         }
     }
     error
 }
 
+fn storage_failure(app: &AppHandle, error: String) -> String {
+    let state = app.state::<AppState>();
+    record_storage_failure(error, &state.storage_error, |label, error| {
+        if let Some(view) = app.get_webview(label) {
+            let _ = view.emit("storage_error", error);
+        }
+    })
+}
+
 pub(crate) fn select_native_history(app: &AppHandle, id: Option<&str>) -> Result<(), String> {
     app.state::<AppState>().history.lock().unwrap().select(id)?;
-    windows::refresh_history(app)?;
     publish_history(app)
 }
 
@@ -43,14 +55,12 @@ pub(crate) fn history_add(app: &AppHandle, record: HistoryRecord) -> Result<(), 
         .unwrap()
         .cache
         .clear();
-    windows::refresh_history(app)?;
     publish_history(app)
 }
 
 pub(crate) fn publish_history(app: &AppHandle) -> Result<(), String> {
-    let views: Vec<_> = ["translation", "history"]
+    let views: Vec<_> = HISTORY_VIEWS
         .into_iter()
-        .filter(|label| *label != "translation" || !crate::platform::capabilities().native_history)
         .filter_map(|label| app.get_webview(label))
         .collect();
     if views.is_empty() {
@@ -111,7 +121,6 @@ pub(crate) async fn update_record(
             .unwrap()
             .cache
             .update_record(&previous, next.as_ref());
-        windows::refresh_history(&app)?;
         publish_history(&app)?;
         Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
     })
@@ -167,7 +176,6 @@ pub(crate) async fn commit_translation(
             .lock()
             .unwrap()
             .add_completed(record.clone(), current, &query)?;
-        windows::refresh_history(&app)?;
         publish_history(&app)?;
         Ok(record)
     })
@@ -179,43 +187,6 @@ pub(crate) struct PageState {
     pub query: crate::database::HistoryQuery,
     pub cursor: Option<crate::database::HistoryCursor>,
     pub cache: crate::history::HistoryPageCache,
-}
-
-#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-pub(crate) fn restore_cached_query(
-    app: &AppHandle,
-    query: crate::database::HistoryQuery,
-) -> Result<bool, String> {
-    let state = app.state::<AppState>();
-    let Ok(_write) = state.history_writes.try_lock() else {
-        return Ok(false);
-    };
-    if let Some(error) = state.storage_error.lock().unwrap().clone() {
-        return Err(error);
-    }
-    let page = {
-        let mut paging = state.history_page.lock().unwrap();
-        let Some(page) = paging.cache.get(&query) else {
-            return Ok(false);
-        };
-        paging.query = query;
-        paging.cursor = page.cursor.clone();
-        page
-    };
-    state
-        .history_query_revision
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let detail_visible = state.windows.lock().unwrap().translation_visible;
-    {
-        let mut history = state.history.lock().unwrap();
-        history.apply_page(page, true);
-        if detail_visible {
-            history.restore_visual_selection();
-        }
-    }
-    windows::refresh_history(app)?;
-    publish_history(app)?;
-    Ok(true)
 }
 
 pub(crate) async fn query_history(
@@ -337,10 +308,40 @@ async fn load_page(
             paging.query = request.query;
             paging.cursor = cursor;
         }
-        windows::refresh_history(&app)?;
         publish_history(&app)?;
         let snapshot = state.history.lock().unwrap().snapshot();
         Ok(snapshot)
     })
     .await?
+}
+
+#[cfg(test)]
+mod event_routing_tests {
+    use super::*;
+
+    #[test]
+    fn fatal_storage_error_reaches_records_only_host_and_blocks_writes() {
+        for error in ["storage_corrupt", "storage_schema", "storage_version"] {
+            let stored = std::sync::Mutex::new(None);
+            let mut received = Vec::new();
+            let result = record_storage_failure(error.into(), &stored, |label, payload| {
+                if label == "clipboard" {
+                    received.push(payload.to_owned());
+                }
+            });
+            assert_eq!(result, error);
+            assert_eq!(stored.lock().unwrap().as_deref(), Some(error));
+            assert_eq!(received, vec![error]);
+        }
+    }
+
+    #[test]
+    fn transient_storage_error_does_not_latch_or_broadcast() {
+        let stored = std::sync::Mutex::new(None);
+        let result = record_storage_failure("storage_busy".into(), &stored, |_, _| {
+            panic!("transient error must remain an operation error");
+        });
+        assert_eq!(result, "storage_busy");
+        assert!(stored.lock().unwrap().is_none());
+    }
 }

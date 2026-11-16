@@ -6,34 +6,49 @@ import type { ViewProps } from '../App';
 import { cn } from '../lib/utils';
 import { languages } from '../shared/languages';
 import { filterHistory, historyPreview, historyScrollTarget, type HistoryRecord } from './history';
-import fallbackIcon from '../assets/history/reference-nami.png';
+import { RecordHeading } from '../shared/RecordHeading';
+import { RecordActions } from '../shared/RecordActions';
 import { useHistory } from './useHistory';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryList } from '../shared/HistoryList';
 import { RecordMenu } from '../shared/RecordMenu';
 import { HistoryFooter } from '../shared/HistoryFooter';
+import { RecordFeedback } from '../shared/RecordFeedback';
+import { invoke } from '@tauri-apps/api/core';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
   onSelect: (record: HistoryRecord, retranslate?: boolean) => void;
   onKeyDown: (event: KeyboardEvent) => void;
   active?: boolean;
+  activity?: ViewProps['activity'];
 }
 
-export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true }: Props) {
+export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true, activity }: Props) {
   const history = useHistory(native);
-  const records = history.snapshot.records;
-  const selection = snapshot.window.translationVisible ? native ? history.snapshot.selectedId : selectedId : null;
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [session, setSession] = useState(0);
-  const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
+  const [copyFailed, setCopyFailed] = useState(false);
+  const copyOperation = useRef(0);
+  useEffect(() => { ++copyOperation.current; setCopyFailed(false); }, [active, snapshot.window.recordsSession]);
+  useEffect(() => () => { ++copyOperation.current; }, []);
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
   const state = snapshot.window;
-  const { query, setQuery, favoritesOnly, toggleFavorites, remember } = useRecordBrowser(state.recordsSession, active, list, pinnedList);
-  const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite).sort((a,b) => Number(b.isPinned)-Number(a.isPinned) || Date.parse(b.date)-Date.parse(a.date)) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
   const lastQuery = useRef({ query: '', favoritesOnly: false });
+  const { query, setQuery, favoritesOnly, toggleFavorites, remember } = useRecordBrowser(state.recordsSession, active, list, pinnedList, () => !native || history.displayReady(query, favoritesOnly));
+  const displayed = history.displaySnapshot(query, favoritesOnly);
+  const records = displayed.records;
+  const selection = snapshot.window.translationVisible ? native ? history.snapshot.selectedId : selectedId : null;
+  const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
+  const actionVersion = useRef(0);
+  const actionContext = useRef({ active, query, favoritesOnly, session: state.recordsSession });
+  const previousContext = actionContext.current;
+  if (previousContext.active !== active || previousContext.query !== query || previousContext.favoritesOnly !== favoritesOnly || previousContext.session !== state.recordsSession) ++actionVersion.current;
+  actionContext.current = { active, query, favoritesOnly, session: state.recordsSession };
+  useEffect(() => () => { ++actionVersion.current; }, []);
+  const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite).sort((a,b) => Number(b.isPinned)-Number(a.isPinned) || Date.parse(b.date)-Date.parse(a.date)) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
   const name = (code: string) => languages.find(([id]) => id === code)?.[1] ?? code;
 
   useEffect(() => {
@@ -50,6 +65,17 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
 
   useEffect(() => { setMenu(null); }, [query, favoritesOnly, state.historyVisible, active]);
   useEffect(() => { if (!state.historyVisible || !active) setSession((value) => value + 1); }, [state.historyVisible, active]);
+  useEffect(() => { setMenu(null); setSession((value) => value + 1); }, [state.recordsSession]);
+  useEffect(() => { if (active && state.recordsFocus !== undefined) search.current?.focus({ preventScroll: true }); }, [active, state.recordsFocus]);
+  useEffect(() => {
+    if (!active || !selection) return;
+    const row = [...(pinnedList.current?.querySelectorAll<HTMLElement>('.history-row') ?? []), ...(list.current?.querySelectorAll<HTMLElement>('.history-row') ?? [])].find((row) => row.dataset.recordId === selection);
+    const scroller = row?.closest<HTMLElement>('.history-list, .history-pinned');
+    if (!row || !scroller) return;
+    const viewport = scroller.getBoundingClientRect();
+    const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
+    if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+  }, [active, selection]);
   useEffect(() => {
     const close = () => setMenu(null);
     window.addEventListener('scroll', close, true);
@@ -57,18 +83,32 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   }, []);
 
   function loadNearEnd(element: HTMLDivElement) {
-    if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 240) void history.loadMore();
+    if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 180) void history.loadMore(query, favoritesOnly);
+  }
+
+  async function copyRecord(id: string) {
+    if (!native || !snapshot.capabilities.clipboardWrite) return;
+    const operation = ++copyOperation.current;
+    setCopyFailed(false); activity?.(1);
+    try { await invoke('translation_sample_copy', { sampleId: id, part: 'source' }); }
+    catch { if (operation === copyOperation.current) setCopyFailed(true); }
+    finally { activity?.(-1); }
+  }
+
+  function whenReady(id: string, action: () => void) {
+    const version = actionVersion.current;
+    if (!active) return;
+    const execute = (ready: boolean) => { if (ready && version === actionVersion.current && actionContext.current.active) action(); };
+    const ready = native ? history.whenReady(query, favoritesOnly, id) : true;
+    if (typeof ready === 'boolean') execute(ready);
+    else void ready.then(execute);
   }
 
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
-    const date = new Date(record.date);
-    const today = date.toDateString() === new Date().toDateString();
-    const two = (value: number) => String(value).padStart(2, '0');
-    const time = `${today ? '' : `${two(date.getMonth() + 1)}-${two(date.getDate())} `}${two(date.getHours())}:${two(date.getMinutes())}`;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
     return <article onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', record.isPinned && 'pinned')}
-      style={{ '--history-actions-width': `${canDelete ? 124 : 99}px` } as CSSProperties}>
+      style={{ '--history-actions-width': `${canDelete ? 99 : 74}px` } as CSSProperties}>
       <button className="history-row-select" onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -87,40 +127,29 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
           const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
           if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         }
-        onSelect(record);
+        whenReady(record.id, () => onSelect(record));
       }}>
-        <span className="history-row-heading">
-          {record.sourceApp?.iconDataUrl
-            ? <img className="history-origin" src={record.sourceApp.iconDataUrl} alt={record.sourceApp.name ?? 'Nami'} title={record.sourceApp.name ?? 'Nami'} />
-            : <span className="history-origin history-symbol" role="img" aria-label={record.sourceApp?.name ?? 'Nami'} title={record.sourceApp?.name ?? 'Nami'} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0, background: '#fff' } as CSSProperties} />}
-          <span className="history-languages" title={label}>{label}</span>
-          <time dateTime={record.date}>{time}</time>
-        </span>
+        <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />
         <span className="history-preview">{historyPreview(record.text)}</span>
       </button>
-      <div className="history-row-actions" role="group" aria-label={t('actions')}>
-        <button className="icon-button" title={t('retranslate')} aria-label={t('retranslate')} onClick={() => onSelect(record, true)}><HistoryIcon name="languages" /></button>
-        <button className="icon-button" title={t('copySource')} aria-label={t('copySource')} disabled={!native || !snapshot.capabilities.clipboardWrite} onClick={() => void command('translation_sample_copy', { sampleId: record.id, part: 'source' })}><HistoryIcon name="doc.on.doc" /></button>
-        <button className="icon-button" title={record.isFavorite ? t('unfavorite') : t('favorite')} aria-label={record.isFavorite ? t('unfavorite') : t('favorite')} aria-pressed={record.isFavorite} disabled={!native} onClick={() => void history.update(record.id, 'favorite')}><HistoryIcon name={record.isFavorite ? 'star.fill' : 'star'} /></button>
-        <button className="icon-button" title={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-label={record.isPinned ? t('unpinRecord') : t('pinRecord')} aria-pressed={record.isPinned} disabled={!native} onClick={() => void history.update(record.id, 'pin')}><HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} /></button>
-        {canDelete && <button className="icon-button history-delete" title={t('deleteHistory')} aria-label={t('deleteHistory')} disabled={!native} onClick={() => void history.update(record.id, 'delete')}><HistoryIcon name="trash" /></button>}
-      </div>
+      <RecordActions t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copySource')} deleteLabel={t('deleteHistory')}
+        onCopy={() => whenReady(record.id, () => { void copyRecord(record.id); })} onUpdate={(action) => whenReady(record.id, () => { void history.update(record.id, action); })} />
     </article>;
   }
 
   return <aside id="translation-history" className="history-panel" aria-label={t('history')} onKeyDown={onKeyDown}>
-    {history.showLoading && <ActivityBeam label={t('working')} />}
+    {active && history.showLoading && <ActivityBeam label={t('working')} />}
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onArrowDown={() => {
       (pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select'))?.focus();
     }} />
-    {history.error && <p role="alert" className="history-error">{t('nativeError')}</p>}
-    <HistoryList onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
+    {history.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => history.refresh(query, favoritesOnly)}>{t('retry')}</button></p>}
+    <HistoryList active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
       {filtered.filter((record) => !record.isPinned).map(row)}
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>
-    <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={history.snapshot.totalRecords} primaryModifier={snapshot.capabilities.primaryModifier} />
-    {menu && menuRecord && <RecordMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`[data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
+    <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={displayed.totalRecords} primaryModifier={snapshot.capabilities.primaryModifier} />
+    {menu && menuRecord && <RecordMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
       { action: 'retranslate', label: 'Retranslate', icon: <HistoryIcon name="languages" /> },
       { action: 'copy', label: 'Copy source text', icon: <HistoryIcon name="doc.on.doc" />, disabled: !native || !snapshot.capabilities.clipboardWrite },
       { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name={menuRecord.isFavorite ? 'star.fill' : 'star'} />, disabled: !native },
@@ -128,9 +157,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       { action: 'delete', label: 'Delete', icon: <HistoryIcon name="trash" />, destructive: true, disabled: !native || menuRecord.isFavorite || menuRecord.isPinned },
     ]} onAction={(action) => {
       setMenu(null);
-      if (action === 'retranslate') onSelect(menuRecord, true);
-      else if (action === 'copy') void command('translation_sample_copy', { sampleId: menuRecord.id, part: 'source' });
-      else void history.update(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
+      whenReady(menuRecord.id, () => {
+        if (action === 'retranslate') onSelect(menuRecord, true);
+        else if (action === 'copy') void copyRecord(menuRecord.id);
+        else void history.update(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
+      });
     }} />}
+    <RecordFeedback message={active && copyFailed ? t('copyFailed') : null} />
   </aside>;
 }

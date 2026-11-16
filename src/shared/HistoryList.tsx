@@ -1,23 +1,33 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 // The scrollbar spans the complete viewport while pinned rows stay above the scrolling list.
-export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll }: {
+export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, active = true }: {
   list: RefObject<HTMLDivElement | null>; pinnedList: RefObject<HTMLDivElement | null>;
-  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void;
+  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void; active?: boolean;
 }) {
   const listId = useId();
   const [scrollbarVisible, setScrollbarVisible] = useState(false);
   const idle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const dragging = useRef(false);
   const focused = useRef(false);
+  const enabled = useRef(active);
+  enabled.current = active;
+  const dragCleanup = useRef<(() => void) | undefined>(undefined);
   function showScrollbar() {
+    if (!enabled.current) return;
     window.clearTimeout(idle.current);
     setScrollbarVisible(true);
     idle.current = window.setTimeout(() => {
       if (!dragging.current && !focused.current) setScrollbarVisible(false);
     }, 1000);
   }
-  useEffect(() => () => window.clearTimeout(idle.current), []);
+  useEffect(() => () => { window.clearTimeout(idle.current); dragCleanup.current?.(); }, []);
+  useLayoutEffect(() => {
+    window.clearTimeout(idle.current);
+    dragging.current = false; focused.current = false;
+    dragCleanup.current?.();
+    setScrollbarVisible(false);
+  }, [active]);
   const viewport = useRef<HTMLDivElement>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0 });
   function measure() {
@@ -31,15 +41,17 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
     const observer = new ResizeObserver(measure);
     for (const element of [viewport.current, list.current, pinnedList.current, ...Array.from(list.current?.children ?? [])]) if (element) observer.observe(element);
     return () => observer.disconnect();
-  }, [children, pinned]);
+  }, [children, pinned, active]);
   const maximum = Math.max(0, scroll.content - scroll.height);
   const thumb = Math.min(scroll.track, Math.max(24, scroll.track * scroll.height / Math.max(1, scroll.content)));
   const travel = scroll.track - thumb;
   function move(top: number) { list.current?.scrollTo({ top: Math.max(0, Math.min(maximum, top)) }); }
-  return <div ref={viewport} className="history-viewport">
+  return <div ref={viewport} className="history-viewport" onWheel={showScrollbar} onTouchMove={showScrollbar} onKeyDownCapture={(event) => {
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.nativeEvent.isComposing && ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) showScrollbar();
+  }}>
     <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} onScroll={(event) => { onScroll?.(); onNearEnd(event.currentTarget); }}>{pinned}</div>
-    <div ref={list} id={listId} className="history-list" onScroll={(event) => { showScrollbar(); measure(); onScroll?.(); onNearEnd(event.currentTarget); }}>{children}</div>
-    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerEnter={showScrollbar} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
+    <div ref={list} id={listId} className="history-list" onScroll={(event) => { measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); } }}>{children}</div>
+    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={showScrollbar} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;
         if (delta || event.key === 'Home' || event.key === 'End') { showScrollbar(); event.preventDefault(); event.stopPropagation(); move(event.key === 'Home' ? 0 : event.key === 'End' ? maximum : scroll.top + delta); }
@@ -54,9 +66,11 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
         const startTop = onThumb ? scroll.top : Math.max(0, Math.min(maximum, (event.clientY - track.getBoundingClientRect().top - thumb / 2) / Math.max(1, travel) * maximum));
         move(startTop);
         const drag = (next: PointerEvent) => { if (next.pointerId === event.pointerId) { showScrollbar(); move(startTop + (next.clientY - startY) / Math.max(1, travel) * maximum); } };
-        const end = () => { dragging.current = false; showScrollbar(); track.removeEventListener('pointermove', drag); track.removeEventListener('lostpointercapture', end); };
+        const cleanup = () => { track.removeEventListener('pointermove', drag); track.removeEventListener('lostpointercapture', end); dragCleanup.current = undefined; };
+        const end = () => { dragging.current = false; showScrollbar(); cleanup(); };
         track.addEventListener('pointermove', drag);
         track.addEventListener('lostpointercapture', end);
+        dragCleanup.current = cleanup;
       }}><span className="history-scrollbar-thumb" style={{ height: thumb, transform: `translateY(${maximum ? scroll.top / maximum * travel : 0}px)` }} /></div>}
   </div>;
 }

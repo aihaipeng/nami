@@ -116,6 +116,8 @@ mod macos {
                     "trash",
                     "magnifyingglass",
                     "xmark.circle.fill",
+                    "chevron.left",
+                    "chevron.right",
                 ] {
                     let image: Option<Retained<AnyObject>> = msg_send![class!(NSImage), imageWithSystemSymbolName: &*NSString::from_str(name), accessibilityDescription: std::ptr::null::<NSString>()];
                     let image = image.ok_or_else(|| format!("Cannot load SF Symbol: {name}"))?;

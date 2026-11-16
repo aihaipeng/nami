@@ -48,7 +48,7 @@ def test_native_ui():
     result = json.loads(report.read_text())
     selected = os.environ.get('NAMI_UI_TEST_CASE')
     if selected:
-        names = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel'}
+        names = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC'}
         assert selected in names, 'Unknown targeted native test'
         assert result['runId'] == run_id
         assert result['testCase'] == selected
