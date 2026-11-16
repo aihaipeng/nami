@@ -745,9 +745,13 @@ describe('database clipboard history', () => {
       expect(scrollbar.classList.contains('visible')).toBe(false);
       fireEvent.wheel(document.querySelector('.history-list')!);
       fireEvent.scroll(document.querySelector('.history-list')!);
+      // Removing a focused control queues jsdom's focus repair on a 1000/60 interval.
+      // Vitest's next animation frame is at most 16ms and can stop short of that delay.
+      fireEvent.focus(scrollbar);
       mounted.unmount();
-      // jsdom schedules focus repair on the rendering frame after focused DOM is removed.
-      act(() => vi.advanceTimersToNextFrame());
+      act(() => {
+        for (let attempt = 0; attempt < 4 && vi.getTimerCount() > 0; attempt += 1) vi.advanceTimersByTime(Math.ceil(1000 / 60));
+      });
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
@@ -1013,21 +1017,22 @@ describe('database clipboard history', () => {
   });
 
   it('prefetches favorites outside the first all page and keeps native image nodes mounted across switches', async () => {
-    records = Array.from({ length: 125 }, (_, index) => ({ ...records[0], id: `record-${index}`, isFavorite: index === 124, sourceApp: { name: 'Synthetic', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } }));
-    queryHandler = async (request) => ({ ...page(request.query, request.favoritesOnly), records: records.slice(0, 100), hasMore: true, cursor });
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    const pageSize = 2;
+    records = Array.from({ length: pageSize + 1 }, (_, index) => ({ ...records[0], id: `record-${index}`, isFavorite: index === pageSize, sourceApp: { name: 'Synthetic', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } }));
+    queryHandler = async (request) => ({ ...page(request.query, request.favoritesOnly), records: records.slice(0, pageSize), hasMore: true, cursor });
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(pageSize));
     const original = row('record-0'); const source = original.querySelector('img');
-    expect(row('record-124').hidden).toBe(true);
+    expect(row(`record-${pageSize}`).hidden).toBe(true);
     const queries = calls('clipboard_query').length;
     for (let index = 0; index < 8; index++) {
       fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
-      expect(listRows()).toHaveLength(1); expect(row('record-124').hidden).toBe(false);
+      expect(listRows()).toHaveLength(1); expect(row(`record-${pageSize}`).hidden).toBe(false);
       fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
-      expect(listRows()).toHaveLength(100); expect(row('record-0')).toBe(original);
+      expect(listRows()).toHaveLength(pageSize); expect(row('record-0')).toBe(original);
       expect(original.querySelector('img')).toBe(source);
     }
     expect(calls('clipboard_query')).toHaveLength(queries);
-    expect(document.querySelectorAll('.clipboard-panel .history-row')).toHaveLength(101);
+    expect(document.querySelectorAll('.clipboard-panel .history-row')).toHaveLength(pageSize + 1);
   });
 
   it('omits successful copy, paste and manual-paste footer messages', async () => {
