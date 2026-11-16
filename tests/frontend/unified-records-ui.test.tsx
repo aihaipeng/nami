@@ -219,6 +219,38 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Source text' }));
   });
 
+  it('opens translation details on the first unpinned record and follows hover or focus', async () => {
+    await mount('translation');
+    await switchView('translation');
+    const row = (id: string) => panel('translation').querySelector<HTMLElement>(`[data-record-id="${id}"]`)!;
+    const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
+    await waitFor(() => expect(row('sample-03')).toBeTruthy());
+    fireEvent.mouseEnter(row('sample-04'));
+    expect(calls('history_sample_select')).toHaveLength(0);
+    fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(source().value).toBe('The next train leaves in ten minutes.'));
+    expect(bridge.history.selectedId).toBe('sample-03');
+    expect(row('sample-03').classList.contains('selected')).toBe(true);
+    expect(row('sample-01').classList.contains('selected')).toBe(false);
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('下一班列车将在十分钟后出发。');
+    fireEvent.mouseEnter(row('sample-04'));
+    await waitFor(() => expect(source().value).toBe('Please send me the updated design before Friday.'));
+    expect(row('sample-04').classList.contains('selected')).toBe(true);
+    fireEvent.mouseLeave(row('sample-04'));
+    expect(bridge.history.selectedId).toBe('sample-04');
+    expect(source().value).toBe('Please send me the updated design before Friday.');
+    fireEvent.focus(row('sample-05').querySelector('button')!);
+    await waitFor(() => expect(source().value).toContain('A thoughtful tool stays out of the way.'));
+    fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Collapse details' }));
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    const selects = calls('history_sample_select').length;
+    fireEvent.mouseEnter(row('sample-04'));
+    expect(calls('history_sample_select')).toHaveLength(selects);
+    fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(bridge.history.selectedId).toBe('sample-03'));
+    expect(source().value).toBe('The next train leaves in ten minutes.');
+  });
+
   it('uses the same search layout and detail artwork in both record views', async () => {
     await mount('translation');
     const clipboardSearch = search('clipboard');
