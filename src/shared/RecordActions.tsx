@@ -4,13 +4,14 @@ import type { ComponentProps } from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
-export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false }: Pick<ViewProps, 't' | 'native'> & {
+export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false }: Pick<ViewProps, 't' | 'native'> & {
   favorite: boolean; pinned: boolean; canCopy: boolean;
   copyLabel: string; deleteLabel: string;
   onCopy: () => void; onUpdate: (action: 'favorite' | 'pin' | 'delete') => void;
-  onTranslate?: () => void; onOcr?: () => void; onNote?: () => void; busy?: boolean;
+  onTranslate?: () => void; onOcr?: () => void; onNote?: () => void; busy?: boolean; retainDelete?: boolean;
 }) {
   const reduceMotion = useReducedMotion();
+  const protectedRecord = favorite || pinned;
   const actions = [
     { id: 'copy', label: copyLabel, icon: 'doc.on.doc' as const, disabled: !canCopy, onClick: onCopy },
     ...(onTranslate ? [{ id: 'translate', label: 'Translate', icon: 'languages' as const, disabled: busy, onClick: onTranslate }] : []),
@@ -18,7 +19,7 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
     ...(onNote ? [{ id: 'note', label: 'Note', icon: 'note' as const, onClick: onNote }] : []),
     { id: 'favorite', label: favorite ? t('unfavorite') : t('favorite'), icon: favorite ? 'star.fill' as const : 'star' as const, pressed: favorite, onClick: () => onUpdate('favorite') },
     { id: 'pin', label: pinned ? t('unpinRecord') : t('pinRecord'), icon: pinned ? 'pin.fill' as const : 'pin' as const, pressed: pinned, onClick: () => onUpdate('pin') },
-    ...(!favorite && !pinned ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, onClick: () => onUpdate('delete') }] : []),
+    ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, disabled: retainDelete && protectedRecord, onClick: () => onUpdate('delete') }] : []),
   ];
   return <div className="history-row-actions" role="group" aria-label={t('actions')}>
     <AnimatePresence initial={false} mode="popLayout">

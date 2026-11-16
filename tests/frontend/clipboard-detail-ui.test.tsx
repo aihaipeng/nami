@@ -87,6 +87,22 @@ describe('clipboard details', () => {
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
   });
 
+  it('does not show a loading beam while the next record detail is still loading', async () => {
+    let resolve!: (value: ClipboardDetailData) => void;
+    fetchDetail = (id) => id === 'second' ? new Promise((done) => { resolve = done; }) : Promise.resolve(structuredClone(records.find((record) => record.id === id)!));
+    await open();
+    const stable = ['Note', 'Favorite', 'Pin record', 'Delete clipboard record'].map((name) => within(pane()).getByRole('button', { name }));
+    fireEvent.mouseEnter(row('second'));
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')).toBeNull());
+    expect(pane().querySelector('[role="progressbar"]')).toBeNull();
+    expect(stable.map((button) => button.isConnected)).toEqual([true, true, true, true]);
+    stable.forEach((button, index) => expect(within(pane()).getByRole('button', { name: ['Note', 'Favorite', 'Pin record', 'Delete clipboard record'][index] })).toBe(button));
+    fireEvent.click(stable[0]);
+    expect(calls('clipboard_note_open')).toHaveLength(0);
+    await act(async () => resolve(structuredClone(records.find((record) => record.id === 'second')!)));
+    await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+  });
+
   it('ignores an old detail response after moving to another record or hiding', async () => {
     let resolve!: (value: ClipboardDetailData) => void;
     fetchDetail = (id) => id === 'first' ? new Promise((done) => { resolve = done; }) : Promise.resolve(records.find((record) => record.id === id)!);
@@ -103,14 +119,22 @@ describe('clipboard details', () => {
 
   it('refreshes favorite and pin state from events and routes Note to the existing left editor', async () => {
     await open();
+    const remove = within(pane()).getByRole('button', { name: 'Delete clipboard record' });
     fireEvent.click(within(pane()).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
-    expect(within(pane()).queryByRole('button', { name: 'Delete clipboard record' })).toBeNull();
+    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
+    expect(remove).toHaveProperty('disabled', true);
+    fireEvent.click(remove);
+    expect(calls('clipboard_record_update').filter(([, args]) => (args as { action?: string })?.action === 'delete')).toHaveLength(0);
+    fireEvent.mouseEnter(row('pinned'));
+    await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
+    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
+    expect(remove).toHaveProperty('disabled', true);
     fireEvent.click(within(pane()).getByRole('button', { name: 'Note' }));
     expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
     await waitFor(() => expect(pane().hasAttribute('inert')).toBe(true));
-    expect(calls('clipboard_note_open').at(-1)?.[1]).toEqual({ recordId: 'first' });
-    expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', first().text);
+    expect(calls('clipboard_note_open').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
+    expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', 'Pinned text');
   });
 
   it('opens the existing editor when a note request arrives while the list is temporarily hidden', async () => {

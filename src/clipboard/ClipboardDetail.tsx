@@ -35,11 +35,12 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const operation = useRef(0);
   const list = useRef<HTMLDivElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
-  const imageText = useClipboardImageText(detail ? [detail] : [], active && native && snapshot.capabilities.imageOcr);
+  const matched = detail && detail.id === id ? [detail] : [];
+  const imageText = useClipboardImageText(matched, active && native && snapshot.capabilities.imageOcr && matched.length > 0);
   useEffect(() => {
-    ++operation.current; setBusy(false); setFeedback(null); setDetail(null); setFailed(false);
+    ++operation.current; setBusy(false); setFeedback(null); setFailed(false);
     list.current?.scrollTo(0, 0);
-    if (!active || !native || !id) return;
+    if (!active || !native || !id) { setDetail(null); return; }
     let disposed = false;
     let request = 0;
     const load = async () => {
@@ -53,9 +54,10 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     void remove.then(load).catch(() => { if (!disposed) setFailed(true); });
     return () => { disposed = true; ++operation.current; void remove.then((unlisten) => unlisten()).catch(() => {}); };
   }, [id, active, native, snapshot.window.recordsSession]);
-  const current = active && detail?.id === id ? detail : null;
-  const canTranslate = current?.kind === 'text' ? !!current.text.trim() : !!current && snapshot.capabilities.imageOcr && imageText.get(current.id) === true;
-  const canOcr = canTranslate && current?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
+  const shown = active && detail && !failed ? detail : null;
+  const current = shown?.id === id ? shown : null;
+  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
+  const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
   async function action(type: 'copy' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
     if (!current || busy) return;
     const revision = ++operation.current;
@@ -84,11 +86,11 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   }, [active, snapshot.window.recordsEditorOpen, snapshot.capabilities.primaryModifier, command]);
   return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details">
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
-      {current && <RecordActions t={t} native={native && !busy} favorite={current.isFavorite} pinned={current.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
+      {shown && <RecordActions t={t} native={native && !busy} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
         onCopy={() => { void action('copy'); }} onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
-        onNote={() => { void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} />}
+        onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
     </header>
-    {active && (busy || id && !current && !failed) && <ActivityBeam label="Working" />}
+    {active && busy && <ActivityBeam label="Working" />}
     <HistoryList scrollOnly key={id ?? 'empty'} active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
         {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} />}
