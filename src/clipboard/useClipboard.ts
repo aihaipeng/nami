@@ -271,5 +271,15 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const displayedIds = new Set(displayedPage.records.map(({ id }) => id));
   const retained = [...(defaultPage.current?.page.records ?? []), ...[...pages.current.values()].flatMap((cached) => cached.records)];
   const retainedRecords = [...displayedPage.records, ...new Map(retained.filter(({ id }) => !displayedIds.has(id)).map((record) => [record.id, record])).values()];
-  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  const resetFilters = useCallback((next: { query: string; favoritesOnly: boolean; kind: ClipboardKind | null }) => {
+    filters.current = next;
+    pages.current.clear();
+    defaultPage.current = null;
+    ++defaultRevision.current;
+    deferred.current = false;
+    resetPending.current = true;
+    morePending.current = false;
+    if (ready.current) void fetchPage(false, false);
+  }, [fetchPage]);
+  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

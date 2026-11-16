@@ -7,7 +7,7 @@ import type { MessageKey } from '../shared/i18n';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordToolbar } from '../shared/RecordToolbar';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
-import { historyPreview } from '../translation/history';
+import { historyPreview, historyScrollTarget } from '../translation/history';
 import { cn } from '../lib/utils';
 import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
@@ -34,6 +34,8 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
   const operation = useRef(0);
   const processingRevision = useRef(0);
+  const reveal = useRef<string | null>(null);
+  const revealContext = useRef({ details: false, command });
   const mounted = useRef(true);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const search = useRef<HTMLInputElement>(null);
@@ -98,12 +100,41 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
     return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
   }, [native]);
 
+  revealContext.current = { details: snapshot.window.translationVisible, command };
   function previewRecord(id: string) {
     if (!snapshot.window.translationVisible || snapshot.window.clipboardDetailId === id || editing) return;
     void command('clipboard_details_select', { recordId: id });
   }
   useEffect(() => {
-    if (!active || !snapshot.window.translationVisible || clipboard.loading || !clipboard.displayReady) return;
+    if (!native) return;
+    let disposed = false;
+    const remove = listen<string>('clipboard_text_created', ({ payload }) => {
+      if (disposed || !payload) return;
+      reveal.current = payload;
+      setSelected(payload);
+      setKindFilter(null); setFavoritesOnly(false); setQuery('');
+      list.current?.scrollTo(0, 0);
+      clipboard.resetFilters({ query: '', favoritesOnly: false, kind: null });
+      if (revealContext.current.details) void revealContext.current.command('clipboard_details_select', { recordId: payload });
+    });
+    return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
+  }, [native, clipboard.resetFilters, setFavoritesOnly, setQuery]);
+  useEffect(() => {
+    const id = reveal.current;
+    if (!active || !id || query || favoritesOnly || kindFilter || clipboard.loading || !clipboard.displayReady) return;
+    if (!records.some((record) => record.id === id)) { reveal.current = null; return; }
+    reveal.current = null;
+    setSelected(id);
+    if (snapshot.window.translationVisible && snapshot.window.clipboardDetailId !== id) void command('clipboard_details_select', { recordId: id });
+    const element = rowRefs.current.get(id)?.closest<HTMLElement>('.history-row');
+    const scroller = element?.closest<HTMLElement>('.history-list');
+    if (!element || !scroller) return;
+    const bounds = scroller.getBoundingClientRect();
+    const top = historyScrollTarget(scroller.scrollTop, { top: bounds.top, bottom: bounds.bottom }, element.getBoundingClientRect());
+    if (top !== null) scroller.scrollTo({ top, behavior: 'instant' });
+  }, [active, records, query, favoritesOnly, kindFilter, clipboard.loading, clipboard.displayReady, snapshot.window.translationVisible, snapshot.window.clipboardDetailId, command]);
+  useEffect(() => {
+    if (!active || !snapshot.window.translationVisible || clipboard.loading || !clipboard.displayReady || reveal.current) return;
     if (snapshot.window.clipboardDetailId && records.some(({ id }) => id === snapshot.window.clipboardDetailId)) return;
     const first = records.find((record) => !record.isPinned) ?? records[0];
     if ((first?.id ?? null) !== (snapshot.window.clipboardDetailId ?? null)) void command('clipboard_details_select', { recordId: first?.id ?? null });

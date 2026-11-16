@@ -389,6 +389,35 @@ describe('clipboard text processing', () => {
     expect(document.querySelector('.record-feedback')).toBeNull();
     expect((within(row('first')).getByRole('button', { name: 'Translate' }) as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it('selects the text record created by OCR, clearing filters that would hide it', async () => {
+    records = [
+      { id: 'picture', kind: 'image', text: 'Image', date: '2026-11-14T12:00:00Z', isFavorite: false, isPinned: false },
+      { id: 'pinned', kind: 'text', text: 'Pinned text', date: '2026-11-14T11:00:00Z', isFavorite: true, isPinned: true },
+    ];
+    await mount('clipboard');
+    await waitFor(() => expect(row('picture')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'image' } });
+    await waitFor(() => expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ query: 'image', kind: 'image' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('picture'));
+    records.unshift({ id: 'ocr-text', kind: 'text', text: 'Recognized sentence', date: '2026-11-14T13:00:00Z', isFavorite: false, isPinned: false });
+    await emit('clipboard_text_created', 'ocr-text');
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('ocr-text'));
+    expect(row('ocr-text').classList.contains('selected')).toBe(true);
+    expect(row('picture').classList.contains('selected')).toBe(false);
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
+    expect(screen.getByRole('button', { name: 'Image clipboard records' }).getAttribute('aria-pressed')).toBe('false');
+    const selects = calls('clipboard_details_select').length;
+    records.unshift({ id: 'ocr-later', kind: 'text', text: 'Second sentence', date: '2026-11-14T14:00:00Z', isFavorite: false, isPinned: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    await emit('clipboard_text_created', 'ocr-later');
+    await waitFor(() => expect(row('ocr-later').classList.contains('selected')).toBe(true));
+    expect(calls('clipboard_details_select')).toHaveLength(selects);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+  });
 });
 
 describe('database clipboard history', () => {

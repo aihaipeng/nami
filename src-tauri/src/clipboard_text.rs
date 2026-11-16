@@ -199,12 +199,18 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             source_app: Some(serde_json::json!({"name":"Nami"})),
             image_path: None,
         };
-        clipboard_runtime::database(app, move |database| {
-            database.clipboard_insert(&captured).map(|_| ())
+        let saved_id = clipboard_runtime::database(app, move |database| {
+            database.clipboard_insert(&captured).map(|record| record.id)
         })
         .await?;
         drop(_write);
         clipboard_runtime::changed(app)?;
+        for label in ["clipboard", "translation"] {
+            if let Some(view) = app.get_webview(label) {
+                view.emit("clipboard_text_created", saved_id.clone())
+                    .map_err(|_| "event_emit")?;
+            }
+        }
     }
     Ok(())
 }
