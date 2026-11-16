@@ -1377,7 +1377,7 @@ mod tests {
         let promoted = db.clipboard_record("pin-old").unwrap();
         assert!(promoted.is_pinned && promoted.is_favorite);
         assert_eq!(promoted.text, "pin-old");
-        assert!(promoted.date > "2026-11-15T03:00:00.000Z".to_owned());
+        assert!(promoted.date.as_str() > "2026-11-15T03:00:00.000Z");
         let created: i64 = db
             .connection
             .query_row(
