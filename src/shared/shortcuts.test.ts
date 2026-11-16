@@ -1,0 +1,24 @@
+import { describe, expect, it } from 'vitest';
+import { defaultTranslationShortcuts, matchesBinding, shortcutError } from './shortcuts';
+
+describe('translation shortcuts', () => {
+  const shortcuts = defaultTranslationShortcuts('meta');
+
+  it('keeps the current translation bindings as defaults', () => {
+    expect(shortcuts.selection).toEqual({ code: 'KeyT', modifiers: ['meta'] });
+    expect(shortcuts.translate).toEqual({ code: 'Enter', modifiers: ['meta'] });
+    expect(shortcuts.pin).toEqual({ code: 'KeyP', modifiers: ['shift', 'meta'] });
+    expect(defaultTranslationShortcuts('control').actions).toEqual({ code: 'KeyK', modifiers: ['control'] });
+  });
+
+  it('matches a keyboard event and rejects reserved, clipboard, and duplicate bindings', () => {
+    expect(matchesBinding(shortcuts.translate, { key: 'Enter', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false })).toBe(true);
+    expect(matchesBinding(shortcuts.pin, { key: 'p', code: 'KeyP', metaKey: true, ctrlKey: false, altKey: false, shiftKey: true })).toBe(true);
+    expect(shortcutError('translate', { code: 'KeyW', modifiers: ['meta'] }, shortcuts)).toBe('shortcut_reserved');
+    expect(shortcutError('translate', { code: 'KeyZ', modifiers: ['meta', 'shift'] }, shortcuts)).toBe('shortcut_reserved');
+    expect(shortcutError('actions', { code: 'Backquote', modifiers: ['control'] }, shortcuts)).toBe('shortcut_clipboard');
+    expect(shortcutError('pin', { code: 'Enter', modifiers: ['meta'] }, shortcuts)).toBe('shortcut_conflict:translate');
+    expect(shortcutError('translate', { code: 'KeyP', modifiers: ['shift'] }, shortcuts)).toBe('shortcut_modifier');
+    expect(shortcutError('actions', null, shortcuts)).toBeNull();
+  });
+});

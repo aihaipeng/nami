@@ -1,3 +1,5 @@
+import { defaultTranslationShortcuts, type TranslationShortcuts } from './shortcuts';
+
 export type Locale = 'system' | 'zh-CN' | 'en';
 export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
 export type WindowTarget = Exclude<Region, 'history'>;
@@ -33,10 +35,21 @@ export interface PlatformCapabilities {
   primaryModifier: 'meta' | 'control';
 }
 
+export interface TranslationPreferences {
+  engine: 'edge' | 'google';
+  sourceLanguage: string;
+  primaryLanguage: string;
+  secondaryLanguage: string;
+  proxyUrl: string;
+  proxyEnabled: boolean;
+  shortcuts: TranslationShortcuts;
+}
+
 export interface AppSnapshot {
   capabilities: PlatformCapabilities;
   locale: Locale;
   translationEngine: 'edge' | 'google';
+  translationPreferences: TranslationPreferences;
   storageError: string | null;
   clipboardCaptureEnabled: boolean;
   accessibility: boolean;
@@ -54,6 +67,15 @@ export const initialSnapshot: AppSnapshot = {
   capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   translationEngine: 'edge',
+  translationPreferences: {
+    engine: 'edge',
+    sourceLanguage: 'auto',
+    primaryLanguage: 'en',
+    secondaryLanguage: 'zh-CN',
+    proxyUrl: '',
+    proxyEnabled: false,
+    shortcuts: defaultTranslationShortcuts('control'),
+  },
   storageError: null,
   clipboardCaptureEnabled: false,
   accessibility: false,

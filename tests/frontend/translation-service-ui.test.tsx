@@ -138,10 +138,30 @@ describe('live translation bridge', () => {
 describe('translation engine settings', () => {
   it('offers only Edge and Google and sends the chosen engine to the backend', async () => {
     const user = userEvent.setup(); await mount('settings');
-    await user.click(screen.getByRole('button', { name: 'Translate' }));
-    await user.click(screen.getByRole('button', { name: 'Translation service: Edge' }));
-    expect(screen.getAllByRole('option').map((item) => item.textContent)).toEqual(['Edge', 'Google']);
-    await user.click(screen.getByRole('option', { name: 'Google' }));
-    expect(calls('translation_engine_set').at(-1)?.[1]).toEqual({ engine: 'google' });
+    await user.click(screen.getByRole('button', { name: /^Translate$/ }));
+    await user.click(screen.getByRole('button', { name: 'Translation service: Microsoft Edge Translate' }));
+    expect(screen.getAllByRole('option').map((item) => item.textContent)).toEqual(['Microsoft Edge Translate', 'Google Translate']);
+    await user.click(screen.getByRole('option', { name: 'Google Translate' }));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'google' });
+  });
+
+  it('saves an HTTP proxy and rebinds a shortcut without taking the clipboard shortcut', async () => {
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: /^Translate$/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'HTTP Proxy URL' }), { target: { value: 'http://user:pass@127.0.0.1:7890' } });
+    expect((await screen.findByRole('alert')).textContent).toContain('Proxy URLs cannot include a username or password.');
+    expect(calls('translation_preferences_set').some(([, args]) => String((args as { proxyUrl?: string }).proxyUrl).includes('@'))).toBe(false);
+    fireEvent.change(screen.getByRole('textbox', { name: 'HTTP Proxy URL' }), { target: { value: 'http://127.0.0.1:7890' } });
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'http://127.0.0.1:7890' });
+    fireEvent.click(screen.getByRole('switch', { name: 'Use HTTP Proxy' }));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyEnabled: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Actions shortcut' }));
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
+    await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'actions', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Translate shortcut' }));
+    fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true });
+    expect((await screen.findByRole('alert')).textContent).toContain('Already assigned to Open Clipboard.');
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Default' }));
+    await waitFor(() => expect(calls('translation_shortcuts_restore')).toHaveLength(1));
   });
 });

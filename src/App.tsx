@@ -3,7 +3,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { initialSnapshot, type AppSnapshot, type Locale, type WindowState, type WindowTarget } from './shared/contracts';
+import { initialSnapshot, type AppSnapshot, type Locale, type TranslationPreferences, type WindowState, type WindowTarget } from './shared/contracts';
 import { resolveLanguage, translator } from './shared/i18n';
 import { Translation } from './translation/Translation';
 import { HistoryView } from './translation/HistoryView';
@@ -38,13 +38,19 @@ export default function App() {
     let latestWindow: WindowState | undefined;
     let latestLocale: Locale | undefined;
     let latestEngine: AppSnapshot['translationEngine'] | undefined;
+    let latestPreferences: TranslationPreferences | undefined;
     let latestCapture: boolean | undefined;
     async function connect() {
       for (const subscribe of [
         () => getCurrentWindow().onMoved(() => window.dispatchEvent(new Event('nami:window-moved'))),
         () => listen<'edge' | 'google'>('translation_engine_changed', ({ payload }) => {
           latestEngine = payload;
-          if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload }));
+          if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload, translationPreferences: { ...current.translationPreferences, engine: payload } }));
+        }),
+        () => listen<TranslationPreferences>('translation_preferences_changed', ({ payload }) => {
+          latestPreferences = payload;
+          latestEngine = payload.engine;
+          if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload.engine, translationPreferences: payload }));
         }),
         () => listen<boolean>('clipboard_capture_changed', ({ payload }) => { latestCapture = payload; if (!disposed) setSnapshot((current) => ({ ...current, clipboardCaptureEnabled: payload })); }),
         () => listen<string>('storage_error', ({ payload }) => { if (!disposed) setSnapshot((current) => ({ ...current, storageError: payload })); }),
@@ -66,7 +72,7 @@ export default function App() {
       if (!disposed) {
         document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
         document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
-        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, window: latestWindow ?? data.window });
+        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
         setConnected(true);
       }
     }
@@ -103,6 +109,10 @@ export default function App() {
       if (name === 'translation_columns_set') setSnapshot((value) => ({ ...value, window: { ...value.window, secondaryEnabled: Boolean(args?.secondaryEnabled) } }));
       if (name === 'window_pin') setSnapshot((value) => ({ ...value, window: { ...value.window, [`${String(args?.region)}Pinned`]: Boolean(args?.pinned) } }));
       if (name === 'locale_set') setSnapshot((value) => ({ ...value, locale: args?.locale as Locale }));
+      if (name === 'translation_preferences_set') setSnapshot((value) => {
+        const next = { ...value.translationPreferences, ...args, engine: (args?.engine as TranslationPreferences['engine']) ?? value.translationPreferences.engine };
+        return { ...value, translationEngine: next.engine, translationPreferences: next };
+      });
       if (name === 'window_show') {
         setTarget(args?.target as WindowTarget);
         if (args?.target === 'translation') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: true, translationExtent: value.window.translationWidth } }));
@@ -116,7 +126,7 @@ export default function App() {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, translationPreferences: refreshed.translationPreferences, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
       }
     } catch {
       setError(true);

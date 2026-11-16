@@ -4,6 +4,7 @@ import type { ViewProps } from '../App';
 import type { Locale } from '../shared/contracts';
 import './settings.css';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
+import { TranslationSettings } from './TranslationSettings';
 
 const pages = [
   { value: 'general', icon: Settings2, description: 'generalDescription' },
@@ -15,7 +16,6 @@ const pages = [
 export function Settings({ t, snapshot, command, native }: ViewProps) {
   const [page, setPage] = useState<typeof pages[number]['value']>('general');
   const [languageOpen, setLanguageOpen] = useState(false);
-  const [engineOpen, setEngineOpen] = useState(false);
   useEffect(() => { setLanguageOpen(false); }, [page, snapshot.locale]);
   const current = pages.find((item) => item.value === page)!;
   return <div className="settings-shell">
@@ -40,14 +40,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
           <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><span data-slot="field-label">{t('appearance')}</span><p data-slot="field-description">{t('systemAppearance')}</p></div><span className="settings-badge">{t('followSystem')}</span></div>
         </div>
       </>}
-      {page === 'translation' && <>
-        <h2>{t('service')}</h2>
-        <div className="settings-group">
-          <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><span data-slot="field-label">{t('service')}</span><p data-slot="field-description">Text is sent to the selected service when you translate.</p></div><SearchableDropdown value={snapshot.translationEngine} onChange={(engine) => void command('translation_engine_set', { engine })} label={t('service')} items={[{ code: 'edge', name: 'Edge' }, { code: 'google', name: 'Google' }]} open={engineOpen} onOpenChange={setEngineOpen} t={t} side="bottom" searchable={false} capsule /></div>
-          <hr className="settings-separator" />
-          <div className="settings-field" data-slot="field"><div className="settings-field-content" data-slot="field-content"><span data-slot="field-label">{t('shortcut')}</span><p data-slot="field-description">{t('globalShortcut')}</p></div>{snapshot.capabilities.selection ? <span className="keycaps"><kbd>{snapshot.capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'}</kbd><kbd>T</kbd></span> : <span className="settings-badge">Not available on this platform yet</span>}</div>
-        </div>
-      </>}
+      {page === 'translation' && <TranslationSettings t={t} snapshot={snapshot} command={command} native={native} />}
       {page === 'clipboard' && <>
         <h2>{t('capture')}</h2>
         <div className="settings-group">

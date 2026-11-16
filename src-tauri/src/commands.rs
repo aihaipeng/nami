@@ -61,6 +61,7 @@ pub struct Snapshot {
     accessibility: bool,
     shortcut_errors: Vec<String>,
     translation_engine: String,
+    translation_preferences: crate::translation::Preferences,
     storage_error: Option<String>,
     clipboard_capture_enabled: bool,
     window: WindowState,
@@ -79,6 +80,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         accessibility: platform::accessibility(),
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
         translation_engine: state.translation_engine.lock().unwrap().clone(),
+        translation_preferences: state.translation_preferences.lock().unwrap().clone(),
         storage_error: state.storage_error.lock().unwrap().clone(),
         clipboard_capture_enabled: state.clipboard_enabled.load(Ordering::SeqCst),
         window: state.windows.lock().unwrap().clone(),
@@ -838,6 +840,121 @@ pub fn translation_cancel(window: Webview, app: AppHandle) -> Result<(), String>
     Ok(())
 }
 
+async fn store_preferences(
+    app: &AppHandle,
+    preferences: crate::translation::Preferences,
+) -> Result<(), String> {
+    let entries = preferences.entries();
+    crate::clipboard_runtime::database(app, move |database| {
+        for (key, value) in &entries {
+            database.preference_set(key, value)?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+fn publish_preferences(
+    app: &AppHandle,
+    preferences: &crate::translation::Preferences,
+) -> Result<(), String> {
+    for label in ["translation", "settings"] {
+        if let Some(view) = app.get_webview(label) {
+            view.emit("translation_preferences_changed", preferences)
+                .map_err(|_| "event_emit")?;
+            view.emit("translation_engine_changed", &preferences.engine)
+                .map_err(|_| "event_emit")?;
+        }
+    }
+    Ok(())
+}
+
+async fn commit_preferences(
+    app: &AppHandle,
+    preferences: crate::translation::Preferences,
+    engine_changed: bool,
+) -> Result<(), String> {
+    store_preferences(app, preferences.clone()).await?;
+    on_main(app, move |app| {
+        let state = app.state::<AppState>();
+        *state.translation_engine.lock().unwrap() = preferences.engine.clone();
+        *state.translation_preferences.lock().unwrap() = preferences.clone();
+        if engine_changed {
+            state.translation_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        publish_preferences(&app, &preferences)?;
+        crate::sync_global_shortcuts(&app);
+        Ok(())
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn translation_preferences_set(
+    window: Webview,
+    app: AppHandle,
+    patch: crate::translation::PreferencePatch,
+) -> Result<(), String> {
+    authorize(&window, &["settings", "translation"])?;
+    let mut preferences = app
+        .state::<AppState>()
+        .translation_preferences
+        .lock()
+        .unwrap()
+        .clone();
+    let engine_changed = preferences.apply(patch)?;
+    commit_preferences(&app, preferences, engine_changed).await
+}
+
+#[tauri::command]
+pub async fn translation_shortcut_set(
+    window: Webview,
+    app: AppHandle,
+    action: String,
+    binding: Option<crate::shortcuts::KeyBinding>,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    let mut preferences = app
+        .state::<AppState>()
+        .translation_preferences
+        .lock()
+        .unwrap()
+        .clone();
+    preferences.set_shortcut(&action, binding)?;
+    commit_preferences(&app, preferences, false).await
+}
+
+#[tauri::command]
+pub async fn translation_shortcuts_restore(window: Webview, app: AppHandle) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    let mut preferences = app
+        .state::<AppState>()
+        .translation_preferences
+        .lock()
+        .unwrap()
+        .clone();
+    preferences.shortcuts =
+        crate::shortcuts::TranslationShortcuts::defaults(platform::capabilities().primary_modifier);
+    commit_preferences(&app, preferences, false).await
+}
+
+#[tauri::command]
+pub async fn translation_shortcut_capture(
+    window: Webview,
+    app: AppHandle,
+    active: bool,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    on_main(&app, move |app| {
+        app.state::<AppState>()
+            .shortcuts_suspended
+            .store(active, Ordering::SeqCst);
+        crate::sync_global_shortcuts(&app);
+        Ok(())
+    })
+    .await?
+}
+
 #[tauri::command]
 pub fn translation_engine_set(
     window: Webview,
@@ -849,8 +966,14 @@ pub fn translation_engine_set(
         return Err("invalid_argument".into());
     }
     let state = app.state::<AppState>();
+    state.translation_preferences.lock().unwrap().engine = engine.clone();
     *state.translation_engine.lock().unwrap() = engine.clone();
+    let preferences = state.translation_preferences.lock().unwrap().clone();
     state.translation_revision.fetch_add(1, Ordering::SeqCst);
+    let app_for_store = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = store_preferences(&app_for_store, preferences).await;
+    });
     for label in ["translation", "settings"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("translation_engine_changed", &engine)
@@ -887,7 +1010,10 @@ pub async fn translation_run(
     }
     let state = app.state::<AppState>();
     let revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
-    let engine = state.translation_engine.lock().unwrap().clone();
+    let preferences = state.translation_preferences.lock().unwrap().clone();
+    let engine = preferences.engine.clone();
+    let proxy_url = preferences.proxy_url.clone();
+    let proxy_enabled = preferences.proxy_enabled;
     crate::translation::validate_options(&engine, &source, &targets)?;
     let previous = reuse
         .as_ref()
@@ -915,7 +1041,14 @@ pub async fn translation_run(
     let (translated, resolved_source) = if missing.is_empty() {
         (Vec::new(), source.clone())
     } else {
-        let request = crate::translation::translate(&engine, &text, &source, &missing);
+        let request = crate::translation::translate(
+            &engine,
+            &text,
+            &source,
+            &missing,
+            &proxy_url,
+            proxy_enabled,
+        );
         tokio::pin!(request);
         loop {
             tokio::select! {

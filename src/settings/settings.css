@@ -23,6 +23,21 @@
 .settings-shell .settings-intro { margin: 6px 0 0; font-size: 12.9px; line-height: 1.6; color: hsl(var(--foreground) / .6); }
 .settings-shell .settings-content h2 { display: flex; align-items: center; min-height: 32px; margin: 0; padding: 0 12px; font-size: 12.9px; font-weight: 400; color: inherit; }
 .settings-shell .settings-group { padding: 0 12px; border: 0; border-radius: 12px; background: rgb(var(--settings-card) / .7); box-shadow: none; }
+.settings-shell .settings-rows { padding: 0; }
+.settings-shell .settings-row { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 12px; }
+.settings-shell .settings-row > span:first-child { flex: 1; min-width: 0; }
+.settings-shell .settings-row + .settings-row { box-shadow: inset 0 1px 0 hsl(var(--foreground) / .05); }
+.settings-shell .settings-row .language-picker { max-width: none; }
+.settings-shell .settings-proxy { width: min(260px, 42%); }
+.settings-shell .settings-proxy input { width: 100%; height: 28px; border: 0; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; font-style: italic; text-align: center; }
+.settings-shell .settings-proxy input:focus { outline: none; color: hsl(var(--foreground)); font-style: normal; }
+.settings-shell .settings-shortcut-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 34px; margin: 16px 4px 8px; }
+.settings-shell .settings-shortcut-heading h2 { min-height: 0; margin: 0; padding: 0; font-size: 20px; font-weight: 600; letter-spacing: -.17px; }
+.settings-shell .settings-recorder-wrap { display: inline-flex; align-items: center; gap: 4px; }
+.settings-shell .settings-recorder { display: inline-flex; align-items: center; min-height: 28px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.settings-shell .settings-recorder em { color: hsl(var(--foreground) / .6); font-style: italic; }
+.settings-shell .settings-recorder[data-recording], .settings-shell .settings-recorder:hover { background: hsl(var(--foreground) / .1); }
+.settings-shell .settings-clear { width: 20px; height: 20px; border: 0; border-radius: 7px; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; line-height: 1; }
 .settings-shell .settings-field { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 12px 0; }
 .settings-shell .settings-field-content { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
 .settings-shell .settings-field [data-slot=field-label] { font-size: 12.9px; line-height: 18px; font-weight: 400; }

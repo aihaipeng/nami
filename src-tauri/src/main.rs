@@ -5,7 +5,11 @@ mod commands;
 mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
-use nami::{database, history, model, translation};
+use nami::{
+    database, history, model,
+    shortcuts::{self, KeyBinding},
+    translation,
+};
 mod platform;
 mod selection;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
@@ -16,6 +20,7 @@ mod windows;
 
 use model::WindowState;
 use std::io::Write;
+use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64},
     Mutex,
@@ -53,6 +58,9 @@ pub struct AppState {
     operation: AtomicU64,
     translation_revision: AtomicU64,
     translation_engine: Mutex<String>,
+    translation_preferences: Mutex<translation::Preferences>,
+    shortcuts_suspended: AtomicBool,
+    registered_shortcuts: Mutex<Vec<Shortcut>>,
     selection: Mutex<Option<selection::SelectionContext>>,
     selection_source: Mutex<Option<serde_json::Value>>,
     selection_busy: AtomicBool,
@@ -90,6 +98,11 @@ impl Default for AppState {
             operation: AtomicU64::new(0),
             translation_revision: AtomicU64::new(0),
             translation_engine: Mutex::new("edge".into()),
+            translation_preferences: Mutex::new(translation::Preferences::defaults(
+                platform::capabilities().primary_modifier,
+            )),
+            shortcuts_suspended: AtomicBool::new(false),
+            registered_shortcuts: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             selection_source: Mutex::new(None),
             selection_busy: AtomicBool::new(false),
@@ -124,11 +137,93 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
     }
 }
 
-fn fixed_shortcuts() -> [Shortcut; 2] {
-    [
-        Shortcut::new(Some(Modifiers::SUPER), Code::KeyT),
-        Shortcut::new(Some(Modifiers::CONTROL), Code::Backquote),
-    ]
+fn clipboard_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL), Code::Backquote)
+}
+
+fn binding_shortcut(binding: &KeyBinding) -> Result<Shortcut, String> {
+    let code = Code::from_str(&binding.code).map_err(|_| "shortcut_key".to_string())?;
+    let mut modifiers = Modifiers::empty();
+    for name in &binding.modifiers {
+        modifiers |= match name.as_str() {
+            "meta" => Modifiers::SUPER,
+            "control" => Modifiers::CONTROL,
+            "alt" => Modifiers::ALT,
+            "shift" => Modifiers::SHIFT,
+            _ => return Err("shortcut_modifier".into()),
+        };
+    }
+    Ok(Shortcut::new(Some(modifiers), code))
+}
+
+fn same_shortcut(left: &Shortcut, right: &Shortcut) -> bool {
+    left.key == right.key && left.mods == right.mods
+}
+
+pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
+    if !platform::capabilities().selection {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let suspended = state
+        .shortcuts_suspended
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let selection = state
+        .translation_preferences
+        .lock()
+        .unwrap()
+        .shortcuts
+        .selection
+        .clone();
+    let previous = state.registered_shortcuts.lock().unwrap().clone();
+    let mut desired = Vec::new();
+    if !suspended {
+        desired.push(clipboard_shortcut());
+        if let Some(binding) = selection {
+            if let Ok(shortcut) = binding_shortcut(&binding) {
+                if !desired
+                    .iter()
+                    .any(|current| same_shortcut(current, &shortcut))
+                {
+                    desired.push(shortcut);
+                }
+            }
+        }
+    }
+    for shortcut in &previous {
+        if !desired
+            .iter()
+            .any(|current| same_shortcut(current, shortcut))
+        {
+            let _ = app.global_shortcut().unregister(*shortcut);
+        }
+    }
+    let mut failures = Vec::new();
+    for shortcut in &desired {
+        if previous
+            .iter()
+            .any(|current| same_shortcut(current, shortcut))
+        {
+            continue;
+        }
+        if app.global_shortcut().register(*shortcut).is_err() {
+            failures.push(shortcut.to_string());
+        }
+    }
+    {
+        let mut errors = state.shortcut_errors.lock().unwrap();
+        errors.retain(|error| {
+            !previous
+                .iter()
+                .any(|shortcut| shortcut.to_string() == *error)
+        });
+        for failure in failures {
+            if !errors.contains(&failure) {
+                errors.push(failure);
+            }
+        }
+    }
+    *state.registered_shortcuts.lock().unwrap() = desired;
 }
 
 fn main() {
@@ -137,30 +232,43 @@ fn main() {
         builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if shortcut.key == Code::KeyT || event.state() == ShortcutState::Pressed {
-                        let owned = app.clone();
-                        let is_translation = shortcut.key == Code::KeyT;
-                        let _ = app.run_on_main_thread(move || {
-                            let result = if is_translation {
-                                if event.state() == ShortcutState::Pressed {
-                                    selection::prepare_selected(&owned);
-                                    Ok(())
-                                } else {
-                                    selection::show_selected(&owned)
-                                }
-                            } else {
+                    let key = shortcut.key;
+                    let modifiers = shortcut.mods;
+                    let pressed = event.state() == ShortcutState::Pressed;
+                    let owned = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        let state = owned.state::<AppState>();
+                        let selection = state
+                            .translation_preferences
+                            .lock()
+                            .unwrap()
+                            .shortcuts
+                            .selection
+                            .clone()
+                            .and_then(|binding| binding_shortcut(&binding).ok());
+                        let matches = |candidate: &Shortcut| {
+                            candidate.key == key && candidate.mods == modifiers
+                        };
+                        let result = if matches(&clipboard_shortcut()) {
+                            if pressed {
                                 windows::show(&owned, "clipboard")
-                            };
-                            if let Err(code) = result {
-                                owned
-                                    .state::<AppState>()
-                                    .shortcut_errors
-                                    .lock()
-                                    .unwrap()
-                                    .push(code);
+                            } else {
+                                Ok(())
                             }
-                        });
-                    }
+                        } else if selection.as_ref().is_some_and(matches) {
+                            if pressed {
+                                selection::prepare_selected(&owned);
+                                Ok(())
+                            } else {
+                                selection::show_selected(&owned)
+                            }
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(code) = result {
+                            state.shortcut_errors.lock().unwrap().push(code);
+                        }
+                    });
                 })
                 .build(),
         )
@@ -173,6 +281,10 @@ fn main() {
             commands::translation_run,
             commands::translation_cancel,
             commands::translation_engine_set,
+            commands::translation_preferences_set,
+            commands::translation_shortcut_set,
+            commands::translation_shortcuts_restore,
+            commands::translation_shortcut_capture,
             commands::selection_take,
             commands::window_show,
             commands::window_hide,
@@ -246,20 +358,41 @@ fn main() {
                     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
                         .map_err(|_| "storage_unavailable")?;
                 }
-                let database = database::HistoryDatabase::open(&directory.join("nami.sqlite3"))?;
+                let mut database =
+                    database::HistoryDatabase::open(&directory.join("nami.sqlite3"))?;
                 let page = database.page(
                     &database::HistoryQuery::default(),
                     None,
                     database::PAGE_SIZE,
                 )?;
                 let capture = database.clipboard_capture_enabled()?;
-                Ok((database, page, capture))
+                let preferences = translation::Preferences::from_store(
+                    |key| database.preference(key).ok().flatten(),
+                    platform::capabilities().primary_modifier,
+                );
+                if database
+                    .preference("translation_proxy_url")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .is_some_and(translation::proxy_contains_credentials)
+                {
+                    database.preference_set("translation_proxy_url", "")?;
+                    database.preference_set("translation_proxy_enabled", "false")?;
+                }
+                Ok((database, page, capture, preferences))
             })
             .join()
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|loaded| loaded);
             match loaded {
-                Ok((database, page, capture)) => {
+                Ok((database, page, capture, preferences)) => {
+                    *app.state::<AppState>().translation_engine.lock().unwrap() =
+                        preferences.engine.clone();
+                    *app.state::<AppState>()
+                        .translation_preferences
+                        .lock()
+                        .unwrap() = preferences;
                     app.state::<AppState>().clipboard_enabled.store(
                         capture && platform::capabilities().clipboard_write,
                         std::sync::atomic::Ordering::SeqCst,
@@ -317,17 +450,7 @@ fn main() {
             if let Err(error) = windows::prewarm_records(app.handle()) {
                 eprintln!("Nami records prewarm: {error}");
             }
-            if platform::capabilities().selection {
-                for shortcut in fixed_shortcuts() {
-                    if app.global_shortcut().register(shortcut).is_err() {
-                        app.state::<AppState>()
-                            .shortcut_errors
-                            .lock()
-                            .unwrap()
-                            .push(shortcut.to_string());
-                    }
-                }
-            }
+            sync_global_shortcuts(app.handle());
             clipboard_runtime::start(app.handle());
             Ok(())
         })
@@ -349,12 +472,10 @@ mod shortcut_tests {
 
     #[test]
     fn clipboard_history_uses_control_backquote() {
-        let shortcuts = fixed_shortcuts();
-        assert_eq!(
-            shortcuts[0],
-            Shortcut::new(Some(Modifiers::SUPER), Code::KeyT)
-        );
-        assert_eq!(shortcuts[1].key, Code::Backquote);
-        assert_eq!(shortcuts[1].mods, Modifiers::CONTROL);
+        let clipboard = clipboard_shortcut();
+        assert_eq!(clipboard.key, Code::Backquote);
+        assert_eq!(clipboard.mods, Modifiers::CONTROL);
+        let selection = binding_shortcut(&KeyBinding::new("KeyT", &["meta"])).unwrap();
+        assert_eq!(selection, Shortcut::new(Some(Modifiers::SUPER), Code::KeyT));
     }
 }

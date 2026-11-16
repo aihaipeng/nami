@@ -1,4 +1,6 @@
+use crate::shortcuts::{self, KeyBinding, TranslationShortcuts};
 use reqwest::{Client, Response};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
@@ -60,6 +62,154 @@ pub fn validate_text(text: &str) -> Result<(), String> {
         return Err("A line exceeds 5,000 UTF-16 characters. Split it into shorter lines.".into());
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preferences {
+    pub engine: String,
+    pub source_language: String,
+    pub primary_language: String,
+    pub secondary_language: String,
+    pub proxy_url: String,
+    pub proxy_enabled: bool,
+    pub shortcuts: TranslationShortcuts,
+}
+
+impl Preferences {
+    pub fn defaults(primary: &str) -> Self {
+        Self {
+            engine: "edge".into(),
+            source_language: "auto".into(),
+            primary_language: "en".into(),
+            secondary_language: "zh-CN".into(),
+            proxy_url: String::new(),
+            proxy_enabled: false,
+            shortcuts: TranslationShortcuts::defaults(primary),
+        }
+    }
+
+    pub fn from_store(read: impl Fn(&str) -> Option<String>, primary: &str) -> Self {
+        let mut preferences = Self::defaults(primary);
+        if let Some(engine) = read("translation_engine") {
+            if matches!(engine.as_str(), "edge" | "google") {
+                preferences.engine = engine;
+            }
+        }
+        if let Some(source) = read("translation_source") {
+            if source == "auto" || LANGUAGES.contains(&source.as_str()) {
+                preferences.source_language = source;
+            }
+        }
+        if let Some(primary_language) = read("translation_primary") {
+            if LANGUAGES.contains(&primary_language.as_str()) {
+                preferences.primary_language = primary_language;
+            }
+        }
+        if let Some(secondary) = read("translation_secondary") {
+            if secondary == "none" || LANGUAGES.contains(&secondary.as_str()) {
+                preferences.secondary_language = secondary;
+            }
+        }
+        let stored_proxy = read("translation_proxy_url").unwrap_or_default();
+        let stored_proxy = stored_proxy.trim();
+        if stored_proxy.chars().count() <= 2_048 && !proxy_contains_credentials(stored_proxy) {
+            preferences.proxy_url = stored_proxy.to_string();
+        }
+        if read("translation_proxy_enabled").as_deref() == Some("true")
+            && !proxy_contains_credentials(stored_proxy)
+        {
+            preferences.proxy_enabled = true;
+        }
+        if let Some(json) = read("translation_shortcuts") {
+            if let Ok(shortcuts) = serde_json::from_str::<TranslationShortcuts>(&json) {
+                preferences.shortcuts = shortcuts;
+            }
+        }
+        preferences
+    }
+
+    pub fn apply(&mut self, patch: PreferencePatch) -> Result<bool, String> {
+        let mut engine_changed = false;
+        if let Some(engine) = patch.engine {
+            if !matches!(engine.as_str(), "edge" | "google") {
+                return Err("invalid_argument".into());
+            }
+            engine_changed = self.engine != engine;
+            self.engine = engine;
+        }
+        if let Some(source) = patch.source_language {
+            if source != "auto" && !LANGUAGES.contains(&source.as_str()) {
+                return Err("invalid_argument".into());
+            }
+            self.source_language = source;
+        }
+        if let Some(primary) = patch.primary_language {
+            if !LANGUAGES.contains(&primary.as_str()) {
+                return Err("invalid_argument".into());
+            }
+            self.primary_language = primary;
+        }
+        if let Some(secondary) = patch.secondary_language {
+            if secondary != "none" && !LANGUAGES.contains(&secondary.as_str()) {
+                return Err("invalid_argument".into());
+            }
+            self.secondary_language = secondary;
+        }
+        if let Some(url) = patch.proxy_url {
+            let url = url.trim();
+            if proxy_contains_credentials(url) {
+                return Err("proxy_credentials".into());
+            }
+            if url.chars().count() > 2_048 {
+                return Err("invalid_argument".into());
+            }
+            self.proxy_url = url.to_string();
+        }
+        if let Some(enabled) = patch.proxy_enabled {
+            self.proxy_enabled = enabled;
+        }
+        Ok(engine_changed)
+    }
+
+    pub fn set_shortcut(
+        &mut self,
+        action: &str,
+        binding: Option<KeyBinding>,
+    ) -> Result<(), String> {
+        let action = shortcuts::ShortcutAction::parse(action)?;
+        self.shortcuts = shortcuts::assign_shortcut(&self.shortcuts, action, binding)?;
+        Ok(())
+    }
+
+    pub fn entries(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("translation_engine", self.engine.clone()),
+            ("translation_source", self.source_language.clone()),
+            ("translation_primary", self.primary_language.clone()),
+            ("translation_secondary", self.secondary_language.clone()),
+            ("translation_proxy_url", self.proxy_url.clone()),
+            (
+                "translation_proxy_enabled",
+                if self.proxy_enabled { "true" } else { "false" }.into(),
+            ),
+            (
+                "translation_shortcuts",
+                serde_json::to_string(&self.shortcuts).unwrap_or_else(|_| "{}".into()),
+            ),
+        ]
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferencePatch {
+    pub engine: Option<String>,
+    pub source_language: Option<String>,
+    pub primary_language: Option<String>,
+    pub secondary_language: Option<String>,
+    pub proxy_url: Option<String>,
+    pub proxy_enabled: Option<bool>,
 }
 
 pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
@@ -393,11 +543,66 @@ fn fetch_batch<'a>(
     })
 }
 
+pub fn proxy_contains_credentials(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(rest))
+        .is_some_and(|authority| authority.contains('@'))
+    {
+        return true;
+    }
+    reqwest::Url::parse(trimmed)
+        .is_ok_and(|parsed| !parsed.username().is_empty() || parsed.password().is_some())
+}
+
+pub fn configured_proxy(url: &str, enabled: bool) -> Result<Option<reqwest::Proxy>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let url = url.trim();
+    if proxy_contains_credentials(url) {
+        return Err("Proxy URLs cannot include a username or password.".into());
+    }
+    if url.is_empty() {
+        return Err("Enter a valid HTTP or HTTPS proxy URL.".into());
+    }
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| "Enter a valid HTTP or HTTPS proxy URL.".to_string())?;
+    let path_ok = parsed.path().is_empty() || parsed.path() == "/";
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none_or(str::is_empty)
+        || !path_ok
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("Enter a valid HTTP or HTTPS proxy URL.".into());
+    }
+    reqwest::Proxy::all(parsed)
+        .map(Some)
+        .map_err(|_| "Enter a valid HTTP or HTTPS proxy URL.".into())
+}
+
+fn translation_client(proxy_url: &str, proxy_enabled: bool) -> Result<Client, String> {
+    let mut builder = Client::builder()
+        .user_agent("Nami/0.1")
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(proxy) = configured_proxy(proxy_url, proxy_enabled)? {
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|_| "Unable to initialize the translation service.".into())
+}
+
 pub async fn translate(
     engine: &str,
     text: &str,
     source: &str,
     targets: &[String],
+    proxy_url: &str,
+    proxy_enabled: bool,
 ) -> Result<(Vec<String>, String), String> {
     validate_text(text)?;
     validate_options(engine, source, targets)?;
@@ -409,12 +614,7 @@ pub async fn translate(
             source.to_string(),
         ));
     }
-    let client = Client::builder()
-        .user_agent("Nami/0.1")
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Unable to initialize the translation service.".to_string())?;
+    let client = translation_client(proxy_url, proxy_enabled)?;
     let mut results = Vec::with_capacity(targets.len());
     let mut detected = Vec::new();
     for (target_index, target) in targets.iter().enumerate() {
@@ -446,6 +646,83 @@ pub async fn translate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_accepts_http_urls_and_rejects_other_forms() {
+        assert!(configured_proxy("http://127.0.0.1:7890", true).is_ok());
+        assert!(configured_proxy("https://proxy.example.com:8443", true).is_ok());
+        assert!(configured_proxy("http://proxy.example.com:8080", false)
+            .unwrap()
+            .is_none());
+        assert!(configured_proxy("https://user:pass@proxy.example.com:8443", true).is_err());
+        assert!(configured_proxy("socks5://127.0.0.1:1080", true).is_err());
+        assert!(configured_proxy("http://proxy.example.com/path", true).is_err());
+        assert!(configured_proxy("http://proxy.example.com:8080?x=1", true).is_err());
+        assert!(configured_proxy("", true).is_err());
+    }
+
+    #[test]
+    fn stored_preferences_keep_valid_values_and_ignore_corrupt_ones() {
+        let primary = "meta";
+        let defaults = Preferences::defaults(primary);
+        assert_eq!(defaults.engine, "edge");
+        assert_eq!(defaults.shortcuts.selection.as_ref().unwrap().code, "KeyT");
+        let mut stored = defaults.clone();
+        stored.engine = "google".into();
+        stored.primary_language = "de".into();
+        let entries = stored.entries();
+        let read = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            Preferences::from_store(read, primary).primary_language,
+            "de"
+        );
+        let mut corrupt = stored.clone();
+        assert!(corrupt
+            .apply(PreferencePatch {
+                engine: Some("deepl".into()),
+                ..PreferencePatch::default()
+            })
+            .is_err());
+        assert_eq!(corrupt.engine, "google");
+        corrupt.set_shortcut("translate", None).unwrap();
+        assert_eq!(corrupt.shortcuts.translate, None);
+        assert!(corrupt
+            .set_shortcut(
+                "translate",
+                Some(crate::shortcuts::KeyBinding::new("KeyT", &["meta"]))
+            )
+            .is_err());
+        assert!(corrupt
+            .apply(PreferencePatch {
+                proxy_url: Some("http://user:pass@127.0.0.1:7890".into()),
+                ..PreferencePatch::default()
+            })
+            .is_err());
+        assert!(!corrupt.proxy_url.contains('@'));
+        let secret = [
+            (
+                "translation_proxy_url",
+                "http://user:pass@127.0.0.1:7890".to_string(),
+            ),
+            ("translation_proxy_enabled", "true".to_string()),
+        ];
+        let loaded = Preferences::from_store(
+            |key| {
+                secret
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.clone())
+            },
+            primary,
+        );
+        assert!(loaded.proxy_url.is_empty());
+        assert!(!loaded.proxy_enabled);
+    }
 
     #[test]
     fn language_switch_reuses_only_unchanged_columns() {
@@ -752,7 +1029,7 @@ mod tests {
         let input = "Nami synthetic test.\n\nHello & <world>\r\n";
         let targets = vec!["zh-CN".to_string(), "ja".to_string()];
         for engine in ["edge", "google"] {
-            let (results, detected) = translate(engine, input, "auto", &targets)
+            let (results, detected) = translate(engine, input, "auto", &targets, "", false)
                 .await
                 .unwrap_or_else(|error| panic!("{engine} synthetic smoke failed: {error}"));
             assert_eq!(results.len(), targets.len());

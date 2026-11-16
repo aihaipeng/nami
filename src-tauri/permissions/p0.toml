@@ -6,7 +6,7 @@ commands.allow = ["app_snapshot", "window_show", "window_hide"]
 [[permission]]
 identifier = "allow-p0-translation"
 description = "Translation host layout only."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "selection_take", "clipboard_translation_take"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "translation_preferences_set", "selection_take", "clipboard_translation_take"]
 
 [[permission]]
 identifier = "allow-p0-clipboard"
@@ -16,7 +16,7 @@ commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "r
 [[permission]]
 identifier = "allow-p0-settings"
 description = "Session locale and explicit Accessibility request."
-commands.allow = ["locale_set", "permission_request", "translation_engine_set", "clipboard_capture_set"]
+commands.allow = ["locale_set", "permission_request", "translation_engine_set", "translation_preferences_set", "translation_shortcut_set", "translation_shortcuts_restore", "translation_shortcut_capture", "clipboard_capture_set"]
 
 [[permission]]
 identifier = "allow-p0-records-history"

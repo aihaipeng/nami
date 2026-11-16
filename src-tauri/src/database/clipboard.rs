@@ -677,6 +677,53 @@ impl HistoryDatabase {
             .map_err(storage_error)?;
         Ok(())
     }
+
+    pub fn preference(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row("SELECT value FROM preferences WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn preference_set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        const KEYS: &[&str] = &[
+            "translation_engine",
+            "translation_source",
+            "translation_primary",
+            "translation_secondary",
+            "translation_proxy_url",
+            "translation_proxy_enabled",
+            "translation_shortcuts",
+        ];
+        if !KEYS.contains(&key) {
+            return Err("invalid_argument".into());
+        }
+        self.connection
+            .execute(
+                "INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2",
+                params![key, value],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+pub(super) fn ensure_translation_preferences(
+    connection: &rusqlite::Connection,
+) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "INSERT OR IGNORE INTO preferences(key,value) VALUES
+            ('translation_engine','edge'),
+            ('translation_source','auto'),
+            ('translation_primary','en'),
+            ('translation_secondary','zh-CN'),
+            ('translation_proxy_url',''),
+            ('translation_proxy_enabled','false');",
+        )
+        .map_err(storage_error)
 }
 
 #[cfg(test)]
@@ -1979,6 +2026,49 @@ mod tests {
         );
         drop(connection);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn translation_preferences_round_trip_without_replacing_clipboard_capture() {
+        let mut database = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        assert_eq!(
+            database
+                .preference("translation_engine")
+                .unwrap()
+                .as_deref(),
+            Some("edge")
+        );
+        assert!(!database.clipboard_capture_enabled().unwrap());
+        database
+            .preference_set("translation_primary", "ja")
+            .unwrap();
+        database
+            .preference_set("translation_proxy_url", "http://127.0.0.1:7890")
+            .unwrap();
+        database
+            .preference_set("translation_proxy_enabled", "true")
+            .unwrap();
+        database
+            .preference_set("translation_shortcuts", "{\"translate\":null}")
+            .unwrap();
+        assert_eq!(
+            database
+                .preference("translation_primary")
+                .unwrap()
+                .as_deref(),
+            Some("ja")
+        );
+        assert_eq!(
+            database
+                .preference("translation_proxy_url")
+                .unwrap()
+                .as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert!(database
+            .preference_set("clipboard_capture", "true")
+            .is_err());
+        assert!(!database.clipboard_capture_enabled().unwrap());
     }
 
     #[test]

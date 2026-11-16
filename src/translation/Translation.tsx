@@ -7,6 +7,8 @@ import { languages } from '../shared/languages';
 import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
+import { keycapLabels, matchesBinding } from '../shared/shortcuts';
+import type { TranslationPreferences } from '../shared/contracts';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
@@ -33,9 +35,9 @@ function Keycaps({ keys }: { keys: string[] }) {
 
 export function Translation({ t, snapshot, command, native, activity }: ViewProps) {
   const [draft, setDraft] = useState('');
-  const [source, setSource] = useState('auto');
-  const [primary, setPrimary] = useState('en');
-  const [secondary, setSecondary] = useState('zh-CN');
+  const [source, setSource] = useState(snapshot.translationPreferences.sourceLanguage);
+  const [primary, setPrimary] = useState(snapshot.translationPreferences.primaryLanguage);
+  const [secondary, setSecondary] = useState(snapshot.translationPreferences.secondaryLanguage);
   const [notice, setNotice] = useState<'inputLimit' | null>(null);
   const [serviceError, setServiceError] = useState<string | null>(null);
   const requestRevision = useRef(0);
@@ -56,6 +58,17 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const composing = useRef(false);
   const normalizedCaret = useRef<number | null>(null);
   const sourceDrag = useRef({ active: false, taken: false, anchor: 0, pointer: 0, frame: 0 });
+  const sourceRef = useRef(source);
+  const primaryRef = useRef(primary);
+  const secondaryRef = useRef(secondary);
+  const draftRef = useRef(draft);
+  const preferencesRef = useRef(snapshot.translationPreferences);
+  const applyPreferences = useRef<(preferences: TranslationPreferences) => void>(() => {});
+  sourceRef.current = source;
+  primaryRef.current = primary;
+  secondaryRef.current = secondary;
+  draftRef.current = draft;
+  preferencesRef.current = snapshot.translationPreferences;
   const select = useRef<(record: HistoryRecord, retranslate: boolean) => void>(() => {});
   const state = snapshot.window;
   const clipboardDetails = state.recordView === 'clipboard';
@@ -66,6 +79,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const currentWindow = useRef(state);
   currentWindow.current = state;
   const primaryKey = capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl';
+  const shortcutKeys = (action: 'translate' | 'actions' | 'copyPrimary' | 'copySecondary' | 'pin') => {
+    const binding = snapshot.translationPreferences.shortcuts[action];
+    return binding ? keycapLabels(binding, capabilities.platform === 'macos') : [primaryKey];
+  };
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
   const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, {
     sourceLabel: source === 'auto' ? 'Auto-Detect' : languages.find(([code]) => code === source)?.[1] ?? source,
@@ -136,6 +153,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [snapshot.translationEngine]);
 
   useEffect(() => { void command('translation_columns_set', { secondaryEnabled: secondary !== 'none' }); }, [secondary]);
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const remove = listen<TranslationPreferences>('translation_preferences_changed', ({ payload }) => {
+      if (!disposed) applyPreferences.current(payload);
+    });
+    return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
+  }, [native]);
 
   useEffect(() => {
     if (state.translationVisible && !state.historyVisible && !clipboardDetails) input.current?.focus({ preventScroll: true });
@@ -265,10 +290,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   receiveSelection.current = (context) => {
     completedRecord.current = null;
     cancelRequest(); normalizedCaret.current = null;
-    setDraft(context.text); setSource('auto'); setCachedResults([]); setNotice(null); clearSelection();
+    const preferred = preferencesRef.current;
+    setDraft(context.text); setSource(preferred.sourceLanguage); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
+    sourceRef.current = preferred.sourceLanguage; primaryRef.current = preferred.primaryLanguage; secondaryRef.current = preferred.secondaryLanguage;
     fromSelection.current = true;
     setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error ? 'Selected text is unavailable in this application.' : null);
-    if (context.text.trim()) void translateText(context.text, 'auto', [primary, ...(secondary === 'none' ? [] : [secondary])], true);
+    const targets = [preferred.primaryLanguage, ...(preferred.secondaryLanguage === 'none' ? [] : [preferred.secondaryLanguage])];
+    if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true);
     input.current?.focus({ preventScroll: true });
   };
 
@@ -293,7 +321,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     const current = { source, primary, secondary };
     if (current[side] === value) return;
     const next = { ...current, [side]: value };
+    sourceRef.current = next.source; primaryRef.current = next.primary; secondaryRef.current = next.secondary;
     ({ source: setSource, primary: setPrimary, secondary: setSecondary })[side](value);
+    void command('translation_preferences_set', side === 'source' ? { sourceLanguage: value } : side === 'primary' ? { primaryLanguage: value } : { secondaryLanguage: value });
     clearSelection();
     const targets = [next.primary, ...(next.secondary === 'none' ? [] : [next.secondary])];
     if (draft.trim()) {
@@ -316,20 +346,39 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       event.preventDefault();
       if (popup) { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else void command('window_hide', { region: 'translation' });
-    } else if (primaryPressed(event) && event.key.toLowerCase() === 'w') {
+    } else if (primaryPressed(event) && event.key.toLowerCase() === 'w' && !event.altKey && !event.shiftKey) {
       event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
-    } else if (region === 'translation' && primaryPressed(event) && event.key === 'Enter') {
+    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.translate, event)) {
       event.preventDefault(); submit();
-    } else if (region === 'translation' && primaryPressed(event) && (event.key === '1' || event.key === '2')) {
-      event.preventDefault(); copyTranslation(Number(event.key) - 1);
-    } else if (region === 'translation' && primaryPressed(event) && event.key.toLowerCase() === 'k') {
+    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.copyPrimary, event)) {
+      event.preventDefault(); copyTranslation(0);
+    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.copySecondary, event)) {
+      event.preventDefault(); copyTranslation(1);
+    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.actions, event)) {
       event.preventDefault();
       if (popup === 'actions') { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else setPopup('actions');
-    } else if (region === 'translation' && primaryPressed(event) && event.shiftKey && event.key.toLowerCase() === 'p') {
+    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.pin, event)) {
       event.preventDefault(); togglePin();
     }
   }
+
+  applyPreferences.current = (preferences) => {
+    const next = { source: preferences.sourceLanguage, primary: preferences.primaryLanguage, secondary: preferences.secondaryLanguage };
+    const current = { source: sourceRef.current, primary: primaryRef.current, secondary: secondaryRef.current };
+    if (next.source === current.source && next.primary === current.primary && next.secondary === current.secondary) return;
+    sourceRef.current = next.source; primaryRef.current = next.primary; secondaryRef.current = next.secondary;
+    setSource(next.source); setPrimary(next.primary); setSecondary(next.secondary);
+    const text = draftRef.current;
+    if (!text.trim()) return;
+    const targets = [next.primary, ...(next.secondary === 'none' ? [] : [next.secondary])];
+    const sourceChanged = next.source !== current.source;
+    const primaryChanged = next.primary !== current.primary;
+    const secondaryChanged = next.secondary !== current.secondary;
+    if (sourceChanged || (primaryChanged && secondaryChanged)) void translateText(text, next.source, targets, fromSelection.current);
+    else if (primaryChanged) void translateText(text, next.source, targets, fromSelection.current, completedRecord.current ?? undefined, 0);
+    else void translateText(text, next.source, targets, fromSelection.current, completedRecord.current ?? undefined, 1);
+  };
 
   function togglePin() {
     setPopup(null);
@@ -395,8 +444,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
         </div>
         <div ref={actionGroup} className={cn('translation-actions', !actionsFit && 'actions-overflow')} aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
-          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError)} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={[primaryKey, '↵']} /></button>
-          <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={[primaryKey, 'K']} /></button>
+          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError)} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
+          <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={shortcutKeys('actions')} /></button>
         </div>
       </footer>
       {popup === 'actions' && <FloatingPanel anchor={actionButton} onClose={() => setPopup(null)} label={t('actions')} role="menu" width={310} side="top" className="action-menu">
@@ -410,10 +459,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             event.preventDefault(); buttons[event.key === 'Home' ? 0 : buttons.length - 1]?.focus();
           }
         }}>
-          <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[0]} onClick={() => copyTranslation(0)}>{t('copyPrimary')}<Keycaps keys={[primaryKey, '1']} /></button>
-          {secondary !== 'none' && <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[1]} onClick={() => copyTranslation(1)}>{t('copySecondary')}<Keycaps keys={[primaryKey, '2']} /></button>}
+          <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[0]} onClick={() => copyTranslation(0)}>{t('copyPrimary')}<Keycaps keys={shortcutKeys('copyPrimary')} /></button>
+          {secondary !== 'none' && <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[1]} onClick={() => copyTranslation(1)}>{t('copySecondary')}<Keycaps keys={shortcutKeys('copySecondary')} /></button>}
           {secondary === 'none' && <button role="menuitem" onClick={() => { changeLanguage('secondary', 'zh-CN'); setPopup(null); input.current?.focus(); }}>Enable Second Language</button>}
-          <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={[primaryKey, '⇧', 'P']} /></button>
+          <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={shortcutKeys('pin')} /></button>
         </div>
       </FloatingPanel>}
     </section>

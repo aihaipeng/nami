@@ -1,7 +1,8 @@
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import type { HistorySnapshot } from '../../src/translation/history';
-import { initialSnapshot, type AppSnapshot, type WindowState } from '../../src/shared/contracts';
+import { initialSnapshot, type AppSnapshot, type TranslationPreferences, type WindowState } from '../../src/shared/contracts';
+import { defaultTranslationShortcuts, normalizeBinding, shortcutError, type ShortcutAction, type TranslationShortcuts } from '../../src/shared/shortcuts';
 
 const bridge = vi.hoisted(() => ({
   label: 'translation',
@@ -70,6 +71,8 @@ beforeEach(() => {
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
   bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.snapshot.translationEngine = 'edge';
+  bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, shortcuts: defaultTranslationShortcuts('meta') };
   bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null, totalRecords: historySamples.length, hasMore: false, generation: 0 };
   historyQuery = ''; historyFavorites = false; historyLoaded = 100;
   bridge.snapshot.window.recordView = 'translation';
@@ -135,6 +138,30 @@ beforeEach(() => {
       bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationVisible ? bridge.snapshot.window.translationWidth : 0;
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
+    if (name === 'translation_preferences_set') {
+      const patch = args as Partial<TranslationPreferences>;
+      const next = { ...bridge.snapshot.translationPreferences, ...patch };
+      bridge.snapshot.translationPreferences = next;
+      bridge.snapshot.translationEngine = next.engine;
+      deliver('translation_preferences_changed', structuredClone(next));
+      deliver('translation_engine_changed', next.engine);
+      return;
+    }
+    if (name === 'translation_shortcut_set') {
+      const { action, binding } = args as { action: ShortcutAction; binding: TranslationShortcuts[ShortcutAction] };
+      const error = shortcutError(action, binding, bridge.snapshot.translationPreferences.shortcuts);
+      if (error) throw new Error(error);
+      const shortcuts = { ...bridge.snapshot.translationPreferences.shortcuts, [action]: binding ? normalizeBinding(binding) : null };
+      bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts };
+      deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
+      return;
+    }
+    if (name === 'translation_shortcuts_restore') {
+      bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts: defaultTranslationShortcuts(bridge.snapshot.capabilities.primaryModifier) };
+      deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
+      return;
+    }
+    if (name === 'translation_shortcut_capture') return;
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);
     if (name === 'history_sample_select') {
       const selected = args as { sampleId: string | null; retranslate: boolean };

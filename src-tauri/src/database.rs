@@ -162,6 +162,7 @@ impl HistoryDatabase {
             clipboard::migrate_v5(&mut connection)?;
         }
         clipboard::ensure_filter_indexes(&connection)?;
+        clipboard::ensure_translation_preferences(&connection)?;
         let clipboard_total_records = connection
             .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
                 row.get::<_, i64>(0)
