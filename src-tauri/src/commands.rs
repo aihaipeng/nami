@@ -890,12 +890,28 @@ async fn commit_preferences(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn translation_preferences_set(
     window: Webview,
     app: AppHandle,
-    patch: crate::translation::PreferencePatch,
+    engine: Option<String>,
+    source_language: Option<String>,
+    primary_language: Option<String>,
+    secondary_language: Option<String>,
+    proxy_url: Option<String>,
+    proxy_enabled: Option<bool>,
+    selection_enabled: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["settings", "translation"])?;
+    let patch = crate::translation::PreferencePatch {
+        engine,
+        source_language,
+        primary_language,
+        secondary_language,
+        proxy_url,
+        proxy_enabled,
+        selection_enabled,
+    };
     let mut preferences = app
         .state::<AppState>()
         .translation_preferences
