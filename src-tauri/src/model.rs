@@ -62,6 +62,8 @@ pub enum RecordView {
 #[serde(rename_all = "camelCase")]
 pub struct WindowState {
     pub record_view: RecordView,
+    pub clipboard_detail_id: Option<String>,
+    pub records_editor_open: bool,
     pub records_session: u64,
     pub records_focus: u64,
     #[serde(skip)]
@@ -73,6 +75,8 @@ pub struct WindowState {
     pub clipboard_pinned: bool,
     pub history_width: f64,
     pub translation_width: f64,
+    #[serde(skip)]
+    pub translation_width_before_clipboard_details: Option<f64>,
     pub history_extent: f64,
     pub translation_extent: f64,
     pub secondary_enabled: bool,
@@ -92,6 +96,8 @@ impl Default for WindowState {
     fn default() -> Self {
         Self {
             record_view: RecordView::Clipboard,
+            clipboard_detail_id: None,
+            records_editor_open: false,
             records_session: 0,
             records_focus: 0,
             records_open: false,
@@ -102,6 +108,7 @@ impl Default for WindowState {
             clipboard_pinned: false,
             history_width: 360.0,
             translation_width: 920.0,
+            translation_width_before_clipboard_details: None,
             history_extent: 0.0,
             translation_extent: 920.0,
             secondary_enabled: true,
@@ -126,31 +133,49 @@ impl WindowState {
     pub fn toggle_history(&mut self) {
         self.history_visible = self.record_view != RecordView::Translation || !self.history_visible;
         self.record_view = RecordView::Translation;
-        self.translation_visible = true;
+        self.show_translation();
     }
 
     pub fn show_translation(&mut self) {
+        self.restore_translation_width();
         self.translation_visible = true;
+    }
+
+    fn restore_translation_width(&mut self) {
+        if let Some(width) = self.translation_width_before_clipboard_details.take() {
+            self.translation_width = width;
+        }
     }
 
     pub fn summon_translation(&mut self) {
         self.record_view = RecordView::Translation;
         self.history_visible = false;
-        self.translation_visible = true;
+        self.show_translation();
     }
 
     pub fn set_record_view(&mut self, view: RecordView) {
-        self.record_view = view;
-        self.history_visible = true;
-        if view == RecordView::Clipboard {
-            self.translation_visible = false;
+        if view == RecordView::Translation {
+            self.restore_translation_width();
         }
+        self.record_view = view;
+        self.clipboard_detail_id = None;
+        self.history_visible = true;
+        self.translation_visible = false;
+    }
+
+    pub fn toggle_record_details(&mut self) {
+        if !self.translation_visible && self.record_view == RecordView::Clipboard {
+            self.translation_width_before_clipboard_details
+                .get_or_insert(self.translation_width);
+            self.translation_width = self.translation_min_width();
+        }
+        self.translation_visible = !self.translation_visible;
     }
 
     pub fn select_history_record(&mut self, _repeated: bool, _retranslate: bool) {
         self.record_view = RecordView::Translation;
         self.history_visible = true;
-        self.translation_visible = true;
+        self.show_translation();
     }
 
     pub fn sync_records_session(&mut self) -> bool {
@@ -158,6 +183,8 @@ impl WindowState {
         let ended = self.records_open && !open;
         if ended {
             self.records_session += 1;
+            self.records_editor_open = false;
+            self.clipboard_detail_id = None;
         }
         self.records_open = open;
         ended
@@ -174,7 +201,7 @@ impl WindowState {
     }
 
     pub fn translation_min_width(&self) -> f64 {
-        if self.secondary_enabled {
+        if self.record_view == RecordView::Translation && self.secondary_enabled {
             700.0
         } else {
             480.0
@@ -310,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn record_modes_share_size_and_pin_but_clipboard_collapses_details() {
+    fn record_modes_share_size_and_pin_and_collapse_details() {
         let mut state = super::WindowState {
             history_width: 430.0,
             history_pinned: true,
@@ -329,6 +356,71 @@ mod tests {
         state.toggle_history();
         assert!(state.history_visible && state.translation_visible);
         assert_eq!(state.record_view, super::RecordView::Translation);
+    }
+
+    #[test]
+    fn details_open_in_either_mode_and_switching_modes_collapses_the_previous_content() {
+        let mut state = super::WindowState::default();
+        for view in [super::RecordView::Clipboard, super::RecordView::Translation] {
+            state.set_record_view(view);
+            state.toggle_record_details();
+            assert!(state.history_visible && state.translation_visible);
+            assert_eq!(state.record_view, view);
+            state.toggle_record_details();
+            assert!(state.history_visible && !state.translation_visible);
+            state.toggle_record_details();
+        }
+        state.set_record_view(super::RecordView::Clipboard);
+        assert!(state.history_visible && !state.translation_visible);
+    }
+
+    #[test]
+    fn clipboard_details_open_at_the_minimum_without_changing_translation_width() {
+        let mut state = super::WindowState {
+            record_view: super::RecordView::Translation,
+            translation_width: 1100.0,
+            history_width: 400.0,
+            ..Default::default()
+        };
+        state.set_record_view(super::RecordView::Clipboard);
+        state.toggle_record_details();
+        assert_eq!(state.translation_width, state.translation_min_width());
+        state.resize_visible_width(600.0);
+        assert_eq!(state.translation_width, 480.0);
+        assert_eq!(state.history_width, 400.0);
+        state.resize_visible_width(1040.0);
+        assert_eq!(state.translation_width, 640.0);
+        state.toggle_record_details();
+        state.toggle_record_details();
+        assert_eq!(state.translation_width, 480.0);
+        for entry in 0..5 {
+            let mut next = state.clone();
+            match entry {
+                0 => next.set_record_view(super::RecordView::Translation),
+                1 => next.summon_translation(),
+                2 => next.toggle_history(),
+                3 => next.select_history_record(false, false),
+                _ => next.show_translation(),
+            }
+            assert_eq!(next.translation_width, 1100.0);
+        }
+    }
+
+    #[test]
+    fn clipboard_details_clear_on_mode_change_or_session_end_and_use_single_pane_minimum() {
+        let mut state = super::WindowState {
+            clipboard_detail_id: Some("synthetic-record".into()),
+            records_open: true,
+            ..Default::default()
+        };
+        assert_eq!(state.translation_min_width(), 480.0);
+        state.set_record_view(super::RecordView::Translation);
+        assert!(state.clipboard_detail_id.is_none());
+        assert_eq!(state.translation_min_width(), 700.0);
+        state.clipboard_detail_id = Some("synthetic-record".into());
+        state.dismiss();
+        assert!(state.sync_records_session());
+        assert!(state.clipboard_detail_id.is_none());
     }
 
     #[test]
@@ -619,6 +711,7 @@ mod tests {
     fn explicit_dismiss_hides_both_even_when_pinned_and_preserves_sizes() {
         for pinned in [false, true] {
             let mut state = WindowState {
+                record_view: super::RecordView::Translation,
                 history_visible: true,
                 history_pinned: pinned,
                 ..WindowState::default()

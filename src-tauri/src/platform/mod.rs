@@ -20,6 +20,8 @@ pub use clipboard::*;
 mod macos;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 pub use macos::*;
+mod image_metadata;
+pub use image_metadata::image_dimensions;
 mod ocr;
 pub use ocr::recognize_image_text;
 

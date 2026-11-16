@@ -2,9 +2,9 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, ty
 import { motion } from 'motion/react';
 
 // The scrollbar spans the complete viewport while pinned rows stay above the scrolling list.
-export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, active = true }: {
+export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.length, children, onNearEnd, onScroll, active = true, scrollOnly = false }: {
   list: RefObject<HTMLDivElement | null>; pinnedList: RefObject<HTMLDivElement | null>;
-  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void; active?: boolean;
+  pinned: ReactNode[]; pinnedCount?: number; children: ReactNode; onNearEnd: (element: HTMLDivElement) => void; onScroll?: () => void; active?: boolean; scrollOnly?: boolean;
 }) {
   const listId = useId();
   const [scrollbarVisible, setScrollbarVisible] = useState(false);
@@ -54,7 +54,7 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
       <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.height > 0 && scroll.pinned >= scroll.height}>{pinned}</div>
       <div className="history-items">{children}</div>
     </motion.div>
-    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={showScrollbar} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
+    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;
         if (delta || event.key === 'Home' || event.key === 'End') { showScrollbar(); event.preventDefault(); event.stopPropagation(); move(event.key === 'Home' ? 0 : event.key === 'End' ? maximum : scroll.top + delta); }

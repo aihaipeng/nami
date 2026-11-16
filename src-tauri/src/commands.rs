@@ -163,11 +163,90 @@ pub fn records_details_toggle(window: Webview, app: AppHandle) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn records_editor_set(window: Webview, app: AppHandle, dirty: bool) -> Result<(), String> {
+pub fn clipboard_details_select(
+    window: Webview,
+    app: AppHandle,
+    record_id: Option<String>,
+) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
-    app.state::<AppState>()
-        .records_dirty
-        .store(dirty, Ordering::SeqCst);
+    if record_id
+        .as_ref()
+        .is_some_and(|id| id.is_empty() || id.len() > 160)
+    {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    {
+        let mut regions = state.windows.lock().unwrap();
+        if regions.record_view != nami::model::RecordView::Clipboard
+            || !regions.history_visible
+            || regions.records_editor_open
+            || state.records_dirty.load(Ordering::SeqCst)
+        {
+            return Err("cancelled".into());
+        }
+        if regions.clipboard_detail_id == record_id {
+            return Ok(());
+        }
+        regions.clipboard_detail_id = record_id;
+    }
+    windows::emit_state(&app)
+}
+
+#[tauri::command]
+pub fn clipboard_note_open(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if record_id.is_empty() || record_id.len() > 160 {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    let reveal = {
+        let mut regions = state.windows.lock().unwrap();
+        if regions.record_view != nami::model::RecordView::Clipboard
+            || (!regions.history_visible && !regions.translation_visible)
+            || regions.records_editor_open
+            || state.records_dirty.load(Ordering::SeqCst)
+        {
+            return Err("cancelled".into());
+        }
+        let reveal = !regions.history_visible;
+        regions.history_visible = true;
+        reveal
+    };
+    if reveal {
+        windows::apply_translation(&app)?;
+    }
+    let view = app
+        .get_webview("clipboard")
+        .or_else(|| app.get_webview("translation"))
+        .ok_or("window_unavailable")?;
+    view.emit("clipboard_note_requested", record_id)
+        .map_err(|_| "event_emit")?;
+    windows::focus_records_editor(&app)
+}
+
+#[tauri::command]
+pub fn records_editor_set(
+    window: Webview,
+    app: AppHandle,
+    dirty: bool,
+    open: Option<bool>,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    let state = app.state::<AppState>();
+    state.records_dirty.store(dirty, Ordering::SeqCst);
+    if let Some(open) = open {
+        let mut regions = state.windows.lock().unwrap();
+        if regions.records_editor_open != open {
+            regions.records_editor_open = open;
+            drop(regions);
+            windows::emit_state(&app)?;
+        }
+    }
     Ok(())
 }
 
@@ -220,7 +299,7 @@ pub fn history_visibility_set(
         let mut state = state.windows.lock().unwrap();
         state.record_view = crate::model::RecordView::Translation;
         state.history_visible = visible;
-        state.translation_visible = true;
+        state.show_translation();
     }
     windows::apply_translation(&app)
 }
@@ -794,8 +873,14 @@ pub async fn clipboard_record_detail(
     record_id: String,
 ) -> Result<nami::clipboard::ClipboardDetail, String> {
     authorize(&window, &["clipboard", "translation"])?;
-    crate::clipboard_runtime::database(&app, move |database| database.clipboard_detail(&record_id))
+    let detail = crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_detail(&record_id)
+    })
+    .await?;
+    let root = crate::clipboard_runtime::image_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || crate::clipboard_detail::enrich(detail, &root))
         .await
+        .map_err(|_| "storage_worker")?
 }
 
 #[tauri::command]

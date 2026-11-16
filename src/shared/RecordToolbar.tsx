@@ -3,9 +3,9 @@ import type { ViewProps } from '../App';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import { HistoryWordmark } from './HistoryWordmark';
 
-export function RecordToolbar({ t, snapshot, command, view, query, onQuery, search, onArrowDown }: Pick<ViewProps, 't' | 'snapshot' | 'command'> & {
+export function RecordToolbar({ t, snapshot, command, view, query, onQuery, search, onArrowDown, onDetailsToggle }: Pick<ViewProps, 't' | 'snapshot' | 'command'> & {
   view: 'clipboard' | 'translation'; query: string; onQuery: (value: string) => void;
-  search: RefObject<HTMLInputElement | null>; onArrowDown?: () => void;
+  search: RefObject<HTMLInputElement | null>; onArrowDown?: () => void; onDetailsToggle?: () => void;
 }) {
   const state = snapshot.window;
   const searchLabel = t(view === 'clipboard' ? 'searchClipboard' : 'searchHistory');
@@ -21,6 +21,6 @@ export function RecordToolbar({ t, snapshot, command, view, query, onQuery, sear
     <button type="button" className="icon-button" title="Clipboard" aria-label="Clipboard" aria-pressed={view === 'clipboard'} onClick={() => { if (view !== 'clipboard') void command('records_view_set', { view: 'clipboard' }); }}><HistoryIcon name="list.bullet" /></button>
     <button type="button" className="icon-button" title="Translations" aria-label="Translations" aria-pressed={view === 'translation'} onClick={() => { if (view !== 'translation') void command('records_view_set', { view: 'translation' }); }}><HistoryIcon name="languages" /></button>
     <button type="button" className="icon-button history-pin" title={state.historyPinned ? 'Unpin records' : 'Pin records'} aria-label={state.historyPinned ? 'Unpin records' : 'Pin records'} aria-pressed={state.historyPinned} onClick={() => void command('window_pin', { region: 'history', pinned: !state.historyPinned })}><HistoryIcon name={state.historyPinned ? 'pin.fill' : 'pin'} /></button>
-    <button type="button" className="icon-button records-details" title={view === 'clipboard' ? 'Details unavailable' : state.translationVisible ? 'Collapse details' : 'Expand details'} aria-label={view === 'clipboard' ? 'Details unavailable' : state.translationVisible ? 'Collapse details' : 'Expand details'} disabled={view === 'clipboard'} aria-expanded={view === 'translation' && state.translationVisible} onClick={() => void command('records_details_toggle')}><HistoryIcon name={state.translationVisible && view === 'translation' ? 'chevron.left' : 'chevron.right'} /></button>
+    <button type="button" className="icon-button records-details" title={state.translationVisible ? 'Collapse details' : 'Expand details'} aria-label={state.translationVisible ? 'Collapse details' : 'Expand details'} aria-expanded={state.translationVisible} onClick={onDetailsToggle ?? (() => { void command('records_details_toggle'); })}><HistoryIcon name={state.translationVisible ? 'chevron.left' : 'chevron.right'} /></button>
   </header>;
 }

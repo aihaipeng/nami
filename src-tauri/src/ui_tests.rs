@@ -286,6 +286,7 @@ fn owner(app: &AppHandle, _history: bool) -> Result<(), String> {
             translation_width: state.translation_width,
             history_visible: state.history_visible,
             translation_visible: state.translation_visible,
+            translation_content: state.record_view == crate::model::RecordView::Translation,
         }
     };
     let window = app.get_window("translation").ok_or("missing_test_window")?;
@@ -2186,16 +2187,30 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                 ));
             }
         }
-        for (a, b) in clipboard["actions"]
+        let clipboard_actions = clipboard["actions"]
             .as_array()
             .ok_or("clipboard actions")?
             .iter()
-            .zip(
-                translation["actions"]
-                    .as_array()
-                    .ok_or("translation actions")?,
-            )
+            .filter(|action| {
+                !["languages", "ocr", "note"]
+                    .contains(&action["symbol"].as_str().unwrap_or_default())
+            })
+            .collect::<Vec<_>>();
+        let translation_actions = translation["actions"]
+            .as_array()
+            .ok_or("translation actions")?;
+        if clipboard_actions.len() != translation_actions.len()
+            || !clipboard["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["symbol"] == "note")
         {
+            return Err(format!(
+                "shared record actions or clipboard note missing: {clipboard} / {translation}"
+            ));
+        }
+        for (a, b) in clipboard_actions.into_iter().zip(translation_actions) {
             for key in ["symbol", "mask", "color", "opacity", "width", "height"] {
                 if a[key] != b[key] {
                     return Err(format!("record icon {key} differs: {a} / {b}"));
@@ -2223,9 +2238,14 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                 return Err(format!("footer {key} differs"));
             }
         }
-        for key in ["star", "keyboard"] {
-            if clipboard["footer"][key] != translation["footer"][key] {
-                return Err(format!("footer {key} differs"));
+        if clipboard["footer"]["keyboard"] != translation["footer"]["keyboard"] {
+            return Err("footer keyboard differs".into());
+        }
+        for key in ["y", "width", "height", "symbol", "mask", "color", "opacity"] {
+            if clipboard["footer"]["star"][key] != translation["footer"]["star"][key] {
+                return Err(format!(
+                    "footer favorite {key} differs: {clipboard} / {translation}"
+                ));
             }
         }
         samples.extend([clipboard.clone(), translation.clone()]);
@@ -3064,6 +3084,329 @@ fn clipboard_text_fixture(text: bool) -> Result<Vec<u8>, String> {
     }
 }
 
+fn run_clipboard_details(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let mut original_database = None;
+    let result = (|| {
+        if app.config().identifier != "dev.local.nami.ui-tests" {
+            return Err("clipboard details tests require the isolated application identity".into());
+        }
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        let full_text = "Synthetic complete clipboard text 👋\n".repeat(120);
+        let application = "Synthetic Application With A Complete Untruncated Name";
+        for (id, text, pinned, date) in [
+            (
+                "detail-pinned",
+                "Pinned synthetic text".to_string(),
+                true,
+                "2099-01-03T00:00:00Z",
+            ),
+            (
+                "detail-first",
+                full_text.clone(),
+                false,
+                "2099-01-02T00:00:00Z",
+            ),
+            (
+                "detail-second",
+                "Second synthetic detail".to_string(),
+                false,
+                "2099-01-01T00:00:00Z",
+            ),
+        ] {
+            database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: id.into(),
+                kind: "text".into(),
+                fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+                text,
+                date: date.into(),
+                is_favorite: false,
+                is_pinned: pinned,
+                source_app: Some(serde_json::json!({"name":application})),
+                image_path: None,
+            })?;
+        }
+        original_database = Some(
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .replace(database),
+        );
+        app.state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .records_session += 1;
+        crate::clipboard_runtime::changed(app)?;
+        records_mode(app, "clipboard")?;
+        wait_records(app, "return {ready:document.querySelectorAll('.clipboard-panel .history-row:not([hidden])').length===3};")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"window.__detailList=document.querySelector('.clipboard-panel');document.querySelector('.clipboard-panel .records-details').click();return true;"#,
+        )?;
+        let expected = serde_json::to_string(&full_text).unwrap();
+        let application_json = serde_json::to_string(application).unwrap();
+        let first = wait_dom(
+            app,
+            &format!(
+                r#"
+const p=document.querySelector('.clipboard-detail'),text=p?.querySelector('.clipboard-detail-text')?.textContent;
+const metadata=p?.querySelector('.clipboard-detail-metadata'),actions=[...p?.querySelectorAll('.history-action:not([aria-hidden=true])')??[]].map(e=>e.dataset.action);
+const chars=metadata&&[...metadata.children].find(e=>e.firstElementChild?.textContent==='Characters')?.lastElementChild?.textContent;
+const app=p?.querySelector('.clipboard-detail-metadata .history-languages')?.textContent;
+const scroller=p?.querySelector('.history-list'),scrollbar=p?.querySelector('[role=scrollbar]');
+const footerBounds=metadata?.getBoundingClientRect(),viewportBounds=p?.querySelector('.history-viewport')?.getBoundingClientRect();
+window.__detailInput??=document.querySelector('.source-input');window.__detailPane??=p;
+return {{ready:text==={expected}&&!!scrollbar&&actions.includes('note'),length:text?.length,application:app,characters:Number(chars?.replaceAll(',','')),formattedCharacters:chars,actions,translationHidden:document.querySelector('.translation-panel')?.hidden,scrollbarHidden:!!scrollbar&&!scrollbar.classList.contains('visible'),overflow:scroller?.scrollHeight>scroller?.clientHeight,metadata:[...metadata?.children??[]].map(e=>e.firstElementChild?.textContent),icons:[...p?.querySelectorAll('.history-row-actions .history-symbol')??[]].map(e=>{{const r=e.getBoundingClientRect();return {{width:r.width,height:r.height}};}}),completeApplication:app==={application_json},footerBounds:footerBounds&&{{top:footerBounds.top,bottom:footerBounds.bottom}},viewportBottom:viewportBounds?.bottom,footerAligned:footerBounds?.bottom>innerHeight-80&&footerBounds.bottom<=innerHeight&&viewportBounds?.bottom<=footerBounds.top}};
+"#
+            ),
+        )?;
+        if first["characters"] != full_text.chars().count()
+            || first["translationHidden"] != true
+            || first["scrollbarHidden"] != true
+            || first["overflow"] != true
+            || first["footerAligned"] != true
+            || first["completeApplication"] != true
+            || first["metadata"] != serde_json::json!(["Application", "Characters"])
+            || first["actions"]
+                != serde_json::json!(["copy", "translate", "note", "favorite", "pin", "delete"])
+            || first["icons"].as_array().is_none_or(|icons| {
+                icons.len() != 6
+                    || icons
+                        .iter()
+                        .any(|icon| icon["width"] != 14 || icon["height"] != 14)
+            })
+        {
+            return Err(format!("clipboard detail contents or layout: {first}"));
+        }
+        samples.push(first);
+        let native = on_main(app, native_chrome_sample)?;
+        if native["buttons"].as_array().is_none_or(|buttons| {
+            buttons.len() != 3 || buttons.iter().any(|button| button["hidden"] != true)
+        }) {
+            return Err(format!(
+                "translation controls overlap clipboard details: {native}"
+            ));
+        }
+        samples.push(native);
+        let list = wait_records(
+            app,
+            r#"const b=document.querySelector('.clipboard-panel .history-toolbar > button'),r=b?.getBoundingClientRect(),id=document.querySelector('.clipboard-panel .history-row.selected')?.dataset.recordId;return {ready:id==='detail-first',selected:id,toolbarCenter:r.y+r.height/2,sameList:window.__detailList===document.querySelector('.clipboard-panel')};"#,
+        )?;
+        let toolbar = evaluate_dom(
+            app,
+            r#"const b=document.querySelector('.clipboard-detail-toolbar button'),r=b.getBoundingClientRect();return {toolbarCenter:r.y+r.height/2};"#,
+        )?;
+        if (list["toolbarCenter"]
+            .as_f64()
+            .ok_or("left toolbar center")?
+            - toolbar["toolbarCenter"]
+                .as_f64()
+                .ok_or("detail toolbar center")?)
+        .abs()
+            > 1.0
+            || list["sameList"] != true
+        {
+            return Err(format!(
+                "detail toolbar does not align with records: {list} / {toolbar}"
+            ));
+        }
+        samples.push(serde_json::json!({"records":list,"details":toolbar}));
+        evaluate_dom(
+            app,
+            r#"window.__detailPointerSettled=false;document.querySelector('.clipboard-detail [role=scrollbar]').dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:7}));requestAnimationFrame(()=>requestAnimationFrame(()=>window.__detailPointerSettled=true));return true;"#,
+        )?;
+        let pointer = wait_dom(
+            app,
+            r#"return {ready:window.__detailPointerSettled,visible:document.querySelector('.clipboard-detail [role=scrollbar]')?.classList.contains('visible')};"#,
+        )?;
+        if pointer["visible"] != false {
+            return Err(format!(
+                "detail scrollbar appeared without scrolling: {pointer}"
+            ));
+        }
+        samples.push(pointer);
+        evaluate_dom(
+            app,
+            r#"document.querySelector('.clipboard-detail .history-list').dispatchEvent(new WheelEvent('wheel',{bubbles:true,deltaY:80}));return true;"#,
+        )?;
+        samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail [role=scrollbar]')?.classList.contains('visible')===true};"#)?);
+        evaluate_dom(
+            app,
+            r#"document.querySelector('.clipboard-detail [aria-label="Note"]').click();return true;"#,
+        )?;
+        wait_records(
+            app,
+            r#"const editor=document.querySelector('.clipboard-editor');return {ready:!!editor&&!editor.querySelector('input').disabled};"#,
+        )?;
+        samples.push(wait_dom(
+            app,
+            r#"return {ready:document.querySelector('.clipboard-detail')?.inert===true};"#,
+        )?);
+        if !app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .records_editor_open
+        {
+            return Err("detail note did not mark the shared editor open".into());
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+        )?;
+        wait_records(
+            app,
+            "return {ready:!document.querySelector('.clipboard-editor')};",
+        )?;
+        samples.push(wait_dom(
+            app,
+            "return {ready:document.querySelector('.clipboard-detail')?.inert===false};",
+        )?);
+        if app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .records_editor_open
+        {
+            return Err("closing detail note left the shared editor open".into());
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-panel [data-record-id="detail-second"]').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return true;"#,
+        )?;
+        samples.push(wait_dom(app, r#"const text=document.querySelector('.clipboard-detail-text')?.textContent;return {ready:text==='Second synthetic detail',text};"#)?);
+        wait_records(
+            app,
+            r#"return {ready:document.querySelector('.clipboard-panel .history-row.selected')?.dataset.recordId==='detail-second'};"#,
+        )?;
+        wait_motion(app)?;
+        let initial = on_main(app, geometry)?;
+        initial.adjacent()?;
+        equal(
+            initial.translation_width,
+            480.0,
+            "detail default minimum width",
+        )?;
+        samples.push(on_main(app, |app| {
+            let history = view_frame(app, "history")?;
+            let detail = view_frame(app, "translation")?;
+            equal(detail.origin.y, history.origin.y, "detail top matches records")?;
+            equal(detail.size.height, history.size.height, "detail height matches records")?;
+            let window = app.get_window("translation").ok_or("missing_test_window")?;
+            let native = window.ns_window().map_err(|_| "window_geometry")?.cast::<objc2::runtime::AnyObject>();
+            let minimum: objc2_foundation::NSSize = unsafe { objc2::msg_send![native, contentMinSize] };
+            equal(minimum.width, history.size.width + 480.0, "detail shrink limit")?;
+            let native_frame = native_translation_frame(&window)?;
+            native_resize::test_drag(&window, objc2_foundation::NSPoint::new(native_frame.size.width - 1.0, native_frame.size.height / 2.0), objc2_foundation::NSPoint::new(-120.0, 0.0))?;
+            let resized = geometry(app)?;
+            equal(resized.translation_width, 480.0, "detail cannot shrink below default")?;
+            equal(resized.history_width, history.size.width, "minimum drag preserves records width")?;
+            Ok(serde_json::json!({"detailWidth":resized.translation_width,"historyHeight":history.size.height,"detailHeight":detail.size.height,"sameTop":detail.origin.y==history.origin.y,"minimumWidth":480}))
+        })?);
+        for _ in 0..3 {
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                "document.querySelector('.clipboard-panel .records-details').click();return true;",
+            )?;
+            wait_records(app, "return {ready:document.querySelector('.clipboard-panel .records-details')?.getAttribute('aria-expanded')==='false'};")?;
+            wait_motion(app)?;
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                "document.querySelector('.clipboard-panel .records-details').click();return true;",
+            )?;
+            wait_records(app, "return {ready:document.querySelector('.clipboard-panel .records-details')?.getAttribute('aria-expanded')==='true'};")?;
+            wait_motion(app)?;
+            let frame = on_main(app, geometry)?;
+            frame.adjacent()?;
+            equal(
+                frame.window_left,
+                initial.window_left,
+                "detail reopen left anchor",
+            )?;
+            equal(
+                frame.window_width,
+                initial.window_width,
+                "detail reopen window width",
+            )?;
+            equal(
+                frame.history_width,
+                initial.history_width,
+                "detail reopen records width",
+            )?;
+            samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail-text')?.textContent?.startsWith('Synthetic complete clipboard text')&&document.querySelector('.source-input')===window.__detailInput&&document.querySelector('.clipboard-detail')===window.__detailPane,sameTranslation:document.querySelector('.source-input')===window.__detailInput,sameDetails:document.querySelector('.clipboard-detail')===window.__detailPane};"#)?);
+        }
+        on_main(app, |app| {
+            {
+                let state = app.state::<AppState>();
+                let mut windows = state.windows.lock().unwrap();
+                windows.history_visible = false;
+                windows.translation_pinned = true;
+            }
+            apply_translation(app)
+        })?;
+        wait_motion(app)?;
+        wait_records(app, "return {ready:document.querySelector('.clipboard-panel')?.closest('.record-view')?.inert===true};")?;
+        evaluate_dom(
+            app,
+            r#"document.querySelector('.clipboard-detail [aria-label="Note"]').click();return true;"#,
+        )?;
+        wait_records(
+            app,
+            r#"const editor=document.querySelector('.clipboard-editor');return {ready:!!editor&&!editor.querySelector('input').disabled};"#,
+        )?;
+        samples.push(wait_dom(
+            app,
+            "return {ready:document.querySelector('.clipboard-detail')?.inert===true};",
+        )?);
+        {
+            let state = app.state::<AppState>();
+            let windows = state.windows.lock().unwrap();
+            if !windows.history_visible
+                || !windows.records_editor_open
+                || !windows.translation_visible
+            {
+                return Err(
+                    "detail-only Note failed to reveal and protect the shared editor".into(),
+                );
+            }
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+        )?;
+        wait_records(
+            app,
+            "return {ready:!document.querySelector('.clipboard-editor')};",
+        )?;
+        samples.push(wait_dom(
+            app,
+            "return {ready:document.querySelector('.clipboard-detail')?.inert===false};",
+        )?);
+        Ok(())
+    })();
+    if let Some(database) = original_database {
+        *app.state::<AppState>().database.lock().unwrap() = database;
+        let _ = crate::clipboard_runtime::changed(app);
+    }
+    DomCase {
+        name: "clipboard full details and hover navigation",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_kind_text(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let mut original_database = None;
@@ -3228,10 +3571,13 @@ return {ready:rows.length===4&&image.includes('ocr'),text,image,blank,files,icon
             1500,
         )?;
         for (key, expected) in [
-            ("text", vec!["copy", "translate", "favorite", "pin"]),
-            ("image", vec!["copy", "translate", "ocr", "favorite", "pin"]),
-            ("blank", vec!["copy", "favorite", "pin"]),
-            ("files", vec!["copy", "favorite", "pin"]),
+            ("text", vec!["copy", "translate", "note", "favorite", "pin"]),
+            (
+                "image",
+                vec!["copy", "translate", "ocr", "note", "favorite", "pin"],
+            ),
+            ("blank", vec!["copy", "note", "favorite", "pin"]),
+            ("files", vec!["copy", "note", "favorite", "pin"]),
         ] {
             if actions[key] != serde_json::json!(expected) {
                 return Err(format!("clipboard text actions: {actions}"));
@@ -3562,6 +3908,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-editor",
             "clipboard-media",
             "clipboard-kind-text",
+            "clipboard-details",
             "translation-actions",
             "unified-records",
             "records-geometry",
@@ -3581,6 +3928,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_records_open(&app)
             } else if case == "clipboard-kind-text" {
                 run_clipboard_kind_text(&app)
+            } else if case == "clipboard-details" {
+                run_clipboard_details(&app)
             } else if case == "records-pagination" {
                 run_history_pagination(&app)
             } else if case == "records-geometry" {
@@ -3635,6 +3984,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         dom_cases.push(run_clipboard_media_layout(&app));
         dom_cases.push(run_clipboard_editor_layout(&app));
         dom_cases.push(run_clipboard_kind_text(&app));
+        dom_cases.push(run_clipboard_details(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
         let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());
         dom_cases.push(DomCase {

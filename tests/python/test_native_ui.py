@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'AX-only empty selection summon'}
+CASE_NAMES['clipboard-details'] = 'clipboard full details and hover navigation'
 
 
 def check_selected_report(result, run_id, selected):
@@ -83,7 +84,7 @@ def valid_report():
 
 
 @pytest.mark.dfx_diagnostics
-@pytest.mark.parametrize('selected', ['clipboard-kind-text', 'records-open', 'selection-open'])
+@pytest.mark.parametrize('selected', ['clipboard-kind-text', 'clipboard-details', 'records-open', 'selection-open'])
 def test_selected_report_accepts_only_its_current_complete_case(selected):
     name = CASE_NAMES[selected]
     result = {'runId': 'current', 'testCase': selected, 'passed': True,

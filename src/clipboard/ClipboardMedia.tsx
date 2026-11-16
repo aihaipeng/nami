@@ -4,7 +4,7 @@ import { File, Folder, Image } from 'lucide-react';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import type { ClipboardRecord } from './useClipboard';
 
-interface FileEntry { path: string; name: string; exists: boolean; isDir: boolean; isImage: boolean; iconDataUrl: string | null }
+export interface FileEntry { path: string; name: string; exists: boolean; isDir: boolean; isImage: boolean; iconDataUrl: string | null }
 
 function useVisible(native: boolean, trackVisibility = false) {
   const element = useRef<HTMLSpanElement>(null);
@@ -28,7 +28,7 @@ function previewPixelLimit() {
   return Math.min(2048, Math.max(320, Math.ceil(window.innerWidth * scale / 256) * 256));
 }
 
-function ImagePreview({ recordId, native, fallback }: { recordId: string; native: boolean; fallback?: ReactNode }) {
+export function ImagePreview({ recordId, native, fallback }: { recordId: string; native: boolean; fallback?: ReactNode }) {
   const { element, visible } = useVisible(native, true);
   const loaded = useRef<string | null>(null);
   const [url, setUrl] = useState<string | null>(null);
@@ -63,7 +63,7 @@ function FileIcon({ entry }: { entry: FileEntry }) {
   return entry.iconDataUrl && !failed ? <img src={entry.iconDataUrl} alt="" onError={() => setFailed(true)} /> : entry.isDir ? <Folder aria-hidden="true" /> : <File aria-hidden="true" />;
 }
 
-function FileList({ entries }: { entries: FileEntry[] }) {
+export function FileList({ entries }: { entries: FileEntry[] }) {
   return <span className="clipboard-files">{entries.map((entry) => <span key={entry.path} className="clipboard-file" title={entry.path} data-missing={!entry.exists}>
     <FileIcon entry={entry} />
     <span className="clipboard-file-name">{entry.name}</span>

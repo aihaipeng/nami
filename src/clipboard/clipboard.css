@@ -51,3 +51,26 @@
 .clipboard-navigation-confirm { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 16px; border-radius: inherit; background: hsl(var(--background) / .96); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); font-size: 12px; }
 .clipboard-navigation-confirm strong { font-size: 13px; }
 .clipboard-navigation-confirm p { color: hsl(var(--muted-foreground)); margin: 8px 0; }
+
+/* The detail pane shares the records toolbar, actions, edge mask and scrollbar. */
+.clipboard-detail.history-panel { position: relative; inset: auto; width: 100%; min-width: 0; }
+.translation-panel[hidden] { display: none; }
+.clipboard-detail-toolbar { height: 38px; flex: 0 0 38px; display: flex; align-items: center; justify-content: flex-end; padding: 10px 10px 0; }
+.clipboard-detail-toolbar .history-row-actions { position: relative; inset: auto; opacity: 1; visibility: visible; transform: none; }
+.clipboard-detail .history-viewport { position: relative; inset: auto; flex: 1; margin-top: 4px; }
+.clipboard-detail .history-list { padding: 8px 14px; }
+.clipboard-detail .history-items { margin: 0; padding: 0; clip-path: none; }
+.clipboard-detail-content { min-width: 0; }
+.clipboard-detail-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.clipboard-detail .clipboard-image-preview { display: flex; justify-content: center; margin: 0; }
+.clipboard-detail .clipboard-image-preview img { max-height: none; max-width: 100%; }
+.clipboard-detail .clipboard-files { margin: 0; gap: 10px; }
+.clipboard-detail .clipboard-file-name { white-space: normal; overflow-wrap: anywhere; }
+.clipboard-detail-metadata { flex: 0 0 auto; display: flex; flex-direction: column; gap: 5px; margin: 6px 14px 10px; padding-top: 10px; border-top: 1px solid hsl(var(--foreground) / .1); font-size: 11px; line-height: 16px; }
+.clipboard-detail-metadata > div { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.clipboard-detail-metadata > div > span:first-child { color: var(--history-secondary); flex: 0 0 72px; }
+.clipboard-detail-metadata .history-row-heading { align-items: flex-start; height: auto; min-width: 0; padding: 0; color: var(--history-label); }
+.clipboard-detail-metadata .history-origin { margin-top: 1px; }
+.clipboard-detail-metadata .history-languages { white-space: normal; overflow-wrap: anywhere; font-size: 11px; }
+.clipboard-detail-metadata time { display: none; }
+.clipboard-panel .history-row.selected { background: hsl(var(--foreground) / .04); }

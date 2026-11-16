@@ -304,11 +304,8 @@ pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
-        if regions.record_view != RecordView::Translation {
-            return Err("details_unavailable".into());
-        }
-        regions.translation_visible = !regions.translation_visible;
-        if regions.translation_visible {
+        regions.toggle_record_details();
+        if regions.translation_visible && regions.record_view == RecordView::Translation {
             state.history.lock().unwrap().restore_visual_selection();
         }
     }

@@ -40,7 +40,7 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved }: {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   useEffect(() => {
-    void invoke('records_editor_set', { dirty }).catch(() => { if (mounted.current) setError(true); });
+    void invoke('records_editor_set', { dirty, open: true }).catch(() => { if (mounted.current) setError(true); });
   }, [dirty]);
   useEffect(() => {
     let disposed = false;
@@ -52,7 +52,7 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved }: {
     return () => {
       disposed = true;
       void subscription.then((remove) => remove()).catch(() => {});
-      void invoke('records_editor_set', { dirty: false }).catch(() => {});
+      void invoke('records_editor_set', { dirty: false, open: false }).catch(() => {});
     };
   }, []);
   useEffect(() => { (navigation ? confirmation.current?.querySelector('button') : card.current?.querySelector('input'))?.focus({ preventScroll: true }); }, [navigation]);

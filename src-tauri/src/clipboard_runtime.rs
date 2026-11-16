@@ -44,12 +44,11 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
         .clipboard_revision
         .fetch_add(1, Ordering::SeqCst)
         + 1;
-    if let Some(view) = app
-        .get_webview("clipboard")
-        .or_else(|| app.get_webview("translation"))
-    {
-        view.emit("clipboard_changed", revision)
-            .map_err(|_| "event_emit")?;
+    for label in ["clipboard", "translation"] {
+        if let Some(view) = app.get_webview(label) {
+            view.emit("clipboard_changed", revision)
+                .map_err(|_| "event_emit")?;
+        }
     }
     Ok(())
 }

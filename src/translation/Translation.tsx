@@ -8,6 +8,7 @@ import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, editSource } from '../shared/source';
 import { cn } from '../lib/utils';
+import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
 import { HistoryIcon } from './HistoryIcon';
 import { historySamples, type HistoryRecord, type HistorySelection } from './history';
@@ -46,6 +47,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const normalizedCaret = useRef<number | null>(null);
   const select = useRef<(record: HistoryRecord, retranslate: boolean) => void>(() => {});
   const state = snapshot.window;
+  const clipboardDetails = state.recordView === 'clipboard';
   const committedHistoryWidth = useRef(state.historyWidth);
   const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
   useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
@@ -125,7 +127,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useEffect(() => { void command('translation_columns_set', { secondaryEnabled: secondary !== 'none' }); }, [secondary]);
 
   useEffect(() => {
-    if (state.translationVisible && !state.historyVisible) input.current?.focus({ preventScroll: true });
+    if (state.translationVisible && !state.historyVisible && !clipboardDetails) input.current?.focus({ preventScroll: true });
   }, [state.translationVisible]);
 
   useLayoutEffect(() => {
@@ -300,7 +302,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     <RecordsWorkspace t={t} snapshot={snapshot} command={command} native={native} activity={activity} selectedId={selectedId} onSelect={native ? undefined : selectHistory} />
     </div>}
     <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
-    <section className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}
+    {clipboardDetails && <ClipboardDetail t={t} snapshot={snapshot} command={command} native={native} activity={activity} />}
+    <section hidden={clipboardDetails} className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}
       onKeyDown={(event) => keydown(event, 'translation')}
       onKeyDownCapture={(event) => {
         if (primaryPressed(event)) { keydown(event, 'translation'); if (event.defaultPrevented) event.stopPropagation(); }

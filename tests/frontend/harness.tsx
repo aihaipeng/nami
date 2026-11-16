@@ -72,6 +72,7 @@ beforeEach(() => {
   bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null, totalRecords: historySamples.length, hasMore: false, generation: 0 };
   historyQuery = ''; historyFavorites = false; historyLoaded = 100;
+  bridge.snapshot.window.recordView = 'translation';
   bridge.snapshot.window.historyVisible = true;
   bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
   bridge.listeners.clear(); frames.clear(); reducedMotion = false;
@@ -116,9 +117,15 @@ beforeEach(() => {
       const { view } = args as { view: 'clipboard' | 'translation' };
       bridge.snapshot.window.recordView = view;
       bridge.snapshot.window.historyVisible = true;
-      if (view === 'clipboard') { bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; }
+      bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; bridge.snapshot.window.clipboardDetailId = null;
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
+    if (name === 'clipboard_details_select') {
+      bridge.snapshot.window.clipboardDetailId = (args as { recordId: string | null }).recordId;
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
+    if (name === 'records_editor_set' && (args as { open?: boolean }).open !== undefined) { bridge.snapshot.window.recordsEditorOpen = (args as { open: boolean }).open; deliver('window_state', structuredClone(bridge.snapshot.window)); }
+    if (name === 'clipboard_note_open') deliver('clipboard_note_requested', (args as { recordId: string }).recordId);
     if (name === 'records_details_toggle') {
       bridge.snapshot.window.translationVisible = !bridge.snapshot.window.translationVisible;
       bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationVisible ? bridge.snapshot.window.translationWidth : 0;
@@ -173,6 +180,7 @@ export async function windowState(patch: Partial<WindowState>) {
 
 export async function mount(label: 'translation' | 'history' | 'clipboard' | 'settings' = 'translation') {
   bridge.label = label;
+  if (label === 'clipboard') { bridge.snapshot.window.recordView = 'clipboard'; bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; }
   if (label === 'history') bridge.snapshot.window.recordView = 'translation';
   const previous = bridge.invoke.mock.calls.filter(([name]) => name === 'app_snapshot').length;
   const result = render(<App />);

@@ -64,6 +64,18 @@ pub struct ClipboardDetail {
     pub title: String,
     pub text: String,
     pub kind: String,
+    pub id: String,
+    pub date: String,
+    pub is_favorite: bool,
+    pub is_pinned: bool,
+    pub source_app: Option<serde_json::Value>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub file_size: Option<u64>,
+    pub character_count: Option<usize>,
+    pub files: Vec<FileEntry>,
+    #[serde(skip)]
+    pub image_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -78,13 +90,21 @@ pub struct FileEntry {
 }
 
 pub fn file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
+    file_entries_with_limit(text, 3)
+}
+
+pub fn all_file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
+    file_entries_with_limit(text, MAX_FILE_COUNT)
+}
+
+fn file_entries_with_limit(text: &str, limit: usize) -> Result<Vec<FileEntry>, String> {
     let paths: Vec<String> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
     if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
         return Err("storage_corrupt".into());
     }
     paths
         .into_iter()
-        .take(3)
+        .take(limit)
         .map(|path| {
             let file = Path::new(&path);
             if !file.is_absolute() || path.contains('\0') {
@@ -398,7 +418,12 @@ mod file_display_tests {
             "[\"/tmp/a\\u0000\"]",
         ] {
             assert_eq!(file_entries(text).unwrap_err(), "storage_corrupt");
+            assert_eq!(all_file_entries(text).unwrap_err(), "storage_corrupt");
         }
+        assert_eq!(
+            all_file_entries("[\"/tmp/a\",\"/tmp/b\",\"/tmp/c\",\"relative\"]").unwrap_err(),
+            "storage_corrupt"
+        );
         let paths = vec![std::env::temp_dir().join("a"); MAX_FILE_COUNT + 1];
         assert_eq!(
             file_entries(&serde_json::to_string(&paths).unwrap()).unwrap_err(),

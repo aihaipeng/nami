@@ -1,3 +1,4 @@
+mod clipboard_detail;
 mod clipboard_runtime;
 mod clipboard_text;
 mod commands;
@@ -178,6 +179,8 @@ fn main() {
             commands::window_pin,
             commands::records_view_set,
             commands::records_details_toggle,
+            commands::clipboard_details_select,
+            commands::clipboard_note_open,
             commands::records_editor_set,
             commands::records_navigation_resolve,
             commands::history_visibility_set,

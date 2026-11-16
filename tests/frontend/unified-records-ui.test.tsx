@@ -88,7 +88,7 @@ describe('unified records workspace', () => {
     expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
     expect(document.activeElement).toBe(search('translation'));
     const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
-    expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages'));
+    expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages' && symbol !== 'note'));
     expect(clipboardRow.querySelector('[data-action=translate] .history-symbol')?.getAttribute('data-symbol')).toBe('languages');
     expect(translationRow.querySelector('[data-action=translate]')).toBeNull();
     expect(translationRow.querySelector('time')?.textContent).toBe(clipboardRow.querySelector('time')?.textContent);
@@ -208,8 +208,8 @@ describe('unified records workspace', () => {
   it('has one ordered toolbar, mutually exclusive modes and centered footer favorites', async () => {
     await mount('translation');
     const toolbar = panel('clipboard').querySelector<HTMLElement>('.history-toolbar')!;
-    expect(within(toolbar).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(['Clipboard', 'Translations', 'Pin records', 'Details unavailable']);
-    expect((within(toolbar).getByRole('button', { name: 'Details unavailable' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(toolbar).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(['Clipboard', 'Translations', 'Pin records', 'Expand details']);
+    expect((within(toolbar).getByRole('button', { name: 'Expand details' }) as HTMLButtonElement).disabled).toBe(false);
     expect(within(toolbar).getByRole('button', { name: 'Clipboard' }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Clipboard' }));
     expect(calls('records_view_set')).toHaveLength(0);
@@ -272,7 +272,7 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(search('clipboard'));
   });
 
-  it('keeps clipboard text unchanged when details are unavailable and preserves click-to-paste', async () => {
+  it('keeps clipboard text unchanged and preserves click-to-paste', async () => {
     await mount('translation');
     await waitFor(() => expect(within(panel('clipboard')).getByRole('button', { name: 'Clipboard: Saved text' })).toBeTruthy());
     fireEvent.click(within(panel('clipboard')).getByRole('button', { name: 'Clipboard: Saved text' }));
@@ -286,7 +286,7 @@ describe('unified records workspace', () => {
     fireEvent.contextMenu(row.closest('article')!); fireEvent.click(screen.getByRole('menuitem', { name: 'Note' }));
     const input = await screen.findByRole('textbox', { name: 'Content' });
     fireEvent.change(input, { target: { value: 'Changed content' } });
-    await waitFor(() => expect(calls('records_editor_set').at(-1)?.[1]).toEqual({ dirty: true }));
+    await waitFor(() => expect(calls('records_editor_set').at(-1)?.[1]).toEqual({ dirty: true, open: true }));
     await emit('records_navigation_requested', null);
     const confirmation = screen.getByRole('alertdialog', { name: 'Save changes?' });
     fireEvent.click(within(confirmation).getByRole('button', { name: choice }));

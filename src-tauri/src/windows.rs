@@ -120,6 +120,7 @@ struct StageGeometry {
     translation_width: f64,
     history_visible: bool,
     translation_visible: bool,
+    translation_content: bool,
 }
 
 impl StageGeometry {
@@ -131,6 +132,7 @@ impl StageGeometry {
             translation_width: state.translation_width,
             history_visible: state.history_visible,
             translation_visible: state.translation_visible,
+            translation_content: state.record_view == RecordView::Translation,
         }
     }
 
@@ -263,6 +265,7 @@ struct StageState {
     translation_width: Cell<f64>,
     history_visible: Cell<bool>,
     translation_visible: Cell<bool>,
+    translation_content: Cell<bool>,
     translation_view: Cell<usize>,
     clipboard_view: Cell<usize>,
 }
@@ -343,6 +346,7 @@ impl TranslationStage {
             translation_width: state.translation_width.get(),
             history_visible: state.history_visible.get(),
             translation_visible: state.translation_visible.get(),
+            translation_content: state.translation_content.get(),
         };
         unsafe {
             let bounds: objc2_foundation::NSRect = objc2::msg_send![self, bounds];
@@ -373,9 +377,10 @@ impl TranslationStage {
                 self,
                 frames,
                 bounds.size.height,
-                state.translation_visible.get()
-                    || (geometry.mode == StageMode::Explicit
-                        && bounds.size.width > geometry.history_extent + 0.5),
+                state.translation_content.get()
+                    && (state.translation_visible.get()
+                        || (geometry.mode == StageMode::Explicit
+                            && bounds.size.width > geometry.history_extent + 0.5)),
             );
             let window: *mut AnyObject = objc2::msg_send![self, window];
             if !window.is_null() {
@@ -392,6 +397,7 @@ impl TranslationStage {
         state.translation_width.set(geometry.translation_width);
         state.history_visible.set(geometry.history_visible);
         state.translation_visible.set(geometry.translation_visible);
+        state.translation_content.set(geometry.translation_content);
         unsafe {
             let _: () = objc2::msg_send![self, setNeedsLayout: true];
         }
@@ -831,6 +837,7 @@ fn begin_translation_resize(app: &AppHandle) -> Result<(), String> {
             translation_width: state.translation_width,
             history_visible: state.history_visible,
             translation_visible: state.translation_visible,
+            translation_content: state.record_view == RecordView::Translation,
         }
     };
     // AppKit owns the window frame and the stage keeps both WebViews glued to
@@ -1003,6 +1010,7 @@ fn set_native_frame(
         translation_width: state.translation_width,
         history_visible: state.history_visible,
         translation_visible: state.translation_visible,
+        translation_content: state.record_view == RecordView::Translation,
     });
     if let Some((frame, top)) = frame {
         let current_top = window
@@ -1297,11 +1305,8 @@ pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
-        if regions.record_view != RecordView::Translation {
-            return Err("details_unavailable".into());
-        }
-        regions.translation_visible = !regions.translation_visible;
-        if regions.translation_visible {
+        regions.toggle_record_details();
+        if regions.translation_visible && regions.record_view == RecordView::Translation {
             state.history.lock().unwrap().restore_visual_selection();
         }
     }
@@ -1447,7 +1452,23 @@ mod stage_layout_tests {
             translation_width,
             history_visible,
             translation_visible,
+            translation_content: true,
         }
+    }
+
+    #[test]
+    fn clipboard_details_keep_the_same_stage_frames_without_translation_controls() {
+        let mut state = WindowState {
+            history_visible: true,
+            history_extent: 360.0,
+            ..Default::default()
+        };
+        let clipboard = StageGeometry::explicit(&state, state.history_extent);
+        assert!(!clipboard.translation_content);
+        state.record_view = RecordView::Translation;
+        let translation = StageGeometry::explicit(&state, state.history_extent);
+        assert!(translation.translation_content);
+        assert_eq!(clipboard.frames(1280.0), translation.frames(1280.0));
     }
 
     #[test]

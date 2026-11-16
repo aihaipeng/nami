@@ -215,10 +215,10 @@ describe('clipboard text processing', () => {
     await mount('clipboard');
     await waitFor(() => expect(within(row('text-image')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
-    expect(actions('first')).toEqual(['Copy', 'Translate', 'Remove favorite', 'Pin record']);
-    expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Remove favorite', 'Pin record']);
-    expect(actions('ordinary')).toEqual(['Copy', 'Translate', 'Favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('ordinary-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('first')).toEqual(['Copy', 'Translate', 'Note', 'Remove favorite', 'Pin record']);
+    expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record']);
+    expect(actions('ordinary')).toEqual(['Copy', 'Translate', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
     for (const id of ['blank', 'empty-image', 'pinned']) {
       expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
       expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();

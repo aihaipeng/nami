@@ -3,6 +3,8 @@ export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
 export type WindowTarget = Exclude<Region, 'history'>;
 
 export interface WindowState {
+  recordsEditorOpen?: boolean;
+  clipboardDetailId?: string | null;
   recordView?: 'clipboard' | 'translation';
   recordsSession?: number;
   recordsFocus?: number;

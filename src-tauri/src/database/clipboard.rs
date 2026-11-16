@@ -422,8 +422,19 @@ impl HistoryDatabase {
             .map_err(storage_error)?;
         Ok(crate::clipboard::ClipboardDetail {
             title,
+            character_count: (record.kind == "text").then(|| record.text.chars().count()),
+            id: record.id,
+            date: record.date,
+            is_favorite: record.is_favorite,
+            is_pinned: record.is_pinned,
+            source_app: record.source_app,
+            image_path: record.image_path,
             text: record.text,
             kind: record.kind,
+            width: None,
+            height: None,
+            file_size: None,
+            files: Vec::new(),
         })
     }
 
@@ -580,6 +591,12 @@ mod tests {
         let detail = db.clipboard_detail("edit").unwrap();
         assert!(detail.title.is_empty());
         assert_eq!(detail.text, original.text);
+        assert_eq!(detail.id, original.id);
+        assert!(detail.is_favorite);
+        assert_eq!(detail.is_pinned, original.is_pinned);
+        assert_eq!(detail.date, original.date);
+        assert_eq!(detail.source_app, original.source_app);
+        assert_eq!(detail.character_count, Some(original.text.chars().count()));
         let edited = "Updated 🌊\ncomplete content ".repeat(100);
         db.clipboard_edit("edit", "My title", Some(&edited))
             .unwrap();

@@ -11,7 +11,7 @@ commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "r
 [[permission]]
 identifier = "allow-p0-clipboard"
 description = "Clipboard window may query and restore local clipboard history."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_record_has_text", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_details_select", "clipboard_note_open", "clipboard_record_has_text", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files"]
 
 [[permission]]
 identifier = "allow-p0-settings"

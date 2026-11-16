@@ -151,7 +151,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             if state.image_text_operation.load(Ordering::SeqCst) != operation
                 || state.operation.load(Ordering::SeqCst) != clipboard_operation
                 || regions.records_session != session
-                || !regions.history_visible
+                || (!regions.history_visible && !regions.translation_visible)
                 || regions.record_view != nami::model::RecordView::Clipboard
                 || state.records_dirty.load(Ordering::SeqCst)
             {

@@ -11,6 +11,8 @@ fn main() {
             "window_pin",
             "records_view_set",
             "records_details_toggle",
+            "clipboard_details_select",
+            "clipboard_note_open",
             "records_editor_set",
             "records_navigation_resolve",
             "history_visibility_set",

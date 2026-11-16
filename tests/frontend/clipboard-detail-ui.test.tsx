@@ -1,0 +1,199 @@
+// @vitest-environment jsdom
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { bridge, calls, emit, mount, windowState } from './harness';
+import { ClipboardDetail, type ClipboardDetailData } from '../../src/clipboard/ClipboardDetail';
+import { translator } from '../../src/shared/i18n';
+
+let records: ClipboardDetailData[];
+let fetchDetail: ((id: string) => Promise<ClipboardDetailData>) | undefined;
+const pane = () => screen.getByRole('region', { name: 'Clipboard details' });
+const row = (id: string) => document.querySelector<HTMLElement>(`.clipboard-panel [data-record-id="${id}"]`)!;
+const first = () => records.find(({ id }) => id === 'first')!;
+beforeEach(() => {
+  fetchDetail = undefined;
+  records = [
+    { id: 'pinned', kind: 'text', title: '', text: 'Pinned text', date: '2026-11-16T10:00:00Z', isFavorite: false, isPinned: true, width: null, height: null, fileSize: null, characterCount: 11, files: [] },
+    { id: 'first', kind: 'text', title: '', text: 'Complete first text\n'.repeat(60), date: '2026-11-16T09:00:00Z', isFavorite: false, isPinned: false, sourceApp: { name: 'An application with its complete long name', iconDataUrl: 'data:image/png;base64,abc' }, width: null, height: null, fileSize: null, characterCount: 1200, files: [] },
+    { id: 'second', kind: 'text', title: '', text: 'Second text', date: '2026-11-16T08:00:00Z', isFavorite: false, isPinned: false, width: null, height: null, fileSize: null, characterCount: 11, files: [] },
+  ];
+  bridge.snapshot.capabilities.nativeHistory = false;
+  bridge.snapshot.capabilities.nativeChrome = false;
+  bridge.snapshot.window.recordView = 'clipboard';
+  bridge.snapshot.window.translationVisible = false;
+  bridge.snapshot.window.translationExtent = 0;
+  const original = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    const id = (args as { recordId?: string })?.recordId;
+    if (name === 'clipboard_query') {
+      const page = { records: records.map(({ sourceApp, text, ...record }) => ({ ...record, text: text.slice(0, 120), sourceAppId: sourceApp ? 1 : null })), sources: { 1: first().sourceApp }, totalRecords: records.length, hasMore: false, cursor: null };
+      return { page, alternate: { ...page, records: [], totalRecords: 0 } };
+    }
+    if (name === 'clipboard_record_detail') return fetchDetail ? fetchDetail(id!) : structuredClone(records.find((record) => record.id === id)!);
+    if (name === 'clipboard_record_has_text') return id === 'image-text';
+    if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
+    if (name === 'clipboard_record_update') {
+      const record = records.find((record) => record.id === id)!;
+      const action = (args as { action: string }).action;
+      if (action === 'favorite') record.isFavorite = !record.isFavorite;
+      if (action === 'pin') record.isPinned = !record.isPinned;
+      if (action === 'delete') records = records.filter((record) => record.id !== id);
+      bridge.listeners.get('clipboard_changed')?.forEach((callback) => callback({ payload: 1 }));
+    }
+    return original(name, args);
+  });
+});
+async function open() {
+  await mount('translation');
+  await waitFor(() => expect(row('first')).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+}
+function direct() {
+  bridge.snapshot.window.translationVisible = true;
+  bridge.snapshot.window.clipboardDetailId = 'first';
+  return render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={async (name, args) => { await bridge.invoke(name, args); }} activity={vi.fn()} />);
+}
+
+describe('clipboard details', () => {
+  it('expands the first unpinned record, keeps full text and source name, and adds Note after text actions', async () => {
+    await open();
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
+    expect(row('first').classList.contains('selected')).toBe(true);
+    expect(row('pinned').classList.contains('selected')).toBe(false);
+    expect(document.querySelector<HTMLElement>('.translation-panel')?.hidden).toBe(true);
+    expect(within(pane()).getByText('An application with its complete long name')).toBeTruthy();
+    expect(within(pane()).getByText('1,200')).toBeTruthy();
+    expect(within(pane()).queryByText('Dimensions')).toBeNull();
+    expect(within(pane()).queryByText('File size')).toBeNull();
+    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['copy', 'translate', 'note', 'favorite', 'pin', 'delete']);
+    expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')?.getAttribute('style')).toBe(row('first').querySelector('[data-action=note] .history-symbol')?.getAttribute('style'));
+  });
+
+  it('follows hover and keyboard focus without pasting, keeps preview on leave, and resets to first on reopen', async () => {
+    await open();
+    fireEvent.mouseEnter(row('second'));
+    await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+    expect(row('second').classList.contains('selected')).toBe(true);
+    fireEvent.mouseLeave(row('second'));
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('second');
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    fireEvent.focus(row('pinned').querySelector('button')!);
+    await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+  });
+
+  it('ignores an old detail response after moving to another record or hiding', async () => {
+    let resolve!: (value: ClipboardDetailData) => void;
+    fetchDetail = (id) => id === 'first' ? new Promise((done) => { resolve = done; }) : Promise.resolve(records.find((record) => record.id === id)!);
+    await mount('translation');
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(resolve).toBeTypeOf('function'));
+    fireEvent.mouseEnter(row('second'));
+    await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+    await act(async () => resolve(first()));
+    expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('Second text');
+    await windowState({ translationVisible: false });
+    expect(document.querySelector('.clipboard-detail-content')).toBeNull();
+  });
+
+  it('refreshes favorite and pin state from events and routes Note to the existing left editor', async () => {
+    await open();
+    fireEvent.click(within(pane()).getByRole('button', { name: 'Favorite' }));
+    await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
+    expect(within(pane()).queryByRole('button', { name: 'Delete clipboard record' })).toBeNull();
+    fireEvent.click(within(pane()).getByRole('button', { name: 'Note' }));
+    expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
+    await waitFor(() => expect(pane().hasAttribute('inert')).toBe(true));
+    expect(calls('clipboard_note_open').at(-1)?.[1]).toEqual({ recordId: 'first' });
+    expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', first().text);
+  });
+
+  it('opens the existing editor when a note request arrives while the list is temporarily hidden', async () => {
+    await mount('translation');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    await windowState({ historyVisible: false, translationVisible: true, clipboardDetailId: 'first' });
+    await emit('clipboard_note_requested', 'first');
+    await windowState({ historyVisible: true });
+    expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', first().text);
+  });
+
+  it.each([['image-text', true], ['image-blank', false]] as const)('only exposes recognized image actions for %s', async (id, text) => {
+    records[1] = { ...first(), id, kind: 'image', text: 'Image', width: 2400, height: 1600, characterCount: null };
+    bridge.snapshot.window.clipboardDetailId = id;
+    bridge.snapshot.window.translationVisible = true;
+    render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
+    await waitFor(() => expect(within(pane()).getByText('2400 × 1600')).toBeTruthy());
+    await waitFor(() => expect(calls('clipboard_record_has_text').length).toBeGreaterThan(0));
+    await act(async () => {});
+    expect(!!within(pane()).queryByRole('button', { name: 'Extract text' })).toBe(text);
+    expect(!!within(pane()).queryByRole('button', { name: 'Translate' })).toBe(text);
+    expect(within(pane()).queryByText('Characters')).toBeNull();
+    expect(within(pane()).queryByText('File size')).toBeNull();
+    const actions = [...pane().querySelectorAll('[data-action]')].map((element) => (element as HTMLElement).dataset.action);
+    if (text) expect(actions.indexOf('note')).toBe(actions.indexOf('ocr') + 1);
+  });
+
+  it('shows every file and only the applicable size metadata', async () => {
+    records[1] = { ...first(), kind: 'files', text: '[]', characterCount: null, fileSize: 1536 * 1024, files: Array.from({ length: 5 }, (_, i) => ({ path: `/tmp/file-${i}.txt`, name: `file-${i}.txt`, exists: true, isDir: false, isImage: false, iconDataUrl: null })) };
+    direct();
+    await waitFor(() => expect(pane().querySelectorAll('.clipboard-file')).toHaveLength(5));
+    expect(within(pane()).getByText('1.5 MB')).toBeTruthy();
+    expect(within(pane()).queryByText('Characters')).toBeNull();
+    expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
+  });
+
+  it.each([
+    ['Copy', 'clipboard_record_use', { recordId: 'first', action: 'copy' }],
+    ['Translate', 'clipboard_record_process', { recordId: 'first', action: 'translate' }],
+    ['Pin record', 'clipboard_record_update', { recordId: 'first', action: 'pin' }],
+    ['Delete clipboard record', 'clipboard_record_update', { recordId: 'first', action: 'delete' }],
+  ] as const)('executes the detail %s action for the displayed complete record', async (label, name, args) => {
+    direct();
+    const button = await within(pane()).findByRole('button', { name: label });
+    fireEvent.click(button);
+    await waitFor(() => expect(calls(name).at(-1)?.[1]).toEqual(args));
+  });
+
+  it('reports a failed copy and restores the action buttons', async () => {
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_record_use' ? { status: 'failed', copyStatus: 'not_written', code: 'clipboard_write' } : original(name, args));
+    direct();
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Copy' }));
+    expect(await within(pane()).findByText('Unable to complete this action. Try again.')).toBeTruthy();
+    expect(within(pane()).getByRole('button', { name: 'Copy' })).toHaveProperty('disabled', false);
+  });
+
+  it('keeps the scrollbar hidden until user scroll, then hides after idle', async () => {
+    direct();
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+    const scroller = pane().querySelector('.history-list')!;
+    Object.defineProperties(scroller, { clientHeight: { value: 100, configurable: true }, scrollHeight: { value: 1000, configurable: true } });
+    fireEvent.scroll(scroller);
+    const bar = within(pane()).getByRole('scrollbar');
+    expect(bar.classList.contains('visible')).toBe(false);
+    fireEvent.pointerMove(bar); fireEvent.focus(bar);
+    expect(bar.classList.contains('visible')).toBe(false);
+    fireEvent.blur(bar);
+    expect(bar.classList.contains('visible')).toBe(false);
+    fireEvent.wheel(scroller);
+    expect(bar.classList.contains('visible')).toBe(true);
+    await waitFor(() => expect(bar.classList.contains('visible')).toBe(false), { timeout: 1600 });
+  });
+
+  it('shows unavailable instead of stale content after deletion, and handles Escape', async () => {
+    direct();
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+    fetchDetail = async () => { throw new Error('not_found'); };
+    await emit('clipboard_changed', 2);
+    expect(await within(pane()).findByRole('alert')).toHaveProperty('textContent', 'This record is unavailable.');
+    expect(pane().querySelector('.clipboard-detail-content')).toBeNull();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'translation' });
+  });
+});
