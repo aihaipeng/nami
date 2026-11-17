@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import noteIcon from '../assets/history/reference/note.svg?url';
 
 const symbols = import.meta.glob<string>('../assets/history/*.png', { eager: true, query: '?url', import: 'default' });
-type HistorySymbol = 'note' | 'keyboard' | 'clock' | 'list.bullet' | 'star' | 'star.fill' | 'pin' | 'pin.fill' | 'languages' | 'doc.on.doc' | 'trash' | 'magnifyingglass' | 'xmark.circle.fill' | 'chevron.left' | 'chevron.right' | 'text' | 'image' | 'files' | 'ocr';
+type HistorySymbol = 'note' | 'keyboard' | 'clock' | 'list.bullet' | 'star' | 'pin' | 'pin.fill' | 'languages' | 'doc.on.doc' | 'trash' | 'magnifyingglass' | 'xmark.circle.fill' | 'chevron.left' | 'chevron.right' | 'text' | 'image' | 'files' | 'ocr';
 const reference: Partial<Record<HistorySymbol, string>> = {
   text: 'reference-text',
   image: 'reference-image',
@@ -17,7 +17,6 @@ const reference: Partial<Record<HistorySymbol, string>> = {
   languages: 'reference-languages',
   'doc.on.doc': 'reference-copy',
   star: 'reference-star',
-  'star.fill': 'reference-star-filled',
   pin: 'reference-pin',
   'pin.fill': 'reference-pin-filled',
 };

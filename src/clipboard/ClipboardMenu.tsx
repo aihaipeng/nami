@@ -9,7 +9,7 @@ export function ClipboardMenu({ record, x, y, canPaste, onClose, onReturnFocus, 
 }) {
   const items = [
     { action: 'paste', label: 'Paste', icon: <ClipboardPaste aria-hidden="true" />, disabled: !canPaste },
-    { action: 'favorite', label: record.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name={record.isFavorite ? 'star.fill' : 'star'} /> },
+    { action: 'favorite', label: record.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: record.isFavorite },
     { action: 'pin', label: record.isPinned ? 'Unpin record' : 'Pin record', icon: <HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} /> },
     { action: 'note', label: 'Note', icon: <HistoryIcon name="note" /> },
     { action: 'delete', label: 'Delete', destructive: true, icon: <HistoryIcon name="trash" />, disabled: record.isFavorite || record.isPinned },

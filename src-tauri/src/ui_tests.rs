@@ -1593,6 +1593,153 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     }
 }
 
+fn verify_record_beam_motion(
+    app: &AppHandle,
+    samples: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let sample = evaluate_view_dom(
+        app,
+        "clipboard",
+        r#"
+const values=[];
+for(const width of [300,900]) {
+ const track=document.createElement('div');track.className='activity-beam';track.style.width=width+'px';track.style.setProperty('--beam-duration',((width+Math.min(width*.3,220))/240)+'s');track.append(document.createElement('span'));document.body.append(track);
+ const beam=track.firstElementChild,style=getComputedStyle(beam),animations=beam.getAnimations();
+ if(matchMedia('(prefers-reduced-motion: reduce)').matches){values.push({reduced:true,stopped:animations.length===0});track.remove();continue;}
+ const animation=animations[0];if(!animation){track.remove();return {error:'missing animation'};}animation.pause();
+ const positions=[0,250,500].map(time=>{animation.currentTime=time;return beam.getBoundingClientRect().left;});
+ values.push({width,count:animations.length,timing:style.animationTimingFunction,direction:style.animationDirection,step1:positions[1]-positions[0],step2:positions[2]-positions[1],duration:style.animationDuration});track.remove();
+}
+return {values};
+"#,
+    )?;
+    for value in sample["values"].as_array().ok_or("beam samples")? {
+        if value["reduced"] == true {
+            if value["stopped"] != true {
+                return Err(format!("reduced motion beam: {sample}"));
+            }
+        } else if value["count"] != 1
+            || value["timing"] != "linear"
+            || value["direction"] != "normal"
+            || (value["step1"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
+            || (value["step2"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
+        {
+            return Err(format!("beam speed or direction: {sample}"));
+        }
+    }
+    samples.push(sample);
+    Ok(())
+}
+
+fn verify_clipboard_action_feedback(
+    app: &AppHandle,
+    samples: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let record = nami::clipboard::ClipboardRecord {
+        id: "action-feedback".into(),
+        kind: "text".into(),
+        text: "Synthetic copy feedback".into(),
+        date: "2099-01-01T00:00:00Z".into(),
+        is_favorite: false,
+        is_pinned: false,
+        source_app: None,
+        image_path: None,
+        fingerprint: "action-feedback".into(),
+    };
+    app.state::<AppState>()
+        .database
+        .lock()
+        .unwrap()
+        .as_mut()
+        .ok_or("test database")?
+        .clipboard_insert(&record)?;
+    crate::clipboard_runtime::changed(app)?;
+    records_mode(app, "clipboard")?;
+    wait_records(
+        app,
+        "return {ready:!!document.querySelector('[data-record-id=action-feedback]')};",
+    )?;
+    on_main(app, |app| {
+        app.state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .history_pinned = false;
+        apply_translation(app)
+    })?;
+    evaluate_view_dom(app, "clipboard", "window.__copyButton=document.querySelector('[data-record-id=action-feedback] [data-action=copy] button');window.__copyBefore=window.__copyButton.querySelector('.history-symbol').getBoundingClientRect().width;window.__copyButton.click();return true;")?;
+    let copied = wait_records(
+        app,
+        r#"
+const button=window.__copyButton,icon=button.querySelector('.copy-success'),r=icon?.getBoundingClientRect(),color=icon&&getComputedStyle(icon).color,green=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(73, 170, 25)':'rgb(82, 196, 26)';
+return {ready:!!icon&&color===green,width:r?.width,height:r?.height,before:window.__copyBefore,color,beams:document.querySelectorAll('[role=progressbar]').length};
+"#,
+    )?;
+    if copied["width"] != 14
+        || copied["height"] != 14
+        || copied["before"] != 14
+        || copied["beams"] != 0
+    {
+        return Err(format!("copy feedback dimensions or activity: {copied}"));
+    }
+    if !app
+        .state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .history_visible
+    {
+        return Err("copy closed the unpinned records page".into());
+    }
+    samples.push(copied);
+    let restored = wait_records_attempts(app, "const button=window.__copyButton;return {ready:!!button.querySelector('[data-symbol=\"doc.on.doc\"]'),same:button===document.querySelector('[data-record-id=action-feedback] [data-action=copy] button')};", 80)?;
+    if restored["same"] != true {
+        return Err("copy feedback remounted the button".into());
+    }
+    samples.push(restored);
+    verify_record_beam_motion(app, samples)?;
+    for (label, active) in [("Favorite", true), ("Remove favorite", false)] {
+        evaluate_view_dom(app, "clipboard", &format!("window.__star=document.querySelector('[data-record-id=action-feedback] [data-action=favorite] .history-symbol');document.querySelector('[data-record-id=action-feedback] [aria-label=\"{label}\"]').click();return true;"))?;
+        let favorite = wait_records(
+            app,
+            &format!(
+                r#"const row=document.querySelector('[data-record-id=action-feedback]'),button=row.querySelector('[data-action=favorite] button'),icon=button.querySelector('.history-symbol');return {{ready:button.getAttribute('aria-pressed')==='{active}',same:icon===window.__star,symbol:icon.dataset.symbol,beams:document.querySelectorAll('[role=progressbar]').length}};"#
+            ),
+        )?;
+        if favorite["same"] != true || favorite["symbol"] != "star" || favorite["beams"] != 0 {
+            return Err(format!("favorite feedback: {favorite}"));
+        }
+        samples.push(favorite);
+        if active {
+            evaluate_view_dom(app,"clipboard","window.__footerStar=document.querySelector('.clipboard-panel .history-favorites .history-symbol');document.querySelector('.clipboard-panel .history-favorites').click();return true;")?;
+            let footer = wait_records(
+                app,
+                r#"const b=document.querySelector('.clipboard-panel .history-favorites'),i=b.querySelector('.history-symbol'),color=getComputedStyle(i).color,warning=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(216, 150, 20)':'rgb(250, 173, 20)';return {ready:b.getAttribute('aria-pressed')==='true'&&color===warning,same:i===window.__footerStar,symbol:i.dataset.symbol,color};"#,
+            )?;
+            if footer["same"] != true || footer["symbol"] != "star" {
+                return Err(format!("footer favorite: {footer}"));
+            }
+            samples.push(footer);
+            wait_records(
+                app,
+                "return {ready:!!document.querySelector('[data-record-id=action-feedback]')};",
+            )?;
+            evaluate_view_dom(app,"clipboard","document.querySelector('[data-record-id=action-feedback]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));return true;")?;
+            let menu = wait_records(
+                app,
+                r#"const b=[...document.querySelectorAll('[role=menuitem]')].find(b=>b.textContent==='Remove favorite'),i=b?.querySelector('.history-symbol'),color=i&&getComputedStyle(i).color,warning=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(216, 150, 20)':'rgb(250, 173, 20)';return {ready:!!i&&color===warning,symbol:i?.dataset.symbol,color};"#,
+            )?;
+            if menu["symbol"] != "star" {
+                return Err(format!("menu favorite: {menu}"));
+            }
+            samples.push(menu);
+            evaluate_view_dom(app,"clipboard","document.querySelector('[role=menu]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));document.querySelector('.clipboard-panel .history-favorites').click();return true;")?;
+            wait_records(app,"return {ready:!document.querySelector('[role=menu]')&&!!document.querySelector('[data-record-id=action-feedback]')&&document.querySelector('.clipboard-panel .history-favorites').getAttribute('aria-pressed')==='false'};")?;
+        }
+    }
+    Ok(())
+}
+
 fn run_clipboard_action_timing(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -1630,12 +1777,13 @@ const idle=read();row.querySelector('button').focus();const focused=row.matches(
                 for state in ["idle", "active"] {
                     if sample[state]["delay"] != "0s, 0s, 0s"
                         || sample[state]["easing"] != "ease-out, ease-out, ease"
-                        || sample[state]["timeDuration"] != "0.15s, 0.15s"
+                        || sample[state]["timeDuration"] != "0.15s"
                     {
                         return Err(format!("clipboard action transition: {sample}"));
                     }
                 }
                 samples.push(sample);
+                verify_clipboard_action_feedback(app, &mut samples)?;
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -2013,7 +2161,7 @@ return {ready:row.matches(':focus-within'),duration:getComputedStyle(actions).tr
         )?;
         if sample["duration"] != "0.15s"
             || sample["delay"] != "0s, 0s, 0s"
-            || sample["timeDuration"] != "0.15s, 0.15s"
+            || sample["timeDuration"] != "0.15s"
         {
             return Err(format!("record action timing: {sample}"));
         }
@@ -2042,7 +2190,32 @@ return {ready:row.matches(':focus-within'),duration:getComputedStyle(actions).tr
 }
 
 fn run_translation_action_timing(app: &AppHandle) -> DomCase {
-    run_record_action_timing(app, "translation", "translation action timing")
+    let mut case = run_record_action_timing(app, "translation", "translation action timing");
+    if !case.passed {
+        return case;
+    }
+    let result = (|| {
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .translation_visible = false;
+            apply_translation(app)
+        })?;
+        evaluate_view_dom(app, "clipboard", "window.__clickedRow=document.querySelector('#translation-history .history-items .history-row-select');window.__clickedRow.click();return true;")?;
+        wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
+        evaluate_view_dom(app, "clipboard", "window.__clickedRow.click();window.__clickedRow.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,detail:2}));return true;")?;
+        let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
+        if closed["beam"] != false {
+            return Err("record click showed activity".to_string());
+        }
+        case.samples.push(closed);
+        Ok::<_, String>(())
+    })();
+    case.passed = result.is_ok();
+    case.error = result.err();
+    case
 }
 
 fn run_records_geometry(app: &AppHandle) -> DomCase {
@@ -2125,6 +2298,25 @@ fn run_records_pinned(app: &AppHandle) -> DomCase {
             if mode == "clipboard" {
                 wait_records(app, "return {ready:!!document.querySelector('[data-record-id=\"pinned-boundary-2\"] img')?.naturalWidth};")?;
             }
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"window.__pinOrder={done:false};(async()=>{try{const p=document.querySelector('.record-view:not([hidden]) .history-panel'),command=p.id==='translation-history'?'history_record_update':'clipboard_record_update',rows=[...p.querySelectorAll('.history-items .history-row:not([hidden])')],ids=rows.slice(-2).map(r=>r.dataset.recordId),dates=rows.slice(-2).map(r=>r.querySelector('time').dateTime);for(const recordId of ids)await window.__TAURI_INTERNALS__.invoke(command,{recordId,action:'pin'});window.__pinOrder={done:true,ids,dates,command};}catch(error){window.__pinOrder={done:true,error:String(error)};}})();return true;"#,
+            )?;
+            let order = wait_records(
+                app,
+                r#"const test=window.__pinOrder,p=document.querySelector('.record-view:not([hidden]) .history-panel'),rows=[...p.querySelectorAll('.history-pinned .history-row:not([hidden])')],ids=rows.map(r=>r.dataset.recordId);return {ready:test?.done&&ids[0]===test.ids?.[1]&&ids[1]===test.ids?.[0],ids:ids.slice(0,2),dates:test.ids?.map(id=>p.querySelector(`[data-record-id="${id}"] time`).dateTime),originalDates:test.dates,error:test.error};"#,
+            )?;
+            if order["dates"] != order["originalDates"] {
+                return Err(format!("pin changed display dates: {order}"));
+            }
+            samples.push(order);
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"window.__pinOrderRestored=false;(async()=>{for(const recordId of window.__pinOrder.ids)await window.__TAURI_INTERNALS__.invoke(window.__pinOrder.command,{recordId,action:'pin'});window.__pinOrderRestored=true;})();return true;"#,
+            )?;
+            wait_records(app,"return {ready:window.__pinOrderRestored&&document.querySelectorAll('.record-view:not([hidden]) .history-pinned .history-row:not([hidden])').length===2};")?;
             for top in [0, 80, 160, 100_000] {
                 evaluate_view_dom(
                     app,
@@ -2582,23 +2774,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             "clipboard",
             r#"document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
         )?;
-        on_main(app, |app| {
-            if !app
-                .state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible
-            {
-                return Err("repeated click collapsed details".into());
-            }
-            Ok(())
-        })?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            "document.querySelector('#translation-history .records-details').click();return true;",
-        )?;
+        wait_records(app,"return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false'};")?;
         wait_motion(app)?;
         wait_records(
             app,

@@ -409,9 +409,21 @@ pub fn request_accessibility() -> bool {
     }
 }
 
+// Native UI fixtures never read or replace the user's general pasteboard.
+pub(super) unsafe fn runtime_pasteboard() -> *mut AnyObject {
+    #[cfg(feature = "ui-tests")]
+    {
+        msg_send![class!(NSPasteboard), pasteboardWithName: ns_string!("dev.local.nami.ui-tests.runtime")]
+    }
+    #[cfg(not(feature = "ui-tests"))]
+    {
+        msg_send![class!(NSPasteboard), generalPasteboard]
+    }
+}
+
 pub fn clipboard_version() -> i64 {
     unsafe {
-        let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        let board = runtime_pasteboard();
         let count: isize = msg_send![board, changeCount];
         count as i64
     }
@@ -419,7 +431,7 @@ pub fn clipboard_version() -> i64 {
 
 pub fn write_text(text: &str) -> Result<i64, (&'static str, Option<i64>)> {
     unsafe {
-        let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        let board = runtime_pasteboard();
         let text = NSString::from_str(text);
         let owned_version: isize = msg_send![board, clearContents];
         let success: bool =

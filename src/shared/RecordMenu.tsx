@@ -1,7 +1,7 @@
 import { useRef, type ReactNode } from 'react';
 import { FloatingPanel } from './FloatingPanel';
 
-export interface RecordMenuItem { action: string; label: string; icon: ReactNode; disabled?: boolean; destructive?: boolean }
+export interface RecordMenuItem { action: string; label: string; icon: ReactNode; disabled?: boolean; destructive?: boolean; active?: boolean }
 
 export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
   x: number; y: number; items: readonly RecordMenuItem[];
@@ -19,7 +19,7 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
         buttons[next]?.focus();
       }}>
-        {items.map((item) => <button key={item.action} type="button" role="menuitem" disabled={'disabled' in item && item.disabled} className={item.destructive ? 'clipboard-menu-delete' : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
+        {items.map((item) => <button key={item.action} type="button" role="menuitem" disabled={'disabled' in item && item.disabled} className={item.destructive ? 'clipboard-menu-delete' : item.action === 'favorite' && item.active ? 'record-favorite' : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
       </div>
     </FloatingPanel>
   </>;

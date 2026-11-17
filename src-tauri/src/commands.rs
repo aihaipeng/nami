@@ -678,20 +678,6 @@ pub async fn clipboard_record_use(
         Err(result) => {
             if result.copy_status == "current" {
                 promote_used_record(&app, promote_id).await?;
-                if result.status == "copied" {
-                    let pinned = app
-                        .state::<AppState>()
-                        .windows
-                        .lock()
-                        .unwrap()
-                        .history_pinned;
-                    if !pinned {
-                        on_main(&app, |app| {
-                            let _ = windows::hide_after_clipboard_use(&app);
-                        })
-                        .await?;
-                    }
-                }
             }
             reveal_failure(&app, operation, &result).await?;
             return Ok(result);

@@ -30,11 +30,15 @@
     --input: 220 13% 85%;
     --ring: 0 0% 35%;
     --radius: 0.625rem;
+    --record-favorite-color: #faad14;
+    --record-success-color: #52c41a;
     --glass-surface: hsl(var(--background) / .88);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       color-scheme: dark;
+      --record-favorite-color: #d89614;
+      --record-success-color: #49aa19;
       --background: 330 5% 7.5%;
       --foreground: 0 0% 100%;
       --card: 330 4% 10%;
@@ -302,10 +306,9 @@
 }
 
 .activity-beam { position: absolute; inset: 0 20px auto; height: 8px; pointer-events: none; overflow: hidden; }
-.activity-beam > span { position: absolute; top: 0; left: 0; display: block; height: 2px; width: 30%; max-width: 220px; border-radius: 1px; background: linear-gradient(90deg, transparent 0%, hsl(var(--foreground) / .4) 25%, hsl(var(--foreground)) 50%, hsl(var(--foreground) / .4) 75%, transparent 100%); box-shadow: 0 0 4px hsl(var(--foreground) / .9); animation: beam-travel 1.3s ease-in-out infinite alternate, beam-pulse .55s ease-in-out infinite alternate; }
-@keyframes beam-travel { from { left: 0; transform: translateX(0); } to { left: 100%; transform: translateX(-100%); } }
-@keyframes beam-pulse { from { opacity: .65; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .activity-beam > span { left: 50%; transform: translateX(-50%); opacity: 1; } }
+.activity-beam > span { position: absolute; top: 0; left: 0; display: block; height: 2px; width: 30%; max-width: 220px; border-radius: 1px; background: linear-gradient(90deg, transparent 0%, hsl(var(--foreground) / .4) 25%, hsl(var(--foreground)) 50%, hsl(var(--foreground) / .4) 75%, transparent 100%); box-shadow: 0 0 4px hsl(var(--foreground) / .9); animation: beam-travel var(--beam-duration, 2s) linear infinite; }
+@keyframes beam-travel { from { left: 0; transform: translateX(-100%); } to { left: 100%; transform: translateX(0); } }
+@media (prefers-reduced-motion: reduce) { .activity-beam > span { animation: none; left: 50%; transform: translateX(-50%); opacity: 1; } }
 
 .preview-navigation { display: flex; gap: 4px; }
 .preview-navigation button { padding: 5px 9px; font-size: 11px; border-radius: 6px; }
@@ -351,3 +354,8 @@ html[data-native-material=true] .app-surface.clipboard { box-shadow: none; }
 
 
 @media (prefers-reduced-motion: reduce) { .history-panel .history-row-actions, .history-panel .history-row time { transition: none !important; } }
+
+:is(.history-row-actions, .history-footer) .icon-button.record-favorite, .record-context-menu button.record-favorite .history-symbol { color: var(--record-favorite-color); }
+.history-row-actions .icon-button.record-copied { color: var(--record-success-color); }
+.history-row-actions .icon-button, .history-footer .history-favorites, .record-context-menu button .history-symbol { transition: color 150ms; }
+.history-row-actions .copy-success { width: 14px; height: 14px; stroke-width: 1.5; }

@@ -89,17 +89,30 @@ pub(crate) async fn update_record(
     let worker = app.clone();
     let worker_id = id.clone();
     let worker_action = action.clone();
-    let (previous, next) = tauri::async_runtime::spawn_blocking(move || {
+    let (previous, next, replacement) = tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<AppState>();
         let (previous, next) = state
             .history
             .lock()
             .unwrap()
             .prepare_update(&worker_id, &worker_action)?;
-        if let Some(database) = state.database.lock().unwrap().as_mut() {
+        let query = state.history_page.lock().unwrap().query.clone();
+        let reload_count = {
+            let history = state.history.lock().unwrap();
+            history
+                .requires_update_query(&previous, next.as_ref(), &query)
+                .then(|| history.snapshot().records.len() + 1)
+        };
+        let mut databases = state.database.lock().unwrap();
+        let replacement = if let Some(database) = databases.as_mut() {
             database.update(&previous, next.as_ref())?;
-        }
-        Ok::<_, String>((previous, next))
+            reload_count
+                .map(|count| database.page_prefix(&query, count))
+                .transpose()?
+        } else {
+            None
+        };
+        Ok::<_, String>((previous, next, replacement))
     })
     .await
     .map_err(|_| "storage_worker")?
@@ -112,17 +125,30 @@ pub(crate) async fn update_record(
             .unwrap()
             .query
             .clone();
-        app.state::<AppState>()
-            .history
-            .lock()
-            .unwrap()
-            .update_for_query(&id, &action, &query)?;
-        app.state::<AppState>()
+        let state = app.state::<AppState>();
+        state
             .history_page
             .lock()
             .unwrap()
             .cache
             .update_record(&previous, next.as_ref());
+        if let Some(page) = replacement {
+            let cursor = page.cursor.clone();
+            let loaded = {
+                let mut history = state.history.lock().unwrap();
+                history.apply_updated_page(page, &id, next);
+                history.loaded_page(cursor.clone())
+            };
+            let mut paging = state.history_page.lock().unwrap();
+            paging.cursor = cursor;
+            paging.cache.insert(query, loaded);
+        } else {
+            state
+                .history
+                .lock()
+                .unwrap()
+                .update_for_query(&id, &action, &query)?;
+        }
         publish_history(&app)?;
         Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
     })
@@ -267,6 +293,16 @@ async fn load_page(
     let cached = reset
         .then(|| state.history_page.lock().unwrap().cache.get(&request.query))
         .flatten();
+    let reload_count = if reset {
+        state
+            .history_page
+            .lock()
+            .unwrap()
+            .cache
+            .loaded_count(&request.query)
+    } else {
+        0
+    };
     let worker = app.clone();
     let work = request.clone();
     let page = if let Some(page) = cached {
@@ -275,11 +311,16 @@ async fn load_page(
         tauri::async_runtime::spawn_blocking(move || {
             let state = worker.state::<AppState>();
             let database = state.database.lock().unwrap();
-            database.as_ref().ok_or("storage_unavailable")?.page(
-                &work.query,
-                work.cursor.as_ref(),
-                crate::database::PAGE_SIZE,
-            )
+            let database = database.as_ref().ok_or("storage_unavailable")?;
+            if reset {
+                database.page_prefix(&work.query, reload_count)
+            } else {
+                database.page(
+                    &work.query,
+                    work.cursor.as_ref(),
+                    crate::database::PAGE_SIZE,
+                )
+            }
         })
         .await
         .map_err(|_| "storage_worker")?

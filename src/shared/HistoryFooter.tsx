@@ -21,7 +21,7 @@ export function HistoryFooter({ total, clipboard = false, favoritesOnly = false,
   }}>
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
     <div className="history-filters">
-      {onFavorites && <button type="button" className="icon-button history-favorites" aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name={favoritesOnly ? 'star.fill' : 'star'} /></button>}
+      {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
       {onKindChange && (['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}
     </div>
     <button ref={button} type="button" className="icon-button history-shortcuts" aria-label="Keyboard shortcuts" title="Keyboard shortcuts" aria-expanded={open} onClick={() => setOpen(!open)}><HistoryIcon name="keyboard" /></button>

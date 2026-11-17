@@ -141,7 +141,7 @@ pub fn read_clipboard() -> Result<Option<ClipboardCapture>, &'static str> {
         return Ok(None);
     }
     unsafe {
-        let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        let board = super::macos::runtime_pasteboard();
         let captured = read(board)?;
         Ok(captured.map(|(version, payload)| ClipboardCapture {
             version,
@@ -396,7 +396,7 @@ unsafe fn write(
 
 pub fn write_clipboard(payload: &ClipboardPayload) -> Result<i64, (&'static str, Option<i64>)> {
     unsafe {
-        let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        let board = super::macos::runtime_pasteboard();
         write(board, payload)
     }
 }

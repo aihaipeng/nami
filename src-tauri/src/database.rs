@@ -378,6 +378,22 @@ impl HistoryDatabase {
         Ok(())
     }
 
+    pub fn page_prefix(&self, query: &HistoryQuery, count: usize) -> Result<HistoryPage, String> {
+        let target = count.max(PAGE_SIZE);
+        let mut page = self.page(query, None, target.min(PAGE_SIZE))?;
+        while page.has_more && page.records.len() < target {
+            let next = self.page(
+                query,
+                page.cursor.as_ref(),
+                (target - page.records.len()).min(PAGE_SIZE),
+            )?;
+            page.records.extend(next.records);
+            page.cursor = next.cursor;
+            page.has_more = next.has_more;
+        }
+        Ok(page)
+    }
+
     pub fn update(
         &mut self,
         previous: &HistoryRecord,
@@ -391,7 +407,14 @@ impl HistoryDatabase {
             if next.id != previous.id {
                 return Err("storage_record".into());
             }
-            transaction.prepare_cached("UPDATE translation_records SET is_favorite=?1,is_pinned=?2 WHERE id=?3 AND is_favorite=?4 AND is_pinned=?5").map_err(storage_error)?.execute(params![next.is_favorite,next.is_pinned,previous.id,previous.is_favorite,previous.is_pinned]).map_err(storage_error)?
+            let order = if next.is_pinned && !previous.is_pinned {
+                transaction.query_row("SELECT MAX(?1,COALESCE(MAX(created_at),0)+1) FROM translation_records WHERE is_pinned=1", [chrono::Utc::now().timestamp_millis()], |row| row.get::<_, i64>(0)).map_err(storage_error)?
+            } else {
+                chrono::DateTime::parse_from_rfc3339(&previous.date)
+                    .map_err(|_| "storage_record")?
+                    .timestamp_millis()
+            };
+            transaction.prepare_cached("UPDATE translation_records SET is_favorite=?1,is_pinned=?2,created_at=CASE WHEN is_pinned<>?2 THEN ?6 ELSE created_at END WHERE id=?3 AND is_favorite=?4 AND is_pinned=?5").map_err(storage_error)?.execute(params![next.is_favorite,next.is_pinned,previous.id,previous.is_favorite,previous.is_pinned,order]).map_err(storage_error)?
         } else {
             if previous.is_favorite || previous.is_pinned {
                 return Err("history_protected".into());
@@ -447,6 +470,44 @@ mod tests {
             ),
         }
     }
+    #[test]
+    fn latest_pin_precedes_older_pins_and_unpin_restores_date_order_after_reopen() {
+        let fixture = Fixture::new();
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let mut newer = record("newer");
+        newer.date = "2026-11-15T12:00:00Z".into();
+        let older = record("older");
+        db.insert(&newer, "edge", || true).unwrap();
+        db.insert(&older, "edge", || true).unwrap();
+        let mut newer_pin = newer.clone();
+        newer_pin.is_pinned = true;
+        db.update(&newer, Some(&newer_pin)).unwrap();
+        let mut older_pin = older.clone();
+        older_pin.is_pinned = true;
+        db.update(&older, Some(&older_pin)).unwrap();
+        drop(db);
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let first = db.page(&HistoryQuery::default(), None, 1).unwrap();
+        assert_eq!(first.records[0].id, "older");
+        assert_eq!(first.records[0].date, older.date);
+        let second = db
+            .page(&HistoryQuery::default(), first.cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(second.records[0].id, "newer");
+        assert!(!second.has_more);
+        db.update(&older_pin, Some(&older)).unwrap();
+        db.update(&newer_pin, Some(&newer)).unwrap();
+        assert_eq!(
+            db.page(&HistoryQuery::default(), None, 10)
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+    }
+
     #[test]
     fn full_text_candidates_are_verified_against_literal_content_with_nul() {
         let fixture = Fixture::new();

@@ -22,7 +22,7 @@ import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import './clipboard.css';
 
-export function Clipboard({ t, snapshot, command, native, activity, active = true }: ViewProps & { active?: boolean }) {
+export function Clipboard({ t, snapshot, command, native, active = true }: ViewProps & { active?: boolean }) {
   const [session, setSession] = useState(0);
   const [kindFilter, setKindFilter] = useState<ClipboardKind | null>(null);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -148,29 +148,30 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
   }
 
   async function useRecord(recordId: string, action: 'copy' | 'paste') {
-    if (!native || (action === 'copy' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return;
+    if (!native || (action === 'copy' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return false;
     const current = ++operation.current;
-    activity(1); setSelected(recordId); setFeedback(null);
+    setSelected(recordId); setFeedback(null);
     try {
       const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId, action });
-      if (!mounted.current) return;
+      if (!mounted.current) return false;
       // Closing the panel bumps the operation generation before this returns. A row click writes the clipboard too.
       if (result.copyStatus === 'current') clipboard.noteCopied(recordId);
-      if (operation.current !== current) return;
+      if (operation.current !== current) return false;
       if (result.copyStatus === 'superseded') setFeedback('clipboardChanged');
       else if (result.status === 'dispatched' || result.status === 'copied') setFeedback(null);
       else setFeedback(result.code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : result.code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : result.copyStatus === 'current' ? null : 'copyFailed');
+      return result.copyStatus === 'current' && result.status === 'copied';
     } catch (error) {
       const code = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
       if (mounted.current && operation.current === current) setFeedback(code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : action === 'copy' ? 'copyFailed' : 'nativeError');
     }
-    finally { activity(-1); }
+    return false;
   }
 
   async function processRecord(recordId: string, action: 'translate' | 'ocr') {
     const current = ++operation.current;
     const revision = ++processingRevision.current;
-    activity(1); setProcessing(recordId); setProcessingError(null); setFeedback(null);
+    setProcessing(recordId); setProcessingError(null); setFeedback(null);
     try {
       await invoke('clipboard_record_process', { recordId, action });
     } catch (error) {
@@ -178,7 +179,6 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
         setProcessingError(action === 'ocr' ? 'Unable to extract and copy text. Try again.' : 'Unable to open this text for translation. Try again.');
       }
     } finally {
-      activity(-1);
       if (mounted.current && processingRevision.current === revision) setProcessing(null);
     }
   }
@@ -213,9 +213,9 @@ export function Clipboard({ t, snapshot, command, native, activity, active = tru
         <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} brightLabel />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : undefined} /> : record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : <span className="history-preview">{historyPreview(record.text)}</span>}
       </button>
-      <RecordActions t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
+      <RecordActions recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
         onNote={() => setEditing(record.id)} busy={processing !== null} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
-        onCopy={() => { void useRecord(record.id, 'copy'); }} onUpdate={(action) => { void clipboard.update(record.id, action); }} />
+        onCopy={() => useRecord(record.id, 'copy')} onUpdate={(action) => { void clipboard.update(record.id, action); }} />
     </article>;
   }
   return <section inert={editing !== null} className="history-panel clipboard-panel" aria-label={t('clipboard')}>

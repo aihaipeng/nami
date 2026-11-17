@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import { createRef } from 'react';
 import { HistoryList } from '../../src/shared/HistoryList';
+import { ActivityBeam } from '../../src/shared/ActivityBeam';
 import { RecordActions } from '../../src/shared/RecordActions';
 import { translator } from '../../src/shared/i18n';
 
@@ -46,6 +47,122 @@ async function switchView(kind: 'clipboard' | 'translation') {
 }
 
 describe('unified records workspace', () => {
+  it('keeps one outline favorite icon and changes only its color state', () => {
+    const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate: vi.fn() };
+    const view = render(<RecordActions {...props} favorite={false} />);
+    const icon = screen.getByRole('button', { name: 'Favorite' }).firstElementChild;
+    view.rerender(<RecordActions {...props} favorite />);
+    const favorite = screen.getByRole('button', { name: 'Remove favorite' });
+    expect(favorite.firstElementChild).toBe(icon);
+    expect(favorite.classList.contains('record-favorite')).toBe(true);
+    expect(icon?.getAttribute('data-symbol')).toBe('star');
+    view.rerender(<RecordActions {...props} favorite={false} />);
+    expect(screen.getByRole('button', { name: 'Favorite' }).firstElementChild).toBe(icon);
+    expect(screen.getByRole('button', { name: 'Favorite' }).classList.contains('record-favorite')).toBe(false);
+  });
+
+  it.each(['clipboard', 'translation'] as const)('uses the same outline favorite and active color in the %s footer and menu', async (kind) => {
+    await mount('clipboard');
+    if (kind === 'translation') await switchView(kind);
+    const pane = panel(kind);
+    const button = within(pane).getByRole('button', { name: kind === 'clipboard' ? 'Favorite clipboard records' : 'Favorite history' });
+    const icon = button.firstElementChild;
+    fireEvent.click(button);
+    expect(button.firstElementChild).toBe(icon);
+    expect(icon?.getAttribute('data-symbol')).toBe('star');
+    expect(button.classList.contains('record-favorite')).toBe(true);
+    const row = await waitFor(() => {
+      const element = pane.querySelector<HTMLElement>(kind === 'clipboard' ? '[data-record-id="clip-favorite"]' : '[data-record-id="sample-04"]');
+      expect(element).toBeTruthy(); return element!;
+    });
+    fireEvent.contextMenu(row);
+    const favorite = screen.getByRole('menuitem', { name: 'Remove favorite' });
+    expect(favorite.querySelector('[data-symbol="star"]')).toBeTruthy();
+    expect(favorite.classList.contains('record-favorite')).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    fireEvent.click(button);
+    expect(button.firstElementChild).toBe(icon);
+    expect(button.classList.contains('record-favorite')).toBe(false);
+  });
+
+  it('shows copy success only after confirmation, ignores repeats and restores the same-size copy after one second', async () => {
+    let finish!: (success: boolean) => void;
+    const onCopy = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    render(<RecordActions t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={onCopy} onUpdate={vi.fn()} />);
+    const button = screen.getByRole('button', { name: 'Copy' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(button.querySelector('.copy-success')).toBeNull();
+    vi.useFakeTimers();
+    try {
+      await act(async () => finish(true));
+      expect(button.classList.contains('record-copied')).toBe(true);
+      expect(button.querySelector('.copy-success')).toBeTruthy();
+      fireEvent.click(button);
+      expect(onCopy).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(999));
+      expect(button.querySelector('.copy-success')).toBeTruthy();
+      act(() => vi.advanceTimersByTime(1));
+      expect(button.querySelector('.copy-success')).toBeNull();
+      expect(button.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
+    } finally { vi.useRealTimers(); }
+    fireEvent.click(button);
+    await act(async () => finish(false));
+    expect(button.querySelector('.copy-success')).toBeNull();
+  });
+
+  it('does not carry pending copy feedback to the next detail record', async () => {
+    let finish!: (success: boolean) => void;
+    const props = { t: translator('en'), native: true, favorite: false, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: () => new Promise<boolean>((resolve) => { finish = resolve; }), onUpdate: vi.fn(), retainDelete: true };
+    const view = render(<RecordActions {...props} recordId="first" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    view.rerender(<RecordActions {...props} recordId="second" />);
+    await act(async () => finish(true));
+    expect(view.container.querySelector('.copy-success')).toBeNull();
+  });
+
+  it('moves the loading beam at 240 pixels per second across either window width', () => {
+    const box = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 400 } as DOMRect);
+    const view = render(<ActivityBeam label="Working" />);
+    expect(view.container.firstElementChild?.getAttribute('style')).toContain('--beam-duration: 2.1666666666666665s');
+    view.unmount();
+    box.mockReturnValue({ width: 1000 } as DOMRect);
+    const wide = render(<ActivityBeam label="Working" />);
+    expect(wide.container.firstElementChild?.getAttribute('style')).toContain('--beam-duration: 5.083333333333333s');
+    box.mockRestore();
+  });
+
+  it('opens on click, closes on the next click and treats double-click clicks the same way', async () => {
+    await mount('clipboard'); await switchView('translation');
+    const button = panel('translation').querySelector<HTMLElement>('[data-record-id="sample-03"] .history-row-select')!;
+    fireEvent.click(button, { detail: 1 });
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    fireEvent.click(button, { detail: 2 }); fireEvent.doubleClick(button, { detail: 2 });
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    expect(calls('history_sample_select')).toHaveLength(1);
+    fireEvent.click(button, { detail: 1 });
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    const next = panel('translation').querySelector<HTMLElement>('[data-record-id="sample-04"] .history-row-select')!;
+    fireEvent.click(next);
+    await waitFor(() => expect(bridge.history.selectedId).toBe('sample-04'));
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+  });
+
+  it('keeps a hovered next record open on its first real click and closes on its second click', async () => {
+    const user = userEvent.setup();
+    await mount('clipboard'); await switchView('translation');
+    const button = (id: string) => panel('translation').querySelector<HTMLElement>(`[data-record-id="${id}"] .history-row-select`)!;
+    await user.click(button('sample-03'));
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    await user.click(button('sample-04'));
+    expect(bridge.history.selectedId).toBe('sample-04');
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    await user.click(button('sample-04'));
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    await act(async () => { fireEvent.click(button('sample-03')); fireEvent.click(button('sample-03')); });
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+  });
+
   it('keeps a protected delete button for its exit animation, blocks it immediately and can reverse the exit', () => {
     const onUpdate = vi.fn();
     const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate };
@@ -213,7 +330,7 @@ describe('unified records workspace', () => {
     const button = row.querySelector<HTMLButtonElement>('.history-row-select')!;
     await user.click(button);
     expect(document.activeElement).toBe(button);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
     fireEvent.contextMenu(row);
     await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
     expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Source text' }));

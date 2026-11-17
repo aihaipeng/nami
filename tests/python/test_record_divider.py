@@ -46,3 +46,11 @@ def test_detail_metadata_height_stays_three_rows():
     clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
     assert 'height: calc(10px + 16px * 3 + 5px * 2)' in clipboard
     assert '.clipboard-detail-metadata { position: relative; flex: 0 0 auto;' in clipboard
+
+
+def test_loading_beam_is_forward_linear_and_reduced_motion_stops_it():
+    styles = (ROOT / 'src/styles.css').read_text()
+    assert 'beam-travel var(--beam-duration, 2s) linear infinite' in styles
+    assert 'beam-pulse' not in styles
+    assert 'infinite alternate' not in styles
+    assert '@media (prefers-reduced-motion: reduce) { .activity-beam > span { animation: none;' in styles

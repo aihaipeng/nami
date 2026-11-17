@@ -445,7 +445,7 @@ impl HistoryDatabase {
         let id = if let Some(id) = duplicate {
             transaction
                 .execute(
-                    "UPDATE clipboard_records SET date=?1,source_app_id=?2,created_at=?4 WHERE id=?3",
+                    "UPDATE clipboard_records SET date=?1,source_app_id=?2,created_at=CASE WHEN is_pinned THEN MAX(?4,COALESCE((SELECT MAX(created_at) FROM clipboard_records WHERE is_pinned=1),0)+1) ELSE ?4 END WHERE id=?3",
                     params![record.date, source_id, id, created],
                 )
                 .map_err(storage_error)?;
@@ -620,7 +620,25 @@ impl HistoryDatabase {
             .ok_or("not_found")?;
         let sql = match action {
             "favorite" => "UPDATE clipboard_records SET is_favorite=NOT is_favorite WHERE id=?1",
-            "pin" => "UPDATE clipboard_records SET is_pinned=NOT is_pinned WHERE id=?1",
+            "pin" => {
+                let order = if pinned {
+                    let date: String = transaction
+                        .query_row(
+                            "SELECT date FROM clipboard_records WHERE id=?1",
+                            [id],
+                            |row| row.get(0),
+                        )
+                        .map_err(storage_error)?;
+                    chrono::DateTime::parse_from_rfc3339(&date)
+                        .map_err(|_| "storage_record")?
+                        .timestamp_millis()
+                } else {
+                    transaction.query_row("SELECT MAX(?1,COALESCE(MAX(created_at),0)+1) FROM clipboard_records WHERE is_pinned=1", [chrono::Utc::now().timestamp_millis()], |row| row.get::<_, i64>(0)).map_err(storage_error)?
+                };
+                transaction.execute("UPDATE clipboard_records SET is_pinned=NOT is_pinned,created_at=?2 WHERE id=?1", params![id,order]).map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                return Ok(());
+            }
             "delete" if (favorite || pinned) && !allow_protected => {
                 return Err("clipboard_protected".into())
             }
@@ -642,7 +660,7 @@ impl HistoryDatabase {
         let updated = self
             .connection
             .execute(
-                "UPDATE clipboard_records SET date=?1,created_at=?2 WHERE id=?3",
+                "UPDATE clipboard_records SET date=?1,created_at=CASE WHEN is_pinned THEN MAX(?2,COALESCE((SELECT MAX(created_at) FROM clipboard_records WHERE is_pinned=1),0)+1) ELSE ?2 END WHERE id=?3",
                 params![date, created, id],
             )
             .map_err(storage_error)?;
@@ -1376,6 +1394,60 @@ mod tests {
                 .unwrap()
                 .total_records,
             99
+        );
+    }
+
+    #[test]
+    fn copying_pinned_records_beats_future_pin_order_for_buttons_and_capture() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let mut future = record("future", "future");
+        future.date = "2099-01-01T00:00:00Z".into();
+        future.is_pinned = true;
+        let mut older = record("older", "older");
+        older.is_pinned = true;
+        db.clipboard_insert(&future).unwrap();
+        db.clipboard_insert(&older).unwrap();
+        db.clipboard_promote("older").unwrap();
+        assert_eq!(
+            db.clipboard_page("", false, None, 10).unwrap().records[0].id,
+            "older"
+        );
+        db.clipboard_insert(&future).unwrap();
+        assert_eq!(
+            db.clipboard_page("", false, None, 10).unwrap().records[0].id,
+            "future"
+        );
+        assert_eq!(db.clipboard_record("future").unwrap().date, future.date);
+    }
+
+    #[test]
+    fn latest_pin_precedes_older_pins_without_changing_copy_date() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let mut newer = record("newer", "newer");
+        newer.date = "2026-11-15T12:00:00Z".into();
+        let older = record("older", "older");
+        db.clipboard_insert(&newer).unwrap();
+        db.clipboard_insert(&older).unwrap();
+        db.clipboard_update("newer", "pin").unwrap();
+        db.clipboard_update("older", "pin").unwrap();
+        let first = db.clipboard_page("", false, None, 1).unwrap();
+        assert_eq!(first.records[0].id, "older");
+        assert_eq!(first.records[0].date, older.date);
+        let second = db
+            .clipboard_page("", false, first.cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(second.records[0].id, "newer");
+        assert!(!second.has_more);
+        db.clipboard_update("older", "pin").unwrap();
+        db.clipboard_update("newer", "pin").unwrap();
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
         );
     }
 

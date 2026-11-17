@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import type { ClipboardResult } from '../shared/contracts';
-import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordHeading } from '../shared/RecordHeading';
 import { RecordFeedback } from '../shared/RecordFeedback';
@@ -59,7 +58,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
   async function action(type: 'copy' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
-    if (!current || busy) return;
+    if (!current || busy) return false;
     const revision = ++operation.current;
     setBusy(true); setFeedback(null);
     try {
@@ -68,9 +67,11 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         if (result.copyStatus === 'superseded' || result.status !== 'copied' && result.status !== 'dispatched') throw new Error('copy_failed');
       } else if (type === 'translate' || type === 'ocr') await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type, ...(type === 'delete' ? { allowProtected: true } : {}) });
+      return type === 'copy' && operation.current === revision;
     } catch (error) {
       if (operation.current === revision && String(error) !== 'cancelled') setFeedback('Unable to complete this action. Try again.');
     } finally { if (operation.current === revision) setBusy(false); }
+    return false;
   }
   const singleImage = current?.kind === 'image' || current?.kind === 'files' && current.files.length === 1 && current.files[0].exists && current.files[0].isImage;
   useEffect(() => {
@@ -86,11 +87,10 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   }, [active, snapshot.window.recordsEditorOpen, snapshot.capabilities.primaryModifier, command]);
   return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details">
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
-      {shown && <RecordActions t={t} native={native && !busy} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
-        onCopy={() => { void action('copy'); }} onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
+      {shown && <RecordActions recordId={shown.id} t={t} native={native && !busy} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
+        onCopy={() => action('copy')} onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
         onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
     </header>
-    {active && busy && <ActivityBeam label="Working" />}
     <HistoryList scrollOnly key={id ?? 'empty'} active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
         {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} />}

@@ -16,6 +16,7 @@ pub struct HistorySnapshot {
 #[derive(Clone, Default)]
 pub struct HistoryPageCache {
     pages: Vec<(crate::database::HistoryQuery, crate::database::HistoryPage)>,
+    invalid: Vec<crate::database::HistoryQuery>,
 }
 
 impl HistoryPageCache {
@@ -25,8 +26,15 @@ impl HistoryPageCache {
     ) -> Option<crate::database::HistoryPage> {
         self.pages
             .iter()
-            .find(|(key, _)| key == query)
+            .find(|(key, _)| key == query && !self.invalid.contains(key))
             .map(|(_, page)| page.clone())
+    }
+
+    pub fn loaded_count(&self, query: &crate::database::HistoryQuery) -> usize {
+        self.pages
+            .iter()
+            .find(|(key, _)| key == query)
+            .map_or(0, |(_, page)| page.records.len())
     }
 
     pub fn insert(
@@ -37,15 +45,29 @@ impl HistoryPageCache {
         // Retain the two already-browsed views for the current search without reading more rows.
         self.pages
             .retain(|(key, _)| key.text == query.text && key != &query);
+        self.invalid
+            .retain(|key| key.text == query.text && key != &query);
         self.pages.push((query, page));
     }
 
     pub fn clear(&mut self) {
         self.pages.clear();
+        self.invalid.clear();
     }
 
     pub fn update_record(&mut self, previous: &HistoryRecord, next: Option<&HistoryRecord>) {
         for (query, page) in &mut self.pages {
+            if self.invalid.contains(query) {
+                continue;
+            }
+            if previous.is_pinned
+                && next.is_some_and(|record| record.is_pinned && query.matches(record))
+                && !query.matches(previous)
+                && !page.records.iter().any(|record| record.id == previous.id)
+            {
+                self.invalid.push(query.clone());
+                continue;
+            }
             let was_match = query.matches(previous);
             let now_match = next.is_some_and(|record| query.matches(record));
             let loaded = page
@@ -63,16 +85,22 @@ impl HistoryPageCache {
                 } else {
                     page.records.remove(index);
                 }
-            } else if let Some(record) =
-                next.filter(|record| now_match && (!was_match || record.is_pinned))
-            {
+            } else if let Some(record) = next.filter(|record| {
+                now_match && (!was_match || record.is_pinned && !previous.is_pinned)
+            }) {
                 page.records.insert(0, record.clone());
             }
-            page.records.sort_by(|a, b| {
-                b.is_pinned
-                    .cmp(&a.is_pinned)
-                    .then_with(|| b.date.cmp(&a.date))
-            });
+            if next.is_some_and(|record| record.is_pinned && !previous.is_pinned) {
+                if let Some(index) = page
+                    .records
+                    .iter()
+                    .position(|record| record.id == previous.id)
+                {
+                    let record = page.records.remove(index);
+                    page.records.insert(0, record);
+                }
+            }
+            order_records(&mut page.records);
             page.has_more &= page.records.len() < page.total_records;
         }
     }
@@ -84,13 +112,22 @@ impl HistoryPageCache {
             }
             page.total_records += 1;
             page.records.insert(0, record.clone());
-            page.records.sort_by(|a, b| {
-                b.is_pinned
-                    .cmp(&a.is_pinned)
-                    .then_with(|| b.date.cmp(&a.date))
-            });
+            order_records(&mut page.records);
         }
     }
+}
+
+fn order_records(records: &mut [HistoryRecord]) {
+    records.sort_by_cached_key(|record| {
+        let time = if record.is_pinned {
+            0
+        } else {
+            chrono::DateTime::parse_from_rfc3339(&record.date)
+                .map(|date| date.timestamp_millis())
+                .unwrap_or_default()
+        };
+        (std::cmp::Reverse(record.is_pinned), std::cmp::Reverse(time))
+    });
 }
 
 pub struct HistoryStore {
@@ -182,6 +219,7 @@ impl HistoryStore {
             return Err("history_record".into());
         }
         self.records.insert(0, record);
+        order_records(&mut self.records);
         self.indices = self
             .records
             .iter()
@@ -273,6 +311,7 @@ impl HistoryStore {
                     self.records.push(record);
                 }
             }
+            order_records(&mut self.records);
         }
         self.indices = self
             .records
@@ -318,6 +357,34 @@ impl HistoryStore {
         self.update_for_query(id, action, &crate::database::HistoryQuery::default())
     }
 
+    pub fn requires_update_query(
+        &self,
+        previous: &HistoryRecord,
+        next: Option<&HistoryRecord>,
+        query: &crate::database::HistoryQuery,
+    ) -> bool {
+        previous.is_pinned
+            && !query.matches(previous)
+            && next.is_some_and(|record| record.is_pinned && query.matches(record))
+            && !self.indices.contains_key(&previous.id)
+    }
+
+    pub fn apply_updated_page(
+        &mut self,
+        page: crate::database::HistoryPage,
+        id: &str,
+        next: Option<HistoryRecord>,
+    ) {
+        self.apply_page(page, true);
+        if self
+            .selected_record
+            .as_ref()
+            .is_some_and(|record| record.id == id)
+        {
+            self.selected_record = next;
+        }
+    }
+
     pub fn update_for_query(
         &mut self,
         id: &str,
@@ -325,6 +392,9 @@ impl HistoryStore {
         query: &crate::database::HistoryQuery,
     ) -> Result<(), String> {
         let (previous, next) = self.prepare_update(id, action)?;
+        if self.requires_update_query(&previous, next.as_ref(), query) {
+            return Err("history_refresh_required".into());
+        }
         let was_match = query.matches(&previous);
         let now_match = next.as_ref().is_some_and(|record| query.matches(record));
         if let Some(index) = self.indices.get(id).copied() {
@@ -336,6 +406,16 @@ impl HistoryStore {
         } else if !was_match && now_match {
             self.records.insert(0, next.clone().unwrap());
         }
+        if next
+            .as_ref()
+            .is_some_and(|record| record.is_pinned && !previous.is_pinned)
+        {
+            if let Some(index) = self.records.iter().position(|record| record.id == id) {
+                let record = self.records.remove(index);
+                self.records.insert(0, record);
+            }
+        }
+        order_records(&mut self.records);
         self.indices = self
             .records
             .iter()
@@ -517,6 +597,243 @@ mod tests {
         assert_eq!(cache.get(&favorite_query).unwrap().total_records, 1);
         store.apply_page(restored, true);
         assert_eq!(store.record("deep").unwrap().text, text);
+    }
+
+    #[test]
+    fn requerying_new_favorite_pins_preserves_deep_page_and_continuation() {
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        let query = crate::database::HistoryQuery {
+            favorites_only: true,
+            ..Default::default()
+        };
+        for index in 0..205 {
+            let mut item = record(&format!("item-{index:03}"));
+            item.date = format!("2026-11-15T00:{:02}:{:02}Z", index / 60, index % 60);
+            database.insert(&item, "edge", || true).unwrap();
+            let mut next = item.clone();
+            next.is_favorite = index > 0;
+            database.update(&item, Some(&next)).unwrap();
+        }
+        for id in ["item-000", "item-204"] {
+            let previous = database.record(id).unwrap().unwrap();
+            let mut next = previous.clone();
+            next.is_pinned = true;
+            database.update(&previous, Some(&next)).unwrap();
+        }
+        let mut store = HistoryStore::new(vec![]);
+        store.apply_page(database.page_prefix(&query, 200).unwrap(), true);
+        let old = database.record("item-000").unwrap().unwrap();
+        store.selected_record = Some(old.clone());
+        store.selected_id = Some(old.id.clone());
+        let mut next = old.clone();
+        next.is_favorite = true;
+        database.update(&old, Some(&next)).unwrap();
+        let page = database
+            .page_prefix(&query, store.snapshot().records.len() + 1)
+            .unwrap();
+        let cursor = page.cursor.clone();
+        store.apply_updated_page(page, &old.id, Some(next));
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.records.len(), 201);
+        assert_eq!(snapshot.records[0].id, "item-204");
+        assert_eq!(snapshot.records[1].id, "item-000");
+        assert!(store.record("item-000").unwrap().is_favorite);
+        assert!(snapshot.has_more);
+        store.apply_page(database.page(&query, cursor.as_ref(), 100).unwrap(), false);
+        assert_eq!(store.snapshot().records.len(), 205);
+        assert!(!store.has_more());
+    }
+
+    #[test]
+    fn newly_favorited_existing_pin_requires_authoritative_order() {
+        let favorites = crate::database::HistoryQuery {
+            favorites_only: true,
+            ..Default::default()
+        };
+        let mut old = record("old-pin");
+        old.is_pinned = true;
+        let mut new = record("new-pin");
+        new.is_pinned = true;
+        new.is_favorite = true;
+        let mut store = HistoryStore::new(vec![new.clone()]);
+        store.selected_id = Some(old.id.clone());
+        store.selected_record = Some(old.clone());
+        let mut cache = HistoryPageCache::default();
+        cache.insert(
+            crate::database::HistoryQuery::default(),
+            store.loaded_page(None),
+        );
+        cache.insert(favorites.clone(), store.loaded_page(None));
+        let mut favorite = old.clone();
+        favorite.is_favorite = true;
+        cache.update_record(&old, Some(&favorite));
+        assert!(cache.get(&favorites).is_none());
+        assert_eq!(cache.loaded_count(&favorites), 1);
+        assert_eq!(
+            cache
+                .get(&crate::database::HistoryQuery::default())
+                .unwrap()
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new-pin"]
+        );
+        assert_eq!(
+            store.update_for_query(&old.id, "favorite", &favorites),
+            Err("history_refresh_required".into())
+        );
+        assert_eq!(store.snapshot().records[0].id, "new-pin");
+    }
+
+    #[test]
+    fn flag_updates_preserve_database_time_zone_order() {
+        let mut newer = record("newer");
+        newer.date = "2026-11-15T01:00:00Z".into();
+        let mut older = record("older");
+        older.date = "2026-11-15T08:00:00+08:00".into();
+        let mut store = HistoryStore::new(vec![newer, older]);
+        store.update("older", "favorite").unwrap();
+        assert_eq!(
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+    }
+
+    #[test]
+    fn paging_after_unpinning_the_cursor_keeps_every_record_in_order() {
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        for (id, date) in [
+            ("newer", "2026-11-17T00:00:00Z"),
+            ("middle", "2026-11-16T00:00:00Z"),
+            ("older", "2026-11-15T00:00:00Z"),
+        ] {
+            let mut item = record(id);
+            item.date = date.into();
+            database.insert(&item, "edge", || true).unwrap();
+        }
+        for id in ["newer", "older"] {
+            let previous = database.record(id).unwrap().unwrap();
+            let mut next = previous.clone();
+            next.is_pinned = true;
+            database.update(&previous, Some(&next)).unwrap();
+        }
+        let query = crate::database::HistoryQuery::default();
+        let first = database.page(&query, None, 1).unwrap();
+        let mut cursor = first.cursor.clone();
+        let mut store = HistoryStore::new(vec![]);
+        store.apply_page(first, true);
+        let (previous, next) = store.prepare_update("older", "pin").unwrap();
+        database.update(&previous, next.as_ref()).unwrap();
+        store.update("older", "pin").unwrap();
+        while store.has_more() {
+            let page = database.page(&query, cursor.as_ref(), 1).unwrap();
+            cursor = page.cursor.clone();
+            store.apply_page(page, false);
+        }
+        assert_eq!(
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "middle", "older"]
+        );
+        let mut newest = record("newest");
+        newest.date = "2026-11-18T00:00:00Z".into();
+        store.add_completed(newest, true, &query).unwrap();
+        assert_eq!(
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "newest", "middle", "older"]
+        );
+    }
+
+    #[test]
+    fn latest_pin_order_survives_store_cache_favorites_and_new_records() {
+        let query = crate::database::HistoryQuery::default();
+        let mut newer = record("newer");
+        newer.date = "2026-11-16T12:00:00Z".into();
+        let older = record("older");
+        let mut store = HistoryStore::new(vec![newer.clone(), older.clone()]);
+        let mut cache = HistoryPageCache::default();
+        cache.insert(query.clone(), store.loaded_page(None));
+        for id in ["newer", "older"] {
+            let (previous, next) = store.prepare_update(id, "pin").unwrap();
+            store.update(id, "pin").unwrap();
+            cache.update_record(&previous, next.as_ref());
+        }
+        assert_eq!(
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["older", "newer"]
+        );
+        assert_eq!(
+            cache
+                .get(&query)
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["older", "newer"]
+        );
+        let (previous, next) = store.prepare_update("newer", "favorite").unwrap();
+        store.update("newer", "favorite").unwrap();
+        cache.update_record(&previous, next.as_ref());
+        let mut newest = record("newest");
+        newest.date = "2026-11-17T12:00:00Z".into();
+        cache.insert_record(&newest);
+        assert_eq!(
+            cache
+                .get(&query)
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["older", "newer", "newest"]
+        );
+        for id in ["older", "newer"] {
+            let (previous, next) = store.prepare_update(id, "pin").unwrap();
+            store.update(id, "pin").unwrap();
+            cache.update_record(&previous, next.as_ref());
+        }
+        assert_eq!(
+            store
+                .snapshot()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+        assert_eq!(
+            cache
+                .get(&query)
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newest", "newer", "older"]
+        );
     }
 
     #[test]

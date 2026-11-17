@@ -71,6 +71,46 @@ beforeEach(() => {
 });
 
 describe('clipboard type filters', () => {
+  it('confirms copy with an inline check and keeps the records page open without a loading beam', async () => {
+    await mount('clipboard'); await waitFor(() => expect(row('first')).toBeTruthy());
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: (value: unknown) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'clipboard_record_use' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
+    const button = within(row('first')).getByRole('button', { name: 'Copy' });
+    fireEvent.click(button);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(button.querySelector('.copy-success')).toBeNull();
+    await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
+    expect(button.querySelector('.copy-success')).toBeTruthy();
+    expect(calls('window_hide')).toHaveLength(0);
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
+    expect(bridge.snapshot.window.historyVisible).toBe(true);
+  });
+
+  it('does not show copy success or a beam when copying fails', async () => {
+    await mount('clipboard'); await waitFor(() => expect(row('first')).toBeTruthy());
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? { status: 'failed', copyStatus: 'not_written', code: 'clipboard_write' } : original(name, args));
+    fireEvent.click(within(row('first')).getByRole('button', { name: 'Copy' }));
+    await screen.findByText('Content was not copied. Try again.');
+    expect(row('first').querySelector('.copy-success')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('places a newly pinned old record ahead of existing pins while a scrolled page defers refresh', async () => {
+    records[0].date = '2020-01-01T00:00:00Z';
+    const originalDate = records[0].date;
+    const view = renderHook(() => useClipboard(true, '', false, () => true));
+    await waitFor(() => expect(view.result.current.page.records).toHaveLength(2));
+    const queries = calls('clipboard_query').length;
+    await act(async () => { await view.result.current.update('first', 'pin'); });
+    expect(view.result.current.page.records.map(({ id }) => id)).toEqual(['first', 'pinned']);
+    expect(view.result.current.page.records[0].date).toBe(originalDate);
+    expect(calls('clipboard_query')).toHaveLength(queries);
+    await act(async () => { await view.result.current.update('first', 'pin'); });
+    expect(view.result.current.page.records.map(({ id }) => id)).toEqual(['pinned', 'first']);
+  });
+
   it('switches favorite and type filters without combining them and resets on a new records session', async () => {
     records.push({ ...records[0], id: 'picture', kind: 'image', isFavorite: true });
     const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
@@ -1106,6 +1146,59 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(ids()).toEqual(['img-c', 'img-b', 'img-a']));
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     expect(ids()).toEqual(['img-b', 'img-a']);
+  });
+
+  it('requeries unknown pin order across kind caches while retaining the browsed favorite depth', async () => {
+    const sample:ClipboardRecord={id:'a',kind:'text',text:'A',date:'2020-01-01T00:00:00Z',isFavorite:false,isPinned:true};
+    records=[sample,...Array.from({length:102},(_,index)=>({...sample,id:`b-${index}`,kind:'files' as const,text:`/tmp/b-${index}`,isFavorite:true}))];
+    queryHandler=async(request)=>{
+      const matching=records.filter(record=>(!request.favoritesOnly||record.isFavorite)&&(!request.kind||record.kind===request.kind));
+      return {records:matching.slice(request.cursor?100:0,request.cursor?200:100),totalRecords:matching.length,hasMore:!request.cursor&&matching.length>100,cursor:!request.cursor&&matching.length>100?cursor:null};
+    };
+    const view=renderHook(({favorites,kind}:{favorites:boolean;kind:ClipboardKind|null})=>useClipboard(true,'',favorites,()=>true,kind),{initialProps:{favorites:true,kind:null as ClipboardKind|null}});
+    await waitFor(()=>expect(view.result.current.page.records).toHaveLength(100));
+    await act(async()=>{await view.result.current.loadMore();});
+    expect(view.result.current.page.records).toHaveLength(102);
+    view.rerender({favorites:false,kind:'text'});
+    await waitFor(()=>expect(view.result.current.page.records.map(({id})=>id)).toEqual(['a']));
+    const before=calls('clipboard_query').length;
+    await act(async()=>{await view.result.current.update('a','favorite');});
+    expect(calls('clipboard_query')).toHaveLength(before);
+    view.rerender({favorites:true,kind:null});
+    await waitFor(()=>expect(view.result.current.page.records).toHaveLength(103));
+    expect(view.result.current.page.records[0].id).toBe('a');
+    expect(view.result.current.page.records[102].id).toBe('b-101');
+    expect(calls('clipboard_query')).toHaveLength(before+2);
+  });
+
+  it('inserts a newly favorited pin by the known All order without disturbing a scrolled page', async () => {
+    records = [
+      { id:'a',kind:'text',text:'A',date:'2020-01-01T00:00:00Z',isFavorite:false,isPinned:true },
+      { id:'b',kind:'text',text:'B',date:'2020-01-02T00:00:00Z',isFavorite:true,isPinned:true },
+    ];
+    const view=renderHook(({favorites})=>useClipboard(true,'',favorites,()=>true),{initialProps:{favorites:false}});
+    await waitFor(()=>expect(view.result.current.page.records).toHaveLength(2));
+    const queries=calls('clipboard_query').length;
+    await act(async()=>{await view.result.current.update('a','favorite');});
+    expect(view.result.current.page.records.map(({id})=>id)).toEqual(['a','b']);
+    view.rerender({favorites:true});
+    await waitFor(()=>expect(view.result.current.page.records.map(({id})=>id)).toEqual(['a','b']));
+    expect(calls('clipboard_query')).toHaveLength(queries);
+  });
+
+  it('accepts the acknowledged copy order when a later pin has an older display date', async () => {
+    records = [
+      { id: 'a', kind: 'text', text: 'A', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: true },
+      { id: 'b', kind: 'text', text: 'B', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: true },
+    ];
+    const view = renderHook(() => useClipboard(true, '', false));
+    await waitFor(() => expect(view.result.current.page.records).toHaveLength(2));
+    act(() => view.result.current.noteCopied('b'));
+    const copiedDate = new Date(Date.now() - 10).toISOString();
+    records = [records[0], { ...records[1], date: copiedDate }];
+    await emit('clipboard_changed', 100);
+    await waitFor(() => expect(view.result.current.page.records.map(({ id }) => id)).toEqual(['a', 'b']));
+    expect(view.result.current.page.records[1].date).toBe(copiedDate);
   });
 
   it('keeps the clicked record first while the returned page is still older', async () => {

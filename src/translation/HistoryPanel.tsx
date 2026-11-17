@@ -24,12 +24,14 @@ interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'>
   activity?: ViewProps['activity'];
 }
 
-export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true, activity }: Props) {
+export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true }: Props) {
   const history = useHistory(native);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [session, setSession] = useState(0);
   const [copyFailed, setCopyFailed] = useState(false);
   const copyOperation = useRef(0);
+  const clickedRecord = useRef<string | null>(null);
+  useEffect(() => { if (!active || !snapshot.window.translationVisible) clickedRecord.current = null; }, [active, snapshot.window.translationVisible, snapshot.window.recordsSession]);
   useEffect(() => { ++copyOperation.current; setCopyFailed(false); }, [active, snapshot.window.recordsSession]);
   useEffect(() => () => { ++copyOperation.current; }, []);
   const search = useRef<HTMLInputElement>(null);
@@ -48,7 +50,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   if (previousContext.active !== active || previousContext.query !== query || previousContext.favoritesOnly !== favoritesOnly || previousContext.session !== state.recordsSession) ++actionVersion.current;
   actionContext.current = { active, query, favoritesOnly, session: state.recordsSession };
   useEffect(() => () => { ++actionVersion.current; }, []);
-  const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite).sort((a,b) => Number(b.isPinned)-Number(a.isPinned) || Date.parse(b.date)-Date.parse(a.date)) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
+  const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
   const name = (code: string) => languages.find(([id]) => id === code)?.[1] ?? code;
 
   useEffect(() => {
@@ -89,10 +91,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   async function copyRecord(id: string) {
     if (!native || !snapshot.capabilities.clipboardWrite) return;
     const operation = ++copyOperation.current;
-    setCopyFailed(false); activity?.(1);
+    setCopyFailed(false);
     try { await invoke('translation_sample_copy', { sampleId: id, part: 'source' }); }
     catch { if (operation === copyOperation.current) setCopyFailed(true); }
-    finally { activity?.(-1); }
   }
 
   function whenReady(id: string, action: () => void) {
@@ -142,7 +143,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
           const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
           if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         }
-        whenReady(record.id, () => onSelect(record));
+        whenReady(record.id, () => {
+          if (clickedRecord.current === record.id) {
+            clickedRecord.current = null;
+            void command('records_details_toggle');
+          } else { clickedRecord.current = record.id; onSelect(record); }
+        });
       }}>
         <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />
         <span className="history-preview">{historyPreview(record.text)}</span>
@@ -167,7 +173,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     {menu && menuRecord && <RecordMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
       { action: 'retranslate', label: 'Retranslate', icon: <HistoryIcon name="languages" /> },
       { action: 'copy', label: 'Copy source text', icon: <HistoryIcon name="doc.on.doc" />, disabled: !native || !snapshot.capabilities.clipboardWrite },
-      { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name={menuRecord.isFavorite ? 'star.fill' : 'star'} />, disabled: !native },
+      { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: menuRecord.isFavorite, disabled: !native },
       { action: 'pin', label: menuRecord.isPinned ? 'Unpin record' : 'Pin record', icon: <HistoryIcon name={menuRecord.isPinned ? 'pin.fill' : 'pin'} />, disabled: !native },
       { action: 'delete', label: 'Delete', icon: <HistoryIcon name="trash" />, destructive: true, disabled: !native || menuRecord.isFavorite || menuRecord.isPinned },
     ]} onAction={(action) => {

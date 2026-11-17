@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, preferReducedMotion, releasePointerCapture, scrollTo, setPointerCapture, windowState } from './harness';
@@ -14,6 +14,27 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('preserves the backend pin order when a newer pin has an older translation date', async () => {
+    const older = { ...bridge.history.records[3], id: 'recently-pinned', isPinned: true, date: '2020-01-01T00:00:00Z' };
+    const newer = { ...bridge.history.records[2], id: 'previously-pinned', isPinned: true, date: '2020-01-02T00:00:00Z' };
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'history_snapshot'
+      ? { ...bridge.history, records: [older, newer], totalRecords: 2 } : original(name, args));
+    await mount('history');
+    await waitFor(() => expect(document.querySelectorAll('.history-pinned article')).toHaveLength(2));
+    expect([...document.querySelectorAll<HTMLElement>('.history-pinned article')].map((row) => row.dataset.recordId)).toEqual(['recently-pinned', 'previously-pinned']);
+  });
+
+  it('keeps a pending inline copy silent without a global loading beam', async () => {
+    await mount('history');
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : original(name, args));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Copy source text' }));
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    await act(async () => finish());
+  });
+
   it('uses shared nonblocking copy failure feedback for inline and menu actions and clears it on hide', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
@@ -147,7 +168,7 @@ describe('history list and session actions', () => {
     expect(records()).toHaveLength(20);
   });
 
-  it('uses FinderX SF Symbols and switches filled record flags without rotating record pins', async () => {
+  it('uses shared icons and EcoPaste favorite color without rotating record pins', async () => {
     const user = userEvent.setup(); await mount('history');
     expect(screen.getByRole('button', { name: 'Clipboard' }).querySelector('[data-symbol="list.bullet"]')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Pin records' }).classList.contains('history-pin')).toBe(true);
@@ -156,7 +177,7 @@ describe('history list and session actions', () => {
     expect(target.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
     expect(target.querySelector('[data-symbol="trash"]')).toBeTruthy();
     await user.click(within(target).getByRole('button', { name: 'Favorite' }));
-    expect(target.querySelector('[data-symbol="star.fill"]')).toBeTruthy();
+    expect(target.querySelector('[data-action="favorite"] .record-favorite [data-symbol="star"]')).toBeTruthy();
     await user.click(within(target).getByRole('button', { name: 'Pin record' }));
     const pinned = row('sample-03');
     expect(pinned.classList.contains('pinned')).toBe(true);

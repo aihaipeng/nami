@@ -56,6 +56,21 @@ function direct() {
 }
 
 describe('clipboard details', () => {
+  it('confirms detail copy inline without lighting the page', async () => {
+    await mount('translation');
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    const detail = await screen.findByRole('region', { name: 'Clipboard details' });
+    await waitFor(() => expect(within(detail).getByRole('button', { name: 'Copy' })).toBeTruthy());
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: (value: unknown) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'clipboard_record_use' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
+    const button = within(detail).getByRole('button', { name: 'Copy' });
+    fireEvent.click(button);
+    expect(within(detail).queryByRole('progressbar')).toBeNull();
+    await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
+    expect(button.querySelector('.copy-success')).toBeTruthy();
+  });
+
   it('expands the first unpinned record, keeps full text and source name, and adds Note after text actions', async () => {
     await open();
     expect(bridge.snapshot.window.clipboardDetailId).toBe('first');

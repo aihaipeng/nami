@@ -267,7 +267,7 @@ const SCRIPT: &str = r#"
       assert(JSON.stringify(loadingStyles[0])===JSON.stringify(loadingStyles[1]), 'record loading effects differ: '+JSON.stringify(loadingStyles));
       assert(loadingStyles[0].height==='2px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
       if(!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        assert(loadingStyles[0].animation==='beam-travel, beam-pulse' && loadingStyles[0].duration==='1.3s, 0.55s', 'shared loading motion parameters changed');
+        assert(loadingStyles[0].animation==='beam-travel' && loadingStyles[0].timing==='linear', 'shared loading motion parameters changed');
       }
       await invoke('records_view_set',{view:'translation'});
       await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');
