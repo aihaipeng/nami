@@ -7,6 +7,7 @@ export function ActivityBeam({ label }: { label: string }) {
     if (!element) return;
     const measure = () => {
       const width = element.getBoundingClientRect().width;
+      element.style.setProperty('--beam-distance', `${width}px`);
       element.style.setProperty('--beam-duration', `${(width + Math.min(width * .3, 220)) / 240}s`);
     };
     measure();

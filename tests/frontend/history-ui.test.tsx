@@ -204,7 +204,12 @@ describe('history list and session actions', () => {
     if (entry === 'menu') {
       fireEvent.contextMenu(row(targetId));
       fireEvent.click(screen.getByRole('menuitem', { name: action === 'favorite' ? 'Remove favorite' : 'Delete' }));
-    } else fireEvent.click(within(row(targetId)).getByRole('button', { name: action === 'favorite' ? 'Remove favorite' : 'Delete history record' }));
+      if (action === 'delete') fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    } else {
+      const button = within(row(targetId)).getByRole('button', { name: action === 'favorite' ? 'Remove favorite' : 'Delete history record' });
+      fireEvent.click(button);
+      if (action === 'delete') fireEvent.click(button);
+    }
     await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: action === 'favorite' ? 'sample-08' : 'sample-04', retranslate: false }));
   });
 
@@ -213,6 +218,7 @@ describe('history list and session actions', () => {
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
     await waitFor(() => expect(records()).toHaveLength(1));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: null, retranslate: false, clearDetail: true }));
   });
@@ -224,6 +230,7 @@ describe('history list and session actions', () => {
     let finish!: () => Promise<void>;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_record_update'
       ? new Promise((resolve) => { finish = async () => { resolve(await original(name, args)); }; }) : original(name, args));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await emit('history_sample_selected', { sampleId, retranslate: false });
     const before = calls('history_sample_select').length;
@@ -479,6 +486,7 @@ describe('history list and session actions', () => {
     const user = userEvent.setup(); const view = await mount('history');
     expect(within(row('sample-01')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
     expect(within(row('sample-04')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
+    await user.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     expect(records()).toHaveLength(19);
     view.unmount(); await mount('history');

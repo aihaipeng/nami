@@ -121,6 +121,7 @@ describe('shared history and platform capabilities', () => {
     const row = screen.getByRole('button', { name: `Translation: ${record.text}` }).closest('article')!;
     record.isFavorite = true;
     await user.click(within(row).getByRole('button', { name: 'Delete history record' }));
+    await user.click(within(row).getByRole('button', { name: 'Delete history record' }));
     expect(calls('history_record_update').at(-1)?.[1]).toEqual({ recordId: record.id, action: 'delete' });
     expect(screen.getByRole('alert').textContent).toContain('The native operation did not complete');
     expect(rows()).toHaveLength(20);

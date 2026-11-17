@@ -1603,12 +1603,12 @@ fn verify_record_beam_motion(
         r#"
 const values=[];
 for(const width of [300,900]) {
- const track=document.createElement('div');track.className='activity-beam';track.style.width=width+'px';track.style.setProperty('--beam-duration',((width+Math.min(width*.3,220))/240)+'s');track.append(document.createElement('span'));document.body.append(track);
+ const track=document.createElement('div');track.className='activity-beam';track.style.width=width+'px';track.style.setProperty('--beam-distance',width+'px');track.style.setProperty('--beam-duration',((width+Math.min(width*.3,220))/240)+'s');track.append(document.createElement('span'));document.body.append(track);
  const beam=track.firstElementChild,style=getComputedStyle(beam),animations=beam.getAnimations();
  if(matchMedia('(prefers-reduced-motion: reduce)').matches){values.push({reduced:true,stopped:animations.length===0});track.remove();continue;}
  const animation=animations[0];if(!animation){track.remove();return {error:'missing animation'};}animation.pause();
  const positions=[0,250,500].map(time=>{animation.currentTime=time;return beam.getBoundingClientRect().left;});
- values.push({width,count:animations.length,timing:style.animationTimingFunction,direction:style.animationDirection,step1:positions[1]-positions[0],step2:positions[2]-positions[1],duration:style.animationDuration});track.remove();
+ values.push({width,count:animations.length,timing:style.animationTimingFunction,direction:style.animationDirection,step1:positions[1]-positions[0],step2:positions[2]-positions[1],duration:style.animationDuration,transformOnly:animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame)&&'transform' in frame),height:style.height,shadow:style.boxShadow,mask:getComputedStyle(track).maskImage});track.remove();
 }
 return {values};
 "#,
@@ -1621,6 +1621,8 @@ return {values};
         } else if value["count"] != 1
             || value["timing"] != "linear"
             || value["direction"] != "normal"
+            || value["transformOnly"] != true
+            || value["height"] != "1.5px"
             || (value["step1"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
             || (value["step2"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
         {
@@ -1737,6 +1739,7 @@ return {ready:!!icon&&color===green,width:r?.width,height:r?.height,before:windo
             wait_records(app,"return {ready:!document.querySelector('[role=menu]')&&!!document.querySelector('[data-record-id=action-feedback]')&&document.querySelector('.clipboard-panel .history-favorites').getAttribute('aria-pressed')==='false'};")?;
         }
     }
+    verify_delete_confirmation(app, "clipboard", samples)?;
     Ok(())
 }
 
@@ -2147,6 +2150,43 @@ scrollbar:scroller?{...box(scroller),visible:scroller.classList.contains('visibl
 mask:getComputedStyle(p.querySelector('.history-list')).webkitMaskImage,error:document.querySelector('.global-error')?.textContent};
 "#;
 
+fn verify_delete_confirmation(
+    app: &AppHandle,
+    mode: &str,
+    samples: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let selector = if mode == "clipboard" {
+        ".clipboard-panel"
+    } else {
+        "#translation-history"
+    };
+    evaluate_view_dom(
+        app,
+        "clipboard",
+        &format!(
+            r#"const p=document.querySelector('{selector}'),b=p.querySelector('.history-items .history-delete:not(:disabled)');if(!b)return {{error:'missing delete'}};window.__deleteButton=b;window.__deleteRecord=b.closest('[data-record-id]').dataset.recordId;window.__deleteInitial=getComputedStyle(b).color;b.focus();b.click();return true;"#
+        ),
+    )?;
+    let armed = wait_records(
+        app,
+        r#"const b=window.__deleteButton,red=document.createElement('span');red.style.color='var(--history-red)';b.parentElement.append(red);const expected=getComputedStyle(red).color;red.remove();return {ready:b.classList.contains('delete-armed')&&getComputedStyle(b).color===expected,initial:window.__deleteInitial,color:getComputedStyle(b).color,stillPresent:!!document.querySelector(`[data-record-id="${window.__deleteRecord}"]`),description:b.getAttribute('aria-description')};"#,
+    )?;
+    if armed["initial"] != "rgb(255, 255, 255)"
+        || armed["stillPresent"] != true
+        || armed["description"] != "Click again to delete"
+    {
+        return Err(format!("{mode} delete first click: {armed}"));
+    }
+    samples.push(armed);
+    evaluate_view_dom(
+        app,
+        "clipboard",
+        "window.__deleteButton.click();return true;",
+    )?;
+    samples.push(wait_records(app, r#"return {ready:!document.querySelector(`[data-record-id="${window.__deleteRecord}"]`),deleted:window.__deleteRecord};"#)?);
+    Ok(())
+}
+
 fn run_record_action_timing(app: &AppHandle, mode: &'static str, name: &'static str) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -2214,6 +2254,7 @@ fn run_translation_action_timing(app: &AppHandle) -> DomCase {
             return Err("record click showed activity".to_string());
         }
         case.samples.push(closed);
+        verify_delete_confirmation(app, "translation", &mut case.samples)?;
         Ok::<_, String>(())
     })();
     case.passed = result.is_ok();
@@ -2680,9 +2721,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
         if clipboard["footer"]["keyboard"] != translation["footer"]["keyboard"] {
             return Err("footer keyboard differs".into());
         }
-        for key in [
-            "x", "y", "width", "height", "symbol", "mask", "color", "opacity",
-        ] {
+        for key in ["y", "width", "height", "symbol", "mask", "color", "opacity"] {
             if clipboard["footer"]["star"][key] != translation["footer"]["star"][key] {
                 return Err(format!(
                     "footer favorite {key} differs: {clipboard} / {translation}"
@@ -2759,7 +2798,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
         samples.push(serde_json::json!({"sharedMenus":menus}));
         for mode in ["clipboard", "translation"] {
             records_mode(app, mode)?;
-            for width in [320.0, 454.0, 380.0] {
+            for width in [280.0, 320.0, 454.0, 380.0] {
                 on_main(app, move |app| {
                     let app_state = app.state::<AppState>();
                     let mut state = app_state.windows.lock().unwrap();
@@ -2777,10 +2816,10 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                     app,
                     r#"
 const p=document.querySelector('.record-view:not([hidden]) .history-panel'),bounds=p.getBoundingClientRect(),footer=p.querySelector('.history-footer');
-const star=footer.querySelector('.history-favorites').getBoundingClientRect(),count=footer.querySelector('.history-record-count').getBoundingClientRect(),keyboard=footer.querySelector('.history-shortcuts').getBoundingClientRect();
+const filterButtons=[...footer.querySelectorAll('.history-filters button')].map(b=>b.getBoundingClientRect()),filters={left:Math.min(...filterButtons.map(b=>b.left)),right:Math.max(...filterButtons.map(b=>b.right))},count=footer.querySelector('.history-record-count').getBoundingClientRect(),keyboard=footer.querySelector('.history-shortcuts').getBoundingClientRect();
 const controls=[...footer.querySelectorAll('button')].map(button=>({label:button.getAttribute('aria-label'),rect:button.getBoundingClientRect()}));
 const overlap=(a,b)=>Math.min(a.right,b.right)-Math.max(a.left,b.left)>.5&&Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>.5;
-return {ready:true,width:bounds.width,centerOffset:star.left+star.width/2-(bounds.left+bounds.width/2),overlaps:controls.flatMap((a,i)=>controls.slice(i+1).filter(b=>overlap(a.rect,b.rect)).map(b=>[a.label,b.label])),countOverlap:controls.some(a=>overlap(a.rect,count)),within:controls.every(a=>a.rect.left>=bounds.left&&a.rect.right<=bounds.right),keyboardAtEdge:keyboard.right<=bounds.right};
+return {ready:true,width:bounds.width,centerOffset:(filters.left+filters.right)/2-(bounds.left+bounds.width/2),overlaps:controls.flatMap((a,i)=>controls.slice(i+1).filter(b=>overlap(a.rect,b.rect)).map(b=>[a.label,b.label])),countOverlap:controls.some(a=>overlap(a.rect,count)),within:controls.every(a=>a.rect.left>=bounds.left&&a.rect.right<=bounds.right),keyboardAtEdge:keyboard.right<=bounds.right};
 "#,
                 )?;
                 if footer["centerOffset"].as_f64().unwrap_or(99.).abs() > 0.5
@@ -4110,12 +4149,13 @@ fn run_clipboard_kind_text(app: &AppHandle) -> DomCase {
                     r#"
 const p=document.querySelector('.clipboard-panel'),f=p.querySelector('.history-footer'),filters=f.querySelector('.history-filters');
 const box=e=>{{const r=e.getBoundingClientRect();return {{left:r.left,right:r.right,width:r.width,height:r.height}};}};
-return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width,count:box(f.querySelector('.history-record-count')),filters:box(filters),keyboard:box(f.querySelector('.history-shortcuts')),icons:[...filters.querySelectorAll('.history-symbol')].map(box)}};
+return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width,count:box(f.querySelector('.history-record-count')),filters:box(filters),keyboard:box(f.querySelector('.history-shortcuts')),centerOffset:(Math.min(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().left))+Math.max(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().right)))/2-(p.getBoundingClientRect().left+p.getBoundingClientRect().width/2),icons:[...filters.querySelectorAll('.history-symbol')].map(box)}};
 "#
                 ),
             )?;
-            if sample["count"]["right"].as_f64().unwrap()
-                > sample["filters"]["left"].as_f64().unwrap() + 0.5
+            if sample["centerOffset"].as_f64().unwrap().abs() > 0.5
+                || sample["count"]["right"].as_f64().unwrap()
+                    > sample["filters"]["left"].as_f64().unwrap() + 0.5
                 || sample["filters"]["right"].as_f64().unwrap()
                     > sample["keyboard"]["left"].as_f64().unwrap() + 0.5
             {

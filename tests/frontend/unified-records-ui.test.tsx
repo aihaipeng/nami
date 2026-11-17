@@ -47,6 +47,91 @@ async function switchView(kind: 'clipboard' | 'translation') {
 }
 
 describe('unified records workspace', () => {
+  it('arms deletion on the first click, deletes on the second and requires fresh confirmation afterwards', () => {
+    const onUpdate = vi.fn();
+    render(<RecordActions recordId="first" t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={onUpdate} />);
+    const button = screen.getByRole('button', { name: 'Delete' });
+    expect(button.classList.contains('delete-armed')).toBe(false);
+    fireEvent.click(button);
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(button.classList.contains('delete-armed')).toBe(true);
+    expect(button.getAttribute('aria-description')).toBe('Click again to delete');
+    fireEvent.click(button);
+    expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
+    expect(button.classList.contains('delete-armed')).toBe(false);
+    fireEvent.click(button);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['outside', 'escape', 'blur', 'window-blur', 'record', 'busy', 'protected'] as const)('cancels delete confirmation on %s', (reset) => {
+    const onUpdate = vi.fn();
+    const props = { recordId: 'first', t: translator('en'), native: true, favorite: false, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate, retainDelete: true };
+    const view = render(<RecordActions {...props} />);
+    const button = screen.getByRole('button', { name: 'Delete' });
+    fireEvent.click(button);
+    expect(onUpdate).not.toHaveBeenCalled();
+    if (reset === 'outside') fireEvent.pointerDown(document.body);
+    if (reset === 'escape') fireEvent.keyDown(button, { key: 'Escape' });
+    if (reset === 'blur') fireEvent.blur(button);
+    if (reset === 'window-blur') fireEvent(window, new Event('blur'));
+    if (reset === 'record') view.rerender(<RecordActions {...props} recordId="second" />);
+    if (reset === 'busy') { view.rerender(<RecordActions {...props} busy />); view.rerender(<RecordActions {...props} />); }
+    if (reset === 'protected') { view.rerender(<RecordActions {...props} favorite />); view.rerender(<RecordActions {...props} />); }
+    expect(button.classList.contains('delete-armed')).toBe(false);
+    fireEvent.click(button);
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(['clipboard', 'translation'] as const)('requires two menu clicks before deleting a %s record and resets after reopening', async (kind) => {
+    await mount('clipboard');
+    if (kind === 'translation') await switchView(kind);
+    const id = kind === 'clipboard' ? 'clip-first' : 'sample-03';
+    const target = panel(kind).querySelector(`[data-record-id="${id}"]`)!;
+    const command = kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update';
+    fireEvent.contextMenu(target);
+    const first = screen.getByRole('menuitem', { name: 'Delete' });
+    fireEvent.click(first);
+    expect(calls(command)).toHaveLength(0);
+    expect(first.classList.contains('delete-armed')).toBe(true);
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.keyDown(first, { key: 'Escape' });
+    fireEvent.contextMenu(target);
+    const next = screen.getByRole('menuitem', { name: 'Delete' });
+    expect(next.classList.contains('delete-armed')).toBe(false);
+    fireEvent.click(next);
+    expect(calls(command)).toHaveLength(0);
+    fireEvent.click(next);
+    await waitFor(() => expect(calls(command)).toHaveLength(1));
+    expect(calls(command)[0][1]).toEqual({ recordId: id, action: 'delete' });
+  });
+
+  it('uses the same confirmation for keyboard Enter and Space', async () => {
+    const onUpdate = vi.fn();
+    const user = userEvent.setup();
+    render(<RecordActions recordId="keyboard" t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={onUpdate} />);
+    screen.getByRole('button', { name: 'Delete' }).focus();
+    await user.keyboard('{Enter}');
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Delete' }).classList.contains('delete-armed')).toBe(true);
+    await user.keyboard(' ');
+    expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
+  });
+
+  it.each(['clipboard', 'translation'] as const)('discards menu confirmation when right-clicking another %s record', async (kind) => {
+    await mount('clipboard');
+    if (kind === 'translation') await switchView(kind);
+    const first = panel(kind).querySelector(`[data-record-id="${kind === 'clipboard' ? 'clip-first' : 'sample-03'}"]`)!;
+    const second = panel(kind).querySelector(`[data-record-id="${kind === 'clipboard' ? 'clip-favorite' : 'sample-02'}"]`)!;
+    fireEvent.contextMenu(first);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.contextMenu(second);
+    expect(screen.getByRole('menuitem', { name: 'Delete' }).classList.contains('delete-armed')).toBe(false);
+    fireEvent.contextMenu(first);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    expect(calls(kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update')).toHaveLength(0);
+    expect(screen.getByRole('menuitem', { name: 'Delete' }).classList.contains('delete-armed')).toBe(true);
+  });
+
   it('keeps one outline favorite icon and changes only its color state', () => {
     const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate: vi.fn() };
     const view = render(<RecordActions {...props} favorite={false} />);
@@ -140,6 +225,7 @@ describe('unified records workspace', () => {
     const box = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 400 } as DOMRect);
     const view = render(<ActivityBeam label="Working" />);
     expect(view.container.firstElementChild?.getAttribute('style')).toContain('--beam-duration: 2.1666666666666665s');
+    expect(view.container.firstElementChild?.getAttribute('style')).toContain('--beam-distance: 400px');
     view.unmount();
     box.mockReturnValue({ width: 1000 } as DOMRect);
     const wide = render(<ActivityBeam label="Working" />);
@@ -194,6 +280,8 @@ describe('unified records workspace', () => {
     view.rerender(<RecordActions {...props} favorite={false} />);
     expect(screen.getByRole('button', { name: 'Delete' })).toBe(button);
     expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(onUpdate).not.toHaveBeenCalled();
     fireEvent.click(button);
     expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
   });
@@ -430,7 +518,7 @@ describe('unified records workspace', () => {
     expect([...actions.querySelectorAll('.history-symbol')].map((icon) => (icon as HTMLElement).dataset.symbol)).toEqual(['doc.on.doc', 'star', 'pin', 'trash']);
   });
 
-  it('has one ordered toolbar, mutually exclusive modes and centered footer favorites', async () => {
+  it('has one ordered toolbar, mutually exclusive modes and centered footer filter groups', async () => {
     await mount('translation');
     const toolbar = panel('clipboard').querySelector<HTMLElement>('.history-toolbar')!;
     expect(within(toolbar).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(['Clipboard', 'Translations', 'Pin records', 'Expand details']);

@@ -56,4 +56,8 @@ def test_loading_beam_is_forward_linear_and_reduced_motion_stops_it():
     assert 'beam-travel var(--beam-duration, 2s) linear infinite' in styles
     assert 'beam-pulse' not in styles
     assert 'infinite alternate' not in styles
-    assert '@media (prefers-reduced-motion: reduce) { .activity-beam > span { animation: none;' in styles
+    assert '.activity-beam > span { animation: none; left: 50%;' in styles
+    travel = next(block for block in styles.split('@keyframes') if block.startswith(' beam-travel'))
+    assert 'translate3d(var(--beam-distance, 400px), 0, 0)' in travel
+    assert 'left:' not in travel
+    assert 'animation: beam-reveal 160ms ease-out 120ms both' in styles

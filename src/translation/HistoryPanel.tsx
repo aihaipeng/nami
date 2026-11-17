@@ -199,7 +199,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>
     <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={displayed.totalRecords} primaryModifier={snapshot.capabilities.primaryModifier} />
-    {menu && menuRecord && <RecordMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
+    {menu && menuRecord && <RecordMenu key={menuRecord.id} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
       { action: 'retranslate', label: 'Retranslate', icon: <HistoryIcon name="languages" /> },
       { action: 'copy', label: 'Copy source text', icon: <HistoryIcon name="doc.on.doc" />, disabled: !native || !snapshot.capabilities.clipboardWrite },
       { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: menuRecord.isFavorite, disabled: !native },

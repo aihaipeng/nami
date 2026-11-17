@@ -290,6 +290,10 @@ describe('clipboard details', () => {
     direct();
     const button = await within(pane()).findByRole('button', { name: label });
     fireEvent.click(button);
+    if (label === 'Delete clipboard record') {
+      expect(calls(name)).toHaveLength(0);
+      fireEvent.click(button);
+    }
     await waitFor(() => expect(calls(name).at(-1)?.[1]).toEqual(args));
   });
 

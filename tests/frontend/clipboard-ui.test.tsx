@@ -499,7 +499,7 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_record_use').every(([,args]) => (args as {action:string}).action === 'copy')).toBe(true);
   });
 
-  it('opens capability-matched record actions without pasting, with icons and protected red delete', async () => {
+  it('opens capability-matched record actions without pasting, with icons and protected two-click delete', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     fireEvent.contextMenu(row('first'), { clientX: 190, clientY: 200 });
     const menu = screen.getByRole('menu');
@@ -1372,6 +1372,7 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('first').parentElement?.className).toContain('history-pinned'));
     await user.click(within(row('first')).getByRole('button', { name: 'Unpin record' }));
     await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Delete clipboard record' })).toBeTruthy());
+    await user.click(within(row('first')).getByRole('button', { name: 'Delete clipboard record' }));
     await user.click(within(row('first')).getByRole('button', { name: 'Delete clipboard record' }));
     await waitFor(() => expect(row('first')).toBeNull());
   });
