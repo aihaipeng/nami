@@ -1302,15 +1302,20 @@ pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
 }
 
 pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
-    {
+    let restore_selection = {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         regions.toggle_record_details();
-        if regions.translation_visible && regions.record_view == RecordView::Translation {
+        let restore_selection =
+            regions.translation_visible && regions.record_view == RecordView::Translation;
+        if restore_selection {
             state.history.lock().unwrap().restore_visual_selection();
         }
+        restore_selection
+    };
+    if restore_selection {
+        crate::history_runtime::publish_history(app)?;
     }
-    crate::history_runtime::publish_history(app)?;
     apply_translation(app)
 }
 

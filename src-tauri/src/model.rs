@@ -278,8 +278,21 @@ impl PanelFrame {
             )
         };
         let (history, history_speed) = sample(self.history, target.history, velocity.history);
-        let (translation, translation_speed) =
-            sample(self.translation, target.translation, velocity.translation);
+        // A bounded symmetric curve makes the detail pane close exactly as it opens.
+        let duration = 0.28;
+        let progress = (elapsed / duration).clamp(0.0, 1.0);
+        let (translation, translation_speed) = if progress >= 1.0 {
+            (target.translation, 0.0)
+        } else {
+            let delta = target.translation - self.translation;
+            let eased = progress * progress * (3.0 - 2.0 * progress);
+            let carry = progress * (1.0 - progress).powi(2);
+            (
+                self.translation + delta * eased + velocity.translation * duration * carry,
+                delta * 6.0 * progress * (1.0 - progress) / duration
+                    + velocity.translation * (1.0 - 4.0 * progress + 3.0 * progress * progress),
+            )
+        };
         let (anchor, anchor_speed) = sample(
             self.left + self.history,
             target.left + target.history,
@@ -574,6 +587,71 @@ mod tests {
                 state.blur();
                 assert!(!state.history_visible, "pin must not reopen hidden history");
             }
+        }
+    }
+
+    #[test]
+    fn details_reversal_preserves_position_and_velocity_then_finishes() {
+        let closed = PanelFrame {
+            left: 100.0,
+            history: 360.0,
+            translation: 0.0,
+        };
+        let open = PanelFrame {
+            translation: 920.0,
+            ..closed
+        };
+        for elapsed in [0.04, 0.14, 0.24] {
+            let (frame, velocity) = closed.spring(open, PanelFrame::default(), elapsed);
+            let (reversed, speed) = frame.spring(closed, velocity, 0.0);
+            assert_eq!(reversed.translation, frame.translation);
+            assert_eq!(speed.translation, velocity.translation);
+            let next = frame.spring(closed, velocity, 1e-8).0;
+            assert!(
+                ((next.translation - frame.translation) / 1e-8 - velocity.translation).abs() < 0.01
+            );
+            let (finished, speed) = frame.spring(closed, velocity, 0.28);
+            assert_eq!(finished.translation, 0.0);
+            assert_eq!(speed.translation, 0.0);
+        }
+    }
+
+    #[test]
+    fn details_open_and_close_have_mirrored_motion_and_finish_in_280ms() {
+        for width in [480.0, 700.0, 920.0] {
+            let closed = PanelFrame {
+                left: 100.0,
+                history: 360.0,
+                translation: 0.0,
+            };
+            let open = PanelFrame {
+                translation: width,
+                ..closed
+            };
+            for tick in 0..=28 {
+                let elapsed = tick as f64 / 100.0;
+                let opening = closed.spring(open, PanelFrame::default(), elapsed).0;
+                let closing = open.spring(closed, PanelFrame::default(), 0.28 - elapsed).0;
+                assert!(
+                    (opening.translation - closing.translation).abs() < 1e-8,
+                    "width={width}, elapsed={elapsed}: open={}, close={}",
+                    opening.translation,
+                    closing.translation
+                );
+            }
+            assert_eq!(
+                closed
+                    .spring(open, PanelFrame::default(), 0.28)
+                    .0
+                    .translation,
+                width
+            );
+            assert_eq!(
+                open.spring(closed, PanelFrame::default(), 0.28)
+                    .0
+                    .translation,
+                0.0
+            );
         }
     }
 

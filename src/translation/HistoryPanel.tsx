@@ -165,6 +165,11 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
           else search.current?.focus();
         }
       }} aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
+        if (clickedRecord.current === record.id) {
+          clickedRecord.current = null;
+          void command('records_details_toggle');
+          return;
+        }
         const row = event.currentTarget.closest<HTMLElement>('.history-row');
         const scroller = list.current;
         if (row && scroller?.contains(row)) {
@@ -173,10 +178,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
           if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
         }
         whenReady(record.id, () => {
-          if (clickedRecord.current === record.id) {
-            clickedRecord.current = null;
-            void command('records_details_toggle');
-          } else { clickedRecord.current = record.id; onSelect(record); }
+          clickedRecord.current = record.id;
+          onSelect(record);
         });
       }}>
         <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />

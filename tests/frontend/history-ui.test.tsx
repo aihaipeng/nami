@@ -14,6 +14,20 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('closes an open record immediately without scrolling the list first', async () => {
+    await mount('history');
+    const target = row('sample-03');
+    const button = within(target).getByRole('button', { name: /^Translation:/ });
+    fireEvent.click(button);
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toMatchObject({ sampleId: 'sample-03' }));
+    vi.spyOn(target, 'getBoundingClientRect').mockReturnValue({ top: 600, bottom: 660 } as DOMRect);
+    scrollTo.mockClear();
+    const before = calls('records_details_toggle').length;
+    fireEvent.click(button);
+    expect(calls('records_details_toggle')).toHaveLength(before + 1);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
   it('confirms inline copy success and blocks repeats for the full pending operation', async () => {
     await mount('history');
     const original = bridge.invoke.getMockImplementation()!;
@@ -581,6 +595,8 @@ describe('history list and session actions', () => {
     await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).not.toHaveBeenCalled();
     preferReducedMotion(); measure.mockReturnValue({ top: 250, bottom: 320 } as DOMRect);
+    await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
+    expect(scrollTo).not.toHaveBeenCalled();
     await user.click(within(article).getByRole('button', { name: /^Translation:/ }));
     expect(scrollTo).toHaveBeenCalledWith({ top: 24, behavior: 'instant' });
     expect(scrollTo.mock.contexts.at(-1)).toBe(list);

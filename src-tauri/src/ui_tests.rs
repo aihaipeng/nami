@@ -2252,15 +2252,60 @@ fn run_translation_action_timing(app: &AppHandle) -> DomCase {
                 .translation_visible = false;
             apply_translation(app)
         })?;
+        wait_motion(app)?;
+        wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false'};")?;
         evaluate_view_dom(app, "clipboard", "window.__clickedRow=document.querySelector('#translation-history .history-items .history-row-select');window.__clickedRow.click();return true;")?;
         wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
+        wait_motion(app)?;
+        let pre_motion_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = pre_motion_events.clone();
+        let owned_app = app.clone();
+        let close_listener = app.listen_any("history_changed", move |_| {
+            let state = owned_app.state::<AppState>();
+            let state = state.windows.lock().unwrap();
+            if !state.translation_visible
+                && state.motion_anchor.is_none()
+                && state.translation_extent > 0.0
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let clicked_at = std::time::Instant::now();
         evaluate_view_dom(app, "clipboard", "window.__clickedRow.click();window.__clickedRow.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,detail:2}));return true;")?;
+        let mut first_move_ms = None;
+        for _ in 0..100 {
+            let moved = on_main(app, |app| {
+                let state = app.state::<AppState>();
+                let state = state.windows.lock().unwrap();
+                Ok(state.translation_extent < state.translation_width - 0.5)
+            })?;
+            if moved {
+                first_move_ms = Some(clicked_at.elapsed().as_secs_f64() * 1000.0);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
+        app.unlisten(close_listener);
+        let pre_motion_events = pre_motion_events.load(Ordering::SeqCst);
+        case.samples.push(serde_json::json!({"closeFirstMoveMs":first_move_ms,"historySnapshotsBeforeMotion":pre_motion_events}));
+        if pre_motion_events != 0 || first_move_ms.is_none_or(|elapsed| elapsed > 75.0) {
+            return Err(format!("close waited before moving: historySnapshots={pre_motion_events}, firstMoveMs={first_move_ms:?}"));
+        }
         if closed["beam"] != false {
             return Err("record click showed activity".to_string());
         }
         case.samples.push(closed);
         verify_delete_confirmation(app, "translation", &mut case.samples)?;
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .translation_visible = true;
+            apply_translation(app)
+        })?;
+        wait_motion(app)?;
         let original_preferences = app
             .state::<AppState>()
             .translation_preferences
@@ -2473,6 +2518,53 @@ fn run_records_geometry(app: &AppHandle) -> DomCase {
         cases.extend(run_visible_paced(app));
     }
     let hits = run_resize_hit_targets(app);
+    record_case(
+        &mut cases,
+        "detail open and close use matching native timing",
+        |samples| {
+            on_main(app, |app| {
+                reset(app, 360.0, 700.0)?;
+                let state = app.state::<AppState>();
+                state.windows.lock().unwrap().translation_visible = false;
+                layout_translation(app, false)?;
+                let window = app.get_window("translation").ok_or("window")?;
+                window.show().map_err(|_| "window_show")?;
+                Ok(())
+            })?;
+            for visible in [true, false, true, false] {
+                on_main(app, move |app| {
+                    app.state::<AppState>()
+                        .windows
+                        .lock()
+                        .unwrap()
+                        .translation_visible = visible;
+                    apply_translation(app)
+                })?;
+                std::thread::sleep(Duration::from_millis(320));
+                let frame = on_main(app, move |app| {
+                    let state = app.state::<AppState>();
+                    let state = state.windows.lock().unwrap();
+                    if state.motion_anchor.is_some() {
+                        return Err("detail motion exceeded 280ms plus two frame allowance".into());
+                    }
+                    equal(
+                        state.translation_extent,
+                        if visible { 700.0 } else { 0.0 },
+                        "detail final extent",
+                    )?;
+                    drop(state);
+                    geometry(app)
+                })?;
+                equal(
+                    frame.window_width,
+                    if visible { 1060.0 } else { 360.0 },
+                    "detail final native width",
+                )?;
+                samples.push(frame);
+            }
+            Ok(())
+        },
+    );
     let error = cases
         .iter()
         .find(|case| !case.passed)
