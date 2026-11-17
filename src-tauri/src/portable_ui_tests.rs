@@ -254,20 +254,20 @@ const SCRIPT: &str = r#"
           let release;
           window.fetch=(input,options)=>new URL(typeof input==='string'?input:input.url,location.href).pathname.endsWith('/'+command)?new Promise((resolve,reject)=>{release=()=>internalFetch(input,options).then(resolve,reject);}):internalFetch(input,options);
           setSearch(panel,query);
-          await waitFor(()=>typeof release==='function' && panel.querySelector('.activity-beam > span'), 'record query did not expose shared loading animation in '+view);
+          await waitFor(()=>typeof release==='function' && panel.querySelector('.activity-beam[data-visible=true] > span'), 'record query did not expose shared loading animation in '+view);
           const track=panel.querySelector('.activity-beam'),beam=track.firstElementChild,style=getComputedStyle(beam),parent=getComputedStyle(track);
-          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,transformOnly:beam.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame))),trackHeight:parent.height,left:parent.left,right:parent.right});
+          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,opacityOnly:beam.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame)&&!('transform' in frame)&&'opacity' in frame)),trackHeight:parent.height,left:parent.left,right:parent.right});
           window.fetch=internalFetch;
           release();
-          await waitFor(()=>!panel.querySelector('.activity-beam'), 'record query loading animation did not finish');
+          await waitFor(()=>!panel.querySelector('.activity-beam[aria-hidden=false]'), 'record query loading animation did not finish');
           setSearch(panel,'');
-          await waitFor(()=>!panel.querySelector('.activity-beam') && panel.querySelector('.history-search input').value==='', 'record search did not clear');
+          await waitFor(()=>!panel.querySelector('.activity-beam[aria-hidden=false]') && panel.querySelector('.history-search input').value==='', 'record search did not clear');
         }
       } finally { window.fetch=internalFetch; }
       assert(JSON.stringify(loadingStyles[0])===JSON.stringify(loadingStyles[1]), 'record loading effects differ: '+JSON.stringify(loadingStyles));
       assert(loadingStyles[0].height==='1.5px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
       if(!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        assert(loadingStyles[0].animation==='beam-travel' && loadingStyles[0].timing==='linear' && loadingStyles[0].transformOnly, 'shared loading motion parameters changed');
+        assert(loadingStyles[0].animation==='beam-breathe' && loadingStyles[0].timing==='ease-in-out' && loadingStyles[0].opacityOnly, 'shared loading motion parameters changed');
       }
       await invoke('records_view_set',{view:'translation'});
       await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');

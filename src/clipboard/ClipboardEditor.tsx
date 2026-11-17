@@ -97,7 +97,7 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved }: {
           else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
         }
       }}>
-      {(!detail && !error || saving) && <ActivityBeam label="Working" />}
+      <ActivityBeam label="Working" active={!detail && !error || saving} />
       <div aria-hidden={!detail || undefined} inert={!detail || navigation}>
         <label><span className="clipboard-editor-label">Title</span><input aria-label="Title" maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={!detail || saving || closing} /></label>
         <label><span className="clipboard-editor-label">Content</span><textarea className={nonEditable ? 'non-editable' : undefined} aria-label="Content" value={content} readOnly={detail?.kind !== 'text'} onChange={(event) => { if (!nonEditable) setText(event.target.value); }} disabled={nonEditable || !detail || saving || closing} /></label>

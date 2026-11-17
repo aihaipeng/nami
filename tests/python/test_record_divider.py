@@ -51,13 +51,17 @@ def test_detail_metadata_height_stays_three_rows():
     assert '.clipboard-detail-metadata { position: relative; flex: 0 0 auto;' in clipboard
 
 
-def test_loading_beam_is_forward_linear_and_reduced_motion_stops_it():
+def test_loading_glow_pulses_in_place_and_reduced_motion_stops_it():
     styles = (ROOT / 'src/styles.css').read_text()
-    assert 'beam-travel var(--beam-duration, 2s) linear infinite' in styles
-    assert 'beam-pulse' not in styles
-    assert 'infinite alternate' not in styles
-    assert '.activity-beam > span { animation: none; left: 50%;' in styles
-    travel = next(block for block in styles.split('@keyframes') if block.startswith(' beam-travel'))
-    assert 'translate3d(var(--beam-distance, 400px), 0, 0)' in travel
-    assert 'left:' not in travel
-    assert 'animation: beam-reveal 160ms ease-out 120ms both' in styles
+    assert 'beam-breathe 1200ms ease-in-out infinite' in styles
+    assert 'beam-travel' not in styles
+    assert '--beam-distance' not in styles
+    assert 'width: 100%' in next(block for block in styles.split('}') if '.activity-beam > span {' in block)
+    breathe = styles.split('@keyframes beam-breathe')[1].split('@media')[0]
+    assert 'opacity:' in breathe
+    for property in ['transform:', 'left:', 'width:']:
+        assert property not in breathe
+    assert 'transition: opacity 160ms ease-out' in styles
+    reduced = next(block for block in styles.split('@media (prefers-reduced-motion: reduce)') if '.activity-beam { transition: none; }' in block)
+    assert '.activity-beam { transition: none; }' in reduced
+    assert '.activity-beam > span { animation: none; opacity: .7; }' in reduced

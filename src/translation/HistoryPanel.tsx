@@ -196,7 +196,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   }
 
   return <aside id="translation-history" className="history-panel" aria-label={t('history')} onKeyDown={onKeyDown}>
-    {active && history.showLoading && <ActivityBeam label={t('working')} />}
+    <ActivityBeam label={t('working')} active={active && history.showLoading} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} onArrowDown={() => {
       const button = pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select');

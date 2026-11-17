@@ -145,7 +145,7 @@ export default function App() {
     {snapshot.storageError && <div role="alert" className="global-error">{t('historyStorageError')}</div>}
     {error && <div role="alert" className="global-error">{t('nativeError')}</div>}
     <main className={cn('app-surface', target)}>
-      {(!connected || pending > 0) && <ActivityBeam label={t('working')} />}
+      <ActivityBeam label={t('working')} active={!connected || pending > 0} />
       {connected && target === 'translation' && <Translation {...common} />}
       {connected && target === 'history' && <HistoryView {...common} />}
       {connected && target === 'clipboard' && <RecordsWorkspace {...common} />}

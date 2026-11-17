@@ -308,11 +308,12 @@
   @media (max-width: 600px) { .preview-brand > span { display: none; } .source-bar > .language-picker { max-width: 360px; } }
 }
 
-.activity-beam { position: absolute; inset: 0 20px auto; height: 8px; pointer-events: none; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 12px, #000 calc(100% - 12px), transparent); animation: beam-reveal 160ms ease-out 120ms both; }
-.activity-beam > span { position: absolute; top: 2px; left: 0; display: block; height: 1.5px; width: 30%; max-width: 220px; border-radius: 1px; background: linear-gradient(90deg, transparent, hsl(var(--foreground) / .12) 35%, hsl(var(--foreground) / .45) 72%, hsl(var(--foreground) / .95) 92%, transparent); box-shadow: 0 0 5px hsl(var(--foreground) / .25); animation: beam-travel var(--beam-duration, 2s) linear infinite; }
-@keyframes beam-travel { from { transform: translate3d(-100%, 0, 0); } to { transform: translate3d(var(--beam-distance, 400px), 0, 0); } }
-@keyframes beam-reveal { from { opacity: 0; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .activity-beam { animation: none; } .activity-beam > span { animation: none; left: 50%; transform: translateX(-50%); opacity: 1; } }
+.activity-beam { position: absolute; inset: 0 20px auto; height: 8px; pointer-events: none; overflow: hidden; opacity: 0; transition: opacity 160ms ease-out; }
+.activity-beam[data-visible=true] { opacity: 1; }
+.activity-beam > span { position: absolute; top: 2px; left: 0; display: block; height: 1.5px; width: 100%; border-radius: 1px; background: linear-gradient(90deg, transparent, hsl(var(--foreground) / .45) 25%, hsl(var(--foreground) / .7) 50%, hsl(var(--foreground) / .45) 75%, transparent); box-shadow: 0 0 5px hsl(var(--foreground) / .2); animation: beam-breathe 1200ms ease-in-out infinite; animation-play-state: paused; }
+.activity-beam[data-visible=true] > span { animation-play-state: running; }
+@keyframes beam-breathe { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .activity-beam { transition: none; } .activity-beam > span { animation: none; opacity: .7; } }
 
 .preview-navigation { display: flex; gap: 4px; }
 .preview-navigation button { padding: 5px 9px; font-size: 11px; border-radius: 6px; }

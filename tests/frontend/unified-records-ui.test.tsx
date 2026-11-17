@@ -292,16 +292,50 @@ describe('unified records workspace', () => {
     expect(view.container.querySelector('.copy-success')).toBeNull();
   });
 
-  it('moves the loading beam at 240 pixels per second across either window width', () => {
-    const box = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 400 } as DOMRect);
-    const view = render(<ActivityBeam label="Working" />);
-    expect(view.container.firstElementChild?.getAttribute('style')).toContain('--beam-duration: 2.1666666666666665s');
-    expect(view.container.firstElementChild?.getAttribute('style')).toContain('--beam-distance: 400px');
-    view.unmount();
-    box.mockReturnValue({ width: 1000 } as DOMRect);
-    const wide = render(<ActivityBeam label="Working" />);
-    expect(wide.container.firstElementChild?.getAttribute('style')).toContain('--beam-duration: 5.083333333333333s');
-    box.mockRestore();
+  it('suppresses very short activity and cancels its delayed reveal', () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<ActivityBeam label="Working" active />);
+      const track = view.container.firstElementChild!;
+      expect(track.getAttribute('data-visible')).toBe('false');
+      act(() => vi.advanceTimersByTime(100));
+      view.rerender(<ActivityBeam label="Working" active={false} />);
+      act(() => vi.advanceTimersByTime(500));
+      expect(track.getAttribute('data-visible')).toBe('false');
+      expect(screen.queryByRole('progressbar')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reveals a whole-line glow after 180ms and preserves its node for fade-out', () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<ActivityBeam label="Working" active />);
+      const track = view.container.firstElementChild!;
+      act(() => vi.advanceTimersByTime(179));
+      expect(track.getAttribute('data-visible')).toBe('false');
+      act(() => vi.advanceTimersByTime(1));
+      expect(track.getAttribute('data-visible')).toBe('true');
+      expect(track.getAttribute('style')).toBeNull();
+      view.rerender(<ActivityBeam label="Working" active={false} />);
+      expect(view.container.firstElementChild).toBe(track);
+      expect(track.getAttribute('data-visible')).toBe('false');
+      expect(track.getAttribute('aria-hidden')).toBe('true');
+      expect(screen.queryByRole('progressbar')).toBeNull();
+      view.rerender(<ActivityBeam label="Working" active />);
+      expect(track.getAttribute('data-visible')).toBe('false');
+      act(() => vi.advanceTimersByTime(180));
+      expect(track.getAttribute('data-visible')).toBe('true');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('cleans up the reveal timer when its media placeholder unmounts', () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<ActivityBeam label="Working" />);
+      expect(vi.getTimerCount()).toBe(1);
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('opens on click, closes on the next click and treats double-click clicks the same way', async () => {

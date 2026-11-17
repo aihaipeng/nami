@@ -1603,12 +1603,15 @@ fn verify_record_beam_motion(
         r#"
 const values=[];
 for(const width of [300,900]) {
- const track=document.createElement('div');track.className='activity-beam';track.style.width=width+'px';track.style.setProperty('--beam-distance',width+'px');track.style.setProperty('--beam-duration',((width+Math.min(width*.3,220))/240)+'s');track.append(document.createElement('span'));document.body.append(track);
+ const track=document.createElement('div');track.className='activity-beam';track.dataset.visible='true';track.style.width=width+'px';track.append(document.createElement('span'));document.body.append(track);
  const beam=track.firstElementChild,style=getComputedStyle(beam),animations=beam.getAnimations();
  if(matchMedia('(prefers-reduced-motion: reduce)').matches){values.push({reduced:true,stopped:animations.length===0});track.remove();continue;}
  const animation=animations[0];if(!animation){track.remove();return {error:'missing animation'};}animation.pause();
- const positions=[0,250,500].map(time=>{animation.currentTime=time;return beam.getBoundingClientRect().left;});
- values.push({width,count:animations.length,timing:style.animationTimingFunction,direction:style.animationDirection,step1:positions[1]-positions[0],step2:positions[2]-positions[1],duration:style.animationDuration,transformOnly:animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame)&&'transform' in frame),height:style.height,shadow:style.boxShadow,mask:getComputedStyle(track).maskImage});track.remove();
+ const frames=[0,300,600].map(time=>{animation.currentTime=time;const box=beam.getBoundingClientRect();return {left:box.left,width:box.width,opacity:Number(getComputedStyle(beam).opacity)};});
+ getComputedStyle(track).opacity;track.dataset.visible='false';getComputedStyle(track).opacity;
+ const transition=track.getAnimations().find(value=>value.transitionProperty==='opacity');if(!transition){track.remove();return {error:'missing exit transition'};}transition.pause();
+ const fade=[0,80,160].map(time=>{transition.currentTime=time;return Number(getComputedStyle(track).opacity);});
+ values.push({width,count:animations.length,name:style.animationName,timing:style.animationTimingFunction,frames,fade,duration:style.animationDuration,opacityOnly:animation.effect.getKeyframes().every(frame=>!('transform' in frame)&&!('left' in frame)&&!('width' in frame)&&'opacity' in frame),height:style.height,exitTransition:getComputedStyle(track).transitionDuration});track.remove();
 }
 return {values};
 "#,
@@ -1618,15 +1621,33 @@ return {values};
             if value["stopped"] != true {
                 return Err(format!("reduced motion beam: {sample}"));
             }
-        } else if value["count"] != 1
-            || value["timing"] != "linear"
-            || value["direction"] != "normal"
-            || value["transformOnly"] != true
-            || value["height"] != "1.5px"
-            || (value["step1"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
-            || (value["step2"].as_f64().unwrap_or(0.0) - 60.0).abs() > 0.5
-        {
-            return Err(format!("beam speed or direction: {sample}"));
+        } else {
+            let frames = value["frames"].as_array().ok_or("glow frames")?;
+            let fade = value["fade"].as_array().ok_or("glow fade")?;
+            if value["count"] != 1
+                || value["name"] != "beam-breathe"
+                || value["timing"] != "ease-in-out"
+                || value["duration"] != "1.2s"
+                || value["opacityOnly"] != true
+                || value["height"] != "1.5px"
+                || value["exitTransition"] != "0.16s"
+                || frames.iter().any(|frame| {
+                    frame["left"] != frames[0]["left"]
+                        || (frame["width"].as_f64().unwrap_or(0.0)
+                            - value["width"].as_f64().unwrap_or(0.0))
+                        .abs()
+                            > 0.5
+                })
+                || frames[0]["opacity"].as_f64() >= frames[1]["opacity"].as_f64()
+                || frames[1]["opacity"].as_f64() >= frames[2]["opacity"].as_f64()
+                || fade[0].as_f64() != Some(1.0)
+                || fade[1]
+                    .as_f64()
+                    .is_none_or(|opacity| opacity <= 0.0 || opacity >= 1.0)
+                || fade[2].as_f64() != Some(0.0)
+            {
+                return Err(format!("glow continuity or fade: {sample}"));
+            }
         }
     }
     samples.push(sample);

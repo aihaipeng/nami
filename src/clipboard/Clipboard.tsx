@@ -220,7 +220,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     </article>;
   }
   return <section inert={editing !== null} className="history-panel clipboard-panel" aria-label={t('clipboard')}>
-    {active && clipboard.showActivity && <ActivityBeam label={t('working')} />}
+    <ActivityBeam label={t('working')} active={active && clipboard.showActivity} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="clipboard" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} onArrowDown={() => { if (ordered[0]) { focusRow(ordered[0].id); previewRecord(ordered[0].id, true); } }} />
     {clipboard.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></p>}

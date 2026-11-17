@@ -1,19 +1,12 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useState } from 'react';
 
-export function ActivityBeam({ label }: { label: string }) {
-  const track = useRef<HTMLDivElement>(null);
+export function ActivityBeam({ label, active = true }: { label: string; active?: boolean }) {
+  const [revealed, setRevealed] = useState(false);
   useLayoutEffect(() => {
-    const element = track.current;
-    if (!element) return;
-    const measure = () => {
-      const width = element.getBoundingClientRect().width;
-      element.style.setProperty('--beam-distance', `${width}px`);
-      element.style.setProperty('--beam-duration', `${(width + Math.min(width * .3, 220)) / 240}s`);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-  return <div ref={track} className="activity-beam" role="progressbar" aria-label={label}><span /></div>;
+    setRevealed(false);
+    if (!active) return;
+    const timer = window.setTimeout(() => setRevealed(true), 180);
+    return () => window.clearTimeout(timer);
+  }, [active]);
+  return <div className="activity-beam" role={active ? 'progressbar' : undefined} aria-label={label} aria-hidden={!active} data-visible={active && revealed}><span /></div>;
 }

@@ -37,7 +37,7 @@ export function ClipboardNotePreview({ record, revealed, native, media }: { reco
   const text = cached?.record === record ? cached.text : '';
   return <motion.span className="clipboard-record-body" data-expanded={expanded} initial={false} animate={{ height }} transition={transition}>
     <motion.span ref={title} className="clipboard-record-title" aria-hidden={expanded} initial={false} animate={{ opacity: expanded ? 0 : 1 }} transition={transition}>{record.title}</motion.span>
-    {revealed && !ready && <ActivityBeam label="Working" />}
+    <ActivityBeam label="Working" active={revealed && !ready} />
     <motion.span ref={content} className="clipboard-record-content" aria-hidden={!expanded} initial={false} animate={{ opacity: expanded ? 1 : 0 }} transition={transition}><span className="clipboard-record-original">
       {failed === record ? <span role="alert">Could not load content. Hover again to retry.</span> : record.kind !== 'text' ? media : <span className="history-preview">{text}</span>}
     </span></motion.span>
