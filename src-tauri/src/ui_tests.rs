@@ -4198,10 +4198,33 @@ return {{ready:mark?.getAttribute('aria-label')==='{pressed}',protectedAction:'{
         {
             return Err("closing detail note left the shared editor open".into());
         }
+        let before_entry = app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .clipboard_detail_id
+            .clone();
         evaluate_view_dom(
             app,
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="detail-second"]').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return true;"#,
+        )?;
+        wait_records(app, "return {ready:true};")?;
+        if app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .clipboard_detail_id
+            != before_entry
+        {
+            return Err("stationary pointer changed clipboard details".into());
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-panel [data-record-id="detail-second"]').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;"#,
         )?;
         samples.push(wait_dom(app, r#"const text=document.querySelector('.clipboard-detail-text')?.textContent;return {ready:text==='Second synthetic detail',text};"#)?);
         wait_records(
@@ -4560,6 +4583,117 @@ const actions=id=>[...p.querySelectorAll(`[data-record-id="${id}"] .history-row-
 const text=actions('kind-text-favorite'),ordinary=actions('kind-text-ordinary'),image=actions('kind-image-text');
 return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.includes('Translate')&&image.includes('Favorite')&&image.includes('Translate')&&image.includes('Extract text'),text,ordinary,image};
 "#)?);
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .translation_visible = false;
+            apply_translation(app)
+        })?;
+        wait_motion(app)?;
+        wait_dom(app, "return {ready:document.querySelector('.translation-clip')?.getAttribute('aria-hidden')==='true'};")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-text"] [aria-label="Translate"]').click();return true;"#,
+        )?;
+        samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value,error=document.querySelector('.translation-status[role=alert]')?.textContent;return {ready:text?.includes('HELLO NAMI')&&error==='translation_network_disabled_in_tests',text,error};"#)?);
+        let before_hover = app
+            .state::<AppState>()
+            .translation_revision
+            .load(Ordering::SeqCst);
+        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history .history-row').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;")?;
+        wait_records(app, "return {ready:true};")?;
+        let after_hover = wait_dom(
+            app,
+            r#"const text=document.querySelector('.source-input')?.value;return {ready:!!text,text};"#,
+        )?;
+        if !after_hover["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("HELLO NAMI"))
+            || app
+                .state::<AppState>()
+                .translation_revision
+                .load(Ordering::SeqCst)
+                != before_hover
+        {
+            return Err(format!(
+                "stationary pointer replaced the image translation: {after_hover}"
+            ));
+        }
+        samples.push(after_hover);
+        let selected = on_main(app, |app| {
+            let record = app
+                .state::<AppState>()
+                .history
+                .lock()
+                .unwrap()
+                .snapshot()
+                .records[0]
+                .clone();
+            crate::commands::select_history_sample(app, Some(record.id.clone()), false, false)?;
+            Ok::<_, String>(record)
+        })?;
+        let mut completed = selected.clone();
+        completed.id = format!("background-{}", uuid::Uuid::new_v4());
+        completed.is_favorite = false;
+        completed.is_pinned = false;
+        completed.text = "Synthetic background translation completed while browsing".into();
+        let completed_id = completed.id.clone();
+        let handle = app.clone();
+        let (send, receive) = mpsc::channel();
+        tauri::async_runtime::spawn(async move {
+            let revision = handle
+                .state::<AppState>()
+                .translation_revision
+                .load(Ordering::SeqCst);
+            let result = crate::history_runtime::commit_translation(
+                &handle,
+                completed,
+                "google".into(),
+                revision,
+            )
+            .await;
+            let _ = send.send(result.map(|_| ()));
+        });
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "background commit timeout")??;
+        if app
+            .state::<AppState>()
+            .history
+            .lock()
+            .unwrap()
+            .selected_id()
+            != Some(selected.id.as_str())
+        {
+            return Err("background translation replaced the browsed record".into());
+        }
+        if app
+            .state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("test database")?
+            .record(&completed_id)?
+            .is_none()
+        {
+            return Err("background translation was not saved".into());
+        }
+        let handle = app.clone();
+        let (send, receive) = mpsc::channel();
+        tauri::async_runtime::spawn(async move {
+            let result =
+                crate::history_runtime::update_record(&handle, completed_id, "delete".into()).await;
+            let _ = send.send(result.map(|_| ()));
+        });
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "background cleanup timeout")??;
+        records_mode(app, "clipboard")?;
+        wait_records(app, "return {ready:!!document.querySelector('.clipboard-panel [data-record-id=\"kind-text-favorite\"] [aria-label=\"Translate\"]')};")?;
         evaluate_view_dom(
             app,
             "clipboard",
@@ -4636,6 +4770,93 @@ return {ready:image.includes('Translate')&&image.includes('Extract text')&&multi
         }
         samples.push(updated);
         samples.push(wait_records(app, r#"const row=document.querySelector('.clipboard-panel [data-record-id="kind-image-file"]');return {ready:!!row&&!row.querySelector('[aria-label="Translate"]:not([aria-hidden=true])')&&!row.querySelector('[aria-label="Extract text"]:not([aria-hidden=true])')};"#)?);
+        let handle = app.clone();
+        let (locked_send, locked_receive) = mpsc::channel();
+        let (release_send, release_receive) = tokio::sync::oneshot::channel();
+        tauri::async_runtime::spawn(async move {
+            let state = handle.state::<AppState>();
+            let _lock = state.image_text.lock().await;
+            let _ = locked_send.send(());
+            let _ = release_receive.await;
+        });
+        locked_receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "OCR worker lock timeout")?;
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .records_browsing = true;
+            emit_state(app)
+        })?;
+        let handle = app.clone();
+        let (finished_send, finished_receive) = mpsc::channel();
+        tauri::async_runtime::spawn(async move {
+            let result =
+                crate::clipboard_text::process(&handle, "kind-image-text".into(), "ocr".into())
+                    .await;
+            let _ = finished_send.send(result);
+        });
+        wait_records(app, "return {ready:true};")?;
+        for _ in 0..100 {
+            if !app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .records_browsing
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .records_browsing
+        {
+            return Err("OCR processing did not protect its result".into());
+        }
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"window.__ocrBrowse=false;window.__TAURI_INTERNALS__.invoke('clipboard_details_select',{recordId:'kind-text-ordinary',browsing:true}).then(()=>window.__ocrBrowse=true);return true;"#,
+        )?;
+        wait_records(app, "return {ready:window.__ocrBrowse};")?;
+        let _ = release_send.send(());
+        finished_receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "background OCR timeout")??;
+        if app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .clipboard_detail_id
+            .as_deref()
+            != Some("kind-text-ordinary")
+        {
+            return Err("background OCR replaced explicit clipboard navigation".into());
+        }
+        let saved = app
+            .state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("test database")?
+            .clipboard_page("HELLO NAMI", false, None, 100)?;
+        if !saved
+            .records
+            .iter()
+            .any(|record| record.kind == "text" && record.text.contains("HELLO NAMI"))
+        {
+            return Err("background OCR did not save its recognized text".into());
+        }
+        samples.push(serde_json::json!({"backgroundOcrSaved":true,"browsedRecordRetained":true}));
         Ok(())
     })();
     if let Some(database) = original_database {

@@ -81,13 +81,18 @@ beforeEach(() => {
   bridge.listeners.clear(); frames.clear(); reducedMotion = false;
   bridge.invoke.mockReset().mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'selection_take') return null;
+    if (name === 'translation_cancel') {
+      bridge.snapshot.window.recordsBrowsing = false;
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
     if (name === 'translation_run') {
       const request = args as { text: string; source: string; targets: string[]; reuse?: { recordId: string; targetIndex?: number } };
       const previous = bridge.history.records.find(({ id }) => id === request.reuse?.recordId);
       const count = bridge.invoke.mock.calls.filter(([name]) => name === 'translation_run').length;
       const record = { ...historySamples[0], id: count === 1 ? 'translation-test' : `translation-test-${count}`, text: request.text, sourceLanguage: request.source, translation: { requestedSource: request.source, engine: bridge.snapshot.translationEngine, strategyVersion: 1, detections: [] }, targetLanguages: request.targets, translations: request.targets.map((target, index) => request.reuse?.targetIndex !== undefined && index !== request.reuse.targetIndex && previous?.text === request.text && previous.sourceLanguage === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false, sourceApp: previous?.text === request.text ? previous.sourceApp : undefined };
       bridge.history.records = [...bridge.history.records.filter(({ id }) => id !== record.id), record];
-      bridge.history.selectedId = record.id; ++bridge.history.revision;
+      if (!bridge.snapshot.window.recordsBrowsing) bridge.history.selectedId = record.id;
+      ++bridge.history.revision;
       deliver('history_changed', historySnapshot());
       return record;
     }
@@ -128,12 +133,16 @@ beforeEach(() => {
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
     if (name === 'clipboard_details_select') {
+      const browsing = (args as { browsing?: boolean }).browsing;
+      if (browsing !== undefined) bridge.snapshot.window.recordsBrowsing = browsing;
+      else if (bridge.snapshot.window.recordsBrowsing === false) return;
       bridge.snapshot.window.clipboardDetailId = (args as { recordId: string | null }).recordId;
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
     if (name === 'records_editor_set' && (args as { open?: boolean }).open !== undefined) { bridge.snapshot.window.recordsEditorOpen = (args as { open: boolean }).open; deliver('window_state', structuredClone(bridge.snapshot.window)); }
     if (name === 'clipboard_note_open') deliver('clipboard_note_requested', (args as { recordId: string }).recordId);
     if (name === 'records_details_toggle') {
+      bridge.snapshot.window.recordsBrowsing = true;
       bridge.snapshot.window.translationVisible = !bridge.snapshot.window.translationVisible;
       bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationVisible ? bridge.snapshot.window.translationWidth : 0;
       deliver('window_state', structuredClone(bridge.snapshot.window));
@@ -164,10 +173,12 @@ beforeEach(() => {
     if (name === 'translation_shortcut_capture') return;
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);
     if (name === 'history_sample_select') {
-      const selected = args as { sampleId: string | null; retranslate: boolean };
+      const selected = args as { sampleId: string | null; retranslate: boolean; preview?: boolean };
+      if (selected.preview && bridge.snapshot.window.recordsBrowsing === false) return;
       const record = bridge.history.records.find(({ id }) => id === selected.sampleId);
       if (selected.sampleId !== null && !record) throw new Error('invalid_argument');
       if (selected.sampleId !== null) {
+        bridge.snapshot.window.recordsBrowsing = true;
         bridge.snapshot.window.translationVisible = true;
         bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationWidth;
         bridge.snapshot.window.historyVisible = true;

@@ -18,7 +18,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
-  onSelect: (record: HistoryRecord, retranslate?: boolean) => void;
+  onSelect: (record: HistoryRecord, retranslate?: boolean, preview?: boolean) => void;
   onKeyDown: (event: KeyboardEvent) => void;
   active?: boolean;
   activity?: ViewProps['activity'];
@@ -134,9 +134,10 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (await history.update(id, action) && version === actionVersion.current && actionContext.current.active) setFollowQuery(follow);
   }
 
-  function previewRecord(record: HistoryRecord) {
-    if (!state.translationVisible || selection === record.id) return;
-    whenReady(record.id, () => onSelect(record));
+  function previewRecord(record: HistoryRecord, explicit = false) {
+    if (!explicit && state.recordsBrowsing === false) return;
+    if (!state.translationVisible || !explicit && selection === record.id) return;
+    whenReady(record.id, () => onSelect(record, false, !explicit));
   }
 
   async function toggleDetails() {
@@ -152,7 +153,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
-    return <article onMouseEnter={() => previewRecord(record)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
+    return <article onMouseMove={() => previewRecord(record)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
       style={{ '--history-actions-width': `${canDelete ? 99 : 74}px` } as CSSProperties}>
       <button className="history-row-select" onFocus={() => previewRecord(record)} onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -160,9 +161,13 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
           event.preventDefault();
           const buttons = [...(event.currentTarget.closest('.history-panel')?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])];
           const index = buttons.indexOf(event.currentTarget);
-          if (event.key === 'ArrowDown') buttons[index + 1]?.focus();
-          else if (index > 0) buttons[index - 1]?.focus();
-          else search.current?.focus();
+          const next = event.key === 'ArrowDown' ? buttons[index + 1] : index > 0 ? buttons[index - 1] : undefined;
+          if (next) {
+            next.focus();
+            const record = records.find(({ id }) => id === next.closest<HTMLElement>('.history-row')?.dataset.recordId);
+            if (record) previewRecord(record, true);
+          }
+          else if (event.key === 'ArrowUp') search.current?.focus();
         }
       }} aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
         if (clickedRecord.current === record.id) {
@@ -194,7 +199,10 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     {active && history.showLoading && <ActivityBeam label={t('working')} />}
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} onArrowDown={() => {
-      (pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select'))?.focus();
+      const button = pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select');
+      button?.focus();
+      const record = records.find(({ id }) => id === button?.closest<HTMLElement>('.history-row')?.dataset.recordId);
+      if (record) previewRecord(record, true);
     }} />
     {history.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => history.refresh(query, favoritesOnly)}>{t('retry')}</button></p>}
     <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>

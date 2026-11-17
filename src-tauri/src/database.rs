@@ -472,6 +472,38 @@ mod tests {
         }
     }
     #[test]
+    fn deleted_image_translation_can_be_inserted_again_and_survives_reopen() {
+        let fixture = Fixture::new();
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let mut first = record("image-first");
+        first.text = "Synthetic OCR text from the same image".into();
+        db.insert(&first, "google", || true).unwrap();
+        db.update(&first, None).unwrap();
+        assert!(db.record(&first.id).unwrap().is_none());
+        assert_eq!(
+            db.page(&HistoryQuery::default(), None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        let mut repeated = first.clone();
+        repeated.id = "image-repeated".into();
+        db.insert(&repeated, "google", || true).unwrap();
+        drop(db);
+        let db = HistoryDatabase::open(&fixture.0).unwrap();
+        assert!(db.record(&first.id).unwrap().is_none());
+        assert_eq!(db.record(&repeated.id).unwrap().unwrap().text, first.text);
+        let query = HistoryQuery {
+            text: "Synthetic OCR".into(),
+            favorites_only: false,
+        };
+        let page = db.page(&query, None, 100).unwrap();
+        assert_eq!(page.total_records, 1);
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, repeated.id);
+    }
+
+    #[test]
     fn translation_metadata_survives_reopen_and_mark_updates_without_schema_change() {
         let fixture = Fixture::new();
         let mut db = HistoryDatabase::open(&fixture.0).unwrap();

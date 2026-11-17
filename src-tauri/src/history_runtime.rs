@@ -193,7 +193,8 @@ pub(crate) async fn commit_translation(
         let current = state
             .translation_revision
             .load(std::sync::atomic::Ordering::SeqCst)
-            == revision;
+            == revision
+            && !state.windows.lock().unwrap().records_browsing;
         let query = {
             let mut page = state.history_page.lock().unwrap();
             page.cache.insert_record(&record);

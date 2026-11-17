@@ -443,6 +443,7 @@ describe('clipboard text processing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('picture'));
     records.unshift({ id: 'ocr-text', kind: 'text', text: 'Recognized sentence', date: '2026-11-14T13:00:00Z', isFavorite: false, isPinned: false });
+    await windowState({ recordsBrowsing: false, clipboardDetailId: 'ocr-text' });
     await emit('clipboard_text_created', 'ocr-text');
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('ocr-text'));
     expect(row('ocr-text').classList.contains('selected')).toBe(true);
@@ -453,10 +454,23 @@ describe('clipboard text processing', () => {
     records.unshift({ id: 'ocr-later', kind: 'text', text: 'Second sentence', date: '2026-11-14T14:00:00Z', isFavorite: false, isPinned: false });
     fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    await windowState({ recordsBrowsing: false, clipboardDetailId: 'ocr-later' });
     await emit('clipboard_text_created', 'ocr-later');
     await waitFor(() => expect(row('ocr-later').classList.contains('selected')).toBe(true));
     expect(calls('clipboard_details_select')).toHaveLength(selects);
     expect(bridge.snapshot.window.translationVisible).toBe(false);
+  });
+
+  it('does not replace an explicitly browsed record when an OCR completion arrives later', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+    const selections = calls('clipboard_details_select').length;
+    records.unshift({ ...records[0], id: 'late-ocr', text: 'Late recognized text' });
+    await emit('clipboard_text_created', 'late-ocr');
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
+    expect(calls('clipboard_details_select')).toHaveLength(selections);
   });
 });
 

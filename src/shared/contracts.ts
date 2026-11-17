@@ -5,6 +5,7 @@ export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
 export type WindowTarget = Exclude<Region, 'history'>;
 
 export interface WindowState {
+  recordsBrowsing?: boolean;
   recordsEditorOpen?: boolean;
   clipboardDetailId?: string | null;
   recordView?: 'clipboard' | 'translation';
@@ -83,6 +84,7 @@ export const initialSnapshot: AppSnapshot = {
   accessibility: false,
   shortcutErrors: [],
   window: {
+    recordsBrowsing: true,
     recordView: 'clipboard',
     recordsSession: 0,
     recordsFocus: 0,

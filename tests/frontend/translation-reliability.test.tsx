@@ -18,6 +18,20 @@ function deferred() {
 }
 
 describe('translation reliability', () => {
+  it('keeps an active translation running while browsing history and does not replace the browsed record on completion', async () => {
+    const pending = deferred(); const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : original(name, args));
+    await mount(); submit('Background image text');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    const cancellations = calls('translation_cancel').length;
+    await emit('history_sample_selected', { sampleId: historySamples[1].id, record: historySamples[1], retranslate: false });
+    expect(source().value).toBe(historySamples[1].text);
+    expect(calls('translation_cancel')).toHaveLength(cancellations);
+    await act(async () => pending.resolve(result('Background image text')));
+    expect(source().value).toBe(historySamples[1].text);
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe(historySamples[1].translations[0]);
+  });
+
   it('uses the latest languages after rapid switches and ignores a late response', async () => {
     const user = userEvent.setup(); await mount(); submit('Rapid switches');
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));

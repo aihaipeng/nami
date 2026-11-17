@@ -80,6 +80,7 @@ pub enum RecordView {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowState {
+    pub records_browsing: bool,
     pub record_view: RecordView,
     pub clipboard_detail_id: Option<String>,
     pub records_editor_open: bool,
@@ -114,6 +115,7 @@ pub struct WindowState {
 impl Default for WindowState {
     fn default() -> Self {
         Self {
+            records_browsing: true,
             record_view: RecordView::Clipboard,
             clipboard_detail_id: None,
             records_editor_open: false,
@@ -167,6 +169,7 @@ impl WindowState {
     }
 
     pub fn summon_translation(&mut self) {
+        self.records_browsing = false;
         self.record_view = RecordView::Translation;
         self.history_visible = false;
         self.show_translation();
@@ -191,6 +194,7 @@ impl WindowState {
     }
 
     pub fn toggle_record_details(&mut self) {
+        self.records_browsing = true;
         if !self.translation_visible && self.record_view == RecordView::Clipboard {
             self.translation_width_before_clipboard_details
                 .get_or_insert(self.translation_width);
@@ -200,6 +204,7 @@ impl WindowState {
     }
 
     pub fn select_history_record(&mut self, _repeated: bool, _retranslate: bool) {
+        self.records_browsing = true;
         self.record_view = RecordView::Translation;
         self.history_visible = true;
         self.show_translation();
@@ -388,6 +393,20 @@ mod tests {
             serde_json::to_value(record).unwrap()["translation"],
             metadata
         );
+    }
+
+    #[test]
+    fn active_result_stays_protected_until_explicit_history_navigation() {
+        let mut state = super::WindowState::default();
+        state.summon_translation();
+        assert!(!state.records_browsing);
+        state.toggle_history();
+        assert!(!state.records_browsing);
+        state.select_history_record(false, false);
+        assert!(state.records_browsing);
+        state.summon_translation();
+        state.toggle_record_details();
+        assert!(state.records_browsing);
     }
 
     #[test]

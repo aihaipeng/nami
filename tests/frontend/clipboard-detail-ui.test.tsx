@@ -56,10 +56,40 @@ function direct() {
 }
 
 describe('clipboard details', () => {
+  it('retains an OCR result during pointer movement and automatic focus until explicit keyboard browsing', async () => {
+    await open();
+    await windowState({ recordsBrowsing: false });
+    const selections = calls('clipboard_details_select').length;
+    fireEvent.mouseMove(row('second'));
+    fireEvent.focus(row('second').querySelector('button')!);
+    expect(calls('clipboard_details_select')).toHaveLength(selections);
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
+    fireEvent.keyDown(row('first').querySelector('button')!, { key: 'ArrowDown' });
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('second'));
+    expect(bridge.snapshot.window.recordsBrowsing).toBe(true);
+    fireEvent.mouseMove(row('first'));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+  });
+
+  it('keeps OCR image details unchanged on pointer entry and follows actual movement', async () => {
+    records[2] = { ...records[2], id: 'image-text', kind: 'image', text: 'Synthetic OCR image' };
+    await open();
+    const selections = calls('clipboard_details_select').length;
+    fireEvent.mouseEnter(row('image-text'));
+    expect(calls('clipboard_details_select')).toHaveLength(selections);
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
+    fireEvent.mouseMove(row('image-text'));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('image-text'));
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Extract text' }));
+    await waitFor(() => expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'image-text', action: 'ocr' }));
+    fireEvent.focus(row('first').querySelector('button')!);
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+  });
+
   it('keeps visual and accessible selection aligned when hover changes the detail', async () => {
     await open();
     fireEvent.focus(row('first').querySelector('button')!);
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(row('second').classList.contains('selected')).toBe(true));
     expect(row('second').querySelector('button')?.getAttribute('aria-pressed')).toBe('true');
     expect(row('first').querySelector('button')?.getAttribute('aria-pressed')).toBe('false');
@@ -98,7 +128,7 @@ describe('clipboard details', () => {
     bridge.invoke.mockImplementation((name,args)=> name === 'clipboard_record_use' ? new Promise((_,fail)=>{reject=fail;}) : original(name,args));
     await open();
     fireEvent.click(within(pane()).getByRole('button',{name:'Copy'}));
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(()=>expect(within(pane()).getByText('Second text')).toBeTruthy());
     await act(async()=>reject(new Error('clipboard_file_missing')));
     expect(pane().querySelector('.record-feedback')).toBeNull();
@@ -170,7 +200,7 @@ describe('clipboard details', () => {
 
   it('follows hover and keyboard focus without pasting, keeps preview on leave, and resets to first on reopen', async () => {
     await open();
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
     expect(row('second').classList.contains('selected')).toBe(true);
     fireEvent.mouseLeave(row('second'));
@@ -188,7 +218,7 @@ describe('clipboard details', () => {
     records[2] = { ...records[2], kind: 'files', text: '[]', characterCount: null, size: null, files: [{ path: '/tmp/a.txt', name: 'a.txt', exists: true, isDir: false, isImage: false, iconDataUrl: null }] };
     await open();
     expect(within(pane()).getByRole('button', { name: 'Translate' })).toBeTruthy();
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
     expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
     expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
@@ -200,7 +230,7 @@ describe('clipboard details', () => {
     fetchDetail = (id) => id === 'second' ? new Promise((done) => { resolve = done; }) : Promise.resolve(structuredClone(records.find((record) => record.id === id)!));
     await open();
     const stable = ['Note', 'Favorite', 'Pin record', 'Delete clipboard record'].map((name) => within(pane()).getByRole('button', { name }));
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')).toBeNull());
     expect(pane().querySelector('[role="progressbar"]')).toBeNull();
     expect(stable.map((button) => button.isConnected)).toEqual([true, true, true, true]);
@@ -217,7 +247,7 @@ describe('clipboard details', () => {
     await mount('translation');
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(resolve).toBeTypeOf('function'));
-    fireEvent.mouseEnter(row('second'));
+    fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
     await act(async () => resolve(first()));
     expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('Second text');
@@ -234,7 +264,7 @@ describe('clipboard details', () => {
     expect(remove).toHaveProperty('disabled', true);
     fireEvent.click(remove);
     expect(calls('clipboard_record_update').filter(([,args]) => (args as {action:string}).action === 'delete')).toHaveLength(0);
-    fireEvent.mouseEnter(row('pinned'));
+    fireEvent.mouseMove(row('pinned'));
     await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
     expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toHaveProperty('disabled', true);
     fireEvent.click(within(pane()).getByRole('button', { name: 'Note' }));

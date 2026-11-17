@@ -192,7 +192,6 @@ pub fn window_pin(
 pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
     let state = app.state::<AppState>();
-    state.image_text_operation.fetch_add(1, Ordering::SeqCst);
     state.operation.fetch_add(1, Ordering::SeqCst);
     windows::set_record_view(&app, &view)
 }
@@ -208,6 +207,7 @@ pub fn clipboard_details_select(
     window: Webview,
     app: AppHandle,
     record_id: Option<String>,
+    browsing: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
     if record_id
@@ -226,7 +226,9 @@ pub fn clipboard_details_select(
         {
             return Err("cancelled".into());
         }
-        if regions.clipboard_detail_id == record_id {
+        if let Some(browsing) = browsing {
+            regions.records_browsing = browsing;
+        } else if !regions.records_browsing {
             return Ok(());
         }
         regions.clipboard_detail_id = record_id;
@@ -473,8 +475,19 @@ pub fn history_sample_select(
     sample_id: Option<String>,
     retranslate: bool,
     clear_detail: Option<bool>,
+    preview: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
+    if preview == Some(true)
+        && !app
+            .state::<AppState>()
+            .windows
+            .lock()
+            .unwrap()
+            .records_browsing
+    {
+        return Ok(());
+    }
     select_history_sample(&app, sample_id, retranslate, clear_detail.unwrap_or(false))
 }
 
@@ -506,6 +519,7 @@ pub(crate) fn select_history_sample(
         let visible = {
             let state = app.state::<AppState>();
             let mut windows = state.windows.lock().unwrap();
+            windows.records_browsing = true;
             windows.select_history_record(repeated, retranslate);
             windows.translation_visible
         };
@@ -846,7 +860,7 @@ pub fn translation_cancel(window: Webview, app: AppHandle) -> Result<(), String>
     app.state::<AppState>()
         .translation_revision
         .fetch_add(1, Ordering::SeqCst);
-    Ok(())
+    crate::records_runtime::protect_result(&app)
 }
 
 async fn store_preferences(
@@ -1019,6 +1033,40 @@ pub async fn translation_run(
     reuse: Option<crate::translation::TranslationReuse>,
 ) -> Result<crate::model::HistoryRecord, String> {
     authorize(&window, &["translation"])?;
+    let captured = if from_selection {
+        app.state::<AppState>()
+            .selection_source
+            .lock()
+            .unwrap()
+            .clone()
+    } else {
+        None
+    };
+    run_translation(app, text, source, targets, captured, reuse, None).await
+}
+
+fn reserve_translation(
+    counter: &std::sync::atomic::AtomicU64,
+    expected: Option<u64>,
+) -> Result<u64, String> {
+    match expected {
+        Some(revision) => counter
+            .compare_exchange(revision, revision + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| revision + 1)
+            .map_err(|_| "cancelled".into()),
+        None => Ok(counter.fetch_add(1, Ordering::SeqCst) + 1),
+    }
+}
+
+pub(crate) async fn run_translation(
+    app: AppHandle,
+    text: String,
+    source: String,
+    targets: Vec<String>,
+    captured: Option<serde_json::Value>,
+    reuse: Option<crate::translation::TranslationReuse>,
+    expected_revision: Option<u64>,
+) -> Result<crate::model::HistoryRecord, String> {
     if let Some(error) = app
         .state::<AppState>()
         .storage_error
@@ -1034,7 +1082,7 @@ pub async fn translation_run(
         return Err("translation_network_disabled_in_tests".into());
     }
     let state = app.state::<AppState>();
-    let revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let revision = reserve_translation(&state.translation_revision, expected_revision)?;
     let preferences = state.translation_preferences.lock().unwrap().clone();
     let engine = preferences.engine.clone();
     let proxy_url = preferences.proxy_url.clone();
@@ -1057,11 +1105,6 @@ pub async fn translation_run(
         .filter(|(_, result)| result.is_none())
         .map(|(target, _)| target.clone())
         .collect();
-    let captured = if from_selection {
-        state.selection_source.lock().unwrap().clone()
-    } else {
-        None
-    };
     let source_app =
         crate::translation::source_app_for_translation(&text, previous.as_ref(), captured);
     let translated_result = if missing.is_empty() {
@@ -1392,6 +1435,19 @@ mod tests {
     use super::{image_history_paste, paste_release_result, remaining_image_settle, PASTE_KEY_GAP};
     use crate::platform::ClipboardPayload;
     use std::time::Duration;
+
+    #[test]
+    fn late_ocr_cannot_reserve_a_translation_after_a_newer_request() {
+        let revision = std::sync::atomic::AtomicU64::new(7);
+        assert_eq!(super::reserve_translation(&revision, Some(7)), Ok(8));
+        assert_eq!(super::reserve_translation(&revision, None), Ok(9));
+        assert_eq!(
+            super::reserve_translation(&revision, Some(8)),
+            Err("cancelled".into())
+        );
+        assert_eq!(revision.load(std::sync::atomic::Ordering::SeqCst), 9);
+        assert_eq!(super::reserve_translation(&revision, Some(9)), Ok(10));
+    }
 
     #[test]
     fn history_selection_detail_clear_is_explicit_in_the_shared_event() {

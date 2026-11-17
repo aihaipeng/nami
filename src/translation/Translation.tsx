@@ -130,7 +130,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
         setSelectedId(null);
         if (payload.clearDetail) {
           completedRecord.current = null;
-          cancelRequest(); fromSelection.current = false; normalizedCaret.current = null;
+          ++requestRevision.current; fromSelection.current = false; normalizedCaret.current = null;
           setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
         }
         return;
@@ -330,7 +330,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function selectHistory(record: HistoryRecord, retranslate = false) {
     setPopup(null);
-    cancelRequest(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
+    ++requestRevision.current; fromSelection.current = false; setServiceError(null); setDetectedSource(null);
     normalizedCaret.current = null;
     setSelectedId(record.id); setDraft(record.text);
     setSource(requestedSource(record)); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage); setPrimary(record.targetLanguages[0]);

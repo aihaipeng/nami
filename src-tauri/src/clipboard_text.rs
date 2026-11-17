@@ -121,7 +121,9 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     let state = app.state::<AppState>();
     let operation = state.image_text_operation.fetch_add(1, Ordering::SeqCst) + 1;
     let clipboard_operation = state.operation.fetch_add(1, Ordering::SeqCst) + 1;
+    let translation_revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let session = state.windows.lock().unwrap().records_session;
+    on_main(app, |app| crate::records_runtime::protect_result(&app)).await??;
     let (record, text) = text(app, id).await?;
     if text.trim().is_empty() {
         return Err("ocr_no_text".into());
@@ -143,24 +145,31 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     .await?;
     let copied = text.clone();
     let source = record.source_app.clone();
+    let background_source = source.clone();
     let is_ocr = action == "ocr";
-    on_main(app, move |app| {
+    let background = on_main(app, move |app| {
         let state = app.state::<AppState>();
         {
             let regions = state.windows.lock().unwrap();
             if state.image_text_operation.load(Ordering::SeqCst) != operation
-                || state.operation.load(Ordering::SeqCst) != clipboard_operation
+                || !is_ocr
+                    && state.translation_revision.load(Ordering::SeqCst) != translation_revision
                 || regions.records_session != session
                 || (!regions.history_visible && !regions.translation_visible)
-                || regions.record_view != nami::model::RecordView::Clipboard
                 || state.records_dirty.load(Ordering::SeqCst)
             {
                 return Err("cancelled".into());
             }
         }
+        if !is_ocr && state.windows.lock().unwrap().records_browsing {
+            return Ok(true);
+        }
         if action == "ocr" {
-            let version = platform::write_text(&copied).map_err(|(code, _)| code.to_string())?;
-            state.clipboard_version.store(version, Ordering::SeqCst);
+            if state.operation.load(Ordering::SeqCst) == clipboard_operation {
+                let version =
+                    platform::write_text(&copied).map_err(|(code, _)| code.to_string())?;
+                state.clipboard_version.store(version, Ordering::SeqCst);
+            }
         } else {
             *state.clipboard_translation.lock().unwrap() = Some(SelectionContext {
                 text: copied,
@@ -185,9 +194,31 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             }
             delivery?;
         }
-        Ok::<_, String>(())
+        Ok::<_, String>(false)
     })
     .await??;
+    if background {
+        drop(_write);
+        if state.image_text_operation.load(Ordering::SeqCst) != operation {
+            return Err("cancelled".into());
+        }
+        let preferences = state.translation_preferences.lock().unwrap().clone();
+        let mut targets = vec![preferences.primary_language];
+        if preferences.secondary_language != "none" {
+            targets.push(preferences.secondary_language);
+        }
+        crate::commands::run_translation(
+            app.clone(),
+            text,
+            preferences.source_language,
+            targets,
+            background_source,
+            None,
+            Some(translation_revision),
+        )
+        .await?;
+        return Ok(());
+    }
     if is_ocr {
         let captured = ClipboardRecord {
             id: uuid::Uuid::new_v4().to_string(),
@@ -205,7 +236,26 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
         })
         .await?;
         drop(_write);
+        let selected_id = saved_id.clone();
+        let follow_result = on_main(app, move |app| {
+            let state = app.state::<AppState>();
+            let mut windows = state.windows.lock().unwrap();
+            let follow = windows.records_session == session
+                && !windows.records_browsing
+                && state.image_text_operation.load(Ordering::SeqCst) == operation
+                && state.operation.load(Ordering::SeqCst) == clipboard_operation;
+            if follow {
+                windows.clipboard_detail_id = Some(selected_id);
+            }
+            drop(windows);
+            windows::emit_state(&app)?;
+            Ok::<_, String>(follow)
+        })
+        .await??;
         clipboard_runtime::changed(app)?;
+        if !follow_result {
+            return Ok(());
+        }
         for label in ["clipboard", "translation"] {
             if let Some(view) = app.get_webview(label) {
                 view.emit("clipboard_text_created", saved_id.clone())

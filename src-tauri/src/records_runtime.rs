@@ -48,3 +48,17 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
         None => Ok(()),
     }
 }
+
+pub(crate) fn protect_result(app: &tauri::AppHandle) -> Result<(), String> {
+    let changed = {
+        let state = app.state::<crate::AppState>();
+        let mut windows = state.windows.lock().unwrap();
+        let changed = windows.records_browsing;
+        windows.records_browsing = false;
+        changed
+    };
+    if changed {
+        crate::windows::emit_state(app)?;
+    }
+    Ok(())
+}

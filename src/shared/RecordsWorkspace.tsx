@@ -6,7 +6,7 @@ import type { HistoryRecord } from '../translation/history';
 
 export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: ViewProps & {
   selectedId?: string | null;
-  onSelect?: (record: HistoryRecord, retranslate?: boolean) => void;
+  onSelect?: (record: HistoryRecord, retranslate?: boolean, preview?: boolean) => void;
 }) {
   const { snapshot, command } = props;
   const view = snapshot.window.recordView ?? 'clipboard';
@@ -28,7 +28,7 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
     </div>
     <div className="record-view" hidden={view !== 'translation'} inert={!visible || view !== 'translation'}>
       <HistoryPanel {...props} active={visible && view === 'translation'} selectedId={selectedId}
-        onSelect={onSelect ?? ((record, retranslate = false) => { void command('history_sample_select', { sampleId: record.id, retranslate }); })}
+        onSelect={onSelect ?? ((record, retranslate = false, preview = false) => { void command('history_sample_select', { sampleId: record.id, retranslate, ...(preview ? { preview: true } : {}) }); })}
         onKeyDown={() => {}} />
     </div>
   </div>;
