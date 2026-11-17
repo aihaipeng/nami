@@ -53,6 +53,20 @@ describe('live translation bridge', () => {
     expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe('French result');
   });
 
+  it.each(['legacy', 'other-engine', 'old-strategy'] as const)('does not retain cached output from %s metadata while changing a target', async (kind) => {
+    await mount();
+    const base = { ...result('Metadata reuse boundary'), targetLanguages: ['en', 'zh-CN'], sourceLanguage: 'en', translation: kind === 'legacy' ? undefined : { requestedSource: 'auto', engine: kind === 'other-engine' ? 'google' : 'edge', strategyVersion: kind === 'old-strategy' ? 0 : 1, detections: [] } };
+    await emit('history_sample_selected', { sampleId: base.id, retranslate: false, record: base });
+    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
+    await user.click(screen.getByRole('option', { name: 'French' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
+    await act(async () => pending.resolve({ ...base, targetLanguages: ['en', 'fr'], translations: ['New primary', 'New secondary'] }));
+  });
+
   it('retranslates both columns when the source language changes', async () => {
     const user = userEvent.setup(); await mount(); submit('Source switch');
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
@@ -173,6 +187,24 @@ describe('live translation bridge', () => {
 
 
 describe('translation engine settings', () => {
+  it('lists languages supported by the selected engine without silently replacing an unsupported target', async () => {
+    bridge.snapshot.translationEngine = 'google';
+    bridge.snapshot.translationPreferences.engine = 'google';
+    bridge.snapshot.translationPreferences.primaryLanguage = 'eo';
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: /^Translation$/ }));
+    expect(screen.getByRole('button', { name: 'Primary Language: Esperanto' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Translation Service: Google Translate' }));
+    await user.click(screen.getByRole('option', { name: 'Microsoft Edge Translate' }));
+    expect(screen.getByRole('button', { name: 'Primary Language: Esperanto (unavailable)' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('not supported');
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'edge' });
+    expect(bridge.snapshot.translationPreferences.primaryLanguage).toBe('eo');
+    await user.click(screen.getByRole('button', { name: 'Primary Language: Esperanto (unavailable)' }));
+    expect(screen.queryByRole('option', { name: 'Esperanto' })).toBeNull();
+    expect(screen.getByRole('option', { name: 'English' })).toBeTruthy();
+  });
+
   it('offers only Edge and Google and sends the chosen engine to the backend', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));

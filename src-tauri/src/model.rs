@@ -1,11 +1,30 @@
 use serde::Serialize;
 
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageDetection {
+    pub raw_language: String,
+    pub language: String,
+    pub score: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationMetadata {
+    pub requested_source: String,
+    pub engine: String,
+    pub strategy_version: u32,
+    pub detections: Vec<LanguageDetection>,
+}
+
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRecord {
     pub id: String,
     pub text: String,
     pub source_language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<TranslationMetadata>,
     pub target_languages: Vec<String>,
     pub translations: Vec<String>,
     pub date: String,
@@ -334,6 +353,30 @@ impl OperationResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn translation_metadata_round_trips_without_changing_legacy_records() {
+        let legacy = serde_json::json!({
+            "id":"legacy", "text":"Synthetic", "sourceLanguage":"en",
+            "targetLanguages":["zh-CN"], "translations":["合成"],
+            "date":"2026-11-17T00:00:00Z", "isFavorite":false, "isPinned":false,
+            "sourceApp":null
+        });
+        let legacy_record: super::HistoryRecord = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy_record).unwrap(), legacy);
+        let mut current = legacy;
+        let metadata = serde_json::json!({
+            "requestedSource":"auto", "engine":"edge", "strategyVersion":1,
+            "detections":[{"rawLanguage":"zh-Hans","language":"zh-CN","score":0.0},
+                {"rawLanguage":"qaa-Zzzz","language":"qaa-Zzzz","score":null}]
+        });
+        current["translation"] = metadata.clone();
+        let record: super::HistoryRecord = serde_json::from_value(current).unwrap();
+        assert_eq!(
+            serde_json::to_value(record).unwrap()["translation"],
+            metadata
+        );
+    }
+
     #[test]
     fn repeated_history_selection_keeps_details_open() {
         let mut state = super::WindowState::default();

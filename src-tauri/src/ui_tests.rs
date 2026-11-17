@@ -2103,12 +2103,6 @@ fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
         apply_translation(app)?;
         update_translation_level(app)?;
         window.show().map_err(|_| "window_show")?;
-        window.set_focus().map_err(|_| "window_focus")?;
-        activate_application();
-        app.get_webview("clipboard")
-            .ok_or("records child")?
-            .set_focus()
-            .map_err(|_| "records focus")?;
         Ok(())
     })?;
     wait_motion(app)?;
@@ -2117,6 +2111,18 @@ fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
     } else {
         "#translation-history"
     };
+    wait_records(app, &format!("const p=document.querySelector('{selector}');return {{ready:!!p&&p.getClientRects().length>0&&!p.closest('[hidden]')&&!!p.querySelector('.history-row:not([hidden])')&&!!p.querySelector('.history-search input')}};"))?;
+    // Focus the mounted child after WK startup, which can otherwise replace its native responder.
+    on_main(app, |app| {
+        let window = app.get_window("translation").ok_or("translation window")?;
+        window.set_focus().map_err(|_| "window_focus")?;
+        activate_application();
+        app.get_webview("clipboard")
+            .ok_or("records child")?
+            .set_focus()
+            .map_err(|_| "records focus")?;
+        Ok(())
+    })?;
     wait_records(app, &format!("const p=document.querySelector('{selector}'),visible=!!p&&p.getClientRects().length>0&&!p.closest('[hidden]'),rows=p?.querySelectorAll('.history-row:not([hidden])').length??0,focused=document.hasFocus(),searchFocused=!!p&&document.activeElement===p.querySelector('.history-search input');return {{ready:visible&&rows>0&&focused&&searchFocused,panel:!!p,visible,rows,focused,searchFocused,activeElement:document.activeElement?.className,error:p?.querySelector('[role=alert]')?.textContent,loading:!!p?.querySelector('[role=progressbar]')}};"))?;
     evaluate_view_dom(app,"clipboard","window.__recordsPresented=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__recordsPresented=true;}));return true;")?;
     wait_records(
@@ -2255,6 +2261,185 @@ fn run_translation_action_timing(app: &AppHandle) -> DomCase {
         }
         case.samples.push(closed);
         verify_delete_confirmation(app, "translation", &mut case.samples)?;
+        let original_preferences = app
+            .state::<AppState>()
+            .translation_preferences
+            .lock()
+            .unwrap()
+            .clone();
+        let mixed = crate::model::HistoryRecord {
+            id: "translation-auto-metadata".into(),
+            text: "Synthetic mixed language input".into(),
+            source_language: "mul".into(),
+            translation: Some(crate::model::TranslationMetadata {
+                requested_source: "auto".into(),
+                engine: "edge".into(),
+                strategy_version: crate::translation::STRATEGY_VERSION,
+                detections: vec![
+                    crate::model::LanguageDetection {
+                        raw_language: "zh-Hans".into(),
+                        language: "zh-CN".into(),
+                        score: Some(1.0),
+                    },
+                    crate::model::LanguageDetection {
+                        raw_language: "en".into(),
+                        language: "en".into(),
+                        score: Some(1.0),
+                    },
+                ],
+            }),
+            target_languages: vec!["en".into()],
+            translations: vec!["Synthetic mixed language output".into()],
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+        };
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated database")?
+            .insert(&mixed, "edge", || true)?;
+        crate::history_runtime::history_add(app, mixed.clone())?;
+        let metadata_result = (|| {
+            for engine in ["edge", "google"] {
+                evaluate_dom(
+                    app,
+                    &format!(
+                        r#"window.__metadataSetup={{done:false}};(async()=>{{await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:null,retranslate:false,clearDetail:true}});await window.__TAURI_INTERNALS__.invoke('translation_preferences_set',{{engine:{engine:?},sourceLanguage:'auto',primaryLanguage:'en',secondaryLanguage:'none'}});await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:'translation-auto-metadata',retranslate:false}});}})().then(()=>window.__metadataSetup={{done:true}},error=>window.__metadataSetup={{done:true,error:String(error)}});return true;"#
+                    ),
+                )?;
+                let restored = wait_dom(
+                    app,
+                    r#"const source=document.querySelector('.source-bar > .language-picker'),bar=document.querySelector('.source-bar');return {ready:window.__metadataSetup?.done&&!window.__metadataSetup.error&&document.querySelector('.source-input')?.value==='Synthetic mixed language input'&&source?.textContent==='Multiple languages'&&bar?.dataset.detectedLanguage==='mul',source:source?.textContent,detected:bar?.dataset.detectedLanguage,description:source?.getAttribute('aria-description'),result:document.querySelector('.result-column')?.textContent,error:window.__metadataSetup?.error,status:document.querySelector('.translation-status')?.textContent};"#,
+                )?;
+                if restored["description"] != "Detected: Multiple languages"
+                    || restored["result"] != "Synthetic mixed language output"
+                    || restored["status"].is_string()
+                {
+                    return Err(format!(
+                        "{engine} auto metadata history restore: {restored}"
+                    ));
+                }
+                let mut native = serde_json::Value::Null;
+                for _ in 0..40 {
+                    native = on_main(app, native_chrome_sample)?;
+                    if native["buttons"][0]["title"] == "Multiple languages" {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if native["buttons"][0]["title"] != "Multiple languages"
+                    || native["buttons"][1]["enabled"] != true
+                {
+                    return Err(format!("{engine} native chrome lost auto mode: {native}"));
+                }
+                case.samples.push(serde_json::json!({"engine":engine,"restored":restored,"nativeSource":native["buttons"][0]}));
+                app.get_webview("translation")
+                    .ok_or("translation view")?
+                    .emit("translation_chrome_action", "source")
+                    .map_err(|_| "source menu event")?;
+                let source_catalog = wait_dom(
+                    app,
+                    r#"const popover=document.querySelector('.language-popover'),options=[...popover?.querySelectorAll('[role=option]')??[]];return {ready:options.length>100,count:options.length,esperanto:options.some(option=>option.textContent==='Esperanto'),swahili:options.some(option=>option.textContent==='Swahili'),selected:options.filter(option=>option.getAttribute('aria-selected')==='true').map(option=>option.textContent)};"#,
+                )?;
+                let expected_source = crate::translation::languages(engine)
+                    .iter()
+                    .filter(|language| language.source)
+                    .count()
+                    + 1;
+                if source_catalog["count"].as_u64() != Some(expected_source as u64)
+                    || source_catalog["esperanto"] != (engine == "google")
+                    || source_catalog["swahili"] != true
+                    || source_catalog["selected"] != serde_json::json!(["Auto-Detect"])
+                {
+                    return Err(format!(
+                        "{engine} source language catalog differs: {source_catalog}"
+                    ));
+                }
+                case.samples
+                    .push(serde_json::json!({"engine":engine,"sourceCatalog":source_catalog}));
+                evaluate_dom(app, "document.querySelector('.language-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
+                wait_dom(
+                    app,
+                    "return {ready:!document.querySelector('.language-popover')};",
+                )?;
+                evaluate_dom(app, "document.querySelector('.translation-footer .language-slot .language-picker').click();return true;")?;
+                let target_catalog = wait_dom(
+                    app,
+                    r#"const options=[...document.querySelectorAll('.language-popover [role=option]')];return {ready:options.length>100,count:options.length,esperanto:options.some(option=>option.textContent==='Esperanto'),selected:options.filter(option=>option.getAttribute('aria-selected')==='true').map(option=>option.textContent)};"#,
+                )?;
+                let expected_target = crate::translation::languages(engine)
+                    .iter()
+                    .filter(|language| language.target)
+                    .count();
+                if target_catalog["count"].as_u64() != Some(expected_target as u64)
+                    || target_catalog["esperanto"] != (engine == "google")
+                    || target_catalog["selected"] != serde_json::json!(["English"])
+                {
+                    return Err(format!(
+                        "{engine} target language catalog differs: {target_catalog}"
+                    ));
+                }
+                case.samples
+                    .push(serde_json::json!({"engine":engine,"targetCatalog":target_catalog}));
+                evaluate_dom(app, "document.querySelector('.language-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
+                wait_dom(
+                    app,
+                    "return {ready:!document.querySelector('.language-popover')};",
+                )?;
+            }
+            Ok::<_, String>(())
+        })();
+        let mut long_name = mixed;
+        long_name.id = "translation-long-detected-name".into();
+        long_name.source_language = "nhe".into();
+        long_name.translation.as_mut().unwrap().engine = "google".into();
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated database")?
+            .insert(&long_name, "google", || true)?;
+        crate::history_runtime::history_add(app, long_name)?;
+        evaluate_dom(app, "window.__TAURI_INTERNALS__.invoke('history_sample_select',{sampleId:'translation-long-detected-name',retranslate:false});return true;")?;
+        let full_name = wait_dom(app, "const b=document.querySelector('.source-bar > .language-picker'),s=b?.querySelector('span');return {ready:b?.textContent==='Nahuatl (Eastern Huasteca)',label:b?.textContent,width:b?.getBoundingClientRect().width,full:!!s&&s.scrollWidth<=s.clientWidth};")?;
+        let mut native_name = serde_json::Value::Null;
+        for _ in 0..40 {
+            native_name = on_main(app, native_chrome_sample)?;
+            if native_name["buttons"][0]["title"] == "Nahuatl (Eastern Huasteca)" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if full_name["full"] != true
+            || native_name["buttons"][0]["title"] != "Nahuatl (Eastern Huasteca)"
+            || native_name["buttons"][0]["width"].as_f64().unwrap_or(0.0) + 1.0
+                < full_name["width"].as_f64().unwrap_or(1000.0)
+        {
+            return Err(format!(
+                "detected language name truncated: {full_name} / {native_name}"
+            ));
+        }
+        case.samples.push(serde_json::json!({"fullDetectedName":full_name,"nativeSource":native_name["buttons"][0]}));
+        let restored_preferences = serde_json::json!({"engine":original_preferences.engine,"sourceLanguage":original_preferences.source_language,"primaryLanguage":original_preferences.primary_language,"secondaryLanguage":original_preferences.secondary_language});
+        evaluate_dom(
+            app,
+            &format!(
+                r#"window.__metadataCleanup={{done:false}};(async()=>{{await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:null,retranslate:false,clearDetail:true}});await window.__TAURI_INTERNALS__.invoke('translation_preferences_set',{restored_preferences});await window.__TAURI_INTERNALS__.invoke('history_record_update',{{recordId:'translation-auto-metadata',action:'delete'}});await window.__TAURI_INTERNALS__.invoke('history_record_update',{{recordId:'translation-long-detected-name',action:'delete'}});await window.__TAURI_INTERNALS__.invoke('window_hide',{{region:'translation',keepHistory:true}});}})().then(()=>window.__metadataCleanup={{done:true}},error=>window.__metadataCleanup={{done:true,error:String(error)}});return true;"#
+            ),
+        )?;
+        let cleanup = wait_dom(
+            app,
+            "return {ready:window.__metadataCleanup?.done,...window.__metadataCleanup};",
+        )?;
+        if cleanup["error"].is_string() {
+            return Err(format!("metadata scenario cleanup failed: {cleanup}"));
+        }
+        metadata_result?;
         Ok::<_, String>(())
     })();
     case.passed = result.is_ok();
@@ -2563,6 +2748,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             id: "unified-translation".into(),
             text: "Synthetic shared record input".into(),
             source_language: "en".into(),
+            translation: None,
             target_languages: vec!["fr".into()],
             translations: vec!["Synthetic shared output".into()],
             date: "2099-01-01T00:00:00Z".into(),
@@ -4393,6 +4579,7 @@ fn run_history_pagination(app: &AppHandle) -> DomCase {
                     id: format!("pagination-{index}"),
                     text: format!("Synthetic page token-{index:04}"),
                     source_language: "en".into(),
+                    translation: None,
                     target_languages: vec!["fr".into()],
                     translations: vec!["Synthetic output".into()],
                     date: "2099-01-01T00:00:00Z".into(),

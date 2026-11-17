@@ -256,7 +256,7 @@ const SCRIPT: &str = r#"
           setSearch(panel,query);
           await waitFor(()=>typeof release==='function' && panel.querySelector('.activity-beam > span'), 'record query did not expose shared loading animation in '+view);
           const track=panel.querySelector('.activity-beam'),beam=track.firstElementChild,style=getComputedStyle(beam),parent=getComputedStyle(track);
-          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,trackHeight:parent.height,left:parent.left,right:parent.right});
+          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,transformOnly:beam.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame))),trackHeight:parent.height,left:parent.left,right:parent.right});
           window.fetch=internalFetch;
           release();
           await waitFor(()=>!panel.querySelector('.activity-beam'), 'record query loading animation did not finish');
@@ -265,9 +265,9 @@ const SCRIPT: &str = r#"
         }
       } finally { window.fetch=internalFetch; }
       assert(JSON.stringify(loadingStyles[0])===JSON.stringify(loadingStyles[1]), 'record loading effects differ: '+JSON.stringify(loadingStyles));
-      assert(loadingStyles[0].height==='2px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
+      assert(loadingStyles[0].height==='1.5px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
       if(!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        assert(loadingStyles[0].animation==='beam-travel' && loadingStyles[0].timing==='linear', 'shared loading motion parameters changed');
+        assert(loadingStyles[0].animation==='beam-travel' && loadingStyles[0].timing==='linear' && loadingStyles[0].transformOnly, 'shared loading motion parameters changed');
       }
       await invoke('records_view_set',{view:'translation'});
       await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');
@@ -383,6 +383,9 @@ const SCRIPT: &str = r#"
       pass(currentCase);
 
       currentCase = 'React deletion removes shared record and preserves selection';
+      clickAction('sample-05', 3);
+      await waitFor(()=>row('sample-05')?.querySelector('.history-delete')?.classList.contains('delete-armed'),'first delete click did not arm confirmation');
+      assert(!!(await record('sample-05')), 'first delete click removed shared record');
       clickAction('sample-05', 3);
       await waitFor(async () => !row('sample-05') && !(await record('sample-05')), 'deleted record remained in DOM or shared store');
       assert((await snapshot()).records.length === 19, 'shared deletion changed unexpected records');

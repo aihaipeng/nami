@@ -460,6 +460,7 @@ mod tests {
             id: id.into(),
             text: "Text\0\n中文 🐋 %_literal".into(),
             source_language: "auto".into(),
+            translation: None,
             target_languages: vec!["en".into(), "fr".into()],
             translations: vec!["First\r\nsecond".into(), "Texte".into()],
             date: "2026-11-14T12:34:56.789Z".into(),
@@ -470,6 +471,81 @@ mod tests {
             ),
         }
     }
+    #[test]
+    fn translation_metadata_survives_reopen_and_mark_updates_without_schema_change() {
+        let fixture = Fixture::new();
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let mut value = serde_json::to_value(record("metadata")).unwrap();
+        let metadata = serde_json::json!({
+            "requestedSource":"auto", "engine":"google", "strategyVersion":1,
+            "detections":[{"rawLanguage":"iw","language":"he","score":null}]
+        });
+        value["translation"] = metadata.clone();
+        let item: HistoryRecord = serde_json::from_value(value).unwrap();
+        db.insert(&item, "google", || true).unwrap();
+        let mut next = item.clone();
+        next.is_favorite = true;
+        db.update(&item, Some(&next)).unwrap();
+        let before_pin = next.clone();
+        next.is_pinned = true;
+        db.update(&before_pin, Some(&next)).unwrap();
+        drop(db);
+        let db = HistoryDatabase::open(&fixture.0).unwrap();
+        let restored = db.record("metadata").unwrap().unwrap();
+        assert!(restored.is_favorite && restored.is_pinned);
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap()["translation"],
+            metadata
+        );
+        assert_eq!(
+            db.connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        let page = db.page(&HistoryQuery::default(), None, 100).unwrap();
+        assert_eq!(
+            serde_json::to_value(&page.records[0]).unwrap()["translation"],
+            metadata
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_record_without_metadata_remains_readable_and_unchanged() {
+        let fixture = Fixture::new();
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let item = record("legacy-no-metadata");
+        db.insert(&item, "edge", || true).unwrap();
+        let original: String = db
+            .connection
+            .query_row(
+                "SELECT record_json FROM translation_records WHERE id=?1",
+                [&item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&original)
+            .unwrap()
+            .get("translation")
+            .is_none());
+        drop(db);
+        let db = HistoryDatabase::open(&fixture.0).unwrap();
+        let restored = db.record(&item.id).unwrap().unwrap();
+        assert!(serde_json::to_value(restored)
+            .unwrap()
+            .get("translation")
+            .is_none());
+        let after: String = db
+            .connection
+            .query_row(
+                "SELECT record_json FROM translation_records WHERE id=?1",
+                [&item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, original);
+    }
+
     #[test]
     fn latest_pin_precedes_older_pins_and_unpin_restores_date_order_after_reopen() {
         let fixture = Fixture::new();

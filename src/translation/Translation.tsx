@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
-import { languages } from '../shared/languages';
+import { languageName, languages, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
 import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
@@ -15,7 +15,7 @@ import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
 import { HistoryIcon } from './HistoryIcon';
 import { RecordFeedback } from '../shared/RecordFeedback';
-import { historySamples, type HistoryRecord, type HistorySelection } from './history';
+import { TRANSLATION_STRATEGY_VERSION, requestedSource, historySamples, type HistoryRecord, type HistorySelection } from './history';
 import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
@@ -38,6 +38,7 @@ function Keycaps({ keys }: { keys: string[] }) {
 export function Translation({ t, snapshot, command, native, activity }: ViewProps) {
   const [draft, setDraft] = useState('');
   const [source, setSource] = useState(snapshot.translationPreferences.sourceLanguage);
+  const [detectedSource, setDetectedSource] = useState<string | null>(null);
   const [primary, setPrimary] = useState(snapshot.translationPreferences.primaryLanguage);
   const [secondary, setSecondary] = useState(snapshot.translationPreferences.secondaryLanguage);
   const [notice, setNotice] = useState<'inputLimit' | null>(null);
@@ -85,6 +86,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     return () => { ++copyOperation.current; };
   }, [selectedId, draft, state.recordView, state.translationVisible, state.recordsSession]);
   const capabilities = snapshot.capabilities;
+  const languagesAvailable = supportsTranslation(snapshot.translationEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
   const currentWindow = useRef(state);
   currentWindow.current = state;
   const primaryKey = capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl';
@@ -93,11 +95,12 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     return binding ? keycapLabels(binding, capabilities.platform === 'macos') : [primaryKey];
   };
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
+  const sourceLabel = `${languageName(source === 'auto' && detectedSource ? detectedSource : source)}${supportsLanguage(snapshot.translationEngine, 'source', source) ? '' : ` (${t('languageUnavailable')})`}`;
   const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, {
-    sourceLabel: source === 'auto' ? 'Auto-Detect' : languages.find(([code]) => code === source)?.[1] ?? source,
+    sourceLabel,
     sourceWidth,
     translateLabel: t('translation'), actionsLabel: t('actions'),
-    canTranslate: Boolean(draft.trim()) && !snapshot.storageError, actionsVisible: actionsFit,
+    canTranslate: Boolean(draft.trim()) && !snapshot.storageError && languagesAvailable, actionsVisible: actionsFit,
   }, (action) => {
     if (action === 'translate') submit();
     else setPopup((current) => current === action ? null : action);
@@ -128,7 +131,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
         if (payload.clearDetail) {
           completedRecord.current = null;
           cancelRequest(); fromSelection.current = false; normalizedCaret.current = null;
-          setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null);
+          setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
         }
         return;
       }
@@ -173,7 +176,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   useEffect(() => {
     completedRecord.current = null;
-    cancelRequest(); setCachedResults([]); setServiceError(null);
+    cancelRequest(); setCachedResults([]); setServiceError(null); setDetectedSource(null);
   }, [snapshot.translationEngine]);
 
   useEffect(() => { void command('translation_columns_set', { secondaryEnabled: secondary !== 'none' }); }, [secondary]);
@@ -213,7 +216,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       const picker = sourceBar.current?.querySelector<HTMLElement>('.language-picker');
       if (capabilities.nativeHistory && picker && sourceBar.current) {
         sourceBar.current.style.paddingRight = `${picker.offsetWidth + 24}px`;
-        if (picker.offsetWidth > 0) setSourceWidth(Math.min(200, Math.max(32, picker.offsetWidth)));
+        if (picker.offsetWidth > 0) setSourceWidth(Math.min(360, Math.max(32, picker.offsetWidth)));
       }
       const last = [...element.querySelectorAll('.language-slot:not(.secondary-off) .language-picker')].at(-1)?.getBoundingClientRect();
       const actions = actionGroup.current?.getBoundingClientRect();
@@ -227,7 +230,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     void document.fonts.ready.then(measure);
     measure();
     return () => observer.disconnect();
-  }, [source, secondary, primary, snapshot.locale, state.translationVisible, capabilities.nativeHistory]);
+  }, [source, detectedSource, secondary, primary, snapshot.locale, state.translationVisible, capabilities.nativeHistory]);
 
   function stepSourceDrag() {
     const field = input.current;
@@ -286,8 +289,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (snapshot.storageError) return;
     const origin = reuse ?? completedRecord.current;
     cancelRequest();
-    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && reuse.sourceLanguage === sourceLanguage && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
-    setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null);
+    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation?.engine === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
+    setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null); setDetectedSource(null);
+    if (!supportsTranslation(snapshot.translationEngine, sourceLanguage, targetLanguages)) return;
     if (!inputWithinLimits(text)) { setNotice('inputLimit'); return; }
     if (!native) { setServiceError('Open Nami to translate.'); return; }
     const revision = requestRevision.current;
@@ -298,14 +302,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
       if (requestRevision.current !== revision) return;
       completedRecord.current = record;
-      setCachedResults(record.translations); setSelectedId(record.id); setSource(record.sourceLanguage);
+      setCachedResults(record.translations); setSelectedId(record.id); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage);
     } catch (error) {
       if (requestRevision.current === revision && String(error) !== 'cancelled') setServiceError(String(error));
     } finally { activity(-1); }
   }
 
   function submit() {
-    if (!draft.trim() || composing.current || snapshot.storageError) return;
+    if (!draft.trim() || composing.current || snapshot.storageError || !languagesAvailable) return;
     clearSelection();
     void translateText(draft, source, [primary, ...(secondary === 'none' ? [] : [secondary])], fromSelection.current);
     input.current?.focus({ preventScroll: true });
@@ -315,7 +319,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     completedRecord.current = null;
     cancelRequest(); normalizedCaret.current = null;
     const preferred = preferencesRef.current;
-    setDraft(context.text); setSource(preferred.sourceLanguage); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
+    setDraft(context.text); setSource(preferred.sourceLanguage); setDetectedSource(null); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
     sourceRef.current = preferred.sourceLanguage; primaryRef.current = preferred.primaryLanguage; secondaryRef.current = preferred.secondaryLanguage;
     fromSelection.current = true;
     setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error ? 'Selected text is unavailable in this application.' : null);
@@ -326,15 +330,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function selectHistory(record: HistoryRecord, retranslate = false) {
     setPopup(null);
-    cancelRequest(); fromSelection.current = false; setServiceError(null);
+    cancelRequest(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
     normalizedCaret.current = null;
     setSelectedId(record.id); setDraft(record.text);
-    setSource(record.sourceLanguage); setPrimary(record.targetLanguages[0]);
+    setSource(requestedSource(record)); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage); setPrimary(record.targetLanguages[0]);
     setSecondary(record.targetLanguages[1] ?? 'none');
     completedRecord.current = record;
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
-    if (retranslate) void translateText(record.text, record.sourceLanguage, record.targetLanguages, false);
+    if (retranslate) void translateText(record.text, requestedSource(record), record.targetLanguages, false);
     if (!native) void command('window_show', { target: 'translation' });
     if (retranslate) input.current?.focus({ preventScroll: true });
   }
@@ -348,7 +352,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     sourceRef.current = next.source; primaryRef.current = next.primary; secondaryRef.current = next.secondary;
     ({ source: setSource, primary: setPrimary, secondary: setSecondary })[side](value);
     void command('translation_preferences_set', side === 'source' ? { sourceLanguage: value } : side === 'primary' ? { primaryLanguage: value } : { secondaryLanguage: value });
-    clearSelection();
+    clearSelection(); setDetectedSource(null);
     const targets = [next.primary, ...(next.secondary === 'none' ? [] : [next.secondary])];
     if (draft.trim()) {
       void translateText(draft, next.source, targets, fromSelection.current, side === 'source' ? undefined : completedRecord.current ?? undefined, side === 'primary' ? 0 : side === 'secondary' ? 1 : undefined);
@@ -417,7 +421,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   function picker(id: Exclude<Popup, 'actions'>, value: string, onChange: (value: string) => void, extra?: 'auto' | 'none') {
     return <SearchableDropdown value={value} onChange={onChange}
       label={t(id === 'source' ? 'sourceLanguage' : id === 'primary' ? 'primaryLanguage' : 'secondaryLanguage')}
-      items={[...(extra ? [{ code: extra, name: extra === 'auto' ? 'Auto-Detect' : 'None' }] : []), ...languages.map(([code, name]) => ({ code, name }))]} t={t} side={id === 'source' ? 'bottom' : 'top'} open={popup === id}
+      items={[...(extra ? [{ code: extra, name: extra === 'auto' ? 'Auto-Detect' : 'None' }] : []), ...providerLanguages(snapshot.translationEngine, id === 'source' ? 'source' : 'target')]} t={t}
+      valueLabel={id === 'source' ? sourceLabel : value === 'none' || supportsLanguage(snapshot.translationEngine, 'target', value) ? undefined : `${languageName(value)} (${t('languageUnavailable')})`}
+      description={id === 'source' && source === 'auto' && detectedSource ? `${t('detectedLanguage')}: ${languageName(detectedSource)}` : undefined} side={id === 'source' ? 'bottom' : 'top'} open={popup === id}
       hiddenTrigger={id === 'source' && nativeChrome}
       onOpenChange={(open) => setPopup(open ? id : null)} />;
   }
@@ -441,14 +447,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
         if (primaryPressed(event)) { keydown(event, 'translation'); if (event.defaultPrevented) event.stopPropagation(); }
       }}>
       <div className="drag-strip" data-tauri-drag-region />
-      <header ref={sourceBar} className="source-bar">
+      <header ref={sourceBar} className="source-bar" data-detected-language={detectedSource ?? undefined}>
         <button className="icon-button history-trigger" title={t('history')} aria-label={t('history')} aria-expanded={state.historyVisible}
           aria-controls={capabilities.nativeHistory ? undefined : 'translation-history'} aria-pressed={state.historyVisible} onMouseDown={(event) => event.preventDefault()}
           onClick={() => { setPopup(null); void command('history_toggle'); }}><HistoryIcon name="clock" /></button>
         <textarea ref={input} className="source-input" aria-label={t('sourceLabel')} rows={1} wrap="off" spellCheck={false} value={displaySource(draft)}
           onChange={(event) => {
             completedRecord.current = null;
-            cancelRequest(); fromSelection.current = false; setServiceError(null);
+            cancelRequest(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
             const next = event.target.value;
             // Like FinderX, leave ordinary typing and IME selection to the editor.
             normalizedCaret.current = displaySource(next) === next ? null : displaySource(next.slice(0, event.target.selectionStart)).length;
@@ -461,6 +467,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       </header>
       <div className={cn('result-columns', secondary === 'none' && 'single-column')}>
         {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
+          {index === 0 && !languagesAvailable && <p className="translation-status" role="status">{t('languageNotSupported')}</p>}
           {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
           {serviceError && !cachedResults[index] && <p className="translation-status" data-tauri-drag-region="false" role="alert">{serviceError}</p>}
           {notice && <p className="translation-status" data-tauri-drag-region="false" role="status">{t(notice)}</p>}
@@ -472,7 +479,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
         </div>
         <div ref={actionGroup} className={cn('translation-actions', !actionsFit && 'actions-overflow')} aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
-          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError)} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
+          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError) || !languagesAvailable} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
           <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={shortcutKeys('actions')} /></button>
         </div>
       </footer>

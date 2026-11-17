@@ -99,6 +99,43 @@ describe('translation reliability', () => {
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
   });
 
+  it('preserves unsupported selections on an engine switch and blocks both DOM and native submission', async () => {
+    bridge.snapshot.translationEngine = 'google';
+    bridge.snapshot.translationPreferences.engine = 'google';
+    bridge.snapshot.translationPreferences.primaryLanguage = 'eo';
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Keep my requested target' } });
+    bridge.snapshot.translationEngine = 'edge'; bridge.snapshot.translationPreferences.engine = 'edge';
+    await emit('translation_engine_changed', 'edge');
+    expect(screen.getByRole('button', { name: 'Primary language: Esperanto (unavailable)' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('not supported');
+    expect(screen.getByRole('button', { name: /^Translate/ })).toHaveProperty('disabled', true);
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await emit('translation_chrome_action', 'translate');
+    expect(calls('translation_run')).toHaveLength(0);
+    expect(calls('translation_preferences_set')).toHaveLength(0);
+    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.canTranslate).toBe(false);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Primary language: Esperanto (unavailable)' }));
+    await user.click(screen.getByRole('option', { name: 'German' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]?.targets).toEqual(['de', 'zh-CN']);
+  });
+
+  it('rejects a stale language summary after editing and after a newer manual source choice', async () => {
+    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
+    await mount(); submit('Outdated language');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    fireEvent.change(source(), { target: { value: '' } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
+    await user.click(screen.getByRole('option', { name: 'French' }));
+    await act(async () => pending.resolve({ ...result('Outdated language'), sourceLanguage: 'ja' }));
+    expect(screen.getByRole('button', { name: 'Source language: French' })).toBeTruthy();
+    expect(document.querySelector('.source-bar')?.getAttribute('data-detected-language')).toBeNull();
+  });
+
   it('shows service errors and removes the loading animation', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.reject('The translation request timed out. Try again.') : invoke(name, args));

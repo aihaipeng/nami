@@ -2147,6 +2147,7 @@ mod tests {
             id: "preserved-translation".into(),
             text: "synthetic original".into(),
             source_language: "auto".into(),
+            translation: None,
             target_languages: vec!["en".into()],
             translations: vec!["synthetic translation".into()],
             date: "2026-11-14T12:00:00.000Z".into(),

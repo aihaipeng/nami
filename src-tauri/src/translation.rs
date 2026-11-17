@@ -1,7 +1,7 @@
 use crate::shortcuts::{self, KeyBinding, TranslationShortcuts};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -9,21 +9,68 @@ use std::time::Duration;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const TRANSLATION_RETRY_LIMIT: usize = 3;
 const TRANSLATION_RETRY_DELAY: Duration = Duration::from_millis(300);
-type BatchTranslation = (Vec<String>, Vec<Option<String>>);
+mod edge;
+mod google;
+mod text;
+
+pub const STRATEGY_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+pub struct Language {
+    pub code: &'static str,
+    pub name: &'static str,
+    pub source: bool,
+    pub target: bool,
+}
+
+struct SegmentResult {
+    text: String,
+    detection: Option<crate::model::LanguageDetection>,
+}
+
+pub struct TranslationResult {
+    pub translations: Vec<String>,
+    pub source_language: String,
+    pub detections: Vec<crate::model::LanguageDetection>,
+}
+
+type BatchTranslation = Vec<SegmentResult>;
 type BatchFuture<'a> = Pin<Box<dyn Future<Output = Result<BatchTranslation, String>> + Send + 'a>>;
-const LANGUAGES: &[&str] = &[
-    "ar", "zh-CN", "zh-TW", "nl", "en", "fr", "de", "id", "it", "ja", "ko", "pl", "pt", "ru", "es",
-    "tr", "vi",
-];
+pub fn languages(engine: &str) -> &'static [Language] {
+    match engine {
+        "google" => google::languages(),
+        "edge" => edge::languages(),
+        _ => &[],
+    }
+}
+
+fn supports_language(engine: &str, code: &str, source: bool) -> bool {
+    languages(engine).iter().any(|language| {
+        language.code == code
+            && if source {
+                language.source
+            } else {
+                language.target
+            }
+    })
+}
+
+fn known_language(code: &str, source: bool) -> bool {
+    ["google", "edge"]
+        .iter()
+        .any(|engine| supports_language(engine, code, source))
+}
 
 struct Lines<'a> {
     texts: Vec<&'a str>,
+    #[cfg(test)]
     endings: Vec<&'a str>,
 }
 
 fn split_lines(text: &str) -> Lines<'_> {
     let bytes = text.as_bytes();
     let mut texts = Vec::new();
+    #[cfg(test)]
     let mut endings = Vec::new();
     let mut start = 0;
     let mut index = 0;
@@ -35,6 +82,7 @@ fn split_lines(text: &str) -> Lines<'_> {
                 index += 1;
             }
             texts.push(&text[start..end]);
+            #[cfg(test)]
             endings.push(&text[end..index]);
             start = index;
         } else {
@@ -42,8 +90,13 @@ fn split_lines(text: &str) -> Lines<'_> {
         }
     }
     texts.push(&text[start..]);
+    #[cfg(test)]
     endings.push("");
-    Lines { texts, endings }
+    Lines {
+        texts,
+        #[cfg(test)]
+        endings,
+    }
 }
 
 pub fn validate_text(text: &str) -> Result<(), String> {
@@ -99,17 +152,17 @@ impl Preferences {
             }
         }
         if let Some(source) = read("translation_source") {
-            if source == "auto" || LANGUAGES.contains(&source.as_str()) {
+            if source == "auto" || known_language(&source, true) {
                 preferences.source_language = source;
             }
         }
         if let Some(primary_language) = read("translation_primary") {
-            if LANGUAGES.contains(&primary_language.as_str()) {
+            if known_language(&primary_language, false) {
                 preferences.primary_language = primary_language;
             }
         }
         if let Some(secondary) = read("translation_secondary") {
-            if secondary == "none" || LANGUAGES.contains(&secondary.as_str()) {
+            if secondary == "none" || known_language(&secondary, false) {
                 preferences.secondary_language = secondary;
             }
         }
@@ -144,19 +197,19 @@ impl Preferences {
             self.engine = engine;
         }
         if let Some(source) = patch.source_language {
-            if source != "auto" && !LANGUAGES.contains(&source.as_str()) {
+            if source != "auto" && !supports_language(&self.engine, &source, true) {
                 return Err("invalid_argument".into());
             }
             self.source_language = source;
         }
         if let Some(primary) = patch.primary_language {
-            if !LANGUAGES.contains(&primary.as_str()) {
+            if !supports_language(&self.engine, &primary, false) {
                 return Err("invalid_argument".into());
             }
             self.primary_language = primary;
         }
         if let Some(secondary) = patch.secondary_language {
-            if secondary != "none" && !LANGUAGES.contains(&secondary.as_str()) {
+            if secondary != "none" && !supports_language(&self.engine, &secondary, false) {
                 return Err("invalid_argument".into());
             }
             self.secondary_language = secondary;
@@ -234,13 +287,13 @@ pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Resul
     if !matches!(engine, "edge" | "google") {
         return Err("Choose a supported translation engine.".into());
     }
-    if source != "auto" && !LANGUAGES.contains(&source) {
+    if source != "auto" && !supports_language(engine, source, true) {
         return Err("Choose a supported source language.".into());
     }
     if !(1..=2).contains(&targets.len())
         || targets
             .iter()
-            .any(|target| !LANGUAGES.contains(&target.as_str()))
+            .any(|target| !supports_language(engine, target, false))
     {
         return Err("Choose one or two supported target languages.".into());
     }
@@ -266,6 +319,7 @@ pub fn source_app_for_translation(
 }
 
 pub fn reusable_results(
+    engine: &str,
     text: &str,
     source: &str,
     targets: &[String],
@@ -277,24 +331,20 @@ pub fn reusable_results(
         .enumerate()
         .map(|(index, target)| {
             previous
-                .filter(|_| refresh_target.is_some_and(|changed| index != changed))
-                .filter(|record| record.text == text && record.source_language == source)
+                .filter(|_| refresh_target.is_some_and(|changed| changed < 2 && index != changed))
+                .filter(|record| record.text == text)
+                .filter(|record| {
+                    record.translation.as_ref().is_some_and(|metadata| {
+                        metadata.engine == engine
+                            && metadata.requested_source == source
+                            && metadata.strategy_version == STRATEGY_VERSION
+                    })
+                })
                 .filter(|record| record.target_languages.get(index) == Some(target))
                 .and_then(|record| record.translations.get(index))
                 .cloned()
         })
         .collect()
-}
-
-fn language_code<'a>(engine: &str, code: &'a str) -> &'a str {
-    match (engine, code.to_ascii_lowercase().as_str()) {
-        ("edge", "auto") => "",
-        ("edge", "zh" | "zh-cn" | "zh-hans") => "zh-Hans",
-        ("edge", "zh-tw" | "zh-hant") => "zh-Hant",
-        (_, "zh" | "zh-cn" | "zh-hans") => "zh-CN",
-        (_, "zh-tw" | "zh-hant") => "zh-TW",
-        _ => code,
-    }
 }
 
 fn batches(lines: &[&str]) -> Vec<Vec<usize>> {
@@ -306,7 +356,7 @@ fn batches(lines: &[&str]) -> Vec<Vec<usize>> {
             continue;
         }
         let next = line.encode_utf16().count();
-        if batch.len() == 64 || units + next > 12_000 {
+        if !batch.is_empty() && (batch.len() == 64 || units + next > 12_000) {
             result.push(std::mem::take(&mut batch));
             units = 0;
         }
@@ -319,133 +369,20 @@ fn batches(lines: &[&str]) -> Vec<Vec<usize>> {
     result
 }
 
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn catalog_language(code: &str) -> Option<String> {
-    let lower = code.trim().to_ascii_lowercase();
-    let mapped = match lower.as_str() {
-        "zh" | "zh-cn" | "zh-hans" | "zh-chs" => "zh-CN",
-        "zh-tw" | "zh-hant" | "zh-hk" | "zh-mo" | "zh-cht" => "zh-TW",
-        "pt-br" | "pt-pt" => "pt",
-        other => other,
-    };
-    LANGUAGES
-        .iter()
-        .find(|language| language.eq_ignore_ascii_case(mapped))
-        .copied()
-        .or_else(|| {
-            let primary = mapped.split('-').next()?;
-            if primary == "zh" {
-                return None;
-            }
-            LANGUAGES
-                .iter()
-                .find(|language| language.eq_ignore_ascii_case(primary))
-                .copied()
-        })
-        .map(str::to_string)
-}
-
 fn matched_language(codes: &[Option<String>]) -> Option<String> {
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    let mut best: Option<(String, usize)> = None;
-    for code in codes.iter().flatten() {
-        let count = if let Some(entry) = counts.iter_mut().find(|(name, _)| name == code) {
-            entry.1 += 1;
-            entry.1
-        } else {
-            counts.push((code.clone(), 1));
-            1
-        };
-        if best
-            .as_ref()
-            .is_none_or(|(_, best_count)| count > *best_count)
-        {
-            best = Some((code.clone(), count));
+    let mut language: Option<&str> = None;
+    for code in codes
+        .iter()
+        .flatten()
+        .filter(|code| !matches!(code.as_str(), "auto" | "und"))
+    {
+        match language {
+            None => language = Some(code),
+            Some(previous) if previous != code => return Some("mul".into()),
+            _ => {}
         }
     }
-    best.map(|(code, _)| code)
-}
-
-fn parse_response(
-    engine: &str,
-    data: &[u8],
-    count: usize,
-    source: &str,
-) -> Result<(Vec<String>, Vec<Option<String>>), String> {
-    let malformed = || "The translation service returned an invalid response.".to_string();
-    let root: Value = serde_json::from_slice(data).map_err(|_| malformed())?;
-    if engine == "edge" {
-        let rows = root
-            .as_array()
-            .filter(|rows| rows.len() == count)
-            .ok_or_else(malformed)?;
-        rows.iter()
-            .map(|row| {
-                let detected = if source == "auto" {
-                    Some(
-                        row["detectedLanguage"]["language"]
-                            .as_str()
-                            .map(catalog_language)
-                            .ok_or_else(malformed)?,
-                    )
-                } else {
-                    None
-                };
-                let text = row["translations"]
-                    .as_array()
-                    .and_then(|translations| translations.first())
-                    .and_then(|translation| translation["text"].as_str())
-                    .map(String::from)
-                    .ok_or_else(malformed)?;
-                Ok((text, detected.flatten()))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(|rows| {
-                let (texts, detected) = rows.into_iter().unzip();
-                (
-                    texts,
-                    if source == "auto" {
-                        detected
-                    } else {
-                        Vec::new()
-                    },
-                )
-            })
-    } else {
-        let root = root.as_array().ok_or_else(malformed)?;
-        let texts = root
-            .first()
-            .and_then(Value::as_array)
-            .filter(|texts| texts.len() == count)
-            .ok_or_else(malformed)?;
-        let detected = if source == "auto" {
-            let detected = root
-                .get(1)
-                .and_then(Value::as_array)
-                .filter(|codes| codes.len() == count)
-                .ok_or_else(malformed)?;
-            detected
-                .iter()
-                .map(|code| code.as_str().map(catalog_language).ok_or_else(malformed))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
-        };
-        let texts = texts
-            .iter()
-            .map(|text| {
-                text.as_str()
-                    .map(|text| html_escape::decode_html_entities(text).into_owned())
-                    .ok_or_else(malformed)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((texts, detected))
-    }
+    language.map(str::to_string)
 }
 
 fn network_error(error: reqwest::Error) -> String {
@@ -484,6 +421,7 @@ async fn response_bytes(mut response: Response) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+#[cfg(test)]
 fn join_lines(translations: &[String], endings: &[&str]) -> String {
     let mut result = String::new();
     for (translation, ending) in translations.iter().zip(endings) {
@@ -491,40 +429,6 @@ fn join_lines(translations: &[String], endings: &[&str]) -> String {
         result.push_str(ending);
     }
     result
-}
-
-fn request(
-    client: &Client,
-    engine: &str,
-    active: &[&str],
-    source: &str,
-    target: &str,
-) -> reqwest::RequestBuilder {
-    if engine == "edge" {
-        client
-            .post("https://edge.microsoft.com/translate/translatetext")
-            .query(&[
-                ("from", language_code(engine, source)),
-                ("to", language_code(engine, target)),
-                ("isEnterpriseClient", "false"),
-            ])
-            .json(&active)
-    } else {
-        let escaped: Vec<String> = active.iter().map(|text| escape_html(text)).collect();
-        client
-            .post("https://translate-pa.googleapis.com/v1/translateHtml")
-            .header("Content-Type", "application/json+protobuf")
-            .json(&json!([
-                [
-                    escaped,
-                    language_code(engine, source),
-                    language_code(engine, target)
-                ],
-                "te_lib"
-            ]))
-            // Public Translate Element frontend key used by the reference client.
-            .header("X-Goog-Api-Key", "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520")
-    }
 }
 
 async fn with_translation_retries<'a, T: 'a>(
@@ -552,12 +456,18 @@ fn fetch_batch<'a>(
     target: &'a str,
 ) -> BatchFuture<'a> {
     Box::pin(async move {
-        let response = request(client, engine, active, source, target)
-            .send()
-            .await
-            .map_err(network_error)?;
+        let request = match engine {
+            "google" => google::request(client, active, source, target),
+            "edge" => edge::request(client, active, source, target),
+            _ => return Err("Choose a supported translation engine.".into()),
+        };
+        let response = request.send().await.map_err(network_error)?;
         let data = response_bytes(response).await?;
-        parse_response(engine, &data, active.len(), source)
+        match engine {
+            "google" => google::parse(&data, active.len(), source),
+            "edge" => edge::parse(&data, active.len(), source),
+            _ => unreachable!(),
+        }
     })
 }
 
@@ -614,51 +524,154 @@ fn translation_client(proxy_url: &str, proxy_enabled: bool) -> Result<Client, St
         .map_err(|_| "Unable to initialize the translation service.".into())
 }
 
+fn context_groups<'a>(
+    input: &'a str,
+    units: &[text::Unit<'a>],
+    detections: &[Option<crate::model::LanguageDetection>],
+) -> Vec<(text::Unit<'a>, std::ops::Range<usize>)> {
+    let mut groups = Vec::new();
+    let mut cursor = 0;
+    for line in text::units(input, false)
+        .into_iter()
+        .filter(|unit| unit.translate)
+    {
+        let start = line.original.as_ptr() as usize;
+        let end = start + line.original.len();
+        while cursor < units.len() && (units[cursor].original.as_ptr() as usize) < start {
+            cursor += 1;
+        }
+        let first = cursor;
+        while cursor < units.len() && (units[cursor].original.as_ptr() as usize) < end {
+            cursor += 1;
+        }
+        let range = first..cursor;
+        let mut language: Option<&str> = None;
+        let mut count = 0;
+        let same_language = range
+            .clone()
+            .filter(|index| units[*index].translate)
+            .all(|index| {
+                let Some(detection) = detections[index].as_ref() else {
+                    return false;
+                };
+                if detection.score == Some(0.0)
+                    || matches!(detection.language.as_str(), "auto" | "und")
+                {
+                    return false;
+                }
+                count += 1;
+                match language {
+                    Some(previous) => previous == detection.language,
+                    None => {
+                        language = Some(&detection.language);
+                        true
+                    }
+                }
+            });
+        if same_language && count > 1 {
+            groups.push((line, range));
+        }
+    }
+    groups
+}
+
 pub async fn translate(
     engine: &str,
-    text: &str,
+    input: &str,
     source: &str,
     targets: &[String],
     proxy_url: &str,
     proxy_enabled: bool,
-) -> Result<(Vec<String>, String), String> {
-    validate_text(text)?;
+) -> Result<TranslationResult, String> {
+    validate_text(input)?;
     validate_options(engine, source, targets)?;
-    let lines = split_lines(text);
-    let batches = batches(&lines.texts);
-    if batches.is_empty() {
-        return Ok((
-            targets.iter().map(|_| text.to_string()).collect(),
-            source.to_string(),
-        ));
+    let units = text::units(input, source == "auto");
+    let prepared: Vec<&str> = units
+        .iter()
+        .map(|unit| {
+            if unit.translate {
+                unit.prepared.as_str()
+            } else {
+                ""
+            }
+        })
+        .collect();
+    let batch_plan = batches(&prepared);
+    if batch_plan.is_empty() {
+        return Ok(TranslationResult {
+            translations: targets.iter().map(|_| input.to_string()).collect(),
+            source_language: if source == "auto" {
+                "und".into()
+            } else {
+                source.into()
+            },
+            detections: Vec::new(),
+        });
     }
     let client = translation_client(proxy_url, proxy_enabled)?;
     let mut results = Vec::with_capacity(targets.len());
-    let mut detected = Vec::new();
+    let mut detections = Vec::new();
     for (target_index, target) in targets.iter().enumerate() {
-        let mut translations: Vec<String> =
-            lines.texts.iter().map(|text| text.to_string()).collect();
-        for batch in &batches {
-            let active: Vec<&str> = batch.iter().map(|index| lines.texts[*index]).collect();
-            let (translated, languages) = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
+        let mut target_detections = vec![None; units.len()];
+        let mut translated_units: Vec<String> =
+            units.iter().map(|unit| unit.original.to_string()).collect();
+        for batch in &batch_plan {
+            let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
+            let translated = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
                 fetch_batch(&client, engine, &active, source, target)
             })
             .await?;
-            if target_index == 0 && source == "auto" {
-                detected.extend(languages);
-            }
-            for (index, translated) in batch.iter().zip(translated) {
-                translations[*index] = translated;
+            for (index, result) in batch.iter().zip(translated) {
+                translated_units[*index] = units[*index].restore(&result.text)?;
+                target_detections[*index] = result.detection;
             }
         }
-        results.push(join_lines(&translations, &lines.endings));
+        if source == "auto" {
+            // Rejoin same-language sentences to retain pronouns and paragraph context.
+            let groups = context_groups(input, &units, &target_detections);
+            let prepared: Vec<&str> = groups
+                .iter()
+                .map(|(unit, _)| unit.prepared.as_str())
+                .collect();
+            for batch in batches(&prepared) {
+                let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
+                let contextual = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
+                    fetch_batch(&client, engine, &active, source, target)
+                })
+                .await?;
+                for (index, result) in batch.iter().zip(contextual) {
+                    let (unit, range) = &groups[*index];
+                    let restored = unit.restore(&result.text)?;
+                    for index in range.clone() {
+                        translated_units[index].clear();
+                        target_detections[index] = None;
+                    }
+                    translated_units[range.start] = restored;
+                    target_detections[range.start] = result.detection;
+                }
+            }
+        }
+        if target_index == 0 {
+            detections.extend(target_detections.into_iter().flatten());
+        }
+        results.push(translated_units.concat());
     }
-    let source_language = if source == "auto" {
-        matched_language(&detected).unwrap_or_else(|| source.to_string())
+    let resolved = if source == "auto" {
+        matched_language(
+            &detections
+                .iter()
+                .map(|value| Some(value.language.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|| "und".into())
     } else {
         source.to_string()
     };
-    Ok((results, source_language))
+    Ok(TranslationResult {
+        translations: results,
+        source_language: resolved,
+        detections,
+    })
 }
 
 #[cfg(test)]
@@ -754,9 +767,16 @@ mod tests {
             is_favorite: false,
             is_pinned: false,
             source_app: None,
+            translation: Some(crate::model::TranslationMetadata {
+                requested_source: "auto".into(),
+                engine: "edge".into(),
+                strategy_version: STRATEGY_VERSION,
+                detections: Vec::new(),
+            }),
         };
         assert_eq!(
             reusable_results(
+                "edge",
                 "Synthetic",
                 "auto",
                 &record.target_languages,
@@ -767,6 +787,7 @@ mod tests {
         );
         assert_eq!(
             reusable_results(
+                "edge",
                 "Synthetic",
                 "auto",
                 &record.target_languages,
@@ -799,6 +820,7 @@ mod tests {
         assert_eq!(full_refresh.target_index, None);
         assert_eq!(
             reusable_results(
+                "edge",
                 "Synthetic",
                 "auto",
                 &record.target_languages,
@@ -809,27 +831,42 @@ mod tests {
         );
         let targets = vec!["de".into(), "zh-CN".into()];
         assert_eq!(
-            reusable_results("Synthetic", "auto", &targets, Some(&record), Some(0)),
+            reusable_results(
+                "edge",
+                "Synthetic",
+                "auto",
+                &targets,
+                Some(&record),
+                Some(0)
+            ),
             vec![None, Some("Chinese".into())]
         );
         assert_eq!(
-            reusable_results("Synthetic", "de", &targets, Some(&record), Some(0)),
+            reusable_results("edge", "Synthetic", "de", &targets, Some(&record), Some(0)),
             vec![None, None]
         );
         assert_eq!(
-            reusable_results("Edited", "auto", &targets, Some(&record), Some(0)),
+            reusable_results("edge", "Edited", "auto", &targets, Some(&record), Some(0)),
             vec![None, None]
         );
         assert_eq!(
-            reusable_results("Synthetic", "auto", &targets, None, Some(0)),
+            reusable_results("edge", "Synthetic", "auto", &targets, None, Some(0)),
             vec![None, None]
         );
         assert_eq!(
-            reusable_results("Synthetic", "auto", &["en".into()], Some(&record), Some(1)),
+            reusable_results(
+                "edge",
+                "Synthetic",
+                "auto",
+                &["en".into()],
+                Some(&record),
+                Some(1)
+            ),
             vec![Some("English".into())]
         );
         assert_eq!(
             reusable_results(
+                "edge",
                 "Synthetic",
                 "auto",
                 &["en".into(), "fr".into()],
@@ -837,52 +874,6 @@ mod tests {
                 Some(1)
             ),
             vec![Some("English".into()), None]
-        );
-    }
-
-    #[test]
-    fn builds_fixed_provider_requests_with_one_content_type() {
-        let client = Client::builder().user_agent("Nami/0.1").build().unwrap();
-        let active = ["A & B <world>", "Second line"];
-        let edge = request(&client, "edge", &active, "auto", "zh-CN")
-            .build()
-            .unwrap();
-        assert_eq!(edge.method(), reqwest::Method::POST);
-        assert_eq!(edge.url().scheme(), "https");
-        assert_eq!(edge.url().host_str(), Some("edge.microsoft.com"));
-        assert_eq!(edge.url().path(), "/translate/translatetext");
-        assert_eq!(
-            edge.url().as_str(),
-            "https://edge.microsoft.com/translate/translatetext?from=&to=zh-Hans&isEnterpriseClient=false"
-        );
-        assert_eq!(edge.headers().get_all("Content-Type").iter().count(), 1);
-        assert_eq!(edge.headers()["Content-Type"], "application/json");
-        let edge_body: Value =
-            serde_json::from_slice(edge.body().unwrap().as_bytes().unwrap()).unwrap();
-        assert_eq!(edge_body, json!(active));
-
-        let google = request(&client, "google", &active, "zh-Hans", "zh-Hant")
-            .build()
-            .unwrap();
-        assert_eq!(google.method(), reqwest::Method::POST);
-        assert_eq!(
-            google.url().as_str(),
-            "https://translate-pa.googleapis.com/v1/translateHtml"
-        );
-        assert_eq!(google.headers().get_all("Content-Type").iter().count(), 1);
-        assert_eq!(
-            google.headers()["Content-Type"],
-            "application/json+protobuf"
-        );
-        assert!(google.headers().contains_key("X-Goog-Api-Key"));
-        let google_body: Value =
-            serde_json::from_slice(google.body().unwrap().as_bytes().unwrap()).unwrap();
-        assert_eq!(
-            google_body,
-            json!([
-                [["A &amp; B &lt;world&gt;", "Second line"], "zh-CN", "zh-TW"],
-                "te_lib"
-            ])
         );
     }
 
@@ -914,71 +905,6 @@ mod tests {
         let long = "😀".repeat(2_500);
         assert_eq!(batches(&[&long, "  ", &long, &long]), [vec![0, 2], vec![3]]);
         assert!(batches(&["", "  ", "\t"]).is_empty());
-    }
-
-    #[test]
-    fn maps_chinese_aliases_per_provider() {
-        assert_eq!(language_code("edge", "auto"), "");
-        for code in ["zh", "ZH-cn", "zh-Hans"] {
-            assert_eq!(language_code("edge", code), "zh-Hans");
-            assert_eq!(language_code("google", code), "zh-CN");
-        }
-        for code in ["zh-TW", "zh-Hant"] {
-            assert_eq!(language_code("edge", code), "zh-Hant");
-            assert_eq!(language_code("google", code), "zh-TW");
-        }
-        assert_eq!(language_code("google", "auto"), "auto");
-    }
-
-    #[test]
-    fn parses_strict_provider_responses_and_html_once() {
-        let edge = br#"[{"detectedLanguage":{"language":"en"},"translations":[{"text":"Hello"}]}]"#;
-        let (texts, detected) = parse_response("edge", edge, 1, "auto").unwrap();
-        assert_eq!(texts, ["Hello"]);
-        assert_eq!(detected, [Some("en".to_string())]);
-        assert!(parse_response("edge", edge, 2, "auto").is_err());
-        assert!(
-            parse_response("edge", br#"[{"translations":[{"text":"x"}]}]"#, 1, "auto").is_err()
-        );
-        assert!(parse_response("edge", br#"[{"translations":[{"text":2}]}]"#, 1, "en").is_err());
-        assert_eq!(escape_html("A & B < C > D"), "A &amp; B &lt; C &gt; D");
-        let google = br#"[["&lt;b&gt;&amp; &#39; &#x1F600; &amp;lt;"],["en"]]"#;
-        let (texts, detected) = parse_response("google", google, 1, "auto").unwrap();
-        assert_eq!(texts, ["<b>& ' 😀 &lt;"]);
-        assert_eq!(detected, [Some("en".to_string())]);
-        assert!(parse_response("google", google, 2, "auto").is_err());
-        assert!(parse_response("google", br#"[["x"],["en","ja"]]"#, 1, "auto").is_err());
-        assert!(parse_response("google", br#"[[2]]"#, 1, "en").is_err());
-        assert!(parse_response("google", b"invalid", 1, "en").is_err());
-    }
-
-    #[test]
-    fn auto_detection_uses_the_most_common_catalog_language() {
-        let edge = br#"[{"detectedLanguage":{"language":"zh-Hans"},"translations":[{"text":"A"}]},{"detectedLanguage":{"language":"en-US"},"translations":[{"text":"B"}]},{"detectedLanguage":{"language":"en"},"translations":[{"text":"C"}]},{"detectedLanguage":{"language":"la"},"translations":[{"text":"D"}]}]"#;
-        let (texts, detected) = parse_response("edge", edge, 4, "auto").unwrap();
-        assert_eq!(texts, ["A", "B", "C", "D"]);
-        assert_eq!(
-            detected,
-            [
-                Some("zh-CN".to_string()),
-                Some("en".to_string()),
-                Some("en".to_string()),
-                None
-            ]
-        );
-        assert_eq!(matched_language(&detected), Some("en".to_string()));
-        assert_eq!(
-            matched_language(&[Some("ja".into()), Some("fr".into())]),
-            Some("ja".to_string())
-        );
-        let google = r#"[["甲","乙"],["zh-Hans","zh-Hant"]]"#.as_bytes();
-        assert_eq!(
-            parse_response("google", google, 2, "auto").unwrap().1,
-            [Some("zh-CN".to_string()), Some("zh-TW".to_string())]
-        );
-        let (texts, detected) = parse_response("edge", edge, 4, "fr").unwrap();
-        assert_eq!(texts, ["A", "B", "C", "D"]);
-        assert!(detected.is_empty());
     }
 
     #[test]
@@ -1047,12 +973,12 @@ mod tests {
         let input = "Nami synthetic test.\n\nHello & <world>\r\n";
         let targets = vec!["zh-CN".to_string(), "ja".to_string()];
         for engine in ["edge", "google"] {
-            let (results, detected) = translate(engine, input, "auto", &targets, "", false)
+            let result = translate(engine, input, "auto", &targets, "", false)
                 .await
                 .unwrap_or_else(|error| panic!("{engine} synthetic smoke failed: {error}"));
-            assert_eq!(results.len(), targets.len());
-            assert!(LANGUAGES.contains(&detected.as_str()));
-            for output in results {
+            assert_eq!(result.translations.len(), targets.len());
+            assert!(!result.detections.is_empty());
+            for output in result.translations {
                 let lines = split_lines(&output);
                 assert_eq!(lines.texts.len(), 4);
                 assert_eq!(lines.endings, ["\n", "\n", "\r\n", ""]);
@@ -1065,5 +991,317 @@ mod tests {
             }
             println!("{engine} PASS");
         }
+    }
+    #[test]
+    fn auto_detection_describes_mixed_sources_instead_of_counting_lines() {
+        assert_eq!(
+            matched_language(&[
+                Some("en".into()),
+                Some("zh-CN".into()),
+                Some("zh-CN".into())
+            ]),
+            Some("mul".into())
+        );
+        assert_eq!(matched_language(&[Some("th".into())]), Some("th".into()));
+    }
+
+    #[test]
+    fn provider_catalogs_accept_additional_languages_and_reject_other_engines_targets() {
+        assert!(validate_options("google", "auto", &["eo".into()]).is_ok());
+        assert!(validate_options("edge", "sw", &["en".into()]).is_ok());
+        assert!(validate_options("edge", "auto", &["eo".into()]).is_err());
+    }
+
+    #[test]
+    fn frontend_catalog_matches_each_backend_provider() {
+        for (engine, data) in [
+            (
+                "google",
+                include_str!("../../src/shared/languages/google.json"),
+            ),
+            ("edge", include_str!("../../src/shared/languages/edge.json")),
+        ] {
+            let frontend: serde_json::Value = serde_json::from_str(data).unwrap();
+            let backend = serde_json::to_value(languages(engine)).unwrap();
+            assert_eq!(backend, frontend, "{engine} catalogs diverged");
+        }
+        let frontend_version = include_str!("../../src/translation/history.ts");
+        assert!(frontend_version.contains(&format!(
+            "TRANSLATION_STRATEGY_VERSION = {STRATEGY_VERSION}"
+        )));
+    }
+
+    #[test]
+    fn oversize_prepared_units_never_make_an_empty_batch() {
+        let expanded = "&amp;".repeat(5000);
+        assert_eq!(batches(&[&expanded, "later"]), vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn reuse_requires_current_engine_request_mode_and_strategy() {
+        let mut record: crate::model::HistoryRecord = serde_json::from_value(serde_json::json!({
+            "id":"synthetic","text":"text","sourceLanguage":"en","targetLanguages":["en","zh-CN"],
+            "translations":["text","文本"],"date":"2026-11-17T00:00:00Z","isFavorite":false,"isPinned":false,
+            "translation":{"requestedSource":"auto","engine":"edge","strategyVersion":1,"detections":[]}
+        })).unwrap();
+        assert_eq!(
+            reusable_results(
+                "edge",
+                "text",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                Some(1)
+            ),
+            [Some("text".into()), None]
+        );
+        assert_eq!(
+            reusable_results(
+                "google",
+                "text",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                Some(1)
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            reusable_results(
+                "edge",
+                "text",
+                "en",
+                &record.target_languages,
+                Some(&record),
+                Some(1)
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            reusable_results(
+                "edge",
+                "text",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                Some(99)
+            ),
+            [None, None]
+        );
+        record.translation.as_mut().unwrap().strategy_version = 0;
+        assert_eq!(
+            reusable_results(
+                "edge",
+                "text",
+                "auto",
+                &record.target_languages,
+                Some(&record),
+                Some(1)
+            ),
+            [None, None]
+        );
+        record.translation = None;
+        assert_eq!(
+            reusable_results(
+                "edge",
+                "text",
+                "en",
+                &record.target_languages,
+                Some(&record),
+                Some(1)
+            ),
+            [None, None]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit synthetic network smoke"]
+    async fn live_services_mixed_text_and_protected_code() {
+        let input = "今天的会议取消了。Please send the report tomorrow.\r\n请执行 `npm run build` 并访问 https://example.com/test?a=1&b=2 。";
+        for engine in ["google", "edge"] {
+            let result = translate(
+                engine,
+                input,
+                "auto",
+                &["en".into(), "zh-CN".into()],
+                "",
+                false,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{engine}: {error}"));
+            assert_eq!(result.source_language, "mul");
+            assert!(result.detections.iter().any(|d| d.language == "en"));
+            assert!(result.detections.iter().any(|d| d.language == "zh-CN"));
+            for translated in &result.translations {
+                assert!(
+                    translated.contains("`npm run build`"),
+                    "{engine}: command changed"
+                );
+                assert!(
+                    translated.contains("https://example.com/test?a=1&b=2"),
+                    "{engine}: URL changed"
+                );
+                assert_eq!(translated.matches("\r\n").count(), 1);
+                assert!(!translated.contains("<span") && !translated.contains("nami-code-"));
+            }
+            assert!(
+                !result.translations[0].contains("今天的会议取消了"),
+                "{engine}: Chinese sentence left in English result"
+            );
+            assert!(
+                !result.translations[1].contains("Please send the report tomorrow"),
+                "{engine}: English sentence left in Chinese result"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_sentences_keep_the_original_line_request_budget() {
+        let line = "Hi. ".repeat(1000);
+        let input = std::iter::repeat_n(line.as_str(), 20)
+            .collect::<Vec<_>>()
+            .join("\n");
+        validate_text(&input).unwrap();
+        let prepared = text::units(&input, true);
+        assert_eq!(prepared.iter().filter(|unit| unit.translate).count(), 20);
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|unit| unit.original)
+                .collect::<String>(),
+            input
+        );
+    }
+    #[tokio::test]
+    async fn empty_and_literal_inputs_do_not_initialize_the_network_client() {
+        for engine in ["google", "edge"] {
+            for input in [
+                "",
+                " \t\r\n",
+                "12345",
+                "`npm run build`",
+                "https://example.com",
+                "```rust\nlet x = 1;\n```\n",
+            ] {
+                let result = translate(
+                    engine,
+                    input,
+                    "auto",
+                    &["en".into()],
+                    "not-a-valid-proxy",
+                    true,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.translations, [input]);
+                assert_eq!(result.source_language, "und");
+                assert!(result.detections.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit synthetic network smoke"]
+    async fn live_services_technical_sentence_protects_bare_commands() {
+        let input = "请检查 useEffect 的 dependency array，然后执行 npm run build。";
+        for engine in ["google", "edge"] {
+            let result = translate(engine, input, "auto", &["en".into()], "", false)
+                .await
+                .unwrap();
+            assert!(
+                result.translations[0].contains("npm run build"),
+                "{engine}: command changed"
+            );
+            assert!(
+                !result.translations[0].contains("请检查")
+                    && !result.translations[0].contains("然后执行"),
+                "{engine}: untranslated prose"
+            );
+        }
+    }
+    #[test]
+    fn merges_only_matching_nonzero_detections_for_sentence_context() {
+        let input = "  She bought a bicycle. She rides it to school.  \r\n中文。English.";
+        let units = text::units(input, true);
+        let detections = units
+            .iter()
+            .map(|unit| {
+                unit.translate.then(|| crate::model::LanguageDetection {
+                    raw_language: if unit.original.contains("中文") {
+                        "zh-Hans"
+                    } else {
+                        "en"
+                    }
+                    .into(),
+                    language: if unit.original.contains("中文") {
+                        "zh-CN"
+                    } else {
+                        "en"
+                    }
+                    .into(),
+                    score: Some(1.0),
+                })
+            })
+            .collect::<Vec<_>>();
+        let context = context_groups(input, &units, &detections);
+        assert_eq!(context.len(), 1);
+        assert_eq!(
+            context[0].0.original,
+            "She bought a bicycle. She rides it to school."
+        );
+        let mut unknown = detections;
+        for detection in unknown.iter_mut().flatten() {
+            detection.score = Some(0.0);
+        }
+        assert!(context_groups(input, &units, &unknown).is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit synthetic network smoke"]
+    async fn live_google_preserves_monolingual_sentence_context() {
+        let result = translate(
+            "google",
+            "田中さんは新しい自転車を買いました。それで毎日学校に通っています。",
+            "auto",
+            &["en".into()],
+            "",
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(result.translations[0].contains("Tanaka"));
+        assert!(
+            !result.translations[0].contains("I go"),
+            "sentence splitting lost the subject"
+        );
+        assert_eq!(result.source_language, "ja");
+    }
+    #[test]
+    fn context_replacement_preserves_surrounding_whitespace_and_code_fences() {
+        let input = "  First sentence. Second sentence.  \r\n```\nuntouched();\n```\n\tRun `npm run build`. Visit https://example.com.\n";
+        let units = text::units(input, true);
+        let detections = units
+            .iter()
+            .map(|unit| {
+                unit.translate.then(|| crate::model::LanguageDetection {
+                    raw_language: "en".into(),
+                    language: "en".into(),
+                    score: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let groups = context_groups(input, &units, &detections);
+        assert_eq!(groups.len(), 2);
+        let mut outputs = units
+            .iter()
+            .map(|unit| unit.original.to_owned())
+            .collect::<Vec<_>>();
+        for (unit, range) in groups {
+            for index in range.clone() {
+                outputs[index].clear();
+            }
+            outputs[range.start] = unit.restore(&unit.prepared).unwrap();
+        }
+        assert_eq!(outputs.concat(), input);
     }
 }

@@ -171,6 +171,15 @@ impl HistoryStore {
                     id: record.id.clone(),
                     text: record.text.chars().take(256).collect(),
                     source_language: record.source_language.clone(),
+                    // Full detection details stay in the record fetched by ID.
+                    translation: record.translation.as_ref().map(|metadata| {
+                        crate::model::TranslationMetadata {
+                            requested_source: metadata.requested_source.clone(),
+                            engine: metadata.engine.clone(),
+                            strategy_version: metadata.strategy_version,
+                            detections: Vec::new(),
+                        }
+                    }),
                     target_languages: record.target_languages.clone(),
                     translations: record
                         .translations
@@ -451,6 +460,7 @@ mod tests {
             id: id.into(),
             text: "Synthetic source".into(),
             source_language: "en".into(),
+            translation: None,
             target_languages: vec!["zh-CN".into()],
             translations: vec!["合成译文".into()],
             date: "2026-11-14T00:00:00.000Z".into(),
@@ -902,6 +912,38 @@ mod tests {
             .unwrap();
         assert_eq!(store.snapshot().records.len(), 1);
         assert_eq!(store.snapshot().total_records, 1);
+    }
+
+    #[test]
+    fn snapshot_keeps_request_context_without_copying_segment_detections() {
+        let mut value = serde_json::to_value(record("metadata")).unwrap();
+        let detections = (0..2000)
+            .map(|_| {
+                serde_json::json!({
+                    "rawLanguage":"zh-Hans", "language":"zh-CN", "score":1.0
+                })
+            })
+            .collect::<Vec<_>>();
+        value["translation"] = serde_json::json!({
+            "requestedSource":"auto", "engine":"edge", "strategyVersion":1,
+            "detections":detections
+        });
+        let item: HistoryRecord = serde_json::from_value(value).unwrap();
+        let store = HistoryStore::new(vec![item]);
+        let snapshot = serde_json::to_value(store.snapshot()).unwrap();
+        assert_eq!(
+            snapshot["records"][0]["translation"],
+            serde_json::json!({
+                "requestedSource":"auto", "engine":"edge", "strategyVersion":1,
+                "detections":[]
+            })
+        );
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 2000);
+        let full = serde_json::to_value(store.record("metadata").unwrap()).unwrap();
+        assert_eq!(
+            full["translation"]["detections"].as_array().unwrap().len(),
+            2000
+        );
     }
 
     #[test]

@@ -1,0 +1,938 @@
+[
+  {
+    "code": "af",
+    "name": "Afrikaans",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sq",
+    "name": "Albanian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "am",
+    "name": "Amharic",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ar",
+    "name": "Arabic",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hy",
+    "name": "Armenian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "as",
+    "name": "Assamese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "awa",
+    "name": "Awadhi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "az",
+    "name": "Azerbaijani",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "bn",
+    "name": "Bangla",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ba",
+    "name": "Bashkir",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "eu",
+    "name": "Basque",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "be",
+    "name": "Belarusian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "bho",
+    "name": "Bhojpuri",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "brx",
+    "name": "Bodo",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "bs",
+    "name": "Bosnian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "bg",
+    "name": "Bulgarian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "yue",
+    "name": "Cantonese (Traditional)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ca",
+    "name": "Catalan",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ceb",
+    "name": "Cebuano",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ce",
+    "name": "Chechen",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hne",
+    "name": "Chhattisgarhi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lzh",
+    "name": "Chinese (Literary)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "zh-CN",
+    "name": "Chinese Simplified",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "zh-TW",
+    "name": "Chinese Traditional",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "cv",
+    "name": "Chuvash",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hr",
+    "name": "Croatian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "cs",
+    "name": "Czech",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "da",
+    "name": "Danish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fa-AF",
+    "name": "Dari",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "luo",
+    "name": "Dholuo",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "dv",
+    "name": "Divehi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "doi",
+    "name": "Dogri",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "nl",
+    "name": "Dutch",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "dz",
+    "name": "Dzongkha",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "en",
+    "name": "English",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "et",
+    "name": "Estonian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fo",
+    "name": "Faroese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fj",
+    "name": "Fijian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fil",
+    "name": "Filipino",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fi",
+    "name": "Finnish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fr",
+    "name": "French",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fr-CA",
+    "name": "French (Canada)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "gl",
+    "name": "Galician",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lg",
+    "name": "Ganda",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ka",
+    "name": "Georgian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "de",
+    "name": "German",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "el",
+    "name": "Greek",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "gu",
+    "name": "Gujarati",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ht",
+    "name": "Haitian Creole",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ha",
+    "name": "Hausa",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "haw",
+    "name": "Hawaiian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "he",
+    "name": "Hebrew",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hi",
+    "name": "Hindi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hmn",
+    "name": "Hmong Daw",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hu",
+    "name": "Hungarian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "is",
+    "name": "Icelandic",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ig",
+    "name": "Igbo",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "id",
+    "name": "Indonesian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ikt",
+    "name": "Inuinnaqtun",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "iu",
+    "name": "Inuktitut",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "iu-Latn",
+    "name": "Inuktitut (Latin)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ga",
+    "name": "Irish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "it",
+    "name": "Italian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ja",
+    "name": "Japanese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "kn",
+    "name": "Kannada",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ks",
+    "name": "Kashmiri",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "kk",
+    "name": "Kazakh",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "kha",
+    "name": "Khasi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "km",
+    "name": "Khmer",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "rw",
+    "name": "Kinyarwanda",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tlh",
+    "name": "Klingon (Latin)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tlh-Piqd",
+    "name": "Klingon (pIqaD)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "gom",
+    "name": "Konkani",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ko",
+    "name": "Korean",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ckb",
+    "name": "Kurdish (Central)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ku",
+    "name": "Kurdish (Northern)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ky",
+    "name": "Kyrgyz",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lo",
+    "name": "Lao",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "la",
+    "name": "Latin",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lv",
+    "name": "Latvian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ln",
+    "name": "Lingala",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lt",
+    "name": "Lithuanian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "dsb",
+    "name": "Lower Sorbian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lb",
+    "name": "Luxembourgish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mk",
+    "name": "Macedonian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mag",
+    "name": "Magahi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mai",
+    "name": "Maithili",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mg",
+    "name": "Malagasy",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ms",
+    "name": "Malay",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ml",
+    "name": "Malayalam",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mt",
+    "name": "Maltese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mni",
+    "name": "Manipuri",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mr",
+    "name": "Marathi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "lus",
+    "name": "Mizo",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mn",
+    "name": "Mongolian (Cyrillic)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mn-Mong",
+    "name": "Mongolian (Traditional)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "my",
+    "name": "Myanmar (Burmese)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "mi",
+    "name": "Māori",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ne",
+    "name": "Nepali",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "nb",
+    "name": "Norwegian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ny",
+    "name": "Nyanja",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "oc",
+    "name": "Occitan",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "or",
+    "name": "Odia",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ps",
+    "name": "Pashto",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "fa",
+    "name": "Persian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "pl",
+    "name": "Polish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "pt",
+    "name": "Portuguese (Brazil)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "pt-PT",
+    "name": "Portuguese (Portugal)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "pa",
+    "name": "Punjabi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "otq",
+    "name": "Querétaro Otomi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ro",
+    "name": "Romanian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "rn",
+    "name": "Rundi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ru",
+    "name": "Russian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sm",
+    "name": "Samoan",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sa",
+    "name": "Sanskrit",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sat",
+    "name": "Santali",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sr",
+    "name": "Serbian (Cyrillic)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sr-Latn",
+    "name": "Serbian (Latin)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "st",
+    "name": "Sesotho",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "nso",
+    "name": "Sesotho sa Leboa",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tn",
+    "name": "Setswana",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sn",
+    "name": "Shona",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sd",
+    "name": "Sindhi",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "si",
+    "name": "Sinhala",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sk",
+    "name": "Slovak",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sl",
+    "name": "Slovenian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "so",
+    "name": "Somali",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "es",
+    "name": "Spanish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "es-MX",
+    "name": "Spanish (Mexico)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "su",
+    "name": "Sundanese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sw",
+    "name": "Swahili",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "sv",
+    "name": "Swedish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ty",
+    "name": "Tahitian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tg",
+    "name": "Tajik",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ta",
+    "name": "Tamil",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tt",
+    "name": "Tatar",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "te",
+    "name": "Telugu",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tet",
+    "name": "Tetum",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "th",
+    "name": "Thai",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "bo",
+    "name": "Tibetan",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ti",
+    "name": "Tigrinya",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "to",
+    "name": "Tongan",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tr",
+    "name": "Turkish",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "tk",
+    "name": "Turkmen",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "uk",
+    "name": "Ukrainian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "hsb",
+    "name": "Upper Sorbian",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ur",
+    "name": "Urdu",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "ug",
+    "name": "Uyghur",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "uz",
+    "name": "Uzbek (Latin)",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "vi",
+    "name": "Vietnamese",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "cy",
+    "name": "Welsh",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "xh",
+    "name": "Xhosa",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "yo",
+    "name": "Yoruba",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "yua",
+    "name": "Yucatec Maya",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "zu",
+    "name": "Zulu",
+    "source": true,
+    "target": true
+  },
+  {
+    "code": "jv",
+    "name": "basa Djawa",
+    "source": true,
+    "target": true
+  }
+]

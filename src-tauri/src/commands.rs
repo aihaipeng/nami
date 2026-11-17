@@ -375,7 +375,7 @@ pub fn translation_chrome_update(
 ) -> Result<bool, String> {
     authorize(&window, &["translation"])?;
     if !state.source_width.is_finite()
-        || !(32.0..=200.0).contains(&state.source_width)
+        || !(32.0..=360.0).contains(&state.source_width)
         || [
             &state.source_label,
             &state.translate_label,
@@ -1044,6 +1044,7 @@ pub async fn translation_run(
         .as_ref()
         .and_then(|reuse| state.history.lock().unwrap().record(&reuse.record_id));
     let retained = crate::translation::reusable_results(
+        &engine,
         &text,
         &source,
         &targets,
@@ -1063,8 +1064,12 @@ pub async fn translation_run(
     };
     let source_app =
         crate::translation::source_app_for_translation(&text, previous.as_ref(), captured);
-    let (translated, resolved_source) = if missing.is_empty() {
-        (Vec::new(), source.clone())
+    let translated_result = if missing.is_empty() {
+        crate::translation::TranslationResult {
+            translations: Vec::new(),
+            source_language: source.clone(),
+            detections: Vec::new(),
+        }
     } else {
         let request = crate::translation::translate(
             &engine,
@@ -1084,7 +1089,24 @@ pub async fn translation_run(
             }
         }
     };
-    let mut fresh = translated.into_iter();
+    let detections = if retained.first().is_some_and(Option::is_some) {
+        previous
+            .as_ref()
+            .and_then(|record| record.translation.as_ref())
+            .map(|metadata| metadata.detections.clone())
+            .unwrap_or_default()
+    } else {
+        translated_result.detections
+    };
+    let resolved_source = if retained.first().is_some_and(Option::is_some) {
+        previous
+            .as_ref()
+            .map(|record| record.source_language.clone())
+            .unwrap_or_else(|| source.clone())
+    } else {
+        translated_result.source_language
+    };
+    let mut fresh = translated_result.translations.into_iter();
     let translated = retained
         .into_iter()
         .map(|cached| cached.or_else(|| fresh.next()).ok_or("translation_result"))
@@ -1093,6 +1115,12 @@ pub async fn translation_run(
         id: uuid::Uuid::new_v4().to_string(),
         text,
         source_language: resolved_source,
+        translation: Some(crate::model::TranslationMetadata {
+            requested_source: source,
+            engine: engine.clone(),
+            strategy_version: crate::translation::STRATEGY_VERSION,
+            detections,
+        }),
         target_languages: targets,
         translations: translated,
         date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),

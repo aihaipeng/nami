@@ -4,7 +4,7 @@ import { RecordToolbar } from '../shared/RecordToolbar';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
 import type { ViewProps } from '../App';
 import { cn } from '../lib/utils';
-import { languages } from '../shared/languages';
+import { languageName } from '../shared/languages';
 import { filterHistory, historyPreview, historyScrollTarget, type HistoryRecord } from './history';
 import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
@@ -52,7 +52,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   actionContext.current = { active, query, favoritesOnly, session: state.recordsSession };
   useEffect(() => () => { ++actionVersion.current; }, []);
   const filtered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
-  const name = (code: string) => languages.find(([id]) => id === code)?.[1] ?? code;
+  const name = languageName;
 
   useEffect(() => {
     if (!native || (lastQuery.current.query === query && lastQuery.current.favoritesOnly === favoritesOnly)) return;

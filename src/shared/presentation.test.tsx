@@ -31,8 +31,8 @@ describe('English presentation and nonverbal activity', () => {
   });
 });
 
-describe('FinderX language choices', () => {
-  it('keeps the same shared provider set and alphabetical English names', async () => {
+describe('language choices and provider capabilities', () => {
+  it('retains the existing labels and accent-insensitive language search', async () => {
     const { languages, matchesLanguage } = await import('./languages');
     expect(languages).toHaveLength(17);
     expect(languages.map(([code]) => code)).toEqual(['ar', 'zh-CN', 'zh-TW', 'nl', 'en', 'fr', 'de', 'id', 'it', 'ja', 'ko', 'pl', 'pt', 'ru', 'es', 'tr', 'vi']);
@@ -40,5 +40,26 @@ describe('FinderX language choices', () => {
     expect(matchesLanguage('fr', 'French', '  french  ')).toBe(true);
     expect(matchesLanguage('pt', 'Portuguese (Brazil)', 'BRAZIL')).toBe(true);
     expect(matchesLanguage('fr', 'French', 'German')).toBe(false);
+  });
+});
+
+describe('provider-specific language catalogs', () => {
+  it('keeps each provider capability separate and does not send display summaries as language codes', async () => {
+    const { providerLanguages, supportsLanguage, supportsTranslation, languageName } = await import('./languages');
+    expect(providerLanguages('google', 'target').some(({ code }) => code === 'eo')).toBe(true);
+    expect(providerLanguages('edge', 'target').some(({ code }) => code === 'eo')).toBe(false);
+    expect(providerLanguages('edge', 'source').some(({ code }) => code === 'lzh')).toBe(true);
+    expect(providerLanguages('google', 'source').some(({ code }) => code === 'lzh')).toBe(false);
+    expect(supportsLanguage('google', 'source', 'zh-TW')).toBe(true);
+    expect(supportsTranslation('google', 'auto', ['en', 'eo'])).toBe(true);
+    expect(supportsTranslation('edge', 'auto', ['en', 'eo'])).toBe(false);
+    for (const engine of ['google', 'edge'] as const) {
+      expect(supportsLanguage(engine, 'source', 'auto')).toBe(true);
+      for (const code of ['auto', 'mul', 'und', 'not-a-language']) expect(supportsLanguage(engine, 'target', code)).toBe(false);
+    }
+    expect(languageName('mul')).toBe('Multiple languages');
+    expect(languageName('und')).toBe('Unknown language');
+    expect(languageName('unknown-provider-code')).toBe('unknown-provider-code');
+    expect(languageName('pt')).toBe('Portuguese (Brazil)');
   });
 });

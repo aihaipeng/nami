@@ -1,6 +1,6 @@
 import historySamples from '../../tests/fixtures/translation-history.json';
 import { expect, it } from 'vitest';
-import { filterHistory, historyPreview, historySamples as initialHistory, historyScrollTarget } from './history';
+import { requestedSource, filterHistory, historyPreview, historySamples as initialHistory, historyScrollTarget } from './history';
 
 it('starts without preloaded translation history', () => {
   expect(initialHistory).toEqual([]);
@@ -41,4 +41,10 @@ it('reveals only clipped records in their own scroll region without moving visib
   expect(historyScrollTarget(100, viewport, { top: 530, bottom: 610 })).toBe(130);
   expect(historyScrollTarget(100, viewport, { top: 190, bottom: 270 })).toBeNull();
   expect(historyScrollTarget(0, viewport, { top: 178, bottom: 258 })).toBe(0);
+});
+
+it('restores the requested source mode from metadata and preserves the explicit legacy source', () => {
+  const legacy = { ...historySamples[0], sourceLanguage: 'fr' };
+  expect(requestedSource(legacy)).toBe('fr');
+  expect(requestedSource({ ...legacy, sourceLanguage: 'mul', translation: { requestedSource: 'auto', engine: 'google', strategyVersion: 1, detections: [] } })).toBe('auto');
 });

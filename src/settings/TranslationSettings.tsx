@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { MessageCircle, X } from 'lucide-react';
 import type { ViewProps } from '../App';
-import { languages } from '../shared/languages';
+import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { bindingFromEvent, keycapLabels, normalizeBinding, shortcutActions, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from '../shared/shortcuts';
 import type { Translate } from '../shared/i18n';
@@ -43,7 +43,10 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const macos = snapshot.capabilities.platform === 'macos';
-  const languageItems = languages.map(([code, name]) => ({ code, name }));
+  const sourceItems = providerLanguages(preferences.engine, 'source');
+  const targetItems = providerLanguages(preferences.engine, 'target');
+  const languagesAvailable = supportsTranslation(preferences.engine, preferences.sourceLanguage, [preferences.primaryLanguage, ...(preferences.secondaryLanguage === 'none' ? [] : [preferences.secondaryLanguage])]);
+  const selectedLabel = (value: string, side: 'source' | 'target') => value === 'none' || supportsLanguage(preferences.engine, side, value) ? undefined : `${languageName(value)} (${t('languageUnavailable')})`;
   const recordable = shortcutActions.filter((action) => action !== 'selection' || snapshot.capabilities.selection);
   useEffect(() => { setProxyUrl(preferences.proxyUrl); }, [preferences.proxyUrl]);
   useEffect(() => { setOpen(null); setRecording(null); }, [snapshot.locale]);
@@ -82,11 +85,11 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
         items={[{ code: 'edge', name: 'Microsoft Edge Translate' }, { code: 'google', name: 'Google Translate' }]}
         onChange={(engine) => void command('translation_preferences_set', { engine })} t={t} />
       <SettingsChoice label={t('settingsSource')} value={preferences.sourceLanguage} open={open === 'source'} onOpenChange={(value) => setOpen(value ? 'source' : null)}
-        items={[{ code: 'auto', name: 'Auto-Detect' }, ...languageItems]} onChange={(sourceLanguage) => void command('translation_preferences_set', { sourceLanguage })} t={t} />
+        items={[{ code: 'auto', name: 'Auto-Detect' }, ...sourceItems]} valueLabel={selectedLabel(preferences.sourceLanguage, 'source')} onChange={(sourceLanguage) => void command('translation_preferences_set', { sourceLanguage })} t={t} />
       <SettingsChoice label={t('settingsPrimary')} value={preferences.primaryLanguage} open={open === 'primary'} onOpenChange={(value) => setOpen(value ? 'primary' : null)}
-        items={languageItems} onChange={(primaryLanguage) => void command('translation_preferences_set', { primaryLanguage })} t={t} />
+        items={targetItems} valueLabel={selectedLabel(preferences.primaryLanguage, 'target')} onChange={(primaryLanguage) => void command('translation_preferences_set', { primaryLanguage })} t={t} />
       <SettingsChoice label={t('settingsSecondary')} value={preferences.secondaryLanguage} open={open === 'secondary'} onOpenChange={(value) => setOpen(value ? 'secondary' : null)}
-        items={[{ code: 'none', name: 'None' }, ...languageItems]} onChange={(secondaryLanguage) => void command('translation_preferences_set', { secondaryLanguage })} t={t} />
+        items={[{ code: 'none', name: 'None' }, ...targetItems]} valueLabel={selectedLabel(preferences.secondaryLanguage, 'target')} onChange={(secondaryLanguage) => void command('translation_preferences_set', { secondaryLanguage })} t={t} />
       <div className="finder-row finder-proxy-row">
         <span>{t('httpProxy')}</span>
         <div className="finder-proxy-slot">
@@ -104,6 +107,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
           onChange={(event) => void command('translation_preferences_set', { selectionEnabled: event.target.checked })} />
       </div>
     </div>
+    {!languagesAvailable && <p className="settings-callout" role="status">{t('languageNotSupported')}</p>}
     <div className="finder-shortcut-heading"><h2>{t('keyboardShortcut')}</h2>
       <button type="button" className="finder-restore" onClick={() => { setShortcutError(null); void invoke('translation_shortcuts_restore').catch((error) => setShortcutError(shortcutMessage(errorCode(error), t))); }}>{t('restoreDefaults')}</button>
     </div>
@@ -122,10 +126,10 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
   </div>;
 }
 
-function SettingsChoice({ label, value, items, open, onOpenChange, onChange, t, searchable = true, menuWidth = 200 }: {
-  label: string; value: string; items: { code: string; name: string }[]; open: boolean; onOpenChange: (open: boolean) => void; onChange: (value: string) => void; t: Translate; searchable?: boolean; menuWidth?: number;
+function SettingsChoice({ label, value, items, open, onOpenChange, onChange, t, searchable = true, menuWidth = 200, valueLabel }: {
+  label: string; value: string; items: { code: string; name: string }[]; open: boolean; onOpenChange: (open: boolean) => void; onChange: (value: string) => void; t: Translate; searchable?: boolean; menuWidth?: number; valueLabel?: string;
 }) {
-  return <div className="finder-row"><span>{label}</span><SearchableDropdown label={label} value={value} items={items} open={open} onOpenChange={onOpenChange} onChange={onChange} t={t} side="bottom" searchable={searchable} settings menuWidth={menuWidth} /></div>;
+  return <div className="finder-row"><span>{label}</span><SearchableDropdown label={label} value={value} items={items} open={open} onOpenChange={onOpenChange} onChange={onChange} t={t} side="bottom" searchable={searchable} settings menuWidth={menuWidth} valueLabel={valueLabel} /></div>;
 }
 
 function ShortcutRow({ action, title, binding, macos, disabled, unavailable, recording, onRecord, onCancel, onCommit, onClear, t }: {

@@ -150,7 +150,7 @@ describe('translation input and shortcuts', () => {
     fireEvent.compositionEnd(source());
   });
 
-  it('replaces Auto-Detect with the language recognized for the translation', async () => {
+  it('displays the detected language while preserving automatic requests for new input', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       const result = await original(name, args);
@@ -160,8 +160,65 @@ describe('translation input and shortcuts', () => {
     await mount();
     fireEvent.change(source(), { target: { value: 'こんにちは' } });
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Source language: Japanese' })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Source language: Japanese' }).getAttribute('title')).toBe('Detected: Japanese'));
     expect(calls('translation_chrome_update').at(-1)?.[1]?.state.sourceLabel).toBe('Japanese');
+    fireEvent.change(source(), { target: { value: 'Bonjour le monde' } });
+    expect(screen.getByRole('button', { name: 'Source language: Auto-Detect' }).getAttribute('title')).toBeNull();
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(calls('translation_run')[1][1]?.source).toBe('auto');
+  });
+
+  it('restores an automatic history request without fixing its detected language as the source', async () => {
+    await mount();
+    const record = { ...sample, id: 'automatic-history', sourceLanguage: 'mul', translation: { requestedSource: 'auto', engine: 'edge', strategyVersion: 1, detections: [] } };
+    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
+    const button = screen.getByRole('button', { name: 'Source language: Multiple languages' });
+    expect(button.getAttribute('title')).toBe('Detected: Multiple languages');
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]?.source).toBe('auto');
+  });
+
+  it('shows the complete detected name while the source menu still selects automatic mode', async () => {
+    bridge.snapshot.translationEngine = 'google';
+    bridge.snapshot.translationPreferences.engine = 'google';
+    await mount();
+    const record = { ...sample, id: 'long-detected-name', sourceLanguage: 'nhe', translation: { requestedSource: 'auto', engine: 'google', strategyVersion: 1, detections: [] } };
+    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
+    const button = screen.getByRole('button', { name: 'Source language: Nahuatl (Eastern Huasteca)' });
+    expect(button.textContent).toBe('Nahuatl (Eastern Huasteca)');
+    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.sourceLabel).toBe('Nahuatl (Eastern Huasteca)');
+    fireEvent.click(button);
+    expect(screen.getByRole('option', { name: 'Auto-Detect' }).getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Escape' });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]?.source).toBe('auto');
+  });
+
+  it('preserves an explicit legacy history source instead of guessing that it was automatic', async () => {
+    await mount();
+    const record = { ...sample, id: 'legacy-history', sourceLanguage: 'fr' };
+    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
+    expect(screen.getByRole('button', { name: 'Source language: French' })).toBeTruthy();
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]?.source).toBe('fr');
+  });
+
+  it('keeps an explicit source even if the service responds with a different detection', async () => {
+    bridge.snapshot.translationPreferences.sourceLanguage = 'fr';
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      const result = await original(name, args);
+      return name === 'translation_run' ? { ...result, sourceLanguage: 'en' } : result;
+    });
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Bonjour' } });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(screen.getByRole('button', { name: 'Source language: French' })).toBeTruthy();
   });
 
   it('keeps DOM controls available until native installation is acknowledged, then routes native actions', async () => {
@@ -482,8 +539,8 @@ describe('language dropdown and menu keyboard behavior', () => {
     const search = screen.getByRole('combobox', { name: 'Search languages or codes…' });
     expect(document.activeElement).toBe(search);
     await user.type(search, 'Chinese');
-    expect(screen.getAllByRole('option')).toHaveLength(2);
-    await user.keyboard('{ArrowDown}{Enter}');
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Chinese (Literary)', 'Chinese (Simplified)', 'Chinese (Traditional)']);
+    await user.keyboard('{ArrowDown}{ArrowDown}{Enter}');
     const trigger = screen.getByRole('button', { name: 'Primary language: Chinese (Traditional)' });
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(trigger);

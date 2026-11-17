@@ -4,10 +4,10 @@ import { FloatingPanel } from './FloatingPanel';
 import { matchesLanguage } from './languages';
 import type { Translate } from './i18n';
 
-export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false }: {
+export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false, description, valueLabel }: {
   value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string }[];
   t: Translate; side?: 'top' | 'bottom'; open: boolean; onOpenChange: (open: boolean) => void; searchable?: boolean; id?: string; capsule?: boolean; settings?: boolean; menuWidth?: number;
-  hiddenTrigger?: boolean;
+  hiddenTrigger?: boolean; description?: string; valueLabel?: string;
 }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(value);
@@ -17,7 +17,7 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   const options = items;
   const visible = options.filter((option) => matchesLanguage(option.code, option.name, query));
   const current = visible.findIndex((option) => option.code === active);
-  const selected = options.find((option) => option.code === value)?.name ?? value;
+  const selected = valueLabel ?? options.find((option) => option.code === value)?.name ?? value;
 
   useEffect(() => {
     if (!open) { setQuery(''); setActive(value); }
@@ -35,7 +35,7 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   return <>
     <button ref={trigger} id={triggerId} type="button" className={settings ? 'language-picker settings-dropdown' : capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
       aria-hidden={hiddenTrigger || undefined} inert={hiddenTrigger} tabIndex={hiddenTrigger ? -1 : undefined}
-      aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
+      title={description} aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
       <span>{selected}</span><ChevronDown aria-hidden="true" />
     </button>
     {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className="language-popover">

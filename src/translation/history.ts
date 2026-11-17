@@ -1,7 +1,17 @@
+export const TRANSLATION_STRATEGY_VERSION = 1;
+
+export interface TranslationMetadata {
+  requestedSource: string;
+  engine: string;
+  strategyVersion: number;
+  detections: { rawLanguage: string; language: string; score: number | null }[];
+}
+
 export interface HistoryRecord {
   id: string;
   text: string;
   sourceLanguage: string;
+  translation?: TranslationMetadata;
   targetLanguages: string[];
   translations: string[];
   date: string;
@@ -25,6 +35,10 @@ export interface HistorySelection {
   retranslate: boolean;
   clearDetail?: boolean;
   record?: HistoryRecord | null;
+}
+
+export function requestedSource(record: HistoryRecord) {
+  return record.translation?.requestedSource ?? record.sourceLanguage;
 }
 
 export const historySamples: HistoryRecord[] = [];

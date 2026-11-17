@@ -298,7 +298,7 @@ pub fn update(
     ] {
         let button = button(&stage, tag).ok_or("window_geometry")?;
         let width = if tag == SOURCE_TAG {
-            source_width
+            source_width.max(unsafe { text_size(&label, 13.0).width.ceil() + 42.0 })
         } else {
             unsafe { text_size(&label, 13.0).width.ceil() + 83.0 }
         };
