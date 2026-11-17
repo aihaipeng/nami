@@ -30,17 +30,84 @@ describe('native view connection and feedback', () => {
     expect((source() as HTMLTextAreaElement).value).toBe('A local draft');
   });
 
-  it('shows only an animated progress indicator during an in-flight copy', async () => {
+  it('keeps translation detail copy silent while pending and ignores repeated shortcuts', async () => {
     await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
     const original = bridge.invoke.getMockImplementation()!;
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? pending : original(name, args));
     fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect(screen.getByRole('progressbar', { name: 'Working' }).textContent).toBe('');
-    expect(screen.queryByText('Working')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    expect(calls('translation_sample_copy')).toHaveLength(1);
     await act(async () => { finish(); });
     expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  it('allows different result parts while suppressing repeats of each pending copy', async () => {
+    await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
+    const original = bridge.invoke.getMockImplementation()!;
+    const finish: (() => void)[] = [];
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy'
+      ? new Promise<void>((resolve) => finish.push(resolve)) : original(name, args));
+    for (const key of ['1', '1', '2', '2']) fireEvent.keyDown(source(), { key, metaKey: true });
+    expect(calls('translation_sample_copy').map(([, args]) => (args as { part: string }).part)).toEqual(['primary', 'secondary']);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    await act(async () => { finish.forEach((resolve) => resolve()); });
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    expect(calls('translation_sample_copy')).toHaveLength(3);
+    await act(async () => finish[2]());
+  });
+
+  it.each([{ translationVisible: false }, { recordsSession: 2 }])('discards pending detail copy failure when its context changes: %j', async (patch) => {
+    await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
+    const original = bridge.invoke.getMockImplementation()!;
+    let fail!: (error: Error) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy'
+      ? new Promise((_resolve, reject) => { fail = reject; }) : original(name, args));
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    await windowState(patch);
+    await act(async () => fail(new Error('clipboard_write')));
+    expect(document.querySelector('.record-feedback')).toBeNull();
+    expect(document.querySelector('.global-error')).toBeNull();
+  });
+
+  it('reports detail copy failure locally without moving or clearing the draft', async () => {
+    await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
+    const draft = (source() as HTMLTextAreaElement).value;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'translation_sample_copy') throw new Error('clipboard_write');
+      return original(name, args);
+    });
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Content was not copied'));
+    expect(document.querySelector('.global-error')).toBeNull();
+    expect((source() as HTMLTextAreaElement).value).toBe(draft);
+  });
+
+  it('drops late copy errors after selecting another history record', async () => {
+    await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
+    let fail!: (error: Error) => void;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy'
+      ? new Promise((_resolve, reject) => { fail = reject; }) : original(name, args));
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    await emit('history_sample_selected', { sampleId: 'sample-02', retranslate: false });
+    await act(async () => fail(new Error('clipboard_write')));
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(document.querySelector('.global-error')).toBeNull();
+  });
+
+  it('clears source and results only for an explicit empty-history detail event', async () => {
+    await mount(); await emit('history_sample_selected', { sampleId: 'sample-01', retranslate: false });
+    expect((source() as HTMLTextAreaElement).value).not.toBe('');
+    await emit('history_sample_selected', { sampleId: null, retranslate: false, clearDetail: true });
+    expect((source() as HTMLTextAreaElement).value).toBe('');
+    expect(document.querySelector('.result-column')?.textContent).toBe('');
+    fireEvent.change(source(), { target: { value: 'Keep an editable draft' } });
+    await emit('history_sample_selected', { sampleId: null, retranslate: false });
+    expect((source() as HTMLTextAreaElement).value).toBe('Keep an editable draft');
   });
 
   it('does not display loading UI for an in-flight history toggle', async () => {

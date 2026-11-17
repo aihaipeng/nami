@@ -39,7 +39,7 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
     ...(onNote ? [{ id: 'note', label: 'Note', icon: 'note' as const, onClick: onNote }] : []),
     { id: 'favorite', label: favorite ? t('unfavorite') : t('favorite'), icon: 'star' as const, pressed: favorite, onClick: () => onUpdate('favorite') },
     { id: 'pin', label: pinned ? t('unpinRecord') : t('pinRecord'), icon: pinned ? 'pin.fill' as const : 'pin' as const, pressed: pinned, onClick: () => onUpdate('pin') },
-    ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, onClick: () => onUpdate('delete') }] : []),
+    ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, disabled: protectedRecord || busy, onClick: () => onUpdate('delete') }] : []),
   ];
   const buttons = actions.map((action) => {
     const button = <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : action.id === 'favorite' && favorite ? ' record-favorite' : action.id === 'copy' && copied ? ' record-copied' : ''}`} title={action.label} aria-label={action.label}

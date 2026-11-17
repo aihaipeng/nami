@@ -1,5 +1,4 @@
 .clipboard-panel.history-panel { position: relative; width: 100%; right: auto; }
-.clipboard-panel .history-row .history-languages { color: #fff; -webkit-text-fill-color: #fff; }
 .clipboard-panel .history-row-select:disabled { opacity: 1; }
 .clipboard-empty { flex-direction: column; gap: 10px; }
 .clipboard-empty p { margin: 0; }
@@ -75,4 +74,3 @@
 .clipboard-detail-metadata .history-origin { margin-top: 1px; }
 .clipboard-detail-metadata .history-languages { white-space: normal; overflow-wrap: anywhere; font-size: 11px; }
 .clipboard-detail-metadata time { display: none; }
-.clipboard-panel .history-row.selected { background: hsl(var(--foreground) / .04); }

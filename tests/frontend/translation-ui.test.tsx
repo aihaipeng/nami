@@ -401,8 +401,10 @@ describe('selection across native webviews', () => {
     expect(within(translation.container).getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
     expect(button.getAttribute('aria-pressed')).toBe('true');
     await user.click(button);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
     expect(bridge.snapshot.window.historyVisible).toBe(true);
+    await user.click(button);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
     expect(calls('window_hide')).toHaveLength(0);
   });
 

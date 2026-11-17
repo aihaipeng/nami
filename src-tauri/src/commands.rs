@@ -112,9 +112,9 @@ pub fn window_hide(
         return Err("invalid_argument".into());
     }
     if region != "settings" {
-        app.state::<AppState>()
-            .image_text_operation
-            .fetch_add(1, Ordering::SeqCst);
+        let state = app.state::<AppState>();
+        state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+        state.operation.fetch_add(1, Ordering::SeqCst);
     }
     if region == "translation" && keep_history == Some(true) {
         {
@@ -191,9 +191,9 @@ pub fn window_pin(
 #[tauri::command]
 pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
-    app.state::<AppState>()
-        .image_text_operation
-        .fetch_add(1, Ordering::SeqCst);
+    let state = app.state::<AppState>();
+    state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+    state.operation.fetch_add(1, Ordering::SeqCst);
     windows::set_record_view(&app, &view)
 }
 
@@ -409,6 +409,7 @@ struct HistorySelection {
     revision: u64,
     sample_id: Option<String>,
     retranslate: bool,
+    clear_detail: bool,
     record: Option<crate::model::HistoryRecord>,
 }
 
@@ -471,16 +472,21 @@ pub fn history_sample_select(
     app: AppHandle,
     sample_id: Option<String>,
     retranslate: bool,
+    clear_detail: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
-    select_history_sample(&app, sample_id, retranslate)
+    select_history_sample(&app, sample_id, retranslate, clear_detail.unwrap_or(false))
 }
 
 pub(crate) fn select_history_sample(
     app: &AppHandle,
     sample_id: Option<String>,
     retranslate: bool,
+    clear_detail: bool,
 ) -> Result<(), String> {
+    if clear_detail && sample_id.is_some() {
+        return Err("invalid_argument".into());
+    }
     let record = sample_id
         .as_ref()
         .and_then(|id| windows::history_record(app, id));
@@ -519,6 +525,7 @@ pub(crate) fn select_history_sample(
         revision,
         sample_id,
         retranslate,
+        clear_detail,
         record,
     };
     for label in ["translation", "history", "clipboard"] {
@@ -1196,7 +1203,6 @@ pub async fn clipboard_record_update(
     action: String,
     title: Option<String>,
     text: Option<String>,
-    allow_protected: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
     let state = app.state::<AppState>();
@@ -1224,11 +1230,7 @@ pub async fn clipboard_record_update(
             if title.is_some() || text.is_some() {
                 return Err("invalid_argument".into());
             }
-            database.clipboard_update_allowing(
-                &record_id,
-                &action,
-                allow_protected.unwrap_or(false) && action == "delete",
-            )?;
+            database.clipboard_update(&record_id, &action)?;
         }
         let mut unreferenced = Vec::new();
         for path in images {
@@ -1362,6 +1364,24 @@ mod tests {
     use super::{image_history_paste, paste_release_result, remaining_image_settle, PASTE_KEY_GAP};
     use crate::platform::ClipboardPayload;
     use std::time::Duration;
+
+    #[test]
+    fn history_selection_detail_clear_is_explicit_in_the_shared_event() {
+        for clear_detail in [false, true] {
+            let event = super::HistorySelection {
+                revision: 7,
+                sample_id: None,
+                retranslate: false,
+                clear_detail,
+                record: None,
+            };
+            let payload = serde_json::to_value(event).unwrap();
+            assert_eq!(payload["sampleId"], serde_json::Value::Null);
+            assert_eq!(payload["clearDetail"], clear_detail);
+            assert_eq!(payload["revision"], 7);
+            assert!(payload.get("clear_detail").is_none());
+        }
+    }
 
     #[test]
     fn image_click_waits_out_the_clipboard_notice_off_the_main_thread() {

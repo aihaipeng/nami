@@ -39,6 +39,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const pinnedList = useRef<HTMLDivElement>(null);
   const state = snapshot.window;
   const lastQuery = useRef({ query: '', favoritesOnly: false });
+  const [followQuery, setFollowQuery] = useState<{ query: string; favoritesOnly: boolean; selectedId: string | null; selectionRevision: number } | null>(null);
   const { query, setQuery, favoritesOnly, toggleFavorites, remember, restoreScroll } = useRecordBrowser(state.recordsSession, active, list, () => !native || history.displayReady(query, favoritesOnly), () => history.snapshot.records);
   const displayed = history.displaySnapshot(query, favoritesOnly);
   const records = displayed.records;
@@ -56,16 +57,32 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   useEffect(() => {
     if (!native || (lastQuery.current.query === query && lastQuery.current.favoritesOnly === favoritesOnly)) return;
     const favoriteChanged = lastQuery.current.favoritesOnly !== favoritesOnly;
+    let cancelled = false;
     const submit = () => {
       lastQuery.current = { query, favoritesOnly };
-      void history.setQuery(query, favoritesOnly, favoriteChanged);
+      void history.setQuery(query, favoritesOnly, favoriteChanged || !query).then(() => {
+        if (!cancelled) setFollowQuery({ query, favoritesOnly, selectedId: selection, selectionRevision: history.selectionRevision });
+      });
     };
-    if (favoriteChanged) { submit(); return; }
-    const timer = window.setTimeout(submit, 150);
-    return () => window.clearTimeout(timer);
+    const timer = favoriteChanged || !query ? undefined : window.setTimeout(submit, 150);
+    if (timer === undefined) submit();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [query, favoritesOnly, native, history.setQuery]);
 
-  useEffect(() => { setMenu(null); }, [query, favoritesOnly, state.historyVisible, active]);
+  useEffect(() => {
+    if (!followQuery) return;
+    if (!active || !state.translationVisible || followQuery.query !== query || followQuery.favoritesOnly !== favoritesOnly) { setFollowQuery(null); return; }
+    if (history.loading || history.error || !history.displayReady(query, favoritesOnly)) return;
+    setFollowQuery(null);
+    if (!followQuery.selectedId || history.selectionRevision !== followQuery.selectionRevision) return;
+    if (selection && (selection !== followQuery.selectedId || filtered.some(({ id }) => id === selection))) return;
+    const first = filtered.find((record) => !record.isPinned) ?? filtered[0];
+    if (first) onSelect(first);
+    else void command('history_sample_select', { sampleId: null, retranslate: false, clearDetail: true });
+  }, [followQuery, active, state.translationVisible, query, favoritesOnly, history.loading, history.error, filtered, selection, history.selectionRevision]);
+
+  useEffect(() => { setMenu(null); clickedRecord.current = null; }, [query, favoritesOnly, state.historyVisible, active]);
+  useEffect(() => { if (!selection) clickedRecord.current = null; }, [selection, history.selectionRevision]);
   useEffect(() => { if (!state.historyVisible || !active) setSession((value) => value + 1); }, [state.historyVisible, active]);
   useEffect(() => { setMenu(null); setSession((value) => value + 1); }, [state.recordsSession]);
   useEffect(() => { if (active && state.recordsFocus !== undefined) search.current?.focus({ preventScroll: true }); }, [active, state.recordsFocus]);
@@ -89,11 +106,17 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   }
 
   async function copyRecord(id: string) {
-    if (!native || !snapshot.capabilities.clipboardWrite) return;
+    if (!native || !snapshot.capabilities.clipboardWrite || !active) return false;
+    const version = actionVersion.current;
+    const ready = history.whenReady(query, favoritesOnly, id);
+    if (!(typeof ready === 'boolean' ? ready : await ready) || version !== actionVersion.current || !actionContext.current.active) return false;
     const operation = ++copyOperation.current;
     setCopyFailed(false);
-    try { await invoke('translation_sample_copy', { sampleId: id, part: 'source' }); }
-    catch { if (operation === copyOperation.current) setCopyFailed(true); }
+    try {
+      await invoke('translation_sample_copy', { sampleId: id, part: 'source' });
+      return operation === copyOperation.current && version === actionVersion.current;
+    } catch { if (operation === copyOperation.current && version === actionVersion.current) setCopyFailed(true); }
+    return false;
   }
 
   function whenReady(id: string, action: () => void) {
@@ -103,6 +126,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const ready = native ? history.whenReady(query, favoritesOnly, id) : true;
     if (typeof ready === 'boolean') execute(ready);
     else void ready.then(execute);
+  }
+
+  async function updateRecord(id: string, action: 'favorite' | 'pin' | 'delete') {
+    const version = actionVersion.current;
+    const follow = { query, favoritesOnly, selectedId: selection, selectionRevision: history.selectionRevision };
+    if (await history.update(id, action) && version === actionVersion.current && actionContext.current.active) setFollowQuery(follow);
   }
 
   function previewRecord(record: HistoryRecord) {
@@ -123,7 +152,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
-    return <article onMouseEnter={() => previewRecord(record)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', record.isPinned && 'pinned')}
+    return <article onMouseEnter={() => previewRecord(record)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
       style={{ '--history-actions-width': `${canDelete ? 99 : 74}px` } as CSSProperties}>
       <button className="history-row-select" onFocus={() => previewRecord(record)} onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -153,8 +182,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />
         <span className="history-preview">{historyPreview(record.text)}</span>
       </button>
-      <RecordActions t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copySource')} deleteLabel={t('deleteHistory')}
-        onCopy={() => whenReady(record.id, () => { void copyRecord(record.id); })} onUpdate={(action) => whenReady(record.id, () => { void history.update(record.id, action); })} />
+      <RecordActions recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copySource')} deleteLabel={t('deleteHistory')}
+        onCopy={() => copyRecord(record.id)} onUpdate={(action) => whenReady(record.id, () => { void updateRecord(record.id, action); })} />
     </article>;
   }
 
@@ -181,7 +210,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       whenReady(menuRecord.id, () => {
         if (action === 'retranslate') onSelect(menuRecord, true);
         else if (action === 'copy') void copyRecord(menuRecord.id);
-        else void history.update(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
+        else void updateRecord(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
       });
     }} />}
     <RecordFeedback message={active && copyFailed ? t('copyFailed') : null} />

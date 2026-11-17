@@ -2132,11 +2132,14 @@ const box=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.widt
 const icon=e=>{const s=getComputedStyle(e),i=e.querySelector('.history-symbol')||e;return {symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,color:s.color,opacity:s.opacity,...box(i)};};
 const row=p.querySelector('.history-items .history-row:not([hidden])')||p.querySelector('.history-row:not([hidden])');
 const search=p.querySelector('.history-search'),input=search.querySelector('input'),footer=p.querySelector('.history-footer'),scroller=p.querySelector('[role=scrollbar]');
+const probe=row.cloneNode(true);probe.classList.remove('selected','context-target');p.append(probe);const ordinaryBackground=getComputedStyle(probe).backgroundColor;probe.classList.add('selected');const selectedBackground=getComputedStyle(probe).backgroundColor;probe.classList.remove('selected');probe.classList.add('context-target');const contextBackground=getComputedStyle(probe).backgroundColor;probe.remove();
+const label=row.querySelector('.history-languages'),labelStyle=getComputedStyle(label);
 return {ready:true,kind:p.id==='translation-history'?'translation':'clipboard',panel:nodeId(p),width:p.getBoundingClientRect().width,
 rows:[...p.querySelectorAll('.history-row:not([hidden])')].map(r=>({id:r.dataset.recordId,node:nodeId(r),selected:r.classList.contains('selected'),pinned:r.classList.contains('pinned')})),
 search:{...box(search),border:getComputedStyle(search).borderTopWidth,radius:getComputedStyle(search).borderRadius,shadow:getComputedStyle(search).boxShadow,font:getComputedStyle(input).fontSize,caret:getComputedStyle(input).caretColor},query:input.value,
 toolbar:[...p.querySelectorAll('.history-toolbar > button')].map(b=>({...box(b),...icon(b),pressed:b.getAttribute('aria-pressed'),expanded:b.getAttribute('aria-expanded'),disabled:b.disabled})),
 actions:[...row.querySelectorAll('.history-row-actions button:not([aria-hidden="true"])')].map(icon),actionDuration:getComputedStyle(row.querySelector('.history-row-actions')).transitionDuration,
+labelColor:labelStyle.color,labelFill:labelStyle.webkitTextFillColor,selectedBackground,contextBackground,ordinaryBackground,
 timeDuration:getComputedStyle(row.querySelector('time')).transitionDuration,previewFont:getComputedStyle(row.querySelector('.history-preview')).fontSize,
 origin:{...box(row.querySelector('.history-origin')),fit:getComputedStyle(row.querySelector('.history-origin')).objectFit,radius:getComputedStyle(row.querySelector('.history-origin')).borderRadius},
 footer:{...box(footer),star:icon(footer.querySelector('.history-favorites')),keyboard:icon(footer.querySelector('.history-shortcuts')),count:footer.querySelector('.history-record-count').textContent},
@@ -2583,11 +2586,30 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             return Err("record child gained settings command permission".into());
         }
         samples.push(permission);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"window.__invalidClearDetail={done:false};window.__TAURI_INTERNALS__.invoke('history_sample_select',{sampleId:'unified-translation',retranslate:false,clearDetail:true}).then(()=>window.__invalidClearDetail={done:true,rejected:false},error=>window.__invalidClearDetail={done:true,rejected:error==='invalid_argument',error:String(error)});return true;"#,
+        )?;
+        let invalid_clear = wait_records(
+            app,
+            "return {ready:window.__invalidClearDetail?.done,...window.__invalidClearDetail};",
+        )?;
+        if invalid_clear["rejected"] != true {
+            return Err(format!(
+                "clearDetail accepted a nonempty sampleId: {invalid_clear}"
+            ));
+        }
+        samples.push(invalid_clear);
         for key in [
             "search",
             "actionDuration",
             "timeDuration",
             "previewFont",
+            "labelColor",
+            "labelFill",
+            "selectedBackground",
+            "contextBackground",
             "mask",
         ] {
             if clipboard[key] != translation[key] {
@@ -2596,6 +2618,13 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                     clipboard[key], translation[key]
                 ));
             }
+        }
+        if clipboard["selectedBackground"] == clipboard["contextBackground"]
+            || clipboard["contextBackground"] == clipboard["ordinaryBackground"]
+        {
+            return Err(format!(
+                "selected, menu target and ordinary rows are not distinguishable: {clipboard}"
+            ));
         }
         let clipboard_actions = clipboard["actions"]
             .as_array()
@@ -2651,7 +2680,9 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
         if clipboard["footer"]["keyboard"] != translation["footer"]["keyboard"] {
             return Err("footer keyboard differs".into());
         }
-        for key in ["y", "width", "height", "symbol", "mask", "color", "opacity"] {
+        for key in [
+            "x", "y", "width", "height", "symbol", "mask", "color", "opacity",
+        ] {
             if clipboard["footer"]["star"][key] != translation["footer"]["star"][key] {
                 return Err(format!(
                     "footer favorite {key} differs: {clipboard} / {translation}"
@@ -2696,10 +2727,31 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             )?;
             let menu = wait_records(
                 app,
-                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu);return {ready:true,background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin record','Delete'].includes(b.textContent)).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:b.textContent,color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
+                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu);return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:[...menu.querySelectorAll('button')].map(b=>b.textContent),background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin record','Delete'].includes(b.textContent)).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:b.textContent,color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
             )?;
-            menus.push(menu);
+            if menu["contextTarget"] != true {
+                return Err(format!(
+                    "{mode}: right-click target is not highlighted: {menu}"
+                ));
+            }
+            if mode == "clipboard"
+                && menu["labels"].as_array().is_none_or(|labels| {
+                    !labels.iter().any(|label| label == "Copy")
+                        || !labels.iter().any(|label| label == "Translate")
+                })
+            {
+                return Err(format!(
+                    "clipboard menu omits existing content actions: {menu}"
+                ));
+            }
+            samples.push(
+                serde_json::json!({"mode":mode,"menuLabels":menu["labels"],"contextTarget":true}),
+            );
+            let mut common = menu;
+            common.as_object_mut().unwrap().remove("labels");
+            menus.push(common);
             evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
+            wait_records(app, "return {ready:!document.querySelector('.record-context-menu')&&!document.querySelector('.record-view:not([hidden]) .history-row.context-target')};")?;
         }
         if menus[0] != menus[1] {
             return Err(format!("record menus differ: {menus:?}"));
@@ -2721,8 +2773,61 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                 })?;
                 let state=wait_records(app,&format!("const p=document.querySelector('{}');return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width}};",if mode=="clipboard" {".clipboard-panel"} else {"#translation-history"}))?;
                 samples.push(state);
+                let footer = wait_records(
+                    app,
+                    r#"
+const p=document.querySelector('.record-view:not([hidden]) .history-panel'),bounds=p.getBoundingClientRect(),footer=p.querySelector('.history-footer');
+const star=footer.querySelector('.history-favorites').getBoundingClientRect(),count=footer.querySelector('.history-record-count').getBoundingClientRect(),keyboard=footer.querySelector('.history-shortcuts').getBoundingClientRect();
+const controls=[...footer.querySelectorAll('button')].map(button=>({label:button.getAttribute('aria-label'),rect:button.getBoundingClientRect()}));
+const overlap=(a,b)=>Math.min(a.right,b.right)-Math.max(a.left,b.left)>.5&&Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>.5;
+return {ready:true,width:bounds.width,centerOffset:star.left+star.width/2-(bounds.left+bounds.width/2),overlaps:controls.flatMap((a,i)=>controls.slice(i+1).filter(b=>overlap(a.rect,b.rect)).map(b=>[a.label,b.label])),countOverlap:controls.some(a=>overlap(a.rect,count)),within:controls.every(a=>a.rect.left>=bounds.left&&a.rect.right<=bounds.right),keyboardAtEdge:keyboard.right<=bounds.right};
+"#,
+                )?;
+                if footer["centerOffset"].as_f64().unwrap_or(99.).abs() > 0.5
+                    || footer["overlaps"]
+                        .as_array()
+                        .is_none_or(|values| !values.is_empty())
+                    || footer["countOverlap"] != false
+                    || footer["within"] != true
+                {
+                    return Err(format!(
+                        "{mode}: footer loses centering or overlaps at {width}px: {footer}"
+                    ));
+                }
+                samples.push(footer);
             }
         }
+        for (name, args) in [
+            ("records_view_set", serde_json::json!({"view":"clipboard"})),
+            (
+                "window_hide",
+                serde_json::json!({"region":"translation","keepHistory":true}),
+            ),
+        ] {
+            if name == "window_hide" {
+                on_main(app, |app| {
+                    app.state::<AppState>()
+                        .windows
+                        .lock()
+                        .unwrap()
+                        .translation_visible = true;
+                    apply_translation(app)
+                })?;
+                wait_motion(app)?;
+            }
+            let token_before = app.state::<AppState>().operation.load(Ordering::SeqCst);
+            evaluate_view_dom(app, "clipboard", &format!("window.__explicitNavigation={{done:false}};window.__TAURI_INTERNALS__.invoke({name:?},{args}).then(()=>window.__explicitNavigation={{done:true}},error=>window.__explicitNavigation={{done:true,error:String(error)}});return true;"))?;
+            let navigation = wait_records(
+                app,
+                "return {ready:window.__explicitNavigation?.done,...window.__explicitNavigation};",
+            )?;
+            let token_after = app.state::<AppState>().operation.load(Ordering::SeqCst);
+            if navigation["error"].is_string() || token_after <= token_before {
+                return Err(format!("explicit {name} retained stale paste token {token_before}->{token_after}: {navigation}"));
+            }
+            samples.push(serde_json::json!({"navigation":name,"tokenBefore":token_before,"tokenAfter":token_after}));
+        }
+        records_mode(app, "clipboard")?;
         records_mode(app, "translation")?;
         evaluate_dom(
             app,
@@ -2769,6 +2874,25 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             r#"return {ready:document.querySelector('[data-record-id="unified-translation"]').classList.contains('selected')};"#,
         )?;
         wait_dom(app,"return {ready:document.querySelector('.source-input')?.value==='Synthetic shared record input'&&document.querySelector('.result-column')?.textContent==='Synthetic shared output'};")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const input=document.querySelector('#translation-history .history-search input');
+Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'synthetic-no-matching-record-71f39');
+input.dispatchEvent(new Event('input',{bubbles:true}));return true;
+"#,
+        )?;
+        let no_matches = wait_records(app, "const p=document.querySelector('#translation-history');return {ready:p.querySelectorAll('.history-row:not([hidden])').length===0&&!!p.querySelector('[role=status]'),empty:p.querySelector('[role=status]')?.textContent};")?;
+        let cleared = wait_dom(app, "const source=document.querySelector('.source-input')?.value,results=[...document.querySelectorAll('.result-column')].map(e=>e.textContent);return {ready:source===''&&results.every(value=>value===''),source,results};")?;
+        samples.extend([no_matches, cleared]);
+        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history .history-search button').click();return true;")?;
+        wait_records(
+            app,
+            r#"return {ready:!!document.querySelector('#translation-history [data-record-id=unified-translation]')&&document.querySelector('#translation-history .history-search input').value===''};"#,
+        )?;
+        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history [data-record-id=unified-translation] .history-row-select').click();return true;")?;
+        samples.push(wait_dom(app, "const source=document.querySelector('.source-input')?.value,result=document.querySelector('.result-column')?.textContent;return {ready:source==='Synthetic shared record input'&&result==='Synthetic shared output',source,result,restoredAfterEmptySearch:true};")?);
         evaluate_view_dom(
             app,
             "clipboard",
@@ -3607,6 +3731,62 @@ return {{ready:text==={expected}&&!!scrollbar&&actions.includes('note'),length:t
             return Err(format!("clipboard detail contents or layout: {first}"));
         }
         samples.push(first);
+        for (action, pressed) in [("favorite", "Remove favorite"), ("pin", "Unpin record")] {
+            evaluate_dom(app, &format!("document.querySelector('.clipboard-detail [data-action={action}] button').click();return true;"))?;
+            let protected = wait_dom(
+                app,
+                &format!(
+                    r#"
+const p=document.querySelector('.clipboard-detail'),mark=p?.querySelector('[data-action={action}] button'),del=p?.querySelector('[data-action=delete] button');
+return {{ready:mark?.getAttribute('aria-label')==='{pressed}',protectedAction:'{action}',disabled:del?.disabled,retained:!!del}};
+"#
+                ),
+            )?;
+            if protected["disabled"] != true || protected["retained"] != true {
+                return Err(format!(
+                    "detail delete bypasses {action} protection: {protected}"
+                ));
+            }
+            evaluate_dom(app, "document.querySelector('.clipboard-detail [data-action=delete] button').click();return true;")?;
+            if app
+                .state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or("database")?
+                .clipboard_detail("detail-first")
+                .is_err()
+            {
+                return Err(format!("disabled detail Delete removed {action} record"));
+            }
+            evaluate_dom(
+                app,
+                r#"window.__protectedDelete={done:false};window.__TAURI_INTERNALS__.invoke('clipboard_record_update',{recordId:'detail-first',action:'delete',allowProtected:true}).then(()=>window.__protectedDelete={done:true,rejected:false},error=>window.__protectedDelete={done:true,rejected:error==='clipboard_protected',error:String(error)});return true;"#,
+            )?;
+            let rejected = wait_dom(
+                app,
+                "return {ready:window.__protectedDelete?.done,...window.__protectedDelete};",
+            )?;
+            if rejected["rejected"] != true
+                || app
+                    .state::<AppState>()
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("database")?
+                    .clipboard_detail("detail-first")
+                    .is_err()
+            {
+                return Err(format!(
+                    "detail delete IPC bypasses {action} protection: {rejected}"
+                ));
+            }
+            samples.extend([protected, rejected]);
+            evaluate_dom(app, &format!("document.querySelector('.clipboard-detail [data-action={action}] button').click();return true;"))?;
+            wait_dom(app, &format!("return {{ready:document.querySelector('.clipboard-detail [data-action={action}] button')?.getAttribute('aria-pressed')==='false'&&!document.querySelector('.clipboard-detail [data-action=delete] button')?.disabled}};"))?;
+        }
         let native = on_main(app, native_chrome_sample)?;
         if native["buttons"].as_array().is_none_or(|buttons| {
             buttons.len() != 3 || buttons.iter().any(|button| button["hidden"] != true)

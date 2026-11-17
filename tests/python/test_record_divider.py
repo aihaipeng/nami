@@ -22,11 +22,14 @@ def test_detail_metadata_and_pane_seams_match_the_pinned_divider():
     assert 'bounds.size.height * 0.94' in native
 
 
-def test_clipboard_record_type_is_bright_white():
+def test_record_labels_share_the_theme_secondary_color():
     clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
     heading = (ROOT / 'src/shared/RecordHeading.tsx').read_text()
-    assert '.clipboard-panel .history-row .history-languages { color: #fff; -webkit-text-fill-color: #fff; }' in clipboard
-    assert "color: '#fff', WebkitTextFillColor: '#fff'" in heading
+    styles = (ROOT / 'src/styles.css').read_text()
+    assert '.clipboard-panel .history-row .history-languages' not in clipboard
+    assert 'brightLabel' not in heading
+    assert '.history-row-heading' in styles and 'color: var(--history-secondary)' in styles
+    assert "WebkitTextFillColor: '#fff'" not in heading
 
 
 def test_translation_results_use_the_clipboard_detail_font():

@@ -200,6 +200,8 @@
   .history-footer { position: absolute; bottom: 4px; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 14px; color: var(--history-secondary); font-size: 11px; }
   .history-footer .history-shortcuts { color: var(--history-secondary); margin-left: auto; }
   .history-footer .history-filters { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; }
+  .history-footer .history-kinds { position: absolute; left: calc(100% + 4px); display: flex; align-items: center; gap: 1px; }
+  .history-record-count { max-width: calc(50% - 28px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .history-footer .history-filters .icon-button { color: var(--history-secondary); background: transparent; }
   .history-footer .history-filters .icon-button[aria-pressed=true] { color: var(--history-label); }
   .history-footer .history-favorites:hover, .history-footer .history-favorites:active { background: transparent; }
@@ -217,7 +219,7 @@
   .history-row { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-feature-settings: normal; position: relative; border: 1px solid transparent; border-radius: 10px; margin-bottom: 4px; }
   .history-row[hidden] { display: none; }
   .history-row:last-child { margin-bottom: 0; }
-  .history-row:hover { background: hsl(var(--foreground) / .04); }
+  .history-row:hover, .history-row.context-target { background: hsl(var(--foreground) / .04); }
   .history-row.selected { background: hsl(var(--foreground) / .09); }
   .history-row-select { display: block; width: 100%; padding: 7px; border-radius: 9px; text-align: left; font-weight: 400; }
   .history-row-select:hover:not(:disabled), .history-row-select:active:not(:disabled) { background: transparent; }

@@ -14,6 +14,7 @@ import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
 import { HistoryIcon } from './HistoryIcon';
+import { RecordFeedback } from '../shared/RecordFeedback';
 import { historySamples, type HistoryRecord, type HistorySelection } from './history';
 import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
@@ -41,6 +42,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const [secondary, setSecondary] = useState(snapshot.translationPreferences.secondaryLanguage);
   const [notice, setNotice] = useState<'inputLimit' | null>(null);
   const [serviceError, setServiceError] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const copyOperation = useRef(0);
+  const copying = useRef(new Map<number, number>());
   const requestRevision = useRef(0);
   const completedRecord = useRef<HistoryRecord | null>(null);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
@@ -76,6 +80,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const committedHistoryWidth = useRef(state.historyWidth);
   const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
   useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
+  useEffect(() => {
+    ++copyOperation.current; copying.current.clear(); setCopyFailed(false);
+    return () => { ++copyOperation.current; };
+  }, [selectedId, draft, state.recordView, state.translationVisible, state.recordsSession]);
   const capabilities = snapshot.capabilities;
   const currentWindow = useRef(state);
   currentWindow.current = state;
@@ -115,7 +123,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     let disposed = false;
     const remove = listen<HistorySelection>('history_sample_selected', ({ payload }) => {
       if (disposed) return;
-      if (payload.sampleId === null) { setSelectedId(null); return; }
+      if (payload.sampleId === null) {
+        setSelectedId(null);
+        if (payload.clearDetail) {
+          completedRecord.current = null;
+          cancelRequest(); fromSelection.current = false; normalizedCaret.current = null;
+          setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null);
+        }
+        return;
+      }
       const record = payload.record ?? historySamples.find(({ id }) => id === payload.sampleId);
       if (record) select.current(record, payload.retranslate);
     });
@@ -343,9 +359,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function copyTranslation(index: number) {
     const recordId = completedRecord.current?.id ?? selectedId;
-    if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index]) return;
-    setPopup(null);
-    void command('translation_sample_copy', { sampleId: recordId, part: index ? 'secondary' : 'primary' });
+    if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
+    setPopup(null); setCopyFailed(false);
+    const operation = ++copyOperation.current;
+    copying.current.set(index, operation);
+    void invoke('translation_sample_copy', { sampleId: recordId, part: index ? 'secondary' : 'primary' })
+      .catch(() => { if (operation === copyOperation.current) setCopyFailed(true); })
+      .finally(() => { if (copying.current.get(index) === operation) copying.current.delete(index); });
   }
 
   function keydown(event: KeyboardEvent, region: 'translation' | 'history') {
@@ -473,6 +493,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={shortcutKeys('pin')} /></button>
         </div>
       </FloatingPanel>}
+      <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
     </section>
     </div>
     {!capabilities.nativeHistory && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}

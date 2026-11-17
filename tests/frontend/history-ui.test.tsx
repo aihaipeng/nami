@@ -14,6 +14,234 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('confirms inline copy success and blocks repeats for the full pending operation', async () => {
+    await mount('history');
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : original(name, args));
+    const button = within(row('sample-03')).getByRole('button', { name: 'Copy source text' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(calls('translation_sample_copy')).toHaveLength(1);
+    expect(button.querySelector('.copy-success')).toBeNull();
+    vi.useFakeTimers();
+    try {
+      await act(async () => finish());
+      expect(button.querySelector('.copy-success')).toBeTruthy();
+      fireEvent.click(button);
+      expect(calls('translation_sample_copy')).toHaveLength(1);
+      act(() => vi.advanceTimersByTime(999));
+      expect(button.querySelector('.copy-success')).toBeTruthy();
+      act(() => vi.advanceTimersByTime(1));
+      expect(button.querySelector('.copy-success')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not show a late copy success after leaving the record session', async () => {
+    await mount('clipboard');
+    await windowState({ recordView: 'translation' });
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : original(name, args));
+    const target = within(row('sample-03')).getByRole('button', { name: 'Copy source text' });
+    fireEvent.click(target);
+    await windowState({ recordView: 'clipboard' });
+    await act(async () => finish());
+    expect(target.querySelector('.copy-success')).toBeNull();
+    expect(document.querySelector('.global-error')).toBeNull();
+  });
+
+  it('highlights only the context target without selecting it and clears the target when dismissed', async () => {
+    await mount('history');
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    const target = row('sample-03');
+    const before = calls('history_sample_select').length;
+    fireEvent.contextMenu(target);
+    expect(target.classList.contains('context-target')).toBe(true);
+    expect(target.classList.contains('selected')).toBe(false);
+    expect(calls('history_sample_select')).toHaveLength(before);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(target.classList.contains('context-target')).toBe(false);
+    expect(calls('history_sample_select')).toHaveLength(before);
+  });
+
+  it('clears the search immediately without waiting for the typing debounce', async () => {
+    await mount('history');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
+    await waitFor(() => expect(calls('history_query').at(-1)?.[1]).toEqual({ query: 'train', favoritesOnly: false }));
+    vi.useFakeTimers();
+    try {
+      await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Clear history search' })));
+      expect(calls('history_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false });
+      expect(screen.queryByRole('progressbar')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['search', 'favorites'] as const)('follows the first unpinned result when %s excludes the open detail', async (filter) => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    if (filter === 'search') fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'updated design' } });
+    else fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-04', retranslate: false }));
+    expect(within(row('sample-04')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('clears an open detail for empty search results and retains a matching selection', async () => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    const before = calls('history_sample_select').length;
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
+    await waitFor(() => expect(records()).toHaveLength(1));
+    expect(calls('history_sample_select')).toHaveLength(before);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'no synthetic record matches this' } });
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: null, retranslate: false, clearDetail: true }));
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    expect(records()).toHaveLength(0);
+  });
+
+  it.each(['empty-search', 'favorite-roundtrip', 'clear-selection'] as const)('opens the same record after %s instead of treating it as a second click', async (reset) => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    if (reset === 'empty-search') {
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'no synthetic record matches this' } });
+      await waitFor(() => expect(records()).toHaveLength(0));
+      await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toMatchObject({ sampleId: null, clearDetail: true }));
+      fireEvent.click(screen.getByRole('button', { name: 'Clear history search' }));
+      await waitFor(() => expect(records()).toHaveLength(20));
+    } else if (reset === 'favorite-roundtrip') {
+      fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+      await waitFor(() => expect(records()).toHaveLength(5));
+      fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+      await waitFor(() => expect(records()).toHaveLength(20));
+    } else await emit('history_sample_selected', { sampleId: null, retranslate: false });
+    const before = calls('history_sample_select').length;
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    await waitFor(() => expect(calls('history_sample_select')).toHaveLength(before + 1));
+    expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', retranslate: false });
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+  });
+
+  it('falls back to a pinned result when a search has no ordinary records', async () => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'simple, calm' } });
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-02', retranslate: false }));
+  });
+
+  it('retains detail after a failed filter query and follows the results after retry', async () => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    const original = bridge.invoke.getMockImplementation()!;
+    let fail = true;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'history_query' && fail) throw new Error('database_unavailable');
+      return original(name, args);
+    });
+    const before = calls('history_sample_select').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    await screen.findByRole('alert');
+    expect(calls('history_sample_select')).toHaveLength(before);
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-04', retranslate: false }));
+  });
+
+  it.each(['close', 'new-selection'] as const)('does not reopen or replace details after %s while a filter request is pending', async (change) => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: (value: typeof bridge.history) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_query'
+      ? new Promise<typeof bridge.history>((resolve) => { finish = resolve; }) : original(name, args));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (change === 'close') await windowState({ translationVisible: false, translationExtent: 0 });
+    else await emit('history_sample_selected', { sampleId: 'new-result-outside-filter', retranslate: false });
+    const before = calls('history_sample_select').length;
+    const favorites = bridge.history.records.filter(({ isFavorite }) => isFavorite);
+    await act(async () => finish({ ...bridge.history, records: favorites, revision: bridge.history.revision + 1, generation: bridge.history.generation + 1, totalRecords: favorites.length }));
+    expect(calls('history_sample_select')).toHaveLength(before);
+  });
+
+  it.each([['before-query', false], ['before-query', true], ['during-query', false], ['during-query', true]] as const)('preserves an edited draft cleared %s, with empty results=%s', async (timing, empty) => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    if (timing === 'before-query') await emit('history_sample_selected', { sampleId: null, retranslate: false });
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: (value: typeof bridge.history) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_query'
+      ? new Promise<typeof bridge.history>((resolve) => { finish = resolve; }) : original(name, args));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (timing === 'during-query') await emit('history_sample_selected', { sampleId: null, retranslate: false });
+    const before = calls('history_sample_select').length;
+    const favorites = empty ? [] : bridge.history.records.filter(({ isFavorite }) => isFavorite);
+    await act(async () => finish({ ...bridge.history, records: favorites, revision: bridge.history.revision + 1, generation: bridge.history.generation + 1, totalRecords: favorites.length }));
+    expect(calls('history_sample_select')).toHaveLength(before);
+  });
+
+  it('still follows results when a query snapshot only clears the visual selection', async () => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      const result = await original(name, args);
+      return name === 'history_query' ? { ...result, selectedId: null } : result;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-04', retranslate: false }));
+  });
+
+  it.each([['favorite', 'inline'], ['favorite', 'menu'], ['delete', 'inline'], ['delete', 'menu']] as const)('follows remaining results after %s through %s removes the current detail', async (action, entry) => {
+    await mount('history');
+    if (action === 'favorite') {
+      fireEvent.click(screen.getByRole('button', { name: 'Favorite history' }));
+      await waitFor(() => expect(records()).toHaveLength(5));
+    }
+    const targetId = action === 'favorite' ? 'sample-04' : 'sample-03';
+    fireEvent.click(within(row(targetId)).getByRole('button', { name: /^Translation:/ }));
+    if (entry === 'menu') {
+      fireEvent.contextMenu(row(targetId));
+      fireEvent.click(screen.getByRole('menuitem', { name: action === 'favorite' ? 'Remove favorite' : 'Delete' }));
+    } else fireEvent.click(within(row(targetId)).getByRole('button', { name: action === 'favorite' ? 'Remove favorite' : 'Delete history record' }));
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: action === 'favorite' ? 'sample-08' : 'sample-04', retranslate: false }));
+  });
+
+  it('clears detail when deleting the last search result', async () => {
+    await mount('history');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
+    await waitFor(() => expect(records()).toHaveLength(1));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: null, retranslate: false, clearDetail: true }));
+  });
+
+  it.each([null, 'new-retranslation-result'])('does not replace a new selection event (%s) while a record update is pending', async (sampleId) => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    const original = bridge.invoke.getMockImplementation()!;
+    let finish!: () => Promise<void>;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_record_update'
+      ? new Promise((resolve) => { finish = async () => { resolve(await original(name, args)); }; }) : original(name, args));
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
+    await emit('history_sample_selected', { sampleId, retranslate: false });
+    const before = calls('history_sample_select').length;
+    await act(async () => finish());
+    expect(calls('history_sample_select')).toHaveLength(before);
+  });
+
+  it('does not replace an out-of-filter retranslation selection when the filters did not change', async () => {
+    await mount('history');
+    fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
+    await waitFor(() => expect(records()).toHaveLength(1));
+    const before = calls('history_sample_select').length;
+    await emit('history_sample_selected', { sampleId: 'outside-filter-result', retranslate: false });
+    await emit('history_changed', { ...bridge.history, records: [bridge.history.records.find(({ id }) => id === 'sample-03')!], revision: bridge.history.revision + 1 });
+    expect(calls('history_sample_select')).toHaveLength(before);
+  });
+
   it('preserves the backend pin order when a newer pin has an older translation date', async () => {
     const older = { ...bridge.history.records[3], id: 'recently-pinned', isPinned: true, date: '2020-01-01T00:00:00Z' };
     const newer = { ...bridge.history.records[2], id: 'previously-pinned', isPinned: true, date: '2020-01-02T00:00:00Z' };

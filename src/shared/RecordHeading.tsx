@@ -1,11 +1,10 @@
 import type { CSSProperties } from 'react';
 import fallbackIcon from '../assets/history/reference-nami.png';
 
-export function RecordHeading({ date: value, label, sourceApp, brightLabel = false }: {
+export function RecordHeading({ date: value, label, sourceApp }: {
   date: string;
   label: string;
   sourceApp?: { name: string; iconDataUrl?: string | null } | null;
-  brightLabel?: boolean;
 }) {
   const date = new Date(value);
   const two = (part: number) => String(part).padStart(2, '0');
@@ -15,7 +14,7 @@ export function RecordHeading({ date: value, label, sourceApp, brightLabel = fal
     {sourceApp?.iconDataUrl
       ? <img className="history-origin" src={sourceApp.iconDataUrl} alt={name} title={name} />
       : <span className="history-origin history-symbol" role="img" aria-label={name} title={name} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0, background: '#fff' } as CSSProperties} />}
-    <span className="history-languages" title={label} style={brightLabel ? { color: '#fff', WebkitTextFillColor: '#fff' } : undefined}>{label}</span>
+    <span className="history-languages" title={label}>{label}</span>
     <time dateTime={value}>{time}</time>
   </span>;
 }

@@ -23,6 +23,7 @@ export interface HistorySelection {
   revision: number;
   sampleId: string | null;
   retranslate: boolean;
+  clearDetail?: boolean;
   record?: HistoryRecord | null;
 }
 

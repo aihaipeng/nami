@@ -596,15 +596,6 @@ impl HistoryDatabase {
     }
 
     pub fn clipboard_update(&mut self, id: &str, action: &str) -> Result<(), String> {
-        self.clipboard_update_allowing(id, action, false)
-    }
-
-    pub fn clipboard_update_allowing(
-        &mut self,
-        id: &str,
-        action: &str,
-        allow_protected: bool,
-    ) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -639,9 +630,7 @@ impl HistoryDatabase {
                 transaction.commit().map_err(storage_error)?;
                 return Ok(());
             }
-            "delete" if (favorite || pinned) && !allow_protected => {
-                return Err("clipboard_protected".into())
-            }
+            "delete" if favorite || pinned => return Err("clipboard_protected".into()),
             "delete" => "DELETE FROM clipboard_records WHERE id=?1",
             _ => return Err("invalid_argument".into()),
         };
@@ -1800,10 +1789,13 @@ mod tests {
         database.clipboard_insert(&item).unwrap();
         database.clipboard_update("first", "favorite").unwrap();
         database.clipboard_update("first", "pin").unwrap();
-        database
-            .clipboard_update_allowing("first", "delete", true)
-            .unwrap();
-        assert_eq!(database.clipboard_record("first").unwrap_err(), "not_found");
+        assert_eq!(
+            database.clipboard_update("first", "delete").unwrap_err(),
+            "clipboard_protected"
+        );
+        let protected = database.clipboard_record("first").unwrap();
+        assert!(protected.is_favorite && protected.is_pinned);
+        assert_eq!(protected.text, item.text);
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }

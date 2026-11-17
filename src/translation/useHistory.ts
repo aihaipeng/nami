@@ -129,13 +129,14 @@ export function useHistory(native: boolean) {
   }, [native, accept]);
 
   const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
-    if (!native) return;
+    if (!native || !active.current) return false;
     const connection = lifecycle.current;
     setError(false);
     try {
       const next = await invoke<HistorySnapshot>('history_record_update', { recordId, action });
-      if (active.current && lifecycle.current === connection) accept(next);
+      if (active.current && lifecycle.current === connection) { accept(next); return true; }
     } catch { if (active.current && lifecycle.current === connection) setError(true); }
+    return false;
   }, [native, accept]);
 
   function refresh(query: string, favoritesOnly: boolean) {
@@ -154,5 +155,5 @@ export function useHistory(native: boolean) {
     const task = queryTask.current;
     return task?.query === query && task.favoritesOnly === favoritesOnly ? task.done.then((accepted) => accepted && current()) : false;
   }
-  return { snapshot, displaySnapshot, displayReady: (query: string, favoritesOnly: boolean) => !connecting && cacheQuery.current === query && pages.current.has(favoritesOnly), whenReady, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, refresh, setQuery, loadMore, update };
+  return { snapshot, selectionRevision: selection.current.revision, displaySnapshot, displayReady: (query: string, favoritesOnly: boolean) => !connecting && cacheQuery.current === query && pages.current.has(favoritesOnly), whenReady, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, refresh, setQuery, loadMore, update };
 }
