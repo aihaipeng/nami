@@ -111,6 +111,43 @@ describe('live translation bridge', () => {
     expect(source().value).toBe(''); expect(calls('translation_run')).toHaveLength(0);
   });
 
+  it('commits a blank input and cleared results before presenting a new selection summon', async () => {
+    await mount(); submit('Previous selected text');
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => {
+      if (name === 'selection_take') return Promise.resolve({ text: '', error: null, presentationId: 7 });
+      if (name === 'selection_present') {
+        expect(source().value).toBe('');
+        expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
+        expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe('');
+      }
+      return invoke(name, args);
+    });
+    await emit('selection_ready', null);
+    expect(calls('selection_present').at(-1)?.[1]).toEqual({ presentationId: 7 });
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
+  it('ignores an older selection reply that arrives after the newer summon', async () => {
+    await mount();
+    let resolveOld!: (value: unknown) => void;
+    const old = new Promise((resolve) => { resolveOld = resolve; });
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let takes = 0;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => {
+      if (name === 'selection_take') return ++takes === 1 ? old : Promise.resolve({ text: 'New selection', error: null, presentationId: 9 });
+      return invoke(name, args);
+    });
+    await emit('selection_ready', null);
+    await emit('selection_ready', null);
+    await waitFor(() => expect(calls('selection_present')).toHaveLength(1));
+    await act(async () => resolveOld({ text: 'Old selection', error: null, presentationId: 8 }));
+    expect(source().value).toBe('New selection');
+    expect(calls('selection_present')[0][1]).toEqual({ presentationId: 9 });
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
   it('restores runtime records supplied by native history instead of requiring a fixture', async () => {
     await mount(); const record = result('Runtime history');
     await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });

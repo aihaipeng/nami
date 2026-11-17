@@ -9,7 +9,7 @@ import uuid
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'AX-only empty selection summon'}
+CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'selection empty summon and clipboard protection'}
 CASE_NAMES['records-pinned'] = 'shared pinned boundary coverage'
 CASE_NAMES['clipboard-details'] = 'clipboard full details and hover navigation'
 

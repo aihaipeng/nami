@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { flushSync } from 'react-dom';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
@@ -124,9 +125,16 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useEffect(() => {
     if (!native || !capabilities.selection) return;
     let disposed = false;
+    let latestPresentation = 0;
     const take = async () => {
-      const context = await invoke<{ text: string; error: string | null } | null>('selection_take');
-      if (!disposed && context) receiveSelection.current(context);
+      const context = await invoke<{ text: string; error: string | null; presentationId?: number } | null>('selection_take');
+      if (disposed || !context) return;
+      if (context.presentationId !== undefined) {
+        if (context.presentationId <= latestPresentation) return;
+        latestPresentation = context.presentationId;
+      }
+      flushSync(() => receiveSelection.current(context));
+      if (context.presentationId !== undefined) await invoke('selection_present', { presentationId: context.presentationId });
     };
     const remove = listen('selection_ready', () => { void take().catch(() => setServiceError('Unable to read selected text.')); });
     void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read selected text.'); });

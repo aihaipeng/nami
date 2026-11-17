@@ -62,8 +62,11 @@ pub struct AppState {
     shortcuts_suspended: AtomicBool,
     registered_shortcuts: Mutex<Vec<Shortcut>>,
     selection: Mutex<Option<selection::SelectionContext>>,
+    selection_presentation: Mutex<Option<u64>>,
     selection_source: Mutex<Option<serde_json::Value>>,
+    selection_revision: AtomicU64,
     selection_busy: AtomicBool,
+    selection_copy_busy: AtomicBool,
     selection_origin: Mutex<Option<selection::SelectionOrigin>>,
 }
 
@@ -104,8 +107,11 @@ impl Default for AppState {
             shortcuts_suspended: AtomicBool::new(false),
             registered_shortcuts: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
+            selection_presentation: Mutex::new(None),
             selection_source: Mutex::new(None),
+            selection_revision: AtomicU64::new(0),
             selection_busy: AtomicBool::new(false),
+            selection_copy_busy: AtomicBool::new(false),
             selection_origin: Mutex::new(None),
         }
     }
@@ -288,6 +294,7 @@ fn main() {
             commands::translation_shortcuts_restore,
             commands::translation_shortcut_capture,
             commands::selection_take,
+            commands::selection_present,
             commands::window_show,
             commands::window_hide,
             commands::window_pin,

@@ -164,6 +164,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
         } else {
             *state.clipboard_translation.lock().unwrap() = Some(SelectionContext {
                 text: copied,
+                presentation_id: None,
                 source_app: source.clone(),
                 error: None,
             });

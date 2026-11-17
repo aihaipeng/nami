@@ -2726,17 +2726,25 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
             return Err("note editor did not protect unsaved changes".into());
         }
         for action in ["Cancel", "Discard"] {
-            if action == "Cancel" {
-                *app.state::<AppState>().selection.lock().unwrap() =
-                    Some(crate::selection::SelectionContext {
-                        text: "Synthetic pending selected text".into(),
-                        source_app: None,
-                        error: None,
-                    });
-                *app.state::<AppState>().selection_source.lock().unwrap() =
-                    Some(serde_json::json!({"name":"Synthetic source"}));
-            }
-            on_main(app, |app| show(app, "translation"))?;
+            let presentation = app
+                .state::<AppState>()
+                .selection_revision
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            *app.state::<AppState>().selection.lock().unwrap() =
+                Some(crate::selection::SelectionContext {
+                    text: "Synthetic pending selected text".into(),
+                    presentation_id: Some(presentation),
+                    source_app: None,
+                    error: None,
+                });
+            *app.state::<AppState>()
+                .selection_presentation
+                .lock()
+                .unwrap() = Some(presentation);
+            *app.state::<AppState>().selection_source.lock().unwrap() =
+                Some(serde_json::json!({"name":"Synthetic source"}));
+            on_main(app, crate::selection::dispatch)?;
             let mut confirmation = false;
             for _ in 0..100 {
                 confirmation=evaluate_view_dom(app,"clipboard","return !!document.querySelector('[role=alertdialog][aria-label=\"Save changes?\"]');")?==true;
@@ -2771,6 +2779,12 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
                 if app.state::<AppState>().selection.lock().unwrap().is_some()
                     || app
                         .state::<AppState>()
+                        .selection_presentation
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                    || app
+                        .state::<AppState>()
                         .selection_source
                         .lock()
                         .unwrap()
@@ -2800,6 +2814,18 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
                 }
                 if !navigated {
                     return Err("Discard did not continue pending translation summon".into());
+                }
+                wait_dom(app, "return {ready:document.querySelector('.source-input')?.value==='Synthetic pending selected text'};")?;
+                if app
+                    .state::<AppState>()
+                    .selection_presentation
+                    .lock()
+                    .unwrap()
+                    .is_some()
+                {
+                    return Err(
+                        "Discard did not complete the prepared selection presentation".into(),
+                    );
                 }
                 let note = app
                     .state::<AppState>()
@@ -3147,6 +3173,7 @@ fn run_records_open(app: &AppHandle) -> DomCase {
 fn run_selection_open(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
+        on_main(app, |_| crate::platform::test_selection_clipboard())?;
         if app.config().identifier != "dev.local.nami.ui-tests"
             || app.get_window("translation").is_some()
         {
@@ -3167,7 +3194,7 @@ fn run_selection_open(app: &AppHandle) -> DomCase {
         })?;
         wait_dom(
             app,
-            r#"const input=document.querySelector('.source-input'),connected=document.documentElement.dataset.nativeHistory==='true';if(input&&connected&&!window.__selectionInitialProbe){window.__selectionInitialProbe={done:false};(async()=>{try{const context=await window.__TAURI_INTERNALS__.invoke('selection_take');await window.__TAURI_INTERNALS__.invoke('translation_cancel');window.__selectionInitialProbe={done:true,empty:context===null};}catch(error){window.__selectionInitialProbe={done:true,error:String(error)};}})();}return {ready:!!input&&connected&&window.__selectionInitialProbe?.done&&window.__selectionInitialProbe.empty,probe:window.__selectionInitialProbe,input:!!input,connected};"#,
+            r#"const input=document.querySelector('.source-input'),connected=document.documentElement.dataset.nativeHistory==='true';if(input&&connected&&!window.__selectionInitialProbe){window.__selectionInitialProbe={done:false};(async()=>{try{const context=await window.__TAURI_INTERNALS__.invoke('selection_take');await window.__TAURI_INTERNALS__.invoke('selection_present',{presentationId:0});await window.__TAURI_INTERNALS__.invoke('translation_cancel');window.__selectionInitialProbe={done:true,empty:context===null};}catch(error){window.__selectionInitialProbe={done:true,error:String(error)};}})();}return {ready:!!input&&connected&&window.__selectionInitialProbe?.done&&window.__selectionInitialProbe.empty,probe:window.__selectionInitialProbe,input:!!input,connected};"#,
         )?;
         if app
             .get_window("translation")
@@ -3202,7 +3229,7 @@ fn run_selection_open(app: &AppHandle) -> DomCase {
             };
             evaluate_dom(
                 app,
-                r#"window.__selectionOpenProbe={presented:false,scheduled:false};window.__selectionOpenPanel??=document.querySelector('.translation-clip');window.__selectionOpenInput??=document.querySelector('.source-input');return true;"#,
+                r#"window.__selectionOpenProbe={presented:false,scheduled:false,staleOnFocus:false};window.addEventListener('focus',()=>{window.__selectionOpenProbe.staleOnFocus=!!document.querySelector('.source-input')?.value;},{once:true});window.__selectionOpenPanel??=document.querySelector('.translation-clip');window.__selectionOpenInput??=document.querySelector('.source-input');return true;"#,
             )?;
             let revision = app
                 .state::<AppState>()
@@ -3217,7 +3244,7 @@ fn run_selection_open(app: &AppHandle) -> DomCase {
 const input=document.querySelector('.source-input'),panel=document.querySelector('.translation-clip'),probe=window.__selectionOpenProbe;
 const ready=!!input&&input.value===''&&panel?.getAttribute('aria-hidden')==='false'&&document.activeElement===input&&document.hasFocus()&&document.visibilityState==='visible';
 if(ready&&!probe.scheduled){probe.scheduled=true;requestAnimationFrame(()=>requestAnimationFrame(()=>{if(window.__selectionOpenProbe===probe)probe.presented=true;}));}
-return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.activeElement===input,documentFocused:document.hasFocus(),visibility:document.visibilityState,panelShown:panel?.getAttribute('aria-hidden')==='false',samePanel:panel===window.__selectionOpenPanel,sameInput:input===window.__selectionOpenInput,presented:probe.presented,error:document.querySelector('[role=alert]')?.textContent};
+return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.activeElement===input,documentFocused:document.hasFocus(),visibility:document.visibilityState,panelShown:panel?.getAttribute('aria-hidden')==='false',samePanel:panel===window.__selectionOpenPanel,sameInput:input===window.__selectionOpenInput,staleOnFocus:probe.staleOnFocus,emptyResults:[...document.querySelectorAll('.result-column')].every(n=>!n.textContent),presented:probe.presented,error:document.querySelector('[role=alert]')?.textContent};
 "#;
             let mut sample = wait_dom(app, script).map_err(|error| {
                 format!(
@@ -3231,10 +3258,13 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
                 || windows.history_visible
                 || state.selection_busy.load(Ordering::SeqCst)
                 || state.selection.lock().unwrap().is_some()
+                || state.selection_presentation.lock().unwrap().is_some()
                 || state.translation_revision.load(Ordering::SeqCst) <= revision
                 || state.clipboard_version.load(Ordering::SeqCst) != clipboard_version
                 || sample["samePanel"] != true
                 || sample["sameInput"] != true
+                || sample["staleOnFocus"] != false
+                || sample["emptyResults"] != true
             {
                 return Err(format!(
                     "selection-open did not finish blank summon: {sample}"
@@ -3263,7 +3293,7 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
         Ok(())
     })();
     DomCase {
-        name: "AX-only empty selection summon",
+        name: "selection empty summon and clipboard protection",
         passed: result.is_ok(),
         error: result.err(),
         samples,

@@ -10,6 +10,7 @@ fn main() {
             "translation_shortcuts_restore",
             "translation_shortcut_capture",
             "selection_take",
+            "selection_present",
             "window_show",
             "window_hide",
             "window_pin",

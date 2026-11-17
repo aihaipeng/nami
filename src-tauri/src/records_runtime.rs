@@ -24,6 +24,7 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
     if !proceed {
         if pending.as_deref() == Some("translation") {
             state.selection.lock().unwrap().take();
+            state.selection_presentation.lock().unwrap().take();
             state.selection_source.lock().unwrap().take();
         }
         return Ok(());
@@ -33,13 +34,16 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
         Some("view:clipboard") => windows::set_record_view(app, "clipboard"),
         Some("view:translation") => windows::set_record_view(app, "translation"),
         Some(target) => {
-            windows::resume_navigation(app, target)?;
-            if target == "translation" && state.selection.lock().unwrap().is_some() {
-                if let Some(view) = app.get_webview("translation") {
-                    view.emit("selection_ready", ()).map_err(|_| "event_emit")?;
+            if target == "translation" {
+                if state.selection.lock().unwrap().is_some() {
+                    return crate::selection::dispatch(app);
+                }
+                let presentation = *state.selection_presentation.lock().unwrap();
+                if let Some(id) = presentation {
+                    return crate::selection::present(app, id);
                 }
             }
-            Ok(())
+            windows::resume_navigation(app, target)
         }
         None => Ok(()),
     }

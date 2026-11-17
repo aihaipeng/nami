@@ -29,6 +29,10 @@ pub use clipboard::*;
 mod macos;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 pub use macos::*;
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+mod selection_copy;
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub use selection_copy::*;
 mod image_metadata;
 pub use image_metadata::image_dimensions;
 mod ocr;

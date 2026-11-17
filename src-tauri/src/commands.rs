@@ -827,8 +827,24 @@ pub fn selection_take(
     app: AppHandle,
 ) -> Result<Option<crate::selection::SelectionContext>, String> {
     authorize(&window, &["translation"])?;
-    let context = app.state::<AppState>().selection.lock().unwrap().take();
+    let state = app.state::<AppState>();
+    if state.records_dirty.load(Ordering::SeqCst)
+        || state.records_navigation.lock().unwrap().is_some()
+    {
+        return Ok(None);
+    }
+    let context = state.selection.lock().unwrap().take();
     Ok(context)
+}
+
+#[tauri::command]
+pub fn selection_present(
+    window: Webview,
+    app: AppHandle,
+    presentation_id: u64,
+) -> Result<(), String> {
+    authorize(&window, &["translation"])?;
+    crate::selection::present(&app, presentation_id)
 }
 
 #[tauri::command]

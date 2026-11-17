@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn CGEventSetFlags(event: *mut c_void, flags: u64);
     fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
     fn CGEventPost(tap: u32, event: *const c_void);
+    fn CGEventPostToPid(pid: i32, event: *const c_void);
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -264,23 +265,25 @@ pub fn selected_text(target: Target) -> Result<String, &'static str> {
     unsafe {
         let application = AXUIElementCreateApplication(target.pid);
         if application.is_null() {
-            return Err("selection_unavailable");
+            return Err("selection_application_unavailable");
         }
         let application = AXValue(application);
         if AXUIElementSetMessagingTimeout(application.0, 0.25) != 0 {
-            return Err("selection_unavailable");
+            return Err("selection_application_timeout");
         }
+        // Chromium exposes its accessibility tree lazily when the application role is read.
+        let _ = ax_attribute(application.0, ns_string!("AXRole"));
         let focused = ax_attribute(application.0, ns_string!("AXFocusedUIElement"))
-            .ok_or("selection_unavailable")?;
+            .ok_or("selection_focus_unavailable")?;
         if CFGetTypeID(focused.0) != AXUIElementGetTypeID() {
-            return Err("selection_unavailable");
+            return Err("selection_focus_invalid");
         }
         let mut focused_pid = 0;
         if AXUIElementGetPid(focused.0, &mut focused_pid) != 0 || focused_pid != target.pid {
             return Err("target_unavailable");
         }
         if AXUIElementSetMessagingTimeout(focused.0, 0.25) != 0 {
-            return Err("selection_unavailable");
+            return Err("selection_focus_timeout");
         }
         let subrole =
             ax_attribute(focused.0, ns_string!("AXSubrole")).and_then(|value| ax_string(&value));
@@ -342,6 +345,47 @@ pub fn target_app_info(target: Target) -> Option<serde_json::Value> {
 
 pub fn secure_input() -> bool {
     unsafe { IsSecureEventInputEnabled() }
+}
+
+pub fn send_copy(target: Target) -> Result<(), &'static str> {
+    if !accessibility() {
+        return Err("permission_required");
+    }
+    if secure_input() {
+        return Err("selection_secure");
+    }
+    if !target_focused(target) {
+        return Err("target_unavailable");
+    }
+    unsafe {
+        let source = CGEventSourceCreate(-1);
+        if source.is_null() {
+            return Err("event_creation");
+        }
+        let keys = [
+            (55, true, 1 << 20),
+            (8, true, 1 << 20),
+            (8, false, 1 << 20),
+            (55, false, 0),
+        ];
+        let events: Vec<_> = keys
+            .iter()
+            .map(|(key, down, _)| CGEventCreateKeyboardEvent(source, *key, *down))
+            .collect();
+        CFRelease(source);
+        if events.iter().any(|event| event.is_null()) {
+            for event in events.into_iter().filter(|event| !event.is_null()) {
+                CFRelease(event);
+            }
+            return Err("event_creation");
+        }
+        for (event, (_, _, flags)) in events.iter().zip(keys) {
+            CGEventSetFlags(*event, flags);
+            CGEventPostToPid(target.pid, *event);
+            CFRelease(*event);
+        }
+    }
+    Ok(())
 }
 
 pub fn request_accessibility() -> bool {
