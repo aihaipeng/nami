@@ -8,6 +8,7 @@ export interface TranslationMetadata {
 }
 
 export interface HistoryRecord {
+  title?: string;
   id: string;
   text: string;
   sourceLanguage: string;

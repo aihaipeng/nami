@@ -8,7 +8,7 @@ import { languageName, languages, providerLanguages, supportsLanguage, supportsT
 import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
-import { keycapLabels, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
+import { editsText, keycapLabels, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
 import { translationShortcutEnabled, type TranslationPreferences } from '../shared/contracts';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
@@ -95,7 +95,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   };
   const shortcutKeys = (action: ShortcutAction) => {
     const binding = shortcutBinding(action);
-    return binding ? keycapLabels(binding, capabilities.platform === 'macos') : [];
+    return binding ? keycapLabels(binding, capabilities.platform === 'macos', t) : [];
   };
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
   const sourceLabel = `${languageName(source === 'auto' && detectedSource ? detectedSource : source)}${supportsLanguage(snapshot.translationEngine, 'source', source) ? '' : ` (${t('languageUnavailable')})`}`;
@@ -382,12 +382,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function keydown(event: KeyboardEvent, region: 'translation' | 'history') {
     if (event.defaultPrevented || event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      if (popup) { setPopup(null); input.current?.focus({ preventScroll: true }); }
-      else void command('window_hide', { region: 'translation' });
-    } else if (matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
-      event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
+    if (editsText(event.nativeEvent)) return;
+    if (event.key === 'Escape' && popup) {
+      event.preventDefault(); setPopup(null); input.current?.focus({ preventScroll: true });
     } else if (region === 'translation' && matchesBinding(shortcutBinding('translate'), event)) {
       event.preventDefault(); submit();
     } else if (region === 'translation' && matchesBinding(shortcutBinding('copyPrimary'), event)) {
@@ -400,6 +397,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       else setPopup('actions');
     } else if (region === 'translation' && matchesBinding(shortcutBinding('pin'), event)) {
       event.preventDefault(); if (!event.nativeEvent.repeat) togglePin();
+    } else if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
+      event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
+    } else if (event.target === input.current && event.key === 'Enter' && !primaryPressed(event)) {
+      event.preventDefault();
     }
   }
 
@@ -471,7 +472,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             setDraft(editSource(draft, next)); setNotice(null); clearSelection(); setCachedResults([]);
           }}
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current && !primaryPressed(event)) event.preventDefault(); }}
           onPointerDown={beginSourceDrag} onPointerMove={moveSourceDrag} onPointerUp={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onPointerCancel={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onBlur={() => stopSourceDrag()} />
         {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
       </header>

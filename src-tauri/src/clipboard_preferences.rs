@@ -28,12 +28,21 @@ pub(crate) enum Activation {
     Paste,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordsOpenFocus {
+    #[default]
+    Search,
+    List,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
+    records_open_focus: RecordsOpenFocus,
     pub record_shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
 
@@ -53,6 +62,7 @@ impl Default for ClipboardOptions {
             .collect(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
+            records_open_focus: RecordsOpenFocus::default(),
             record_shortcuts: Default::default(),
         }
     }
@@ -75,6 +85,10 @@ impl ClipboardOptions {
             .unwrap_or_default();
         options.activation = db
             .preference("clipboard_activation")?
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        options.records_open_focus = db
+            .preference("records_open_focus")?
             .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or_default();
         options.record_shortcuts = nami::shortcuts::ClipboardRecordShortcuts::from_store(
@@ -215,6 +229,7 @@ pub async fn clipboard_excluded_app_remove(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardControls {
     activation: Activation,
+    records_open_focus: RecordsOpenFocus,
     shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
 
@@ -222,6 +237,7 @@ impl ClipboardOptions {
     pub(crate) fn controls(&self) -> ClipboardControls {
         ClipboardControls {
             activation: self.activation,
+            records_open_focus: self.records_open_focus,
             shortcuts: self.record_shortcuts.clone(),
         }
     }
@@ -288,6 +304,25 @@ pub async fn clipboard_behavior_set(
     })
     .await?;
     state.clipboard_options.lock().unwrap().activation = activation;
+    publish_controls(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn records_open_focus_set(
+    window: Webview,
+    app: AppHandle,
+    focus: RecordsOpenFocus,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    let state = app.state::<AppState>();
+    let _write = state.shortcut_writes.lock().await;
+    let value = serde_json::to_string(&focus).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("records_open_focus", &value)
+    })
+    .await?;
+    state.clipboard_options.lock().unwrap().records_open_focus = focus;
     publish_controls(&app, &state);
     Ok(())
 }

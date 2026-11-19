@@ -1,3 +1,4 @@
+import { listenForModifierTaps } from './shared/shortcuts';
 import { useEffect, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -32,6 +33,8 @@ export default function App() {
   const [error, setError] = useState(false);
   const [pending, setPending] = useState(0);
   const t = translator(snapshot.locale);
+
+  useEffect(listenForModifierTaps, []);
 
   useEffect(() => {
     if (!native) return;
@@ -131,6 +134,7 @@ export default function App() {
       if (name === 'history_width_set') setSnapshot((value) => ({ ...value, window: { ...value.window, historyWidth: Math.min(720, Math.max(280, Number(args?.width))), historyExtent: value.window.historyVisible ? Math.min(720, Math.max(280, Number(args?.width))) : 0 } }));
       if (name === 'translation_columns_set') setSnapshot((value) => ({ ...value, window: { ...value.window, secondaryEnabled: Boolean(args?.secondaryEnabled) } }));
       if (name === 'window_pin') setSnapshot((value) => ({ ...value, window: { ...value.window, [`${String(args?.region)}Pinned`]: Boolean(args?.pinned) } }));
+      if (name === 'records_open_focus_set') setSnapshot((value) => ({ ...value, clipboardControls: { ...value.clipboardControls, recordsOpenFocus: args?.focus as 'search' | 'list' } }));
       if (name === 'locale_set') setSnapshot((value) => ({ ...value, locale: args?.locale as Locale }));
       if (name === 'translation_preferences_set') setSnapshot((value) => {
         const next = { ...value.translationPreferences, ...args, engine: (args?.engine as TranslationPreferences['engine']) ?? value.translationPreferences.engine };
@@ -143,7 +147,7 @@ export default function App() {
       if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
       return;
     }
-    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show'].includes(name);
+    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'records_open_focus_set'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);

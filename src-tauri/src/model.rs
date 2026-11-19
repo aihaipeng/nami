@@ -20,6 +20,8 @@ pub struct TranslationMetadata {
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRecord {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub id: String,
     pub text: String,
     pub source_language: String,

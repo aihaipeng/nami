@@ -862,6 +862,7 @@ mod tests {
     #[test]
     fn language_switch_reuses_only_unchanged_columns() {
         let record = crate::model::HistoryRecord {
+            title: String::new(),
             id: "previous".into(),
             text: "Synthetic".into(),
             source_language: "auto".into(),

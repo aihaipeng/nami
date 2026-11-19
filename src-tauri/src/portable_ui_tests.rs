@@ -163,8 +163,8 @@ const SCRIPT: &str = r#"
   const snapshot = () => invoke('history_snapshot');
   const record = async (id) => (await snapshot()).records.find((record) => record.id === id);
   const flag = async (id, key, value) => waitFor(async () => (await record(id))?.[key] === value, 'store flag did not update: ' + key);
-  const clickAction = (id, index) => {
-    const button = row(id)?.querySelectorAll('.history-row-actions button')[index];
+  const clickAction = (id, action) => {
+    const button = row(id)?.querySelector(`[data-action="${action}"] button`);
     assert(button && !button.disabled, 'history action unavailable');
     button.click();
   };
@@ -196,7 +196,7 @@ const SCRIPT: &str = r#"
         const style = getComputedStyle(node);
         return {width:style.width,height:style.height,mask:style.maskImage||style.webkitMaskImage,color:style.color,opacity:style.opacity};
       };
-      for (const name of ['doc.on.doc','star','pin','trash']) {
+      for (const name of ['doc.on.doc','note','star','pin','trash']) {
         const left = historyNode.querySelector(`[data-symbol="${name}"]`), right = clipboardNode.querySelector(`[data-symbol="${name}"]`);
         assert(left && right, 'shared row icon missing: '+name);
         assert(JSON.stringify(iconStyle(left)) === JSON.stringify(iconStyle(right)), 'row icon appearance differs: '+name);
@@ -303,14 +303,14 @@ const SCRIPT: &str = r#"
       row('sample-03').querySelector('.history-row-select').focus({preventScroll:true});
       await waitFor(()=>getComputedStyle(row('sample-03').querySelector('.history-row-actions')).opacity==='1','record actions did not become visible');
       const deleteBefore=row('sample-03').querySelector('.history-delete'),deleteBoxBefore=deleteBefore.getBoundingClientRect();
-      clickAction('sample-03',1);
+      clickAction('sample-03', 'favorite');
       await waitFor(()=>row('sample-03').querySelector('.history-action[data-action="delete"] button')?.getAttribute('aria-hidden')==='true','protected delete did not start its exit');
       assert(row('sample-03').querySelector('.history-delete')===deleteBefore && deleteBefore.disabled,'delete disappeared before its exit or remained usable');
       await pause(60);
       const exiting=deleteBefore.parentElement,exitStyle=getComputedStyle(exiting),exitBox=deleteBefore.getBoundingClientRect();
       if(!matchMedia('(prefers-reduced-motion: reduce)').matches) assert(Number(exitStyle.opacity)<1 && exitBox.left>deleteBoxBefore.left && Math.abs(exitBox.top-deleteBoxBefore.top)<2,'delete did not move right and fade on protection: '+JSON.stringify({opacity:exitStyle.opacity,transform:exitStyle.transform,width:exitStyle.width,dx:exitBox.left-deleteBoxBefore.left,dy:exitBox.top-deleteBoxBefore.top,connected:exiting.isConnected}));
       await waitFor(()=>!row('sample-03').querySelector('.history-delete'),'delete exit did not finish');
-      clickAction('sample-03',1);
+      clickAction('sample-03', 'favorite');
       await flag('sample-03','isFavorite',false);
       await waitFor(()=>row('sample-03').querySelector('.history-delete') && !row('sample-03').querySelector('.history-delete').disabled,'delete did not return after removing protection');
       pass(currentCase);
@@ -350,10 +350,10 @@ const SCRIPT: &str = r#"
       const id = 'sample-03';
       const original = await record(id);
       assert(!original.isFavorite && !original.isPinned, 'fixture action record must be unprotected');
-      clickAction(id, 1);
+      clickAction(id, 'favorite');
       await flag(id, 'isFavorite', true);
-      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button')[1]?.getAttribute('aria-pressed') === 'true', 'favorite did not render from shared state');
-      clickAction(id, 2);
+      await waitFor(() => row(id)?.querySelector('[data-action=favorite] button')?.getAttribute('aria-pressed') === 'true', 'favorite did not render from shared state');
+      clickAction(id, 'pin');
       await flag(id, 'isPinned', true);
       await waitFor(() => row(id)?.classList.contains('pinned'), 'pinned record did not render in pinned section');
       await waitFor(() => events.some((event) => event.records.some((record) => record.id === id && record.isPinned && record.isFavorite)), 'history_changed event missing authoritative flags');
@@ -367,13 +367,13 @@ const SCRIPT: &str = r#"
       assert(rejected, 'protected deletion was accepted');
       const after = await snapshot();
       assert(after.revision === before.revision && after.records.length === 20, 'protected deletion changed history');
-      assert(row(id)?.querySelectorAll('.history-row-actions button:not([aria-hidden="true"])').length === 3, 'protected record still exposes delete');
-      clickAction(id, 2);
+      assert(!row(id)?.querySelector('[data-action=delete] button:not([aria-hidden="true"])'), 'protected record still exposes delete');
+      clickAction(id, 'pin');
       await flag(id, 'isPinned', false);
       await waitFor(() => !row(id)?.classList.contains('pinned'), 'unpin did not update DOM');
-      clickAction(id, 1);
+      clickAction(id, 'favorite');
       await flag(id, 'isFavorite', false);
-      await waitFor(() => row(id)?.querySelectorAll('.history-row-actions button').length === 4, 'unprotected record did not restore delete');
+      await waitFor(() => row(id)?.querySelector('[data-action=delete] button:not(:disabled)'), 'unprotected record did not restore delete');
       pass(currentCase);
 
       currentCase = 'React selection restores cached translation through IPC';
@@ -383,10 +383,7 @@ const SCRIPT: &str = r#"
       pass(currentCase);
 
       currentCase = 'React deletion removes shared record and preserves selection';
-      clickAction('sample-05', 3);
-      await waitFor(()=>row('sample-05')?.querySelector('.history-delete')?.classList.contains('delete-armed'),'first delete click did not arm confirmation');
-      assert(!!(await record('sample-05')), 'first delete click removed shared record');
-      clickAction('sample-05', 3);
+      clickAction('sample-05', 'delete');
       await waitFor(async () => !row('sample-05') && !(await record('sample-05')), 'deleted record remained in DOM or shared store');
       assert((await snapshot()).records.length === 19, 'shared deletion changed unexpected records');
       assert((await snapshot()).selectedId === id && source().value === original.text, 'deleting another record lost selection');

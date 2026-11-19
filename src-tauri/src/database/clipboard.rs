@@ -907,6 +907,27 @@ impl HistoryDatabase {
             .map_err(storage_error)
     }
 
+    pub fn reset_shortcut_group(
+        &mut self,
+        bindings: &str,
+        disabled: &str,
+        selection_enabled: bool,
+        records: Option<&str>,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO preferences(key,value)
+             SELECT 'translation_shortcuts', ?1 UNION ALL
+             SELECT 'translation_disabled_shortcuts', ?2 UNION ALL
+             SELECT 'translation_selection_enabled', ?3 UNION ALL
+             SELECT 'clipboard_record_shortcuts', ?4 WHERE ?4 IS NOT NULL
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![bindings, disabled, selection_enabled.to_string(), records],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn reset_clipboard_shortcuts(
         &mut self,
         binding: &str,
@@ -929,6 +950,7 @@ impl HistoryDatabase {
             "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
             "clipboard_activation",
+            "records_open_focus",
             "translation_engine",
             "translation_source",
             "translation_primary",
@@ -2741,6 +2763,7 @@ mod tests {
         let path = directory.join("test.sqlite3");
         let mut database = HistoryDatabase::open(&path).unwrap();
         let translation = crate::model::HistoryRecord {
+            title: String::new(),
             id: "preserved-translation".into(),
             text: "synthetic original".into(),
             source_language: "auto".into(),

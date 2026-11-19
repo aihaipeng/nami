@@ -14,7 +14,7 @@ required-features = ["ui-tests"]
 
 [features]
 portable-ui = []
-ui-tests = ["dep:block2"]
+ui-tests = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -34,8 +34,8 @@ uuid = { version = "1.29.2", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-block2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSScrollView", "NSButton", "NSControl", "NSCell", "NSButtonCell", "NSWindow", "NSTextField"] }
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent", "block2", "NSView", "NSScrollView", "NSButton", "NSControl", "NSCell", "NSButtonCell", "NSWindow", "NSTextField"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "objc2-core-foundation"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-image-io = { version = "0.3", default-features = false, features = ["std", "CGImageSource", "CGImageProperties"] }

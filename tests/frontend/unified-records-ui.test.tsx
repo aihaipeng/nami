@@ -148,7 +148,7 @@ describe('unified records workspace', () => {
     expect(source().value).toBe('Synthetic image OCR content. Please translate this image.');
     fireEvent.click(panel('translation').querySelector('[data-record-id="sample-01"] .history-row-select')!);
     await waitFor(() => expect(source().value).toBe(bridge.history.records.find(({ id }) => id === 'sample-01')!.text));
-    fireEvent.mouseMove(panel('translation').querySelector('[data-record-id="sample-03"]')!);
+    fireEvent.mouseMove(panel('translation').querySelector('[data-record-id="sample-03"]')!, { clientY: 90 });
     await waitFor(() => expect(source().value).toBe(bridge.history.records.find(({ id }) => id === 'sample-03')!.text));
   });
 
@@ -185,89 +185,26 @@ describe('unified records workspace', () => {
     expect(bridge.history.records.some(({ id }) => id === 'translation-test')).toBe(false);
   });
 
-  it('arms deletion on the first click, deletes on the second and requires fresh confirmation afterwards', () => {
-    const onUpdate = vi.fn();
-    render(<RecordActions recordId="first" t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={onUpdate} />);
-    const button = screen.getByRole('button', { name: 'Delete' });
-    expect(button.classList.contains('delete-armed')).toBe(false);
-    fireEvent.click(button);
-    expect(onUpdate).not.toHaveBeenCalled();
-    expect(button.classList.contains('delete-armed')).toBe(true);
-    expect(button.getAttribute('aria-description')).toBe('Click again to delete');
-    fireEvent.click(button);
-    expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
-    expect(button.classList.contains('delete-armed')).toBe(false);
-    fireEvent.click(button);
-    expect(onUpdate).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(['outside', 'escape', 'blur', 'window-blur', 'record', 'busy', 'protected'] as const)('cancels delete confirmation on %s', (reset) => {
-    const onUpdate = vi.fn();
-    const props = { recordId: 'first', t: translator('en'), native: true, favorite: false, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate, retainDelete: true };
-    const view = render(<RecordActions {...props} />);
-    const button = screen.getByRole('button', { name: 'Delete' });
-    fireEvent.click(button);
-    expect(onUpdate).not.toHaveBeenCalled();
-    if (reset === 'outside') fireEvent.pointerDown(document.body);
-    if (reset === 'escape') fireEvent.keyDown(button, { key: 'Escape' });
-    if (reset === 'blur') fireEvent.blur(button);
-    if (reset === 'window-blur') fireEvent(window, new Event('blur'));
-    if (reset === 'record') view.rerender(<RecordActions {...props} recordId="second" />);
-    if (reset === 'busy') { view.rerender(<RecordActions {...props} busy />); view.rerender(<RecordActions {...props} />); }
-    if (reset === 'protected') { view.rerender(<RecordActions {...props} favorite />); view.rerender(<RecordActions {...props} />); }
-    expect(button.classList.contains('delete-armed')).toBe(false);
-    fireEvent.click(button);
-    expect(onUpdate).not.toHaveBeenCalled();
-  });
-
-  it.each(['clipboard', 'translation'] as const)('requires two menu clicks before deleting a %s record and resets after reopening', async (kind) => {
+  it.each(['clipboard', 'translation'] as const)('deletes the targeted %s record on the first menu click', async (kind) => {
     await mount('clipboard');
     if (kind === 'translation') await switchView(kind);
     const id = kind === 'clipboard' ? 'clip-first' : 'sample-03';
     const target = panel(kind).querySelector(`[data-record-id="${id}"]`)!;
     const command = kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update';
     fireEvent.contextMenu(target);
-    const first = screen.getByRole('menuitem', { name: 'Delete' });
-    fireEvent.click(first);
-    expect(calls(command)).toHaveLength(0);
-    expect(first.classList.contains('delete-armed')).toBe(true);
-    expect(screen.getByRole('menu')).toBeTruthy();
-    fireEvent.keyDown(first, { key: 'Escape' });
-    fireEvent.contextMenu(target);
-    const next = screen.getByRole('menuitem', { name: 'Delete' });
-    expect(next.classList.contains('delete-armed')).toBe(false);
-    fireEvent.click(next);
-    expect(calls(command)).toHaveLength(0);
-    fireEvent.click(next);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     await waitFor(() => expect(calls(command)).toHaveLength(1));
     expect(calls(command)[0][1]).toEqual({ recordId: id, action: 'delete' });
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
-  it('uses the same confirmation for keyboard Enter and Space', async () => {
+  it.each(['{Enter}', ' '])('deletes on the first button activation with %s', async (key) => {
     const onUpdate = vi.fn();
     const user = userEvent.setup();
-    render(<RecordActions recordId="keyboard" t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={onUpdate} />);
+    render(<RecordActions recordId="keyboard" t={translator('en')} native favorite={false} pinned={false} deleteLabel="Delete" onUpdate={onUpdate} />);
     screen.getByRole('button', { name: 'Delete' }).focus();
-    await user.keyboard('{Enter}');
-    expect(onUpdate).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Delete' }).classList.contains('delete-armed')).toBe(true);
-    await user.keyboard(' ');
+    await user.keyboard(key);
     expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
-  });
-
-  it.each(['clipboard', 'translation'] as const)('discards menu confirmation when right-clicking another %s record', async (kind) => {
-    await mount('clipboard');
-    if (kind === 'translation') await switchView(kind);
-    const first = panel(kind).querySelector(`[data-record-id="${kind === 'clipboard' ? 'clip-first' : 'sample-03'}"]`)!;
-    const second = panel(kind).querySelector(`[data-record-id="${kind === 'clipboard' ? 'clip-favorite' : 'sample-02'}"]`)!;
-    fireEvent.contextMenu(first);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
-    fireEvent.contextMenu(second);
-    expect(screen.getByRole('menuitem', { name: 'Delete' }).classList.contains('delete-armed')).toBe(false);
-    fireEvent.contextMenu(first);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
-    expect(calls(kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update')).toHaveLength(0);
-    expect(screen.getByRole('menuitem', { name: 'Delete' }).classList.contains('delete-armed')).toBe(true);
   });
 
   it('keeps one outline favorite icon and changes only its color state', () => {
@@ -453,8 +390,6 @@ describe('unified records workspace', () => {
     expect(screen.getByRole('button', { name: 'Delete' })).toBe(button);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    expect(onUpdate).not.toHaveBeenCalled();
-    fireEvent.click(button);
     expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
   });
 
@@ -503,6 +438,147 @@ describe('unified records workspace', () => {
     expect(screen.getByTestId('r')).toBe(ordinaryRow);
   });
 
+  it('uses remapped navigation and category keys in both views and leaves typing alone', async () => {
+    const { shortcuts } = bridge.snapshot.clipboardControls;
+    shortcuts.navigateDown.binding = { code: 'F6', modifiers: [] };
+    shortcuts.navigateUp.binding = { code: 'KeyK', modifiers: [] };
+    shortcuts.nextCategory.binding = { code: 'F7', modifiers: ['shift'] };
+    shortcuts.previousCategory.binding = { code: 'F8', modifiers: [] };
+    await mount('clipboard');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const input = search(kind);
+      input.focus();
+      const key = (target: Element, key: string, code = key, shiftKey = false) => fireEvent.keyDown(target, { key, code, shiftKey });
+      const firstRow = panel(kind).querySelector<HTMLButtonElement>('.history-row-select')!;
+      firstRow.focus();
+      expect(key(firstRow, 'ArrowDown')).toBe(true);
+      expect(key(firstRow, 'F6')).toBe(false);
+      expect(document.activeElement).not.toBe(firstRow);
+      expect(key(document.activeElement!, 'k', 'KeyK')).toBe(false);
+      expect(document.activeElement).toBe(firstRow);
+      expect(key(firstRow, 'k', 'KeyK')).toBe(false);
+      expect(document.activeElement).toBe(input);
+      expect(key(input, 'k', 'KeyK')).toBe(true);
+      const favorite = within(panel(kind)).getByRole('button', { name: /Favorite (clipboard records|history)/ });
+      expect(key(input, 'ArrowRight')).toBe(true);
+      expect(favorite.getAttribute('aria-pressed')).toBe('false');
+      expect(key(input, 'F7', 'F7', true)).toBe(false);
+      expect(favorite.getAttribute('aria-pressed')).toBe('true');
+      expect(key(input, 'F8')).toBe(false);
+      expect(favorite.getAttribute('aria-pressed')).toBe('false');
+    }
+  });
+
+  it.each(['search', 'list'] as const)('opens both views with %s focus and hands off without changing the query', async (openingFocus) => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = openingFocus;
+    const { shortcuts } = bridge.snapshot.clipboardControls;
+    shortcuts.navigateDown.binding = { code: 'KeyJ', modifiers: [] };
+    shortcuts.focusRecords.binding = { code: 'F6', modifiers: [] };
+    shortcuts.favorite.binding = { code: 'KeyF', modifiers: [] };
+    await mount('clipboard');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const input = search(kind);
+      const row = await waitFor(() => {
+        const current = panel(kind).querySelector<HTMLButtonElement>('[data-keyboard-current] .history-row-select');
+        expect(current).not.toBeNull();
+        return current!;
+      });
+      expect(document.activeElement).toBe(openingFocus === 'list' ? row : input);
+      fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
+      expect(document.activeElement).toBe(input);
+      expect(fireEvent.keyDown(input, { key: 'j', code: 'KeyJ' })).toBe(true);
+      expect(fireEvent.keyDown(input, { key: 'f', code: 'KeyF' })).toBe(true);
+      expect(fireEvent.keyDown(input, { key: 'F6', code: 'F6', isComposing: true })).toBe(true);
+      expect(document.activeElement).toBe(input);
+      const query = kind === 'clipboard' ? 'Saved' : row.getAttribute('aria-label')!.slice('Translation: '.length);
+      fireEvent.change(input, { target: { value: query } });
+      await waitFor(() => expect(panel(kind).hasAttribute('data-focus-ready')).toBe(true));
+      expect(fireEvent.keyDown(input, { key: 'F6', code: 'F6' })).toBe(false);
+      expect(document.activeElement).toBe(row);
+      expect(fireEvent.keyDown(row, { key: 'f', code: 'KeyF' })).toBe(false);
+      await waitFor(() => expect(calls(kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update').at(-1)?.[1]).toEqual({ recordId: row.closest('article')?.dataset.recordId, action: 'favorite' }));
+      fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
+      expect(document.activeElement).toBe(input);
+      expect(input.value).toBe(query);
+    }
+  });
+
+  it.each(['search', 'list'] as const)('keeps one %s keyboard and mouse target in both record views', async (openingFocus) => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = openingFocus;
+    await mount('clipboard');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const rows = () => [...panel(kind).querySelectorAll<HTMLElement>('.history-row:not([hidden])')];
+      await waitFor(() => expect(rows().length).toBeGreaterThan(1));
+      const [first, second] = rows();
+      const button = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('.history-row-select')!;
+      const targets = () => [...panel(kind).querySelectorAll('[data-record-target]')].map((row) => (row as HTMLElement).dataset.recordId);
+      expect(document.activeElement).toBe(openingFocus === 'list' ? button(first) : search(kind));
+      expect(targets()).toEqual(openingFocus === 'list' ? [first.dataset.recordId] : []);
+      fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
+      expect(targets()).toEqual([second.dataset.recordId]);
+      expect(document.activeElement).toBe(openingFocus === 'list' ? button(second) : search(kind));
+      fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+      await waitFor(() => expect(calls(kind === 'clipboard' ? 'clipboard_record_use' : 'translation_sample_copy').at(-1)?.[1]).toEqual(kind === 'clipboard'
+        ? { recordId: second.dataset.recordId, action: 'copy' }
+        : { sampleId: second.dataset.recordId, part: 'source' }));
+      if (openingFocus === 'search') fireEvent.keyDown(search(kind), { key: 'ArrowDown', code: 'ArrowDown' });
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+      expect(document.activeElement).toBe(button(first));
+      fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
+      expect(targets()).toEqual([first.dataset.recordId]);
+      fireEvent.mouseMove(second, { clientX: 11, clientY: 100 });
+      expect(targets()).toEqual([second.dataset.recordId]);
+    }
+  });
+
+  it('falls back to search when record-list focus is preferred but no records exist', async () => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = 'list';
+    bridge.history.records = [];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_query') {
+        const empty = { records: [], sources: {}, totalRecords: 0, hasMore: false, cursor: null };
+        return { page: empty, alternate: empty };
+      }
+      return original(name, args);
+    });
+    await mount('clipboard');
+    await waitFor(() => expect(document.activeElement).toBe(search('clipboard')));
+    await switchView('translation');
+    await waitFor(() => expect(document.activeElement).toBe(search('translation')));
+    expect(panel('translation').querySelector('.history-row-select')).toBeNull();
+  });
+
+  it('cycles categories per view and switches record views with Tab', async () => {
+    await mount('clipboard');
+    const arrow = (key: string) => fireEvent.keyDown(search(bridge.snapshot.window.recordView === 'translation' ? 'translation' : 'clipboard'), { key });
+    for (const label of ['Favorite clipboard records', 'Text clipboard records', 'Image clipboard records', 'File clipboard records']) {
+      arrow('ArrowRight');
+      expect(screen.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+    }
+    arrow('ArrowRight');
+    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('false');
+    arrow('ArrowLeft');
+    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('true');
+    arrow('Tab');
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
+    arrow('ArrowLeft');
+    expect(screen.getByRole('button', { name: 'Favorite history' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.change(search('translation'), { target: { value: 'query' } });
+    expect(arrow('ArrowRight')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Favorite history' }).getAttribute('aria-pressed')).toBe('true');
+    expect(fireEvent.keyDown(search('translation'), { key: 'Tab', shiftKey: true })).toBe(true);
+    arrow('Tab');
+    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('clipboard'));
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, switchView: { ...shortcuts.switchView, enabled: false } } });
+    expect(arrow('Tab')).toBe(true);
+    expect(bridge.snapshot.window.recordView).toBe('clipboard');
+  });
+
   it('uses the same React record workspace in the macOS child WebView and retains both panes', async () => {
     bridge.snapshot.capabilities.nativeHistory = true;
     bridge.history.records[2].date = clipboardRecords[0].date;
@@ -518,9 +594,9 @@ describe('unified records workspace', () => {
     expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
     expect(document.activeElement).toBe(search('translation'));
     const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
-    expect(icons(translationRow).filter(([symbol]) => symbol !== 'doc.on.doc')).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages' && symbol !== 'note'));
+    expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages'));
     expect(translationRow.querySelector('[data-action=copy]')).toBeTruthy();
-    expect(clipboardRow.querySelector('[data-action=copy]')).toBeNull();
+    expect(clipboardRow.querySelector('[data-action=copy]')).toBeTruthy();
     expect(clipboardRow.querySelector('[data-action=translate] .history-symbol')?.getAttribute('data-symbol')).toBe('languages');
     expect(translationRow.querySelector('[data-action=translate]')).toBeNull();
     expect(translationRow.querySelector('time')?.textContent).toBe(clipboardRow.querySelector('time')?.textContent);
@@ -559,6 +635,49 @@ describe('unified records workspace', () => {
       act(() => vi.advanceTimersByTime(1000));
       expect(scrollbar.classList.contains('visible')).toBe(false);
     } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['clipboard', 'translation'] as const)('routes macOS Copy to the focused %s row only when bound', async (kind) => {
+    const shortcuts = bridge.snapshot.clipboardControls.shortcuts;
+    shortcuts.copyRecord.binding = { code: 'KeyC', modifiers: ['meta'] };
+    await mount('clipboard');
+    if (kind === 'translation') await switchView('translation');
+    const selected = panel(kind).querySelector<HTMLButtonElement>('.history-row-select')!;
+    const input = search(kind);
+    const command = kind === 'clipboard' ? 'clipboard_record_use' : 'translation_sample_copy';
+    input.focus();
+    expect(fireEvent.copy(input)).toBe(true);
+    expect(calls(command)).toHaveLength(0);
+    selected.focus();
+    expect(fireEvent.copy(selected)).toBe(false);
+    await waitFor(() => expect(calls(command)).toHaveLength(1));
+    expect(calls(command)[0][1]).toMatchObject(kind === 'clipboard'
+      ? { recordId: selected.closest('article')?.dataset.recordId, action: 'copy' }
+      : { sampleId: selected.closest('article')?.dataset.recordId, part: 'source' });
+  });
+
+  it('previews the focused translation with the shared shortcut and closes on the next press', async () => {
+    await mount('clipboard');
+    await switchView('translation');
+    const row = panel('translation').querySelectorAll<HTMLButtonElement>('.history-row-select')[1];
+    row.focus();
+    const id = row.closest('article')!.dataset.recordId;
+    const press = (target: Element, key = 'y', code = 'KeyY', metaKey = true, repeat = false) => fireEvent.keyDown(target, { key, code, metaKey, repeat });
+    press(row);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: id, retranslate: false });
+    press(row, 'y', 'KeyY', true, true);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    press(row);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } } });
+    const input = search('translation');
+    input.focus();
+    expect(press(input, ' ', 'Space', false)).toBe(true);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(press(row, ' ', 'Space', false)).toBe(false);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
   });
 
   it('keeps translation keyboard navigation in the record pane until Return and respects IME before hiding', async () => {
@@ -619,7 +738,7 @@ describe('unified records workspace', () => {
     const row = (id: string) => panel('translation').querySelector<HTMLElement>(`[data-record-id="${id}"]`)!;
     const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
     await waitFor(() => expect(row('sample-03')).toBeTruthy());
-    fireEvent.mouseMove(row('sample-04'));
+    fireEvent.mouseMove(row('sample-04'), { clientY: 80 });
     expect(calls('history_sample_select')).toHaveLength(0);
     fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(source().value).toBe('The next train leaves in ten minutes.'));
@@ -627,7 +746,7 @@ describe('unified records workspace', () => {
     expect(row('sample-03').classList.contains('selected')).toBe(true);
     expect(row('sample-01').classList.contains('selected')).toBe(false);
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('下一班列车将在十分钟后出发。');
-    fireEvent.mouseMove(row('sample-04'));
+    fireEvent.mouseMove(row('sample-04'), { clientY: 81 });
     await waitFor(() => expect(source().value).toBe('Please send me the updated design before Friday.'));
     expect(row('sample-04').classList.contains('selected')).toBe(true);
     fireEvent.mouseLeave(row('sample-04'));
@@ -638,7 +757,7 @@ describe('unified records workspace', () => {
     fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Collapse details' }));
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
     const selects = calls('history_sample_select').length;
-    fireEvent.mouseMove(row('sample-04'));
+    fireEvent.mouseMove(row('sample-04'), { clientY: 82 });
     expect(calls('history_sample_select')).toHaveLength(selects);
     fireEvent.click(within(panel('translation')).getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(bridge.history.selectedId).toBe('sample-03'));
@@ -689,7 +808,7 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(translationIcon.dataset.symbol).toBe('chevron.left'));
     expect(panel('translation').querySelector('.records-details')?.getAttribute('aria-expanded')).toBe('true');
     const actions = panel('translation').querySelector<HTMLElement>('.history-row:not(.pinned) .history-row-actions')!;
-    expect([...actions.querySelectorAll('.history-symbol')].map((icon) => (icon as HTMLElement).dataset.symbol)).toEqual(['doc.on.doc', 'star', 'pin', 'trash']);
+    expect([...actions.querySelectorAll('.history-symbol')].map((icon) => (icon as HTMLElement).dataset.symbol)).toEqual(['doc.on.doc', 'note', 'star', 'pin', 'trash']);
   });
 
   it('has one ordered toolbar, mutually exclusive modes and centered footer filter groups', async () => {

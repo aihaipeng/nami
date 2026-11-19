@@ -3,7 +3,6 @@ import type { ViewProps } from '../App';
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { CircleCheck } from 'lucide-react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
-import { DeleteButton } from './DeleteButton';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
 export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false, allowMarkedDelete = false, recordId }: Pick<ViewProps, 't' | 'native'> & {
@@ -43,7 +42,7 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
     ...(!protectedRecord || retainDelete ? [{ id: 'delete', label: deleteLabel, icon: 'trash' as const, disabled: protectedRecord || busy, onClick: () => onUpdate('delete') }] : []),
   ];
   const buttons = actions.map((action) => {
-    const button = <ActionButton confirmDelete={action.id === 'delete'} confirmationKey={`${recordId}:${favorite}:${pinned}:${busy}`} className={`icon-button${action.id === 'delete' ? ' history-delete' : action.id === 'favorite' && favorite ? ' record-favorite' : action.id === 'copy' && copied ? ' record-copied' : ''}`} title={action.label} aria-label={action.label}
+    const button = <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : action.id === 'favorite' && favorite ? ' record-favorite' : action.id === 'copy' && copied ? ' record-copied' : ''}`} title={action.label} aria-label={action.label}
       aria-pressed={'pressed' in action ? action.pressed : undefined} disabled={!native || ('disabled' in action && action.disabled)} onClick={action.onClick}>{action.id === 'copy' && copied ? <CircleCheck className="copy-success" aria-hidden="true" /> : <HistoryIcon name={action.icon} />}</ActionButton>;
     // Keep detail actions mounted while the selected record changes.
     if (retainDelete) return <span key={action.id} className="history-action" data-action={action.id}>{button}</span>;
@@ -58,8 +57,7 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
   </div>;
 }
 
-function ActionButton({ confirmDelete, confirmationKey = '', ...props }: ComponentProps<'button'> & { confirmDelete?: boolean; confirmationKey?: string }) {
+function ActionButton(props: ComponentProps<'button'>) {
   const present = useIsPresent();
-  const buttonProps = { ...props, disabled: props.disabled || !present, 'aria-hidden': !present, inert: !present, tabIndex: present ? undefined : -1, onClick: present ? props.onClick : undefined };
-  return confirmDelete ? <DeleteButton {...buttonProps} context={confirmationKey} /> : <button {...buttonProps} />;
+  return <button {...props} disabled={props.disabled || !present} aria-hidden={!present} inert={!present} tabIndex={present ? undefined : -1} onClick={present ? props.onClick : undefined} />;
 }

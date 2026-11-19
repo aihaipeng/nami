@@ -1,5 +1,4 @@
 import { useRef, type ReactNode } from 'react';
-import { DeleteButton } from './DeleteButton';
 import { FloatingPanel } from './FloatingPanel';
 
 export interface RecordMenuItem { action: string; label: string; icon: ReactNode; disabled?: boolean; destructive?: boolean; active?: boolean }
@@ -22,7 +21,7 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
       }}>
         {items.map((item) => {
           const props = { type: 'button' as const, role: 'menuitem', disabled: item.disabled, onClick: () => onAction(item.action), children: <>{item.icon}<span>{item.label}</span></> };
-          return item.destructive ? <DeleteButton key={item.action} {...props} context={`${x}:${y}`} className="clipboard-menu-delete" /> : <button key={item.action} {...props} className={item.action === 'favorite' && item.active ? 'record-favorite' : undefined} />;
+          return <button key={item.action} {...props} className={item.destructive ? 'clipboard-menu-delete' : item.action === 'favorite' && item.active ? 'record-favorite' : undefined} />;
         })}
       </div>
     </FloatingPanel>

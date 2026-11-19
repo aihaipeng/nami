@@ -71,7 +71,13 @@
 .settings-shortcut-row .settings-badge { grid-column: 2 / -1; justify-self: end; max-width: none; }
 .settings-shortcut-row label[for] { cursor: pointer; }
 .settings-recorder-wrap { position: relative; flex: none; }
-.settings-shell .settings-recorder { padding: 3px 5px; white-space: nowrap; }
+.settings-shell :is(.settings-recorder, .settings-shortcut-row > .keycaps) { padding: 3px 5px; white-space: nowrap; }
+.settings-shortcut-row > .keycaps { border: 1px solid transparent; justify-self: start; }
+.settings-shell .settings-manual-shortcut { position: absolute; inset-inline-start: calc(100% + 4px); top: 50%; translate: 0 -50%; white-space: nowrap; }
+.settings-manual-keys { display: grid; gap: 10px; margin-top: 14px; }
+.settings-manual-keys fieldset { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; margin: 0; padding: 8px; }
+.settings-manual-keys fieldset label { display: flex; align-items: center; gap: 5px; }
+.settings-manual-keys select { width: 100%; }
 .settings-recorder-empty { color: var(--settings-secondary); font-style: italic; }
 .hotkey-group .settings-shortcut-row .settings-recorder-wrap { justify-self: start; max-width: 100%; }
 .settings-shell .hotkey-group .settings-recorder-wrap:has(.settings-clear) .settings-recorder { padding-inline: 5px 26px; }

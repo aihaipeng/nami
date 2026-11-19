@@ -1,3 +1,5 @@
+import type { Translate } from './i18n';
+
 export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch'] as const;
 export const generalShortcutActions = ['selection', ...recordWindowActions] as const;
 export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'actions'] as const;
@@ -37,9 +39,9 @@ export function defaultTranslationShortcuts(primary: 'meta' | 'control'): Transl
 
 export function normalizeBinding(binding: KeyBinding): KeyBinding | null {
   const code = binding.code === 'NumpadEnter' ? 'Enter' : binding.code;
-  if (!supportedCode(code)) return null;
+  if (!/^[A-Z][A-Za-z0-9]+$/.test(code) || code === 'Unidentified') return null;
   const modifiers = normalizeModifiers(binding.modifiers);
-  if (modifiers.length !== binding.modifiers.length || !modifiers.some((modifier) => modifier === 'meta' || modifier === 'control' || modifier === 'alt')) return null;
+  if (modifiers.length !== binding.modifiers.length) return null;
   return { code, modifiers };
 }
 
@@ -52,8 +54,7 @@ export function sameBinding(left: KeyBinding, right: KeyBinding) {
 export function shortcutError(action: ShortcutAction | 'clipboard', binding: KeyBinding | null, current: TranslationShortcuts, clipboard: KeyBinding | null = defaultClipboardBinding) {
   if (!binding) return null;
   const value = normalizeBinding(binding);
-  if (!value) return binding.modifiers.some((modifier) => modifier === 'meta' || modifier === 'control' || modifier === 'alt') ? 'shortcut_key' : 'shortcut_modifier';
-  if (reserved(value)) return 'shortcut_reserved';
+  if (!value) return 'shortcut_key';
   if (clipboard && sameBinding(value, clipboard)) return 'shortcut_clipboard';
   const conflict = shortcutActions.find((other) => other !== action && current[other] && sameBinding(current[other], value));
   return conflict ? `shortcut_conflict:${conflict}` : null;
@@ -62,7 +63,7 @@ export function shortcutError(action: ShortcutAction | 'clipboard', binding: Key
 export function bindingFromEvent(event: { code?: string; key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }): KeyBinding | null {
   let code = event.code && event.code !== 'Unidentified' ? event.code : codeFromKey(event.key);
   if (code === 'NumpadEnter') code = 'Enter';
-  if (!code || ['MetaLeft', 'MetaRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight'].includes(code)) return null;
+  if (!code || modifierKey(code) && (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)) return null;
   const modifiers = modifierOrder.filter((modifier) => ({ control: event.ctrlKey, alt: event.altKey, shift: event.shiftKey, meta: event.metaKey })[modifier]);
   return { code, modifiers };
 }
@@ -72,12 +73,13 @@ export function matchesBinding(binding: KeyBinding | null, event: { code?: strin
   return Boolean(binding && pressed && sameBinding(binding, pressed));
 }
 
-export function keycapLabels(binding: KeyBinding, macos: boolean) {
+export function keycapLabels(binding: KeyBinding, macos: boolean, t: Translate) {
   const symbols = macos
     ? { control: '⌃', alt: '⌥', shift: '⇧', meta: '⌘' }
     : { control: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Ctrl' };
   const names: Record<string, string> = { Enter: '↵', Backspace: macos ? '⌫' : 'Backspace', Space: 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: '\'', Comma: ',', Period: '.', Slash: '/' };
-  const key = names[binding.code] ?? (binding.code.startsWith('Key') ? binding.code.slice(3) : binding.code.startsWith('Digit') ? binding.code.slice(5) : binding.code);
+  const modifier = modifierKey(binding.code);
+  const key = (modifier ? `${t(binding.code.endsWith('Left') ? 'shortcutLeft' : 'shortcutRight')} ${symbols[modifier]}` : names[binding.code]) ?? (binding.code.startsWith('Key') ? binding.code.slice(3) : binding.code.startsWith('Digit') ? binding.code.slice(5) : binding.code);
   return [...normalizeModifiers(binding.modifiers).map((modifier) => symbols[modifier]), key];
 }
 
@@ -85,24 +87,53 @@ function normalizeModifiers(modifiers: readonly string[]): ShortcutModifier[] {
   return modifierOrder.filter((modifier) => modifiers.includes(modifier));
 }
 
-function supportedCode(code: string) {
-  if (/^Key[A-Z]$/.test(code) || /^Digit[0-9]$/.test(code)) return true;
-  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return true;
-  return ['Enter', 'Space', 'Minus', 'Equal', 'BracketLeft', 'BracketRight', 'Backslash', 'Semicolon', 'Quote', 'Comma', 'Period', 'Slash', 'Backquote', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code);
-}
-
-function reserved(binding: KeyBinding) {
-  if (binding.code === 'Tab' || binding.code === 'Escape') return true;
-  const modifiers = binding.modifiers.join('+');
-  const editing = ['KeyA', 'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyQ', 'KeyW', 'Comma'].includes(binding.code);
-  return (editing && (modifiers === 'meta' || modifiers === 'control')) || ((modifiers === 'shift+meta' || modifiers === 'control+shift') && binding.code === 'KeyZ');
-}
-
 function codeFromKey(key: string) {
-  if (key === 'Enter' || key === 'Backspace') return key;
+  if (/^(Enter|Backspace|Delete|Escape|Tab|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right)|F[0-9]+)$/.test(key)) return key;
   if (key === ' ') return 'Space';
   if (key === '`') return 'Backquote';
   if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
   if (/^[0-9]$/.test(key)) return `Digit${key}`;
   return '';
+}
+
+export function editsText(event: KeyboardEvent) {
+  if (!(event.target instanceof HTMLElement) || !event.target.closest('input, textarea, [contenteditable=true]')) return false;
+  if (event.metaKey || event.ctrlKey) {
+    return ['KeyA', 'KeyC', 'KeyV', 'KeyX', 'KeyZ'].includes(event.code) && !(event.metaKey && event.ctrlKey) && !event.altKey
+      && (!event.shiftKey || event.code === 'KeyZ');
+  }
+  return event.key.length === 1 || ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'Dead'].includes(event.key);
+}
+
+export function modifierKey(code: string): ShortcutModifier | undefined {
+  if (!/^(Meta|Control|Alt|Shift)(Left|Right)$/.test(code)) return;
+  return code.replace(/Left|Right/, '').toLowerCase() as ShortcutModifier;
+}
+
+export function listenForModifierTaps() {
+  let pending: { code: string; target: EventTarget | null; started: number } | undefined;
+  const down = (event: KeyboardEvent) => {
+    if (!event.isTrusted) return;
+    const modifier = modifierKey(event.code);
+    const held = Number(event.metaKey) + Number(event.ctrlKey) + Number(event.altKey) + Number(event.shiftKey);
+    pending = modifier && held === 1 && !event.repeat ? { code: event.code, target: event.target, started: event.timeStamp } : undefined;
+  };
+  const up = (event: KeyboardEvent) => {
+    const tap = pending;
+    pending = undefined;
+    if (!event.isTrusted || tap?.code !== event.code || tap.target !== event.target || event.timeStamp - tap.started > 500) return;
+    event.target?.dispatchEvent(new KeyboardEvent('keydown', { code: event.code, key: event.key, bubbles: true, cancelable: true }));
+  };
+  const cancel = () => { pending = undefined; };
+  window.addEventListener('keydown', down, true);
+  window.addEventListener('keyup', up, true);
+  window.addEventListener('blur', cancel);
+  const interruptions = ['pointerdown', 'wheel', 'copy', 'cut', 'paste', 'beforeinput', 'selectionchange'];
+  for (const type of interruptions) window.addEventListener(type, cancel, true);
+  return () => {
+    window.removeEventListener('keydown', down, true);
+    window.removeEventListener('keyup', up, true);
+    window.removeEventListener('blur', cancel);
+    for (const type of interruptions) window.removeEventListener(type, cancel, true);
+  };
 }

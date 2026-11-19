@@ -6,6 +6,8 @@ mod commands;
 mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
+#[cfg(target_os = "macos")]
+mod shortcut_capture;
 use nami::{
     clipboard::RecordingTypes,
     database, history, model,
@@ -354,6 +356,7 @@ fn main() {
             commands::history_query,
             commands::history_load_more,
             commands::history_record_update,
+            commands::history_record_note,
             commands::translation_columns_set,
             commands::translation_sample_copy,
             commands::clipboard_record_use,
@@ -368,6 +371,7 @@ fn main() {
             clipboard_preferences::clipboard_excluded_app_pick,
             clipboard_preferences::clipboard_excluded_app_remove,
             clipboard_preferences::clipboard_behavior_set,
+            clipboard_preferences::records_open_focus_set,
             clipboard_preferences::clipboard_record_shortcut_set,
             clipboard_preferences::clipboard_storage_info,
             clipboard_preferences::clipboard_cleanup_preview,

@@ -1,3 +1,4 @@
+import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { HistoryIcon } from './HistoryIcon';
 import { RecordToolbar } from '../shared/RecordToolbar';
@@ -15,6 +16,8 @@ import { RecordMenu } from '../shared/RecordMenu';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { invoke } from '@tauri-apps/api/core';
+import { ClipboardEditor } from '../clipboard/ClipboardEditor';
+import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable } from '../shared/clipboardShortcuts';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
@@ -26,8 +29,10 @@ interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'>
 
 export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true }: Props) {
   const history = useHistory(native);
+  const [editing, setEditing] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [session, setSession] = useState(0);
+  const [keyboardSelection, setKeyboardSelection] = useState<{ id: string; session: number | undefined } | null>(null);
   const [copyFailed, setCopyFailed] = useState(false);
   const copyOperation = useRef(0);
   const clickedRecord = useRef<string | null>(null);
@@ -83,9 +88,16 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
 
   useEffect(() => { setMenu(null); clickedRecord.current = null; }, [query, favoritesOnly, state.historyVisible, active]);
   useEffect(() => { if (!selection) clickedRecord.current = null; }, [selection, history.selectionRevision]);
-  useEffect(() => { if (!state.historyVisible || !active) setSession((value) => value + 1); }, [state.historyVisible, active]);
-  useEffect(() => { setMenu(null); setSession((value) => value + 1); }, [state.recordsSession]);
-  useEffect(() => { if (active && state.recordsFocus !== undefined) search.current?.focus({ preventScroll: true }); }, [active, state.recordsFocus]);
+  useEffect(() => { if (!state.historyVisible || !active) { setEditing(null); setSession((value) => value + 1); } }, [state.historyVisible, active]);
+  useEffect(() => { setEditing(null); setMenu(null); setSession((value) => value + 1); }, [state.recordsSession]);
+  const focusedId = keyboardSelection?.session === state.recordsSession ? keyboardSelection?.id : undefined;
+  const keyboardId = filtered.find(({ id }) => id === focusedId)?.id ?? (filtered.find(({ id }) => id === selection) ?? filtered.find((record) => !record.isPinned) ?? filtered[0])?.id;
+  const targetOnMouseMove = useRecordPointer();
+  const setTarget = (id: string | null) => setKeyboardSelection((current) =>
+    id === null ? null : current?.id === id && current.session === state.recordsSession ? current : { id, session: state.recordsSession });
+  const focusReady = !native || history.displayReady(query, favoritesOnly);
+  useRecordsOpenFocus(search, active, state.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
+    focusReady, !history.loading, setTarget);
   useEffect(() => {
     if (!active || !selection) return;
     const row = [...(pinnedList.current?.querySelectorAll<HTMLElement>('.history-row') ?? []), ...(list.current?.querySelectorAll<HTMLElement>('.history-row') ?? [])].find((row) => row.dataset.recordId === selection);
@@ -140,36 +152,82 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     whenReady(record.id, () => onSelect(record, false, !explicit));
   }
 
-  async function toggleDetails() {
-    if (state.translationVisible) {
+  async function toggleDetails(record?: HistoryRecord) {
+    if (state.translationVisible && (!record || selection === record.id)) {
       await command('records_details_toggle');
       return;
     }
-    const first = filtered.find((record) => !record.isPinned) ?? filtered[0];
-    if (first) whenReady(first.id, () => onSelect(first));
+    const target = record ?? filtered.find((item) => !item.isPinned) ?? filtered[0];
+    if (target) whenReady(target.id, () => onSelect(target));
     else await command('records_details_toggle');
+  }
+
+  function focusRow(id: string) {
+    const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])]);
+    const button = buttons.find((button) => button.closest<HTMLElement>('article')?.dataset.recordId === id);
+    (button ?? search.current)?.focus({ preventScroll: true });
+  }
+
+  function recordKeyDown(event: KeyboardEvent<HTMLElement>) {
+    onKeyDown(event);
+    const key = event.nativeEvent;
+    if (!active || editing || menu || event.currentTarget.querySelector('.history-shortcuts-panel') || event.defaultPrevented || key.isComposing || key.keyCode === 229 || key.key === 'Dead') return;
+    const target = event.target as HTMLElement;
+    const fromSearch = target === search.current;
+    const row = target.closest<HTMLElement>('article[data-record-id]');
+    if (!row && !fromSearch && !target.closest('.history-toolbar, .history-footer')) return;
+    const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), key);
+    if (action === 'previousCategory' || action === 'nextCategory') {
+      if (target.closest('.history-footer')?.querySelector('[role=dialog]')) return;
+      event.preventDefault();
+      if (!key.repeat) { toggleFavorites(); search.current?.focus({ preventScroll: true }); }
+      return;
+    }
+    if (action === 'navigateUp' || action === 'navigateDown') {
+      if (!fromSearch && !row) return;
+      event.preventDefault();
+      if (fromSearch) {
+        if (action === 'navigateDown') focusRecordList(search.current?.closest('.history-panel'));
+        return;
+      }
+      const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])]);
+      const index = buttons.findIndex((button) => button.closest('article') === row);
+      const next = buttons[index + (action === 'navigateDown' ? 1 : -1)];
+      if (next) {
+        next.focus();
+        const record = records.find(({ id }) => id === next.closest<HTMLElement>('article')?.dataset.recordId);
+        if (record) previewRecord(record, true);
+      } else if (row && action === 'navigateUp') search.current?.focus();
+      return;
+    }
+    if (!action || action === 'focusRecords' || action === 'switchView' || action === 'ocr' || action === 'translate') return;
+    if (fromSearch && key.key === 'Backspace' && query && action !== 'delete') return;
+    const record = row ? filtered.find(({ id }) => id === row.dataset.recordId) : filtered.find(({ id }) => id === keyboardId);
+    if (!record || !clipboardShortcutAvailable(snapshot, native, action)) return;
+    event.preventDefault();
+    if (key.repeat) return;
+    if (action === 'preview') {
+      if (focusReady) void toggleDetails(record);
+      return;
+    }
+    const actionId = action === 'copyRecord' ? 'copy' : action;
+    const article = row ?? [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLElement>('article[data-record-id]') ?? [])]).find((element) => element.dataset.recordId === record.id);
+    const button = article?.querySelector<HTMLButtonElement>(`[data-action=${actionId}] button:not(:disabled)`);
+    button?.click();
   }
 
   function row(record: HistoryRecord) {
     const canDelete = !record.isFavorite && !record.isPinned;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
-    return <article onMouseMove={() => previewRecord(record)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
-      style={{ '--history-actions-width': `${canDelete ? 99 : 74}px` } as CSSProperties}>
-      <button className="history-row-select" onFocus={() => previewRecord(record)} onKeyDown={(event) => {
-        if (event.nativeEvent.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-          event.preventDefault();
-          const buttons = [...(event.currentTarget.closest('.history-panel')?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])];
-          const index = buttons.indexOf(event.currentTarget);
-          const next = event.key === 'ArrowDown' ? buttons[index + 1] : index > 0 ? buttons[index - 1] : undefined;
-          if (next) {
-            next.focus();
-            const record = records.find(({ id }) => id === next.closest<HTMLElement>('.history-row')?.dataset.recordId);
-            if (record) previewRecord(record, true);
-          }
-          else if (event.key === 'ArrowUp') search.current?.focus();
-        }
-      }} aria-label={`Translation: ${record.text}`} aria-pressed={selection === record.id} onClick={(event) => {
+    return <article data-record-target={active && focusReady && (menu?.id ?? focusedId) === record.id || undefined} onFocus={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) { setTarget(record.id); previewRecord(record); }
+    }} onMouseMove={(event) => {
+      if (!active || editing || menu || !focusReady) return;
+      targetOnMouseMove(event, () => { setTarget(record.id); previewRecord(record); });
+    }} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} data-keyboard-current={keyboardId === record.id || undefined} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
+      style={{ '--history-actions-width': `${canDelete ? 124 : 99}px` } as CSSProperties}>
+      <button className="history-row-select" aria-label={`Translation: ${record.text}`} aria-current={keyboardId === record.id || undefined} aria-pressed={selection === record.id} onClick={(event) => {
+        setTarget(record.id);
         if (clickedRecord.current === record.id) {
           clickedRecord.current = null;
           void command('records_details_toggle');
@@ -188,31 +246,27 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         });
       }}>
         <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />
-        <span className="history-preview">{historyPreview(record.text)}</span>
+        <span className="history-preview">{record.title || historyPreview(record.text)}</span>
       </button>
       <RecordActions recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copySource')} deleteLabel={t('deleteHistory')}
-        onCopy={() => copyRecord(record.id)} onUpdate={(action) => whenReady(record.id, () => { void updateRecord(record.id, action); })} />
+        onCopy={() => copyRecord(record.id)} onNote={() => whenReady(record.id, () => setEditing(record.id))} onUpdate={(action) => whenReady(record.id, () => { void updateRecord(record.id, action); })} />
     </article>;
   }
 
-  return <aside id="translation-history" className="history-panel" aria-label={t('history')} onKeyDown={onKeyDown}>
+  return <aside data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
     <ActivityBeam label={t('working')} active={active && history.showLoading} />
     <div className="drag-strip" data-tauri-drag-region />
-    <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} onArrowDown={() => {
-      const button = pinnedList.current?.querySelector<HTMLButtonElement>('.history-row-select') ?? list.current?.querySelector<HTMLButtonElement>('.history-row-select');
-      button?.focus();
-      const record = records.find(({ id }) => id === button?.closest<HTMLElement>('.history-row')?.dataset.recordId);
-      if (record) previewRecord(record, true);
-    }} />
+    <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />
     {history.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => history.refresh(query, favoritesOnly)}>{t('retry')}</button></p>}
     <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinned={filtered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
       {filtered.filter((record) => !record.isPinned).map(row)}
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>
-    <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} t={t} snapshot={snapshot} command={command} native={native} active={active && state.historyVisible && !menu} search={search} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={displayed.totalRecords} />
+    <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} t={t} snapshot={snapshot} command={command} native={native} active={active && state.historyVisible && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={displayed.totalRecords} />
     {menu && menuRecord && <RecordMenu key={menuRecord.id} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
       { action: 'retranslate', label: 'Retranslate', icon: <HistoryIcon name="languages" /> },
       { action: 'copy', label: 'Copy source text', icon: <HistoryIcon name="doc.on.doc" />, disabled: !native || !snapshot.capabilities.clipboardWrite },
+      { action: 'note', label: 'Note', icon: <HistoryIcon name="note" />, disabled: !native },
       { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: menuRecord.isFavorite, disabled: !native },
       { action: 'pin', label: menuRecord.isPinned ? 'Unpin record' : 'Pin record', icon: <HistoryIcon name={menuRecord.isPinned ? 'pin.fill' : 'pin'} />, disabled: !native },
       { action: 'delete', label: 'Delete', icon: <HistoryIcon name="trash" />, destructive: true, disabled: !native || menuRecord.isFavorite || menuRecord.isPinned },
@@ -221,9 +275,11 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       whenReady(menuRecord.id, () => {
         if (action === 'retranslate') onSelect(menuRecord, true);
         else if (action === 'copy') void copyRecord(menuRecord.id);
+        else if (action === 'note') setEditing(menuRecord.id);
         else void updateRecord(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
       });
     }} />}
+    {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} saveTitle={(title) => history.update(editing, 'note', title)} onReturnFocus={() => { requestAnimationFrame(() => focusRow(editing)); }} />}
     <RecordFeedback message={active && copyFailed ? t('copyFailed') : null} />
   </aside>;
 }

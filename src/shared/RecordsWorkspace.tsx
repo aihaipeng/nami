@@ -1,9 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ViewProps } from '../App';
 import { Clipboard } from '../clipboard/Clipboard';
 import { HistoryPanel } from '../translation/HistoryPanel';
 import type { HistoryRecord } from '../translation/history';
+import { focusRecordList } from './recordFocus';
 import { matchesBinding } from './shortcuts';
+import { clipboardKeyAction, clipboardPanelShortcuts } from './clipboardShortcuts';
 
 export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: ViewProps & {
   selectedId?: string | null;
@@ -12,6 +14,40 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
   const { snapshot, command } = props;
   const view = snapshot.window.recordView ?? 'clipboard';
   const visible = snapshot.window.historyVisible;
+  const workspace = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!visible) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead') return;
+      const target = event.target;
+      if (document.querySelector('.clipboard-editor-layer, .clipboard-context-menu, .history-shortcuts-panel')) return;
+      const root = workspace.current;
+      if (!root || (target instanceof HTMLElement && target !== document.body && !root.contains(target))) return;
+      const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), event);
+      if (action === 'focusRecords') {
+        if (!event.repeat && focusRecordList(root.querySelector('.record-view:not([hidden]) .history-panel[data-focus-ready]'))) event.preventDefault();
+        return;
+      }
+      if (target instanceof HTMLElement && target !== document.body && !target.closest('.history-row-select, .history-search input')) return;
+      if (action !== 'switchView') return;
+      event.preventDefault();
+      if (!event.repeat) void command('records_view_set', { view: view === 'clipboard' ? 'translation' : 'clipboard' });
+    };
+    const copy = (event: ClipboardEvent) => {
+      // WebKit can deliver the native Copy command without a keydown.
+      if (snapshot.capabilities.platform !== 'macos' || event.defaultPrevented || !document.getSelection()?.isCollapsed) return;
+      const row = document.activeElement?.closest('.history-row-select');
+      if (!row || !workspace.current?.contains(row) || row.closest('[hidden], [inert]')) return;
+      const key = new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', metaKey: true, bubbles: true, cancelable: true });
+      if (clipboardKeyAction(clipboardPanelShortcuts(snapshot), key) === 'copyRecord' && !row.dispatchEvent(key)) event.preventDefault();
+    };
+    window.addEventListener('keydown', keydown, true);
+    window.addEventListener('copy', copy);
+    return () => {
+      window.removeEventListener('keydown', keydown, true);
+      window.removeEventListener('copy', copy);
+    };
+  }, [visible, snapshot, view, command]);
   useEffect(() => {
     if (!visible || view !== 'translation') return;
     const dismiss = (event: KeyboardEvent) => {
@@ -23,7 +59,7 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
   }, [visible, view, snapshot.capabilities.primaryModifier, command]);
-  return <div className="records-workspace" data-record-view={view}>
+  return <div ref={workspace} className="records-workspace" data-record-view={view}>
     <div className="record-view" hidden={view !== 'clipboard'} inert={!visible || view !== 'clipboard'}>
       <Clipboard {...props} active={visible && view === 'clipboard'} />
     </div>

@@ -3,9 +3,9 @@ import type { ViewProps } from '../App';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import { HistoryWordmark } from './HistoryWordmark';
 
-export function RecordToolbar({ t, snapshot, command, view, query, onQuery, search, onArrowDown, onDetailsToggle }: Pick<ViewProps, 't' | 'snapshot' | 'command'> & {
+export function RecordToolbar({ t, snapshot, command, view, query, onQuery, search, onDetailsToggle }: Pick<ViewProps, 't' | 'snapshot' | 'command'> & {
   view: 'clipboard' | 'translation'; query: string; onQuery: (value: string) => void;
-  search: RefObject<HTMLInputElement | null>; onArrowDown?: () => void; onDetailsToggle?: () => void;
+  search: RefObject<HTMLInputElement | null>; onDetailsToggle?: () => void;
 }) {
   const state = snapshot.window;
   const searchLabel = t(view === 'clipboard' ? 'searchClipboard' : 'searchHistory');
@@ -13,9 +13,7 @@ export function RecordToolbar({ t, snapshot, command, view, query, onQuery, sear
     if ((event.target as HTMLElement).closest('button')) event.preventDefault();
   }}>
     <HistoryWordmark />
-    <label className="history-search"><HistoryIcon name="magnifyingglass" /><input ref={search} type="search" aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
-      if (event.key === 'ArrowDown' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229 && onArrowDown) { event.preventDefault(); onArrowDown(); }
-    }} />
+    <label className="history-search"><HistoryIcon name="magnifyingglass" /><input ref={search} type="search" aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={(event) => onQuery(event.target.value)} />
       <button type="button" hidden={!query} aria-label={t(view === 'clipboard' ? 'clearClipboardSearch' : 'clearHistorySearch')} onClick={() => { onQuery(''); search.current?.focus(); }}><HistoryIcon name="xmark.circle.fill" /></button>
     </label>
     <button type="button" className="icon-button" title="Clipboard" aria-label="Clipboard" aria-pressed={view === 'clipboard'} onClick={() => { if (view !== 'clipboard') void command('records_view_set', { view: 'clipboard' }); }}><HistoryIcon name="list.bullet" /></button>

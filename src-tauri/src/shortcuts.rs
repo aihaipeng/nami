@@ -127,6 +127,26 @@ impl TranslationShortcuts {
             .filter_map(|action| self.get(action))
     }
 
+    pub fn restore_group(
+        &self,
+        general: bool,
+        primary: &str,
+        clipboard: Option<&KeyBinding>,
+    ) -> Result<Self, String> {
+        let defaults = Self::defaults(primary);
+        let actions = TRANSLATION_ACTIONS
+            .into_iter()
+            .filter(|action| is_general_window_action(*action) == general);
+        let mut next = self.clone();
+        for action in actions.clone() {
+            next.set(action, None);
+        }
+        for action in actions {
+            next = assign_shortcut(&next, action, defaults.get(action).cloned(), clipboard)?;
+        }
+        Ok(next)
+    }
+
     pub fn get(&self, action: ShortcutAction) -> Option<&KeyBinding> {
         match action {
             ShortcutAction::Selection => self.selection.as_ref(),
@@ -165,6 +185,13 @@ pub enum ClipboardRecordAction {
     Favorite,
     Pin,
     Delete,
+    CopyRecord,
+    SwitchView,
+    FocusRecords,
+    NavigateUp,
+    NavigateDown,
+    PreviousCategory,
+    NextCategory,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -174,7 +201,7 @@ pub struct RecordShortcut {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ClipboardRecordShortcuts {
     preview: RecordShortcut,
     note: RecordShortcut,
@@ -183,6 +210,13 @@ pub struct ClipboardRecordShortcuts {
     favorite: RecordShortcut,
     pin: RecordShortcut,
     delete: RecordShortcut,
+    copy_record: RecordShortcut,
+    switch_view: RecordShortcut,
+    focus_records: RecordShortcut,
+    navigate_up: RecordShortcut,
+    navigate_down: RecordShortcut,
+    previous_category: RecordShortcut,
+    next_category: RecordShortcut,
 }
 
 impl Default for ClipboardRecordShortcuts {
@@ -209,12 +243,19 @@ impl Default for ClipboardRecordShortcuts {
             favorite: enabled("KeyF", &["alt"]),
             pin: enabled("KeyP", &["alt"]),
             delete: enabled("Backspace", &[primary]),
+            copy_record: enabled("KeyC", &shifted),
+            switch_view: enabled("Tab", &[]),
+            focus_records: enabled("ArrowDown", &[primary]),
+            navigate_up: enabled("ArrowUp", &[]),
+            navigate_down: enabled("ArrowDown", &[]),
+            previous_category: enabled("ArrowLeft", &[]),
+            next_category: enabled("ArrowRight", &[]),
         }
     }
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 7] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 14] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -224,7 +265,48 @@ impl ClipboardRecordShortcuts {
             (Favorite, &self.favorite),
             (Pin, &self.pin),
             (Delete, &self.delete),
+            (CopyRecord, &self.copy_record),
+            (SwitchView, &self.switch_view),
+            (FocusRecords, &self.focus_records),
+            (NavigateUp, &self.navigate_up),
+            (NavigateDown, &self.navigate_down),
+            (PreviousCategory, &self.previous_category),
+            (NextCategory, &self.next_category),
         ]
+    }
+
+    pub fn restore_clipboard(&self) -> Result<Self, String> {
+        let defaults = Self::default();
+        let restored = Self {
+            ocr: defaults.ocr,
+            translate: defaults.translate,
+            ..self.clone()
+        };
+        restored.validate_unique()?;
+        Ok(restored)
+    }
+
+    pub fn restore_general(&self) -> Result<Self, String> {
+        let restored = Self {
+            ocr: self.ocr.clone(),
+            translate: self.translate.clone(),
+            ..Self::default()
+        };
+        restored.validate_unique()?;
+        Ok(restored)
+    }
+
+    fn validate_unique(&self) -> Result<(), String> {
+        for (action, shortcut) in self.entries() {
+            if shortcut
+                .binding
+                .as_ref()
+                .is_some_and(|binding| self.conflicts(binding, Some(action)))
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn conflicts(&self, binding: &KeyBinding, except: Option<ClipboardRecordAction>) -> bool {
@@ -247,7 +329,7 @@ impl ClipboardRecordShortcuts {
         if binding.is_some() && enabled.is_some() {
             return Err("invalid_argument".into());
         }
-        let next = binding.map(checked_record_binding).transpose()?;
+        let next = binding.map(normalize_binding).transpose()?;
         let current = || {
             self.entries().into_iter().find_map(|(entry, value)| {
                 (entry == action)
@@ -276,6 +358,13 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::Favorite => &mut self.favorite,
             ClipboardRecordAction::Pin => &mut self.pin,
             ClipboardRecordAction::Delete => &mut self.delete,
+            ClipboardRecordAction::CopyRecord => &mut self.copy_record,
+            ClipboardRecordAction::SwitchView => &mut self.switch_view,
+            ClipboardRecordAction::FocusRecords => &mut self.focus_records,
+            ClipboardRecordAction::NavigateUp => &mut self.navigate_up,
+            ClipboardRecordAction::NavigateDown => &mut self.navigate_down,
+            ClipboardRecordAction::PreviousCategory => &mut self.previous_category,
+            ClipboardRecordAction::NextCategory => &mut self.next_category,
         };
         if let Some(enabled) = enabled {
             current.enabled = enabled;
@@ -316,54 +405,35 @@ impl ClipboardRecordShortcuts {
                         slot.binding = None;
                     }
                 }
-                Some(shortcuts)
-            })
-            .map(|mut shortcuts| {
-                let legacy_preview = shortcuts
-                    .preview
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.modifiers.is_empty());
-                for shortcut in [
-                    &mut shortcuts.preview,
-                    &mut shortcuts.note,
-                    &mut shortcuts.ocr,
-                    &mut shortcuts.translate,
-                    &mut shortcuts.favorite,
-                    &mut shortcuts.pin,
-                    &mut shortcuts.delete,
+                for (key, action) in [
+                    ("copyRecord", ClipboardRecordAction::CopyRecord),
+                    ("switchView", ClipboardRecordAction::SwitchView),
+                    ("focusRecords", ClipboardRecordAction::FocusRecords),
+                    ("navigateUp", ClipboardRecordAction::NavigateUp),
+                    ("navigateDown", ClipboardRecordAction::NavigateDown),
+                    ("previousCategory", ClipboardRecordAction::PreviousCategory),
+                    ("nextCategory", ClipboardRecordAction::NextCategory),
                 ] {
-                    if shortcut
-                        .binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.modifiers.is_empty())
-                    {
-                        shortcut.binding = None;
+                    if value.get(key).is_none() {
+                        let binding = shortcuts
+                            .entries()
+                            .into_iter()
+                            .find(|(candidate, _)| *candidate == action)
+                            .and_then(|(_, slot)| slot.binding.clone());
+                        if binding
+                            .as_ref()
+                            .is_some_and(|binding| shortcuts.conflicts(binding, Some(action)))
+                        {
+                            let _ = shortcuts.set(action, None, None, &[]);
+                        }
                     }
                 }
-                if shortcuts.delete.binding.as_ref().is_some_and(|binding| {
-                    same_binding(binding, &KeyBinding::new("Backspace", &["alt"]))
-                }) {
-                    shortcuts.delete.binding = Self::default()
-                        .delete
-                        .binding
-                        .filter(|binding| {
-                            !shortcuts.conflicts(binding, Some(ClipboardRecordAction::Delete))
-                        })
-                        .or(shortcuts.delete.binding);
-                }
-                if legacy_preview {
-                    shortcuts.preview.binding = Self::default()
-                        .preview
-                        .binding
-                        .filter(|binding| !shortcuts.conflicts(binding, None));
-                }
-                shortcuts
+                Some(shortcuts)
             })
             .filter(|shortcuts| {
                 shortcuts.entries().into_iter().all(|(action, current)| {
                     current.binding.as_ref().is_none_or(|binding| {
-                        checked_record_binding(binding.clone()).is_ok()
+                        normalize_binding(binding.clone()).is_ok()
                             && !shortcuts.conflicts(binding, Some(action))
                     })
                 })
@@ -372,29 +442,17 @@ impl ClipboardRecordShortcuts {
     }
 }
 
-fn checked_record_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
-    let binding = normalize_key(binding, true)?;
-    if reserved(&binding) {
-        return Err("shortcut_reserved".into());
-    }
-    Ok(binding)
-}
-
 pub fn clipboard_binding() -> KeyBinding {
     KeyBinding::new(CLIPBOARD_SHORTCUT_CODE, &["control"])
 }
 
 pub fn normalize_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
-    normalize_key(binding, false)
-}
-
-fn normalize_key(binding: KeyBinding, panel: bool) -> Result<KeyBinding, String> {
     let code = if binding.code == "NumpadEnter" {
         "Enter".to_string()
     } else {
         binding.code
     };
-    if !(supported_code(&code) || panel && code == "Backspace") {
+    if !supported_code(&code) {
         return Err("shortcut_key".into());
     }
     let mut modifiers = Vec::new();
@@ -403,10 +461,7 @@ fn normalize_key(binding: KeyBinding, panel: bool) -> Result<KeyBinding, String>
             modifiers.push(name.to_string());
         }
     }
-    let modified = modifiers
-        .iter()
-        .any(|modifier| matches!(modifier.as_str(), "meta" | "control" | "alt"));
-    if modifiers.len() != binding.modifiers.len() || !modified {
+    if modifiers.len() != binding.modifiers.len() {
         return Err("shortcut_modifier".into());
     }
     Ok(KeyBinding { code, modifiers })
@@ -430,12 +485,11 @@ pub const GENERAL_SHORTCUT_ACTIONS: [ShortcutAction; 4] = [
     ShortcutAction::FocusSearch,
 ];
 
-fn checked_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
-    let binding = normalize_binding(binding)?;
-    if reserved(&binding) {
-        return Err("shortcut_reserved".into());
-    }
-    Ok(binding)
+pub fn is_general_window_action(action: ShortcutAction) -> bool {
+    matches!(
+        action,
+        ShortcutAction::Pin | ShortcutAction::ShowShortcuts | ShortcutAction::FocusSearch
+    )
 }
 
 fn translation_conflict(
@@ -459,7 +513,7 @@ pub fn validate_clipboard_binding(
     binding: KeyBinding,
     shortcuts: &TranslationShortcuts,
 ) -> Result<KeyBinding, String> {
-    let binding = checked_binding(binding)?;
+    let binding = normalize_binding(binding)?;
     translation_conflict(shortcuts, None, &binding)?;
     Ok(binding)
 }
@@ -470,7 +524,7 @@ pub fn assign_shortcut(
     binding: Option<KeyBinding>,
     clipboard: Option<&KeyBinding>,
 ) -> Result<TranslationShortcuts, String> {
-    let binding = binding.map(checked_binding).transpose()?;
+    let binding = binding.map(normalize_binding).transpose()?;
     if let Some(binding) = &binding {
         if clipboard.is_some_and(|clipboard| same_binding(binding, clipboard)) {
             return Err("shortcut_clipboard".into());
@@ -483,62 +537,19 @@ pub fn assign_shortcut(
 }
 
 pub fn same_binding(left: &KeyBinding, right: &KeyBinding) -> bool {
-    let Ok(left) = normalize_key(left.clone(), true) else {
+    let Ok(left) = normalize_binding(left.clone()) else {
         return false;
     };
-    let Ok(right) = normalize_key(right.clone(), true) else {
+    let Ok(right) = normalize_binding(right.clone()) else {
         return false;
     };
     left.code == right.code && left.modifiers == right.modifiers
 }
 
 fn supported_code(code: &str) -> bool {
-    if let Some(letter) = code.strip_prefix("Key") {
-        return letter.len() == 1 && letter.bytes().all(|byte| byte.is_ascii_uppercase());
-    }
-    if let Some(digit) = code.strip_prefix("Digit") {
-        return digit.len() == 1 && digit.bytes().all(|byte| byte.is_ascii_digit());
-    }
-    if let Some(function) = code.strip_prefix('F') {
-        return function
-            .parse::<u8>()
-            .is_ok_and(|number| (1..=24).contains(&number) && !function.starts_with('0'));
-    }
-    matches!(
-        code,
-        "Enter"
-            | "Space"
-            | "Minus"
-            | "Equal"
-            | "BracketLeft"
-            | "BracketRight"
-            | "Backslash"
-            | "Semicolon"
-            | "Quote"
-            | "Comma"
-            | "Period"
-            | "Slash"
-            | "Backquote"
-            | "ArrowUp"
-            | "ArrowDown"
-            | "ArrowLeft"
-            | "ArrowRight"
-    )
-}
-
-fn reserved(binding: &KeyBinding) -> bool {
-    if matches!(binding.code.as_str(), "Tab" | "Escape") {
-        return true;
-    }
-    let modifiers = binding.modifiers.join("+");
-    let editing = matches!(
-        binding.code.as_str(),
-        "KeyA" | "KeyZ" | "KeyX" | "KeyC" | "KeyV" | "KeyQ" | "KeyW" | "Comma"
-    );
-    if editing && matches!(modifiers.as_str(), "meta" | "control") {
-        return true;
-    }
-    matches!(modifiers.as_str(), "shift+meta" | "control+shift") && binding.code == "KeyZ"
+    use tauri_plugin_global_shortcut::Code;
+    code.parse::<Code>()
+        .is_ok_and(|key| key != Code::Unidentified && key.to_string() == code)
 }
 
 #[cfg(test)]
@@ -587,7 +598,7 @@ mod tests {
             )
         }) {
             let binding = shortcut.binding.clone().unwrap();
-            assert_eq!(checked_record_binding(binding.clone()), Ok(binding));
+            assert_eq!(normalize_binding(binding.clone()), Ok(binding));
             assert!(shortcut.enabled);
         }
     }
@@ -615,6 +626,32 @@ mod tests {
     }
 
     #[test]
+    fn shared_shortcuts_preserve_existing_bindings_and_reject_duplicate_tab() {
+        use ClipboardRecordAction::*;
+        let tab = KeyBinding::new("Tab", &[]);
+        let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
+        old.as_object_mut().unwrap().remove("copyRecord");
+        old.as_object_mut().unwrap().remove("switchView");
+        old["note"] =
+            serde_json::to_value(ClipboardRecordShortcuts::default().copy_record).unwrap();
+        let mut restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
+        assert!(restored.copy_record.binding.is_none());
+        assert_eq!(restored.switch_view.binding, Some(tab.clone()));
+        assert_eq!(serde_json::to_value(&restored.note).unwrap(), old["note"]);
+        assert!(restored
+            .set(CopyRecord, Some(tab.clone()), None, &[])
+            .is_err());
+        restored.set(SwitchView, Some(tab), None, &[]).unwrap();
+        restored.set(SwitchView, None, Some(false), &[]).unwrap();
+        let reset = restored.restore_clipboard().unwrap();
+        assert!(!reset.switch_view.enabled);
+        let saved = serde_json::to_value(&reset).unwrap();
+        assert_eq!(saved["switchView"]["enabled"], false);
+        assert!(saved["copyRecord"]["binding"].is_null());
+        assert_eq!(reset.note.binding, restored.note.binding);
+    }
+
+    #[test]
     fn adds_note_ocr_and_translate_without_overwriting_a_custom_key() {
         let mut stored = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
         let object = stored.as_object_mut().unwrap();
@@ -633,71 +670,52 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_shortcuts_reject_plain_keys_and_accept_modified_delete() {
+    fn plain_and_shift_only_shortcuts_survive_reload_and_navigation_reset_is_scoped() {
+        use ClipboardRecordAction::*;
         let mut shortcuts = ClipboardRecordShortcuts::default();
-        for code in ["Space", "F6", "Enter", "ArrowDown", "KeyA", "Backspace"] {
-            assert_eq!(
-                shortcuts.set(
-                    ClipboardRecordAction::Preview,
-                    Some(KeyBinding::new(code, &[])),
-                    None,
-                    &[]
-                ),
-                Err("shortcut_modifier".into())
-            );
+        for (action, code, modifiers) in [
+            (NavigateUp, "KeyK", &[][..]),
+            (NavigateDown, "Space", &[][..]),
+            (PreviousCategory, "F6", &["shift"][..]),
+            (NextCategory, "ShiftRight", &[][..]),
+            (Preview, "Enter", &[][..]),
+            (Delete, "Backspace", &["alt"][..]),
+        ] {
+            shortcuts
+                .set(action, Some(KeyBinding::new(code, modifiers)), None, &[])
+                .unwrap();
         }
-        let delete = KeyBinding::new("Backspace", &["alt"]);
-        assert!(normalize_binding(delete.clone()).is_err());
-        let copy = KeyBinding::new("KeyC", &["meta"]);
+        shortcuts.set(NavigateUp, None, Some(false), &[]).unwrap();
+        let saved = serde_json::to_value(&shortcuts).unwrap();
+        let restored = ClipboardRecordShortcuts::from_store(Some(saved.to_string()));
+        assert_eq!(serde_json::to_value(&restored).unwrap(), saved);
+        let reset = restored.restore_general().unwrap();
         assert_eq!(
-            shortcuts.set(ClipboardRecordAction::Delete, Some(copy), None, &[]),
-            Err("shortcut_reserved".into())
+            reset.navigate_up.binding,
+            Some(KeyBinding::new("ArrowUp", &[]))
         );
-        shortcuts
-            .set(ClipboardRecordAction::Delete, Some(delete), None, &[])
-            .unwrap();
+        assert!(reset.navigate_up.enabled);
+        assert_eq!(
+            reset.preview.binding,
+            ClipboardRecordShortcuts::default().preview.binding
+        );
+        assert_eq!(
+            restored.restore_clipboard().unwrap().preview.binding,
+            Some(KeyBinding::new("Enter", &[]))
+        );
     }
 
     #[test]
-    fn upgrades_legacy_plain_keys_without_resetting_other_custom_preferences() {
-        let mut legacy = ClipboardRecordShortcuts::default();
-        let preview = legacy.preview.binding.clone();
-        legacy.preview = RecordShortcut {
-            binding: Some(KeyBinding::new("Space", &[])),
-            enabled: false,
-        };
-        legacy.favorite.binding = Some(KeyBinding::new("KeyG", &["alt"]));
-        legacy.delete.binding = Some(KeyBinding::new("F6", &[]));
-        let reload = |legacy: &ClipboardRecordShortcuts| {
-            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(legacy).unwrap()))
-        };
-        let restored = reload(&legacy);
-        assert_eq!(restored.preview.binding, preview);
-        assert!(!restored.preview.enabled);
-        assert_eq!(restored.favorite.binding, legacy.favorite.binding);
-        assert!(restored.delete.binding.is_none());
-        legacy.favorite.binding = preview.clone();
-        let restored = reload(&legacy);
-        assert!(restored.preview.binding.is_none());
-        assert_eq!(restored.favorite.binding, preview);
-    }
-
-    #[test]
-    fn updates_legacy_option_delete_without_changing_its_enabled_state() {
-        let mut legacy = ClipboardRecordShortcuts::default();
-        let default_delete = legacy.delete.binding.clone();
-        legacy.delete = RecordShortcut {
-            binding: Some(KeyBinding::new("Backspace", &["alt"])),
-            enabled: false,
-        };
-        let restored =
-            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&legacy).unwrap()));
-        assert_eq!(restored.delete.binding, default_delete);
-        assert!(!restored.delete.enabled);
-        legacy.delete.binding = Some(KeyBinding::new("KeyJ", &["alt"]));
-        let restored =
-            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&legacy).unwrap()));
-        assert_eq!(restored.delete.binding, legacy.delete.binding);
+    fn new_navigation_defaults_do_not_override_existing_bindings() {
+        let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
+        old.as_object_mut().unwrap().remove("navigateUp");
+        old["preview"]["binding"] = serde_json::to_value(KeyBinding::new("ArrowUp", &[])).unwrap();
+        let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
+        assert!(restored.navigate_up.binding.is_none());
+        assert_eq!(
+            restored.preview.binding,
+            Some(KeyBinding::new("ArrowUp", &[]))
+        );
     }
 
     #[test]
@@ -798,38 +816,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_clipboard_and_duplicate_shortcuts() {
+    fn rejects_duplicate_shortcuts_but_allows_local_editing_combinations() {
         let shortcuts = TranslationShortcuts::defaults("meta");
-        assert_eq!(
-            assign_shortcut(
+        for (code, modifiers) in [
+            ("KeyW", &["meta"][..]),
+            ("KeyZ", &["control", "shift"][..]),
+            ("KeyZ", &["meta", "shift"][..]),
+        ] {
+            let binding = KeyBinding::new(code, modifiers);
+            assert!(assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyW", &["meta"])),
+                Some(binding),
                 Some(&clipboard_binding())
             )
-            .unwrap_err(),
-            "shortcut_reserved"
-        );
-        assert_eq!(
-            assign_shortcut(
-                &shortcuts,
-                ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyZ", &["control", "shift"])),
-                Some(&clipboard_binding())
-            )
-            .unwrap_err(),
-            "shortcut_reserved"
-        );
-        assert_eq!(
-            assign_shortcut(
-                &shortcuts,
-                ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyZ", &["meta", "shift"])),
-                Some(&clipboard_binding())
-            )
-            .unwrap_err(),
-            "shortcut_reserved"
-        );
+            .is_ok());
+        }
         assert_eq!(
             assign_shortcut(
                 &shortcuts,
@@ -850,15 +852,17 @@ mod tests {
             .unwrap_err(),
             "shortcut_conflict:translate"
         );
+        let shift_only = KeyBinding::new("KeyP", &["shift"]);
         assert_eq!(
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyP", &["shift"])),
+                Some(shift_only.clone()),
                 Some(&clipboard_binding())
             )
-            .unwrap_err(),
-            "shortcut_modifier"
+            .unwrap()
+            .translate,
+            Some(shift_only)
         );
         let cleared = assign_shortcut(
             &shortcuts,

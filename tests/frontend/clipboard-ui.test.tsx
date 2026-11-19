@@ -82,9 +82,20 @@ describe('clipboard type filters', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(button.querySelector('.copy-success')).toBeNull();
     await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
-    expect(within(row('first')).queryByRole('button', { name: 'Copy' })).toBeNull();
+    expect(within(row('first')).getByRole('button', { name: 'Copy' }).querySelector('.copy-success')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activate' });
+    expect(bridge.snapshot.window.historyVisible).toBe(true);
+  });
+
+  it('copies directly with a checkmark and keeps the records window open', async () => {
+    await mount('clipboard'); await waitFor(() => expect(row('first')).toBeTruthy());
+    const button = within(row('first')).getByRole('button', { name: 'Copy' });
+    fireEvent.click(button);
+    await waitFor(() => expect(button.querySelector('.copy-success')).toBeTruthy());
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
+    expect(calls('window_hide')).toHaveLength(0);
+    expect(screen.queryByRole('progressbar')).toBeNull();
     expect(bridge.snapshot.window.historyVisible).toBe(true);
   });
 
@@ -262,10 +273,10 @@ describe('clipboard text processing', () => {
     await mount('clipboard');
     await waitFor(() => expect(within(row('text-image')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
-    expect(actions('first')).toEqual(['Translate', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('text-image')).toEqual(['Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('ordinary')).toEqual(['Translate', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('ordinary-image')).toEqual(['Translate', 'Extract text', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('first')).toEqual(['Copy', 'Translate', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary')).toEqual(['Copy', 'Translate', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
     for (const id of ['blank', 'empty-image', 'pinned']) {
       expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
       expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
@@ -368,7 +379,7 @@ describe('clipboard text processing', () => {
     fireEvent.mouseMove(row('pinned'));
     fireEvent.keyDown(search, { key: 'N', code: 'KeyN', metaKey: true, shiftKey: true });
     const editor = await screen.findByRole('dialog', { name: 'Note' });
-    expect(calls('clipboard_record_detail').at(-1)?.[1]).toEqual({ recordId: 'first' });
+    expect(calls('clipboard_record_detail').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
     fireEvent.keyDown(within(editor).getByRole('textbox', { name: 'Title' }), { key: 'T', code: 'KeyT', metaKey: true, shiftKey: true });
     expect(calls('clipboard_record_process')).toHaveLength(0);
   });
@@ -492,10 +503,14 @@ describe('clipboard text processing', () => {
     await waitFor(() => expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ query: 'image', kind: 'image' }));
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('picture'));
+    act(() => row('picture').querySelector<HTMLButtonElement>('.history-row-select')!.focus());
     records.unshift({ id: 'ocr-text', kind: 'text', text: 'Recognized sentence', date: '2026-11-14T13:00:00Z', isFavorite: false, isPinned: false });
     await windowState({ recordsBrowsing: false, clipboardDetailId: 'ocr-text' });
     await emit('clipboard_text_created', 'ocr-text');
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('ocr-text'));
+    expect(document.activeElement).toBe(row('ocr-text').querySelector('.history-row-select'));
+    fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'ocr-text', action: 'copy' });
     expect(row('ocr-text').classList.contains('selected')).toBe(true);
     expect(row('picture').classList.contains('selected')).toBe(false);
     expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
@@ -563,7 +578,7 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
-  it('opens capability-matched record actions without pasting, with icons and two-click delete for marked records', async () => {
+  it('opens capability-matched record actions without pasting, with icons and direct delete for marked records', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     fireEvent.contextMenu(row('first'), { clientX: 190, clientY: 200 });
     const menu = screen.getByRole('menu');
@@ -580,8 +595,6 @@ describe('database clipboard history', () => {
     expect(screen.queryByRole('menu')).toBeNull();
     fireEvent.contextMenu(row('pinned'));
     const remove = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Delete' });
-    fireEvent.click(remove);
-    expect(calls('clipboard_record_update').filter(([, args]) => args.action === 'delete')).toHaveLength(0);
     fireEvent.click(remove);
     await waitFor(() => expect(row('pinned')).toBeNull());
     expect(screen.queryByRole('menu')).toBeNull();
@@ -616,8 +629,15 @@ describe('database clipboard history', () => {
     expect(within(dialog).getByText('Content').classList.contains('clipboard-editor-label')).toBe(true);
     expect(document.activeElement).toBe(title);
     await user.type(title, 'A title');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' }).textContent).toBe('CancelEsc');
+    expect(within(dialog).getByRole('button', { name: 'Save' }).textContent).toBe('Save↵');
     fireEvent.change(content, { target: { value: 'Edited original text' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(fireEvent.keyDown(content, { key: 'Enter', shiftKey: true })).toBe(true);
+    fireEvent.keyDown(content, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(content, { key: 'Escape', isComposing: true });
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    expect(dialog.parentElement?.classList.contains('closing')).toBe(false);
+    fireEvent.keyDown(content, { key: 'Enter' });
     await waitFor(() => expect(dialog.parentElement?.classList.contains('closing')).toBe(true));
     expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'edit', title: 'A title', text: 'Edited original text' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -628,10 +648,13 @@ describe('database clipboard history', () => {
     fireEvent.contextMenu(row('first'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Note' }));
     await waitFor(() => expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('A title'));
-    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Title' }), { key: 'Escape' });
+    const reopenedTitle = screen.getByRole('textbox', { name: 'Title' });
+    fireEvent.change(reopenedTitle, { target: { value: 'Discard this draft' } });
+    fireEvent.keyDown(reopenedTitle, { key: 'Escape' });
     expect(screen.getByRole('dialog')).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(calls('window_hide')).toHaveLength(0);
+    expect(calls('clipboard_record_update')).toHaveLength(1);
   });
 
   it.each(['image', 'files'] as const)('keeps the Content label and shows disabled non-editable text for %s, saving only title', async (kind) => {
@@ -1119,11 +1142,11 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true });
     fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', altKey: true });
     fireEvent.keyDown(search, { key: 'ƒ', code: 'KeyF', altKey: true });
-    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'favorite' }));
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'favorite' }));
     fireEvent.keyDown(search, { key: 'π', code: 'KeyP', altKey: true });
-    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'pin' }));
-    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
-    expect(calls('clipboard_record_use').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'activate' }]);
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pin' }));
+    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
+    expect(calls('clipboard_record_use').map(([, args]) => args)).toEqual([{ recordId: 'pinned', action: 'activate' }]);
     expect(document.activeElement).toBe(search);
   });
 
@@ -1152,7 +1175,7 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'activate' });
   });
 
-  it('leaves native text copy alone and no longer uses records through the old shortcuts', async () => {
+  it('leaves native text copy alone and uses the shared record copy shortcut', async () => {
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     const search = screen.getByRole('searchbox');
@@ -1160,7 +1183,8 @@ describe('database clipboard history', () => {
     expect(fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true })).toBe(true);
     expect(fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', altKey: true })).toBe(true);
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    expect(within(row('first')).queryByRole('button', { name: 'Copy' })).toBeNull();
+    fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
     fireEvent.contextMenu(row('first'));
     expect(within(screen.getByRole('menu')).queryByRole('menuitem', { name: 'Copy' })).toBeNull();
   });
@@ -1174,16 +1198,12 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('first').hasAttribute('data-keyboard-current')).toBe(true));
     expect(fireEvent.keyDown(search, { key: 'Backspace', code: 'Backspace', altKey: true })).toBe(true);
     remove(search);
-    const armed = row('first').querySelector('button.delete-armed')!;
-    expect(armed).toBeTruthy();
-    expect(calls('clipboard_record_update')).toHaveLength(0);
-    remove(armed);
     await waitFor(() => expect(row('first')).toBeNull());
     expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'delete' });
     expect((search as HTMLInputElement).value).toBe('Saved');
   });
 
-  it.each(['Backspace', 'Enter'])('arms deletion with a custom binding for %s from search, locks the target and returns to search', async (code) => {
+  it.each(['Backspace', 'Enter'])('deletes with a custom %s binding, ignores repeat and keeps search focus', async (code) => {
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     const search = screen.getByRole('searchbox');
@@ -1192,15 +1212,13 @@ describe('database clipboard history', () => {
       await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, delete: { ...shortcuts.delete, binding: { code, modifiers: ['alt'] } } } });
     }
     const remove = (target: Element, repeat = false) => fireEvent.keyDown(target, { key: code, code, altKey: true, repeat });
-    remove(search);
-    const armed = row('first').querySelector('button.delete-armed')!;
-    expect(document.activeElement).toBe(armed);
+    act(() => search.focus());
     fireEvent.mouseMove(row('pinned'));
-    remove(armed, true);
+    remove(search, true);
     expect(calls('clipboard_record_update')).toHaveLength(0);
-    remove(armed);
-    await waitFor(() => expect(row('first')).toBeNull());
-    expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'delete' });
+    remove(search);
+    await waitFor(() => expect(row('pinned')).toBeNull());
+    expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'delete' });
     expect(document.activeElement).toBe(search);
   });
 
@@ -1238,17 +1256,14 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(target, { key: 'Backspace', code: 'Backspace', altKey: true });
     expect(calls('records_details_toggle')).toHaveLength(0);
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    expect(row('first').querySelector('.delete-armed')).toBeNull();
+    expect(calls('clipboard_record_update')).toHaveLength(0);
     press(target, 'KeyJ');
     expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
     expect(calls('clipboard_record_update')).toHaveLength(0);
     act(() => target.focus());
-    press(target, 'KeyM');
-    const armed = row('first').querySelector('.delete-armed')!;
-    expect(armed).toBeTruthy();
-    press(armed, 'KeyM', true);
+    press(target, 'KeyM', true);
     expect(calls('clipboard_record_update')).toHaveLength(0);
-    press(armed, 'KeyM');
+    press(target, 'KeyM');
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'delete' }));
   });
 
@@ -1272,27 +1287,16 @@ describe('database clipboard history', () => {
     expect(help.textContent).not.toContain('Favorite');
   });
 
-  it('deletes only after a second deliberate keystroke and moves focus to the next record', async () => {
+  it('deletes on the first deliberate keystroke and moves focus to the next record', async () => {
     await mount('clipboard');
     await waitFor(() => expect(row('first')).toBeTruthy());
     const remove = (target: Element, repeat = false) => fireEvent.keyDown(target, { key: 'Backspace', code: 'Backspace', metaKey: true, repeat });
     const protectedRow = row('pinned').querySelector<HTMLButtonElement>('.history-row-select')!;
     const target = row('first').querySelector<HTMLButtonElement>('.history-row-select')!;
     act(() => target.focus());
-    remove(target);
-    const button = row('first').querySelector('button.delete-armed')!;
-    expect(document.activeElement).toBe(button);
-    remove(button, true);
+    remove(target, true);
     expect(calls('clipboard_record_update')).toHaveLength(0);
-    fireEvent.keyDown(button, { key: 'Escape' });
-    expect(document.activeElement).toBe(target);
-    expect(calls('window_hide')).toHaveLength(0);
     remove(target);
-    fireEvent.keyDown(row('first').querySelector('button.delete-armed')!, { key: 'Enter' });
-    expect(calls('clipboard_record_update')).toHaveLength(0);
-    expect(document.activeElement).toBe(target);
-    remove(target);
-    remove(row('first').querySelector('button.delete-armed')!);
     await waitFor(() => expect(row('first')).toBeNull());
     expect(calls('clipboard_record_update').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'delete' }]);
     expect(document.activeElement).toBe(protectedRow);
@@ -1653,7 +1657,6 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('first').parentElement?.className).toContain('history-pinned'));
     await user.click(within(row('first')).getByRole('button', { name: 'Unpin record' }));
     await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Delete clipboard record' })).toBeTruthy());
-    await user.click(within(row('first')).getByRole('button', { name: 'Delete clipboard record' }));
     await user.click(within(row('first')).getByRole('button', { name: 'Delete clipboard record' }));
     await waitFor(() => expect(row('first')).toBeNull());
   });
@@ -2034,7 +2037,7 @@ describe('database clipboard history', () => {
     bridge.snapshot.capabilities.clipboardWrite = false;
     bridge.snapshot.capabilities.autoPaste = false;
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
-    expect(within(row('first')).queryByRole('button', { name: 'Copy' })).toBeNull();
+    expect(within(row('first')).getByRole<HTMLButtonElement>('button', { name: 'Copy' }).disabled).toBe(true);
     const firstButton = within(row('first')).getByRole('button', { name: 'Clipboard: Saved text' }) as HTMLButtonElement;
     expect(firstButton.disabled).toBe(false);
     firstButton.focus();
@@ -2172,14 +2175,17 @@ describe('database clipboard history', () => {
     expect(calls('window_hide')).toHaveLength(2);
   });
 
-  it('moves the keyboard target with arrows while search keeps focus and hides with Escape', async () => {
+  it('hands focus to the current record before arrows move between rows', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     const search = screen.getByRole('searchbox');
-    expect(row('first').hasAttribute('data-keyboard-current')).toBe(true);
-    fireEvent.keyDown(search, { key: 'ArrowUp' });
-    expect(row('pinned').hasAttribute('data-keyboard-current')).toBe(true);
+    const first = row('first').querySelector('.history-row-select')!;
+    const pinned = row('pinned').querySelector('.history-row-select')!;
+    expect(document.activeElement).toBe(search);
     fireEvent.keyDown(search, { key: 'ArrowDown' });
-    expect(row('first').hasAttribute('data-keyboard-current')).toBe(true);
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(pinned);
+    fireEvent.keyDown(pinned, { key: 'ArrowUp' });
     expect(document.activeElement).toBe(search);
     fireEvent.keyDown(search, { key: 'Escape' });
     expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'clipboard' });

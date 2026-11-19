@@ -260,13 +260,19 @@ describe('translation engine settings', () => {
     expect(recorder.textContent).toBe('⌘J');
   });
 
-  it('can tab into an unchecked recorder and ends recording when the settings window loses focus', async () => {
+  it('records Tab and ends recording when the settings window loses focus', async () => {
     bridge.snapshot.translationPreferences.disabledShortcuts = ['copyPrimary'];
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
     await user.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
+    // Free up Tab so the translation action can claim it.
+    bridge.snapshot.clipboardControls.shortcuts.switchView.binding = null;
     await user.tab();
-    expect(screen.getByRole('button', { name: 'Copy Primary Translation shortcut' }).getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(bridge.snapshot.translationPreferences.shortcuts.translate).toEqual({ code: 'Tab', modifiers: [] }));
+    bridge.invoke.mockClear();
+    const copy = screen.getByRole('button', { name: 'Copy Primary Translation shortcut' });
+    await user.click(copy);
+    expect(copy.getAttribute('aria-pressed')).toBe('true');
     expect(calls('translation_shortcut_capture').map(([, args]) => args)).toEqual([{ active: true }]);
     fireEvent(window, new FocusEvent('blur'));
     expect(calls('translation_shortcut_capture').map(([, args]) => args)).toEqual([{ active: true }, { active: false }]);
@@ -332,7 +338,7 @@ describe('translation engine settings', () => {
     expect((await screen.findByRole('alertdialog')).textContent).toContain('Already assigned to Open Clipboard.');
     expect(document.activeElement?.textContent).toBe('OK');
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Restore Translation Defaults' }));
+    fireEvent.click(within(screen.getByRole('region', { name: 'Translation' })).getByRole('button', { name: 'Restore Default Shortcuts' }));
     await waitFor(() => expect(calls('translation_shortcuts_restore')).toHaveLength(1));
   });
 });

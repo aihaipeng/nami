@@ -14,6 +14,57 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('opens the note card via the shared shortcut and updates or clears only the title', async () => {
+    await mount('history');
+    const record = bridge.history.records.find(({ id }) => id === 'sample-03')!;
+    const original = structuredClone(record);
+    const button = within(row(record.id)).getByRole('button', { name: /^Translation:/ });
+    fireEvent.keyDown(button, { key: 'N', code: 'KeyN', metaKey: true, shiftKey: true });
+    const card = await screen.findByRole('dialog', { name: 'Note' });
+    const content = await within(card).findByRole<HTMLTextAreaElement>('textbox', { name: 'Content' });
+    expect(content.readOnly).toBe(true);
+    expect(content.value).toBe(original.text);
+    const title = within(card).getByRole('textbox', { name: 'Title' });
+    fireEvent.change(title, { target: { value: 'Translation note' } });
+    fireEvent.keyDown(title, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Note' })).toBeNull());
+    expect(calls('history_record_update').at(-1)?.[1]).toEqual({ recordId: record.id, action: 'note', title: 'Translation note' });
+    expect(calls('records_editor_set').slice(-2).map((call) => call[1])).toEqual([{ dirty: false, open: true }, { dirty: false, open: false }]);
+    expect(record).toEqual({ ...original, title: 'Translation note' });
+    expect(within(row(record.id)).getByText('Translation note')).toBeTruthy();
+    fireEvent.click(within(row(record.id)).getByRole('button', { name: 'Note' }));
+    const reopened = await screen.findByRole('dialog', { name: 'Note' });
+    fireEvent.change(await within(reopened).findByDisplayValue('Translation note'), { target: { value: '' } });
+    fireEvent.click(within(reopened).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Note' })).toBeNull());
+    expect(record).toEqual({ ...original, title: '' });
+  });
+
+  it('runs shared copy, mark and direct delete shortcuts without bypassing protection', async () => {
+    await mount('history');
+    const id = 'sample-03';
+    const select = () => within(row(id)).getByRole('button', { name: /^Translation:/ });
+    const remove = { key: 'Backspace', code: 'Backspace', metaKey: true };
+    fireEvent.keyDown(select(), { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    await waitFor(() => expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: id, part: 'source' }));
+    fireEvent.keyDown(select(), { key: 'f', code: 'KeyF', altKey: true });
+    await waitFor(() => expect(within(row(id)).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
+    fireEvent.keyDown(select(), remove);
+    expect(calls('history_record_update').map((call) => call[1])).toEqual([{ recordId: id, action: 'favorite' }]);
+    fireEvent.keyDown(select(), { key: 'f', code: 'KeyF', altKey: true });
+    await waitFor(() => expect(within(row(id)).getByRole('button', { name: 'Favorite' })).toBeTruthy());
+    fireEvent.keyDown(select(), { key: 'p', code: 'KeyP', altKey: true });
+    await waitFor(() => expect(within(row(id)).getByRole('button', { name: 'Unpin record' })).toBeTruthy());
+    fireEvent.keyDown(select(), { key: 'p', code: 'KeyP', altKey: true });
+    await waitFor(() => expect(within(row(id)).getByRole('button', { name: 'Pin record' })).toBeTruthy());
+    const count = calls('history_record_update').length;
+    fireEvent.keyDown(select(), { ...remove, repeat: true });
+    expect(calls('history_record_update')).toHaveLength(count);
+    fireEvent.keyDown(select(), remove);
+    await waitFor(() => expect(calls('history_record_update').at(-1)?.[1]).toEqual({ recordId: id, action: 'delete' }));
+    expect(bridge.history.records.some((record) => record.id === id)).toBe(false);
+  });
+
   it('closes an open record immediately without scrolling the list first', async () => {
     await mount('history');
     const target = row('sample-03');
@@ -218,11 +269,9 @@ describe('history list and session actions', () => {
     if (entry === 'menu') {
       fireEvent.contextMenu(row(targetId));
       fireEvent.click(screen.getByRole('menuitem', { name: action === 'favorite' ? 'Remove favorite' : 'Delete' }));
-      if (action === 'delete') fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     } else {
       const button = within(row(targetId)).getByRole('button', { name: action === 'favorite' ? 'Remove favorite' : 'Delete history record' });
       fireEvent.click(button);
-      if (action === 'delete') fireEvent.click(button);
     }
     await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: action === 'favorite' ? 'sample-08' : 'sample-04', retranslate: false }));
   });
@@ -232,7 +281,6 @@ describe('history list and session actions', () => {
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'train' } });
     await waitFor(() => expect(records()).toHaveLength(1));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }));
-    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: null, retranslate: false, clearDetail: true }));
   });
@@ -244,7 +292,6 @@ describe('history list and session actions', () => {
     let finish!: () => Promise<void>;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'history_record_update'
       ? new Promise((resolve) => { finish = async () => { resolve(await original(name, args)); }; }) : original(name, args));
-    fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     fireEvent.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await emit('history_sample_selected', { sampleId, retranslate: false });
     const before = calls('history_sample_select').length;
@@ -307,12 +354,12 @@ describe('history list and session actions', () => {
     expect(document.querySelector('.global-error')).toBeNull();
   });
 
-  it('opens the shared five-action context menu without selecting or translating the row', async () => {
+  it('opens the shared context menu without selecting or translating the row', async () => {
     await mount('history');
     const before = calls('history_sample_select').length;
     fireEvent.contextMenu(row('sample-03'), { clientX: 100, clientY: 180 });
     const menu = screen.getByRole('menu');
-    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Retranslate', 'Copy source text', 'Favorite', 'Pin record', 'Delete']);
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Retranslate', 'Copy source text', 'Note', 'Favorite', 'Pin record', 'Delete']);
     expect(within(menu).getByRole('menuitem', { name: 'Delete' }).classList.contains('clipboard-menu-delete')).toBe(true);
     expect(within(menu).getAllByRole('menuitem').every((item) => item.children.length === 2)).toBe(true);
     expect(calls('history_sample_select')).toHaveLength(before);
@@ -441,8 +488,8 @@ describe('history list and session actions', () => {
     await mount('history');
     const target = row('sample-03');
     expect(within(target).queryByRole('button', { name: 'Retranslate' })).toBeNull();
-    expect([...target.querySelectorAll('.history-row-actions button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Copy source text', 'Favorite', 'Pin record', 'Delete history record']);
-    expect(target.style.getPropertyValue('--history-actions-width')).toBe('99px');
+    expect([...target.querySelectorAll('.history-row-actions button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Copy source text', 'Note', 'Favorite', 'Pin record', 'Delete history record']);
+    expect(target.style.getPropertyValue('--history-actions-width')).toBe('124px');
     fireEvent.contextMenu(target);
     const button = screen.getByRole('menuitem', { name: 'Retranslate' });
     const icon = button.querySelector<HTMLElement>('.history-symbol')!;
@@ -500,7 +547,6 @@ describe('history list and session actions', () => {
     const user = userEvent.setup(); const view = await mount('history');
     expect(within(row('sample-01')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
     expect(within(row('sample-04')).queryByRole('button', { name: 'Delete history record' })).toBeNull();
-    await user.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Delete history record' }));
     expect(records()).toHaveLength(19);
     view.unmount(); await mount('history');

@@ -168,6 +168,7 @@ impl HistoryStore {
                 .records
                 .iter()
                 .map(|record| HistoryRecord {
+                    title: record.title.clone(),
                     id: record.id.clone(),
                     text: record.text.chars().take(256).collect(),
                     source_language: record.source_language.clone(),
@@ -362,6 +363,20 @@ impl HistoryStore {
         Ok((previous, Some(next)))
     }
 
+    pub fn prepare_title(
+        &self,
+        id: &str,
+        title: &str,
+    ) -> Result<(HistoryRecord, Option<HistoryRecord>), String> {
+        if title.chars().count() > 200 || title.contains('\0') {
+            return Err("invalid_argument".into());
+        }
+        let previous = self.record(id).ok_or("not_found")?;
+        let mut next = previous.clone();
+        next.title = title.trim().to_owned();
+        Ok((previous, Some(next)))
+    }
+
     pub fn update(&mut self, id: &str, action: &str) -> Result<(), String> {
         self.update_for_query(id, action, &crate::database::HistoryQuery::default())
     }
@@ -401,10 +416,20 @@ impl HistoryStore {
         query: &crate::database::HistoryQuery,
     ) -> Result<(), String> {
         let (previous, next) = self.prepare_update(id, action)?;
-        if self.requires_update_query(&previous, next.as_ref(), query) {
+        self.apply_update(&previous, next, query)
+    }
+
+    pub fn apply_update(
+        &mut self,
+        previous: &HistoryRecord,
+        next: Option<HistoryRecord>,
+        query: &crate::database::HistoryQuery,
+    ) -> Result<(), String> {
+        let id = previous.id.as_str();
+        if self.requires_update_query(previous, next.as_ref(), query) {
             return Err("history_refresh_required".into());
         }
-        let was_match = query.matches(&previous);
+        let was_match = query.matches(previous);
         let now_match = next.as_ref().is_some_and(|record| query.matches(record));
         if let Some(index) = self.indices.get(id).copied() {
             if now_match {
@@ -457,6 +482,7 @@ mod tests {
 
     fn record(id: &str) -> HistoryRecord {
         HistoryRecord {
+            title: String::new(),
             id: id.into(),
             text: "Synthetic source".into(),
             source_language: "en".into(),

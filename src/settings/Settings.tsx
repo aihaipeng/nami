@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, ClipboardList, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
 import type { ViewProps } from '../App';
+import type { RecordsOpenFocus } from '../shared/clipboardShortcuts';
 import type { Locale } from '../shared/contracts';
 import './settings.css';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
@@ -18,8 +19,8 @@ const pages = [
 
 export function Settings({ t, snapshot, command, native }: ViewProps) {
   const [page, setPage] = useState<typeof pages[number]['value']>('general');
-  const [languageOpen, setLanguageOpen] = useState(false);
-  useEffect(() => { setLanguageOpen(false); }, [page, snapshot.locale]);
+  const [openDropdown, setOpenDropdown] = useState<'language' | 'recordsFocus' | null>(null);
+  useEffect(() => { setOpenDropdown(null); }, [page, snapshot.locale]);
   return <div className="settings-shell">
     <aside className="settings-sidebar">
       <div className="settings-brand" data-tauri-drag-region>{t('settings')}</div>
@@ -40,7 +41,15 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
               <label className="settings-field-content" htmlFor="interface-language">{t('interfaceLanguage')}</label>
               <SearchableDropdown id="interface-language" value={snapshot.locale} onChange={(locale) => void command('locale_set', { locale: locale as Locale })}
                 label={t('interfaceLanguage')} items={[{ code: 'system', name: t('followSystem') }, { code: 'zh-CN', name: 'Chinese (Simplified)' }, { code: 'en', name: 'English' }]}
-                open={languageOpen} onOpenChange={setLanguageOpen} t={t} side="bottom" searchable={false} settings />
+                open={openDropdown === 'language'} onOpenChange={(open) => setOpenDropdown(open ? 'language' : null)} t={t} side="bottom" searchable={false} settings />
+            </div>
+            <div className="settings-field">
+              <label className="settings-field-content" htmlFor="records-open-focus">{t('recordsOpenFocus')}</label>
+              {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
+                <SearchableDropdown id="records-open-focus" value={snapshot.clipboardControls.recordsOpenFocus ?? 'search'}
+                  onChange={(focus) => void command('records_open_focus_set', { focus: focus as RecordsOpenFocus })}
+                  label={t('recordsOpenFocus')} items={[{ code: 'search', name: t('recordsFocusSearch') }, { code: 'list', name: t('recordsFocusList') }]}
+                  open={openDropdown === 'recordsFocus'} onOpenChange={(open) => setOpenDropdown(open ? 'recordsFocus' : null)} t={t} side="bottom" searchable={false} settings />}
             </div>
             <div className="settings-field"><span className="settings-field-content">{t('appearance')}</span><span className="settings-badge">{t('followSystem')}</span></div>
           </div>

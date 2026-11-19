@@ -80,6 +80,7 @@ pub(crate) async fn update_record(
     app: &AppHandle,
     id: String,
     action: String,
+    title: Option<String>,
 ) -> Result<crate::history::HistorySnapshot, String> {
     let state = app.state::<AppState>();
     let _write = state.history_writes.lock().await;
@@ -88,14 +89,16 @@ pub(crate) async fn update_record(
     }
     let worker = app.clone();
     let worker_id = id.clone();
-    let worker_action = action.clone();
     let (previous, next, replacement) = tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<AppState>();
-        let (previous, next) = state
-            .history
-            .lock()
-            .unwrap()
-            .prepare_update(&worker_id, &worker_action)?;
+        let (previous, next) = {
+            let history = state.history.lock().unwrap();
+            match (action.as_str(), title.as_deref()) {
+                ("note", Some(title)) => history.prepare_title(&worker_id, title),
+                ("note", None) | (_, Some(_)) => Err("invalid_argument".into()),
+                _ => history.prepare_update(&worker_id, &action),
+            }?
+        };
         let query = state.history_page.lock().unwrap().query.clone();
         let reload_count = {
             let history = state.history.lock().unwrap();
@@ -147,7 +150,7 @@ pub(crate) async fn update_record(
                 .history
                 .lock()
                 .unwrap()
-                .update_for_query(&id, &action, &query)?;
+                .apply_update(&previous, next, &query)?;
         }
         publish_history(&app)?;
         Ok(app.state::<AppState>().history.lock().unwrap().snapshot())

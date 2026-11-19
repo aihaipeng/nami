@@ -31,6 +31,7 @@ beforeEach(() => {
       return { page, alternate: { ...page, records: [], totalRecords: 0 } };
     }
     if (name === 'clipboard_record_detail') return fetchDetail ? fetchDetail(id!) : structuredClone(records.find((record) => record.id === id)!);
+    if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
     if (name === 'clipboard_record_has_text') return id === 'image-text';
     if (name === 'clipboard_record_update') {
       const record = records.find((record) => record.id === id)!;
@@ -60,14 +61,14 @@ describe('clipboard details', () => {
     await open();
     await windowState({ recordsBrowsing: false });
     const selections = calls('clipboard_details_select').length;
-    fireEvent.mouseMove(row('second'));
+    fireEvent.mouseMove(row('second'), { clientY: 60 });
     fireEvent.focus(row('second').querySelector('button')!);
     expect(calls('clipboard_details_select')).toHaveLength(selections);
     expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
     fireEvent.keyDown(row('first').querySelector('button')!, { key: 'ArrowDown' });
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('second'));
     expect(bridge.snapshot.window.recordsBrowsing).toBe(true);
-    fireEvent.mouseMove(row('first'));
+    fireEvent.mouseMove(row('first'), { clientY: 30 });
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
   });
 
@@ -115,11 +116,14 @@ describe('clipboard details', () => {
     expect(translate).toHaveProperty('disabled',false);
   });
 
-  it('offers no standalone record copy in the detail toolbar', async () => {
-    direct();
-    await within(pane()).findByRole('button', { name: 'Translate' });
-    expect(within(pane()).queryByRole('button', { name: 'Copy' })).toBeNull();
-    expect(calls('clipboard_record_use')).toHaveLength(0);
+  it('copies the open detail without hiding the window', async () => {
+    await open();
+    const button = await within(pane()).findByRole('button', { name: 'Copy' });
+    fireEvent.click(button);
+    await waitFor(() => expect(button.querySelector('.copy-success')).toBeTruthy());
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
+    expect(calls('window_hide')).toHaveLength(0);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
   });
 
   it('expands the first unpinned record, keeps full text and source name, and adds Note after text actions', async () => {
@@ -132,7 +136,7 @@ describe('clipboard details', () => {
     expect(within(pane()).getByText('1,200')).toBeTruthy();
     expect(within(pane()).queryByText('Dimensions')).toBeNull();
     expect(within(pane()).queryByText('Size')).toBeNull();
-    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['translate', 'note', 'favorite', 'pin', 'delete']);
+    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['copy', 'translate', 'note', 'favorite', 'pin', 'delete']);
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
     expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')?.getAttribute('style')).toBe(row('first').querySelector('[data-action=note] .history-symbol')?.getAttribute('style'));
   });
@@ -161,7 +165,7 @@ describe('clipboard details', () => {
     await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
     expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
     expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
-    expect(pane().querySelectorAll('.history-action')).toHaveLength(4);
+    expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
   });
 
   it('disables every retained detail action while a new record loads and delays the shared activity beam', async () => {
@@ -208,8 +212,6 @@ describe('clipboard details', () => {
     await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
     expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
     expect(remove).toHaveProperty('disabled', false);
-    fireEvent.click(remove);
-    expect(calls('clipboard_record_update').filter(([,args]) => (args as {action:string}).action === 'delete')).toHaveLength(0);
     fireEvent.mouseMove(row('pinned'));
     await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
     expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toHaveProperty('disabled', false);
@@ -265,10 +267,6 @@ describe('clipboard details', () => {
     direct();
     const button = await within(pane()).findByRole('button', { name: label });
     fireEvent.click(button);
-    if (label === 'Delete clipboard record') {
-      expect(calls(name)).toHaveLength(0);
-      fireEvent.click(button);
-    }
     await waitFor(() => expect(calls(name).at(-1)?.[1]).toEqual(args));
   });
 

@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
 
-export function SettingsDialog({ title, description, onClose, children }: {
-  title: string; description?: string; onClose: () => void; children: ReactNode;
+export function SettingsDialog({ title, description, onClose, children, role = 'alertdialog' }: {
+  role?: 'dialog' | 'alertdialog'; title: string; description?: string; onClose: () => void; children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const id = useId();
@@ -15,7 +15,7 @@ export function SettingsDialog({ title, description, onClose, children }: {
       if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
     };
   }, []);
-  return <dialog ref={dialog} className="settings-dialog" role="alertdialog"
+  return <dialog ref={dialog} className="settings-dialog" role={role}
     aria-labelledby={`${id}-title`} aria-describedby={description ? `${id}-description` : undefined}
     onCancel={(event) => { event.preventDefault(); onClose(); }}>
     <h3 id={`${id}-title`}>{title}</h3>

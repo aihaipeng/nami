@@ -410,6 +410,9 @@ impl HistoryDatabase {
             if next.id != previous.id {
                 return Err("storage_record".into());
             }
+            if next.title != previous.title {
+                transaction.execute("UPDATE translation_records SET record_json=json_set(record_json,'$.title',?1) WHERE id=?2", params![next.title, previous.id]).map_err(storage_error)?;
+            }
             let order = if next.is_pinned && !previous.is_pinned {
                 transaction.query_row("SELECT MAX(?1,COALESCE(MAX(created_at),0)+1) FROM translation_records WHERE is_pinned=1", [chrono::Utc::now().timestamp_millis()], |row| row.get::<_, i64>(0)).map_err(storage_error)?
             } else {
@@ -460,6 +463,7 @@ mod tests {
     }
     fn record(id: &str) -> HistoryRecord {
         HistoryRecord {
+            title: String::new(),
             id: id.into(),
             text: "Text\0\n中文 🐋 %_literal".into(),
             source_language: "auto".into(),
@@ -474,6 +478,31 @@ mod tests {
             ),
         }
     }
+    #[test]
+    fn translation_note_updates_only_the_title_and_survives_reopen() {
+        let path = Fixture::new();
+        let mut db = HistoryDatabase::open(&path.0).unwrap();
+        let original = record("noted");
+        db.insert(&original, "edge", || true).unwrap();
+        let mut store = crate::history::HistoryStore::new(vec![original.clone()]);
+        assert!(store.prepare_title("noted", &"x".repeat(201)).is_err());
+        let (previous, next) = store.prepare_title("noted", "  合成备注  ").unwrap();
+        db.update(&previous, next.as_ref()).unwrap();
+        store
+            .apply_update(&previous, next, &HistoryQuery::default())
+            .unwrap();
+        assert_eq!(store.snapshot().records[0].title, "合成备注");
+        drop(db);
+        let mut db = HistoryDatabase::open(&path.0).unwrap();
+        let noted = db.record("noted").unwrap().unwrap();
+        let mut expected = serde_json::to_value(&original).unwrap();
+        expected["title"] = "合成备注".into();
+        assert_eq!(serde_json::to_value(&noted).unwrap(), expected);
+        let (previous, next) = store.prepare_title("noted", "").unwrap();
+        db.update(&previous, next.as_ref()).unwrap();
+        assert!(db.record("noted").unwrap().unwrap().title.is_empty());
+    }
+
     #[test]
     fn deleted_image_translation_can_be_inserted_again_and_survives_reopen() {
         let fixture = Fixture::new();

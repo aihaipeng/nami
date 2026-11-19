@@ -128,12 +128,12 @@ export function useHistory(native: boolean) {
     }
   }, [native, accept]);
 
-  const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
+  const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete' | 'note', title?: string) => {
     if (!native || !active.current) return false;
     const connection = lifecycle.current;
     setError(false);
     try {
-      const next = await invoke<HistorySnapshot>('history_record_update', { recordId, action });
+      const next = await invoke<HistorySnapshot>('history_record_update', { recordId, action, ...(title === undefined ? {} : { title }) });
       if (active.current && lifecycle.current === connection) { accept(next); return true; }
     } catch { if (active.current && lifecycle.current === connection) setError(true); }
     return false;
