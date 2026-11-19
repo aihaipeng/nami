@@ -63,11 +63,11 @@ describe('shared history and platform capabilities', () => {
     expect(calls('translation_run')).toHaveLength(0);
     fireEvent.keyDown(source(), { key: 'Enter', ctrlKey: true });
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    fireEvent.keyDown(source(), { key: 'k', ctrlKey: true });
-    const menu = screen.getByRole('menu', { name: 'Actions' });
-    expect(menu.textContent).toContain('Ctrl');
-    expect(menu.textContent).not.toContain('⌘');
-    expect((within(menu).getByRole('menuitem', { name: /Copy Primary Translation/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: /^Translate/ }).textContent).toContain('Ctrl');
+    fireEvent.keyDown(source(), { key: '/', code: 'Slash', metaKey: true });
+    expect(calls('history_toggle')).toHaveLength(0);
+    fireEvent.keyDown(source(), { key: '/', code: 'Slash', ctrlKey: true });
+    expect(calls('history_toggle')).toHaveLength(1);
   });
 
   it('does not replace newer history events with a delayed initial snapshot', async () => {

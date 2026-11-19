@@ -1,13 +1,14 @@
 import type { Translate } from './i18n';
 
 export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch'] as const;
-export const generalShortcutActions = ['selection', ...recordWindowActions] as const;
-export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'actions'] as const;
-export const shortcutActions = [...generalShortcutActions, ...translationWindowActions] as const;
+export const globalTranslationActions = ['openTranslation', 'selection'] as const;
+export const generalShortcutActions = [...globalTranslationActions, ...recordWindowActions, 'toggleHistory'] as const;
+export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'toggleHistory'] as const;
+export const shortcutActions = [...globalTranslationActions, ...recordWindowActions, ...translationWindowActions] as const;
 
 export const shortcutTitles = {
-  selection: 'openTranslation', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch',
-  translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary', actions: 'actions',
+  openTranslation: 'openTranslation', selection: 'autofillInput', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch',
+  translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary', toggleHistory: 'toggleTranslationHistory',
 } as const;
 export type ShortcutAction = typeof shortcutActions[number];
 export type ShortcutModifier = 'control' | 'alt' | 'shift' | 'meta';
@@ -26,14 +27,14 @@ const modifierOrder: ShortcutModifier[] = ['control', 'alt', 'shift', 'meta'];
 export function defaultTranslationShortcuts(primary: 'meta' | 'control'): TranslationShortcuts {
   const key = (code: string, ...extra: ShortcutModifier[]): KeyBinding => ({ code, modifiers: normalizeModifiers([primary, ...extra]) });
   return {
-    selection: key('KeyT'),
+    openTranslation: key('KeyT'), selection: key('KeyT'),
     translate: key('Enter'),
     copyPrimary: key('Digit1'),
     copySecondary: key('Digit2'),
     pin: key('KeyP', 'shift'),
-    showShortcuts: key('Slash'),
+    showShortcuts: key('KeyK'),
     focusSearch: key('KeyF'),
-    actions: key('KeyK'),
+    toggleHistory: key('Slash'),
   };
 }
 
@@ -56,7 +57,9 @@ export function shortcutError(action: ShortcutAction | 'clipboard', binding: Key
   const value = normalizeBinding(binding);
   if (!value) return 'shortcut_key';
   if (clipboard && sameBinding(value, clipboard)) return 'shortcut_clipboard';
-  const conflict = shortcutActions.find((other) => other !== action && current[other] && sameBinding(current[other], value));
+  const globalTranslation = (candidate: string) => globalTranslationActions.some((entry) => entry === candidate);
+  const conflict = shortcutActions.find((other) => other !== action && !(globalTranslation(other) && globalTranslation(action))
+    && current[other] && sameBinding(current[other], value));
   return conflict ? `shortcut_conflict:${conflict}` : null;
 }
 

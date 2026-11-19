@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { ViewProps } from '../App';
 import { clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardOnlyActions, sharedRecordActions, clipboardShortcutLabels, defaultClipboardShortcuts, sameClipboardBinding, type ClipboardRecordAction } from '../shared/clipboardShortcuts';
 import { translationShortcutEnabled } from '../shared/contracts';
-import { defaultClipboardBinding, generalShortcutActions, sameBinding, shortcutTitles, translationWindowActions, type KeyBinding, type ShortcutAction } from '../shared/shortcuts';
+import { defaultClipboardBinding, sameBinding, shortcutTitles, type KeyBinding, type ShortcutAction } from '../shared/shortcuts';
 import { SettingsDialog } from './SettingsDialog';
 import { ManualShortcut, ShortcutCapture, ShortcutRow, errorCode, shortcutMessage } from './ShortcutCapture';
 
@@ -25,7 +25,10 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
   const clipboardShortcuts = clipboardPanelShortcuts(snapshot);
   const clipboardDefaults = defaultClipboardShortcuts(snapshot.capabilities.primaryModifier);
   const clipboardIsDefault = snapshot.clipboardShortcutEnabled && snapshot.clipboardBinding && sameBinding(snapshot.clipboardBinding, defaultClipboardBinding)
-    && clipboardShortcuts.every(({ action, enabled, binding }) => sharedRecordActions.some((shared) => shared === action) || enabled && binding && sameClipboardBinding(binding, clipboardDefaults[action].binding));
+    && clipboardOnlyActions.every((action) => {
+      const shortcut = snapshot.clipboardControls.shortcuts[action];
+      return shortcut.enabled && shortcut.binding && sameClipboardBinding(shortcut.binding, clipboardDefaults[action].binding);
+    });
   useEffect(() => { setRecording(null); setClipboardError(undefined); setTranslationError(null); }, [snapshot.locale]);
 
   async function saveClipboard(action: ClipboardAction, change: { binding: KeyBinding | null } | { enabled: boolean } | { restore: true }) {
@@ -72,9 +75,9 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
 
   function translationRow(action: ShortcutAction) {
     const title = t(shortcutTitles[action]);
-    return <ShortcutRow key={action} title={title} label={action === 'selection' ? t('selectionShortcut') : `${title} ${t('clipboardShortcutLabel')}`}
-      hint={action === 'selection' ? t('openTranslationHint') : undefined} binding={preferences.shortcuts[action]} macos={macos}
-      unavailable={action === 'selection' && !canUseSelection ? t('platformUnavailable') : undefined}
+    return <ShortcutRow key={action} title={title} label={`${title} ${t('clipboardShortcutLabel')}`}
+      hint={action === 'selection' ? t('autofillInputHint') : action === 'openTranslation' ? t('openTranslationHint') : undefined} binding={preferences.shortcuts[action]} macos={macos}
+      unavailable={(action === 'selection' || action === 'openTranslation') && !canUseSelection ? t('platformUnavailable') : undefined}
       recording={recording?.domain === 'translation' && recording.action === action} enabled={translationShortcutEnabled(preferences, action)}
       onEnabled={(enabled) => void saveTranslation(action, { enabled })} onToggle={() => toggleRecorder({ domain: 'translation', action })}
       onManual={openManual} onClear={() => void saveTranslation(action, { binding: null })} t={t} />;
@@ -109,8 +112,10 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         <button type="button" className="settings-action" disabled={!canManageClipboard || restoring || savingClipboard} onClick={() => void restore(true)}>{t('restoreDefaultHotKeys')}</button>
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="general-shortcut-heading">
-        {generalShortcutActions.filter((action) => action !== 'selection').map(translationRow)}
-        {sharedRecordActions.map(localRow)}
+        {translationRow('focusSearch')}
+        {(['navigateUp', 'navigateDown', 'switchView', 'previousCategory', 'nextCategory', 'focusRecords', 'preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
+        {translationRow('pin')}
+        {translationRow('showShortcuts')}
       </div>
       {clipboardError?.group === 'general' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}
     </section>
@@ -123,7 +128,8 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
       <div className="settings-group hotkey-group" role="group" aria-labelledby="clipboard-shortcut-heading">
         {clipboardRow('global', t('clipboardOpenHistory'), snapshot.clipboardBinding, snapshot.clipboardShortcutEnabled,
           canRecordClipboard ? undefined : t(snapshot.storageError ? 'clipboardSettingsSaveFailed' : 'platformUnavailable'))}
-        {clipboardOnlyActions.map(localRow)}
+        {localRow('translate')}
+        {localRow('ocr')}
       </div>
       {clipboardError?.group === 'clipboard' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}
     </section>
@@ -133,8 +139,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         <button type="button" className="settings-action" disabled={!canManageClipboard || restoring || savingClipboard} onClick={() => void restore(false)}>{t('restoreDefaultHotKeys')}</button>
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="translation-shortcuts-heading">
-        {translationRow('selection')}
-        {translationWindowActions.map(translationRow)}
+        {(['selection', 'openTranslation', 'translate', 'toggleHistory', 'copyPrimary', 'copySecondary'] as const).filter((action) => action !== 'copySecondary' || preferences.secondaryLanguage !== 'none').map(translationRow)}
       </div>
     </section>
     {translationError && <SettingsDialog title={t('shortcutUnavailable')} description={translationError} onClose={() => setTranslationError(null)}>

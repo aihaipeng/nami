@@ -163,6 +163,7 @@ pub(crate) async fn commit_translation(
     record: HistoryRecord,
     engine: String,
     revision: u64,
+    focus_origin: Option<String>,
 ) -> Result<HistoryRecord, String> {
     let state = app.state::<AppState>();
     let _write = state.history_writes.lock().await;
@@ -196,19 +197,41 @@ pub(crate) async fn commit_translation(
         let current = state
             .translation_revision
             .load(std::sync::atomic::Ordering::SeqCst)
-            == revision
-            && !state.windows.lock().unwrap().records_browsing;
+            == revision;
+        let (can_refocus, browsing) = {
+            let window = state.windows.lock().unwrap();
+            (
+                focus_origin.is_some()
+                    && current
+                    && window.history_visible
+                    && window.translation_visible
+                    && window.record_view == crate::model::RecordView::Translation
+                    && !window.records_editor_open,
+                window.records_browsing,
+            )
+        };
         let query = {
             let mut page = state.history_page.lock().unwrap();
             page.cache.insert_record(&record);
             page.query.clone()
         };
-        state
-            .history
-            .lock()
-            .unwrap()
-            .add_completed(record.clone(), current, &query)?;
+        let refocus = {
+            let mut history = state.history.lock().unwrap();
+            let refocus = can_refocus && history.selected_id() == focus_origin.as_deref();
+            history.add_completed(record.clone(), current && (!browsing || refocus), &query)?;
+            refocus
+        };
         publish_history(&app)?;
+        if refocus {
+            let view = ["clipboard", "history", "translation"]
+                .into_iter()
+                .find_map(|label| app.get_webview(label));
+            if let Some(view) = view {
+                let _ = view.set_focus();
+                view.emit("history_refocus", &record.id)
+                    .map_err(|_| "event_emit")?;
+            }
+        }
         Ok(record)
     })
     .await?

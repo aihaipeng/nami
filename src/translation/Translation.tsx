@@ -5,7 +5,6 @@ import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { languageName, languages, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
-import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { editsText, keycapLabels, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
@@ -19,7 +18,7 @@ import { TRANSLATION_STRATEGY_VERSION, requestedSource, historySamples, type His
 import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
-type Popup = 'source' | 'primary' | 'secondary' | 'actions';
+type Popup = 'source' | 'primary' | 'secondary';
 
 let sourceMeasure: CanvasRenderingContext2D | null | undefined;
 
@@ -193,6 +192,16 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [native]);
 
   useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const remove = listen('translation_focus_requested', () => {
+      const window = currentWindow.current;
+      if (!disposed && window.translationVisible && window.recordView !== 'clipboard') focusInput();
+    });
+    return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
+  }, [native]);
+
+  useEffect(() => {
     if (state.translationVisible && !state.historyVisible && !clipboardDetails) input.current?.focus({ preventScroll: true });
   }, [state.translationVisible]);
 
@@ -288,7 +297,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
   }
 
-  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number) {
+  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false) {
     if (snapshot.storageError) return;
     const origin = reuse ?? completedRecord.current;
     cancelRequest();
@@ -302,7 +311,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (requestRevision.current !== revision) return;
     activity(1);
     try {
-      const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
+      const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
       if (requestRevision.current !== revision) return;
       completedRecord.current = record;
       setCachedResults(record.translations); setSelectedId(record.id); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage);
@@ -311,11 +320,11 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     } finally { activity(-1); }
   }
 
-  function submit() {
+  function submit(focusHistory = false) {
     if (!draft.trim() || composing.current || snapshot.storageError || !languagesAvailable) return;
-    clearSelection();
-    void translateText(draft, source, [primary, ...(secondary === 'none' ? [] : [secondary])], fromSelection.current);
-    input.current?.focus({ preventScroll: true });
+    if (!focusHistory) clearSelection();
+    void translateText(draft, source, [primary, ...(secondary === 'none' ? [] : [secondary])], fromSelection.current, undefined, undefined, focusHistory);
+    if (!focusHistory) input.current?.focus({ preventScroll: true });
   }
 
   receiveSelection.current = (context) => {
@@ -341,9 +350,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     completedRecord.current = record;
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
-    if (retranslate) void translateText(record.text, requestedSource(record), record.targetLanguages, false);
+    if (retranslate) void translateText(record.text, requestedSource(record), record.targetLanguages, false, undefined, undefined, true);
     if (!native) void command('window_show', { target: 'translation' });
-    if (retranslate) input.current?.focus({ preventScroll: true });
   }
 
   select.current = selectHistory;
@@ -367,7 +375,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   function copyTranslation(index: number) {
     const recordId = completedRecord.current?.id ?? selectedId;
     if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
-    if (popup === 'actions') input.current?.focus({ preventScroll: true });
     setPopup(null); setCopyFeedback(null); window.clearTimeout(copyFeedbackTimer.current);
     const operation = ++copyOperation.current;
     copying.current.set(index, operation);
@@ -380,22 +387,28 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       .finally(() => { if (copying.current.get(index) === operation) copying.current.delete(index); });
   }
 
-  function keydown(event: KeyboardEvent, region: 'translation' | 'history') {
+  function focusInput() {
+    setPopup(null);
+    input.current?.focus({ preventScroll: true });
+  }
+
+  function keydown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return;
     if (editsText(event.nativeEvent)) return;
     if (event.key === 'Escape' && popup) {
       event.preventDefault(); setPopup(null); input.current?.focus({ preventScroll: true });
-    } else if (region === 'translation' && matchesBinding(shortcutBinding('translate'), event)) {
-      event.preventDefault(); submit();
-    } else if (region === 'translation' && matchesBinding(shortcutBinding('copyPrimary'), event)) {
-      event.preventDefault(); copyTranslation(0);
-    } else if (region === 'translation' && matchesBinding(shortcutBinding('copySecondary'), event)) {
-      event.preventDefault(); copyTranslation(1);
-    } else if (region === 'translation' && matchesBinding(shortcutBinding('actions'), event)) {
+    } else if (matchesBinding(shortcutBinding('focusSearch'), event)) {
+      event.preventDefault(); if (!event.repeat) focusInput();
+    } else if (matchesBinding(shortcutBinding('translate'), event)) {
       event.preventDefault();
-      if (popup === 'actions') { setPopup(null); input.current?.focus({ preventScroll: true }); }
-      else setPopup('actions');
-    } else if (region === 'translation' && matchesBinding(shortcutBinding('pin'), event)) {
+      if (!event.repeat) submit(state.historyVisible && selectedId !== null && completedRecord.current !== null);
+    } else if (matchesBinding(shortcutBinding('copyPrimary'), event)) {
+      event.preventDefault(); copyTranslation(0);
+    } else if (secondary !== 'none' && matchesBinding(shortcutBinding('copySecondary'), event)) {
+      event.preventDefault(); copyTranslation(1);
+    } else if (!capabilities.selection && matchesBinding(shortcutBinding('toggleHistory'), event)) {
+      event.preventDefault(); if (!event.nativeEvent.repeat) toggleHistory();
+    } else if (matchesBinding(shortcutBinding('pin'), event)) {
       event.preventDefault(); if (!event.nativeEvent.repeat) togglePin();
     } else if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
       event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
@@ -427,7 +440,12 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     input.current?.focus({ preventScroll: true });
   }
 
-  function picker(id: Exclude<Popup, 'actions'>, value: string, onChange: (value: string) => void, extra?: 'auto' | 'none') {
+  function toggleHistory() {
+    setPopup(null);
+    void command('history_toggle');
+  }
+
+  function picker(id: Popup, value: string, onChange: (value: string) => void, extra?: 'auto' | 'none') {
     return <SearchableDropdown value={value} onChange={onChange}
       label={t(id === 'source' ? 'sourceLanguage' : id === 'primary' ? 'primaryLanguage' : 'secondaryLanguage')}
       items={[...(extra ? [{ code: extra, name: extra === 'auto' ? 'Auto-Detect' : 'None' }] : []), ...providerLanguages(snapshot.translationEngine, id === 'source' ? 'source' : 'target')]} t={t}
@@ -452,16 +470,16 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     </div>}
     <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
     {clipboardDetails && <ClipboardDetail t={t} snapshot={snapshot} command={command} native={native} activity={activity} />}
-    <section hidden={clipboardDetails} className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')}
-      onKeyDown={(event) => keydown(event, 'translation')}
+    <section hidden={clipboardDetails} className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')} tabIndex={-1}
+      onKeyDown={keydown}
       onKeyDownCapture={(event) => {
-        if (primaryPressed(event)) { keydown(event, 'translation'); if (event.defaultPrevented) event.stopPropagation(); }
+        if (primaryPressed(event)) { keydown(event); if (event.defaultPrevented) event.stopPropagation(); }
       }}>
       <div className="drag-strip" data-tauri-drag-region />
       <header ref={sourceBar} className="source-bar" data-detected-language={detectedSource ?? undefined}>
         <button className="icon-button history-trigger" title={t('history')} aria-label={t('history')} aria-expanded={state.historyVisible}
           aria-controls={capabilities.nativeHistory ? undefined : 'translation-history'} aria-pressed={state.historyVisible} onMouseDown={(event) => event.preventDefault()}
-          onClick={() => { setPopup(null); void command('history_toggle'); }}><HistoryIcon name="clock" /></button>
+          onClick={toggleHistory}><HistoryIcon name="clock" /></button>
         <textarea ref={input} className="source-input" aria-label={t('sourceLabel')} rows={1} wrap="off" spellCheck={false} value={displaySource(draft)}
           onChange={(event) => {
             completedRecord.current = null;
@@ -476,7 +494,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
         {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
       </header>
       <div className={cn('result-columns', secondary === 'none' && 'single-column', taskStatus && !hasResults && 'task-status-only')}>
-        {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
+        {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" tabIndex={-1} key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
           {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
         </section>)}
         {taskStatus && !hasResults && <p className="translation-status" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
@@ -489,26 +507,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
         </div>
         <div ref={actionGroup} className="translation-actions" aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
-          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError) || !languagesAvailable} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
+          <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError) || !languagesAvailable} onMouseDown={(event) => event.preventDefault()} onClick={() => submit()}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
         </div>
       </footer>
-      {popup === 'actions' && <FloatingPanel anchor={actionGroup} returnFocus={input} onClose={() => setPopup(null)} label={t('actions')} role="menu" width={310} side="top" className="action-menu">
-        <div role="group" onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || primaryPressed(event)) return;
-          const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
-          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            event.preventDefault(); buttons[(index + buttons.length + (event.key === 'ArrowDown' ? 1 : -1)) % buttons.length]?.focus();
-          } else if (event.key === 'Home' || event.key === 'End') {
-            event.preventDefault(); buttons[event.key === 'Home' ? 0 : buttons.length - 1]?.focus();
-          }
-        }}>
-          <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[0]} onClick={() => copyTranslation(0)}>{t('copyPrimary')}<Keycaps keys={shortcutKeys('copyPrimary')} /></button>
-          {secondary !== 'none' && <button role="menuitem" disabled={!native || !capabilities.clipboardWrite || !cachedResults[1]} onClick={() => copyTranslation(1)}>{t('copySecondary')}<Keycaps keys={shortcutKeys('copySecondary')} /></button>}
-          {secondary === 'none' && <button role="menuitem" onClick={() => { changeLanguage('secondary', 'zh-CN'); setPopup(null); input.current?.focus(); }}>Enable Second Language</button>}
-          <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={shortcutKeys('pin')} /></button>
-        </div>
-      </FloatingPanel>}
     </section>
     </div>
     {!capabilities.nativeHistory && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}

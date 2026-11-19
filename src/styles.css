@@ -117,6 +117,7 @@
   /* Viewport anchors avoid parent reflow moving right-edge controls during native left resize. */
   html[data-native-history=true] .source-bar > .language-picker { position: fixed; top: 8px; right: 24px; }
   .language-picker { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; max-width: 200px; height: 32px; padding: 0 12px; font-size: 13px; font-weight: 400; border-radius: 16px; white-space: nowrap; }
+  .language-picker:focus-visible { outline: none; background: hsl(var(--foreground) / .06); }
   .language-picker > span { overflow: hidden; text-overflow: ellipsis; }
   .language-picker > svg { width: 10px; height: 10px; color: hsl(var(--muted-foreground)); }
   .result-columns { display: flex; flex: 1; min-height: 0; margin: 8px 0 12px; }
@@ -130,9 +131,11 @@
   .translation-footer { position: relative; display: flex; align-items: center; flex-shrink: 0; height: 28px; margin-bottom: 2px; }
   .language-slot { width: 50%; min-width: 0; padding-left: 8px; padding-right: 24px; }
   .translation-footer .language-picker { position: relative; isolation: isolate; max-width: min(200px, 100%); }
+  .translation-footer .language-picker:focus-visible,
   .translation-footer .language-picker:hover:not(:disabled),
   .translation-footer .language-picker:active:not(:disabled) { background: transparent; }
   .translation-footer .language-picker::before { content: ''; position: absolute; inset: 4px 0; border-radius: 12px; background: transparent; z-index: -1; pointer-events: none; }
+  .translation-footer .language-picker:focus-visible::before,
   .translation-footer .language-picker:hover:not(:disabled)::before { background: hsl(var(--foreground) / .06); }
   .translation-footer .language-picker:active:not(:disabled)::before { background: hsl(var(--foreground) / .1); }
 
@@ -155,10 +158,6 @@
   .language-options button svg { width: 13px; height: 13px; }
   .language-options button[data-active=true] { background: hsl(var(--foreground) / .1); }
   .language-no-results { padding: 16px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
-  .action-menu { padding: 8px; }
-  .action-menu [role=group] { display: flex; flex-direction: column; gap: 2px; }
-  .action-menu button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; height: 38px; padding: 0 10px; border-radius: 8px; font-size: 13px; font-weight: 500; text-align: left; white-space: nowrap; }
-  .action-menu button:focus { background: hsl(var(--foreground) / .1); outline: none; }
   .history-panel { --history-edge-mask: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); --history-label: hsl(var(--foreground)); --history-secondary: hsl(var(--muted-foreground)); --history-red: hsl(var(--destructive)); --history-scroll-thumb: hsl(var(--foreground) / .35); color: var(--history-label); width: var(--history-width); height: 100%; position: absolute; right: 0; top: 0; display: flex; flex-direction: column; background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; }
   html[data-native=true] .history-panel { width: 100%; left: 0; right: auto; }
   .history-symbol { display: inline-block; width: 14px; height: 14px; flex-shrink: 0; background: currentColor; -webkit-mask: var(--symbol-url) center / contain no-repeat; mask: var(--symbol-url) center / contain no-repeat; }
@@ -290,7 +289,6 @@
 
 .dropdown-capsule { border: 1px solid hsl(var(--foreground) / .15); background: hsl(var(--foreground) / .09); flex-shrink: 0; }
 .dropdown-capsule[aria-expanded=true] { background: hsl(var(--foreground) / .16); }
-.action-menu button:hover:not(:disabled), .action-menu button:focus-visible { background: hsl(var(--foreground) / .09); }
 
 .language-options button:focus-visible { outline: 1px solid hsl(var(--foreground) / .25); outline-offset: -1px; }
 .history-search:focus-within { background: hsl(var(--foreground) / .07); box-shadow: none; outline: none; }

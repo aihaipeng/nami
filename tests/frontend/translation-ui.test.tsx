@@ -14,6 +14,24 @@ const select = (id = sample.id, retranslate = false) => act(async () => { await 
 // These tests exercise DOM behavior and the native bridge contract. AppKit geometry,
 // glass rendering and frame pacing are covered by the separate native checks.
 describe('translation input and shortcuts', () => {
+  it('uses the shared focus binding in the translation detail without changing the draft', async () => {
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.focusSearch = { code: 'F6', modifiers: [] };
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Keep this draft' } });
+    const result = screen.getByRole('region', { name: 'Primary language' });
+    act(() => result.focus());
+    expect(fireEvent.keyDown(result, { key: 'f', code: 'KeyF', metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(result, { key: 'F6', code: 'F6', isComposing: true })).toBe(true);
+    expect(fireEvent.keyDown(result, { key: 'F6', code: 'F6' })).toBe(false);
+    expect(document.activeElement).toBe(source());
+    expect(source().value).toBe('Keep this draft');
+    await emit('translation_preferences_changed', { ...preferences, disabledShortcuts: ['focusSearch'] });
+    act(() => result.focus());
+    expect(fireEvent.keyDown(result, { key: 'F6', code: 'F6' })).toBe(true);
+    expect(document.activeElement).toBe(result);
+  });
+
   it('consumes clipboard text once and translates without requiring selection capability', async () => {
     bridge.snapshot.capabilities.selection = false;
     const original = bridge.invoke.getMockImplementation()!;
@@ -67,13 +85,13 @@ describe('translation input and shortcuts', () => {
     expect(calls('translation_run')).toHaveLength(0);
   });
 
-  it('dismisses transient actions on hide and preserves the translation draft', async () => {
+  it('dismisses the language picker on hide and preserves the translation draft', async () => {
     await mount();
     fireEvent.change(source(), { target: { value: 'Preserved draft' } });
-    fireEvent.keyDown(source(), { key: 'k', code: 'KeyK', metaKey: true });
-    expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
+    expect(screen.getByRole('dialog', { name: 'Source language' })).toBeTruthy();
     await windowState({ translationVisible: false, translationExtent: 0 });
-    expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Source language' })).toBeNull();
     await windowState({ translationVisible: true, translationExtent: 920 });
     expect(source().value).toBe('Preserved draft');
   });
@@ -237,12 +255,8 @@ describe('translation input and shortcuts', () => {
     expect(screen.queryByRole('button', { name: /^Actions/ })).toBeNull();
     await emit('translation_chrome_action', 'source');
     expect(screen.getByRole('dialog', { name: 'Source language' })).toBeTruthy();
-    await emit('translation_chrome_action', 'actions');
-    expect(screen.queryByRole('menu')).toBeNull();
-    fireEvent.keyDown(source(), { key: 'k', code: 'KeyK', metaKey: true });
-    expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
     await emit('translation_chrome_action', 'translate');
-    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Source language' })).toBeNull();
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
     expect(source().value).toBe('Native control test');
     expect(calls('translation_chrome_update').at(-1)?.[1]?.state.canTranslate).toBe(true);
@@ -312,14 +326,13 @@ describe('translation input and shortcuts', () => {
     expect(source().value).toBe('A draft worth keeping');
   });
 
-  it('dismisses an open menu before hiding the translation and retains source focus', async () => {
+  it('dismisses the language picker before hiding the translation and restores trigger focus', async () => {
     await mount();
-    fireEvent.keyDown(source(), { key: 'k', metaKey: true });
-    expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
-    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
-    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
+    fireEvent.keyDown(screen.getByRole('dialog', { name: 'Source language' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
-    expect(document.activeElement).toBe(source());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
     fireEvent.keyDown(source(), { key: 'Escape' });
     expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation' }]);
   });
@@ -454,6 +467,73 @@ describe('selection across native webviews', () => {
     expect(history.container.querySelectorAll('.history-row.selected')).toHaveLength(1);
   });
 
+  it.each(['history', 'detail'] as const)('retranslates from %s and focuses the new history row', async (origin) => {
+    const translation = await mount(); const history = await mount('history');
+    const record = historySamples[2];
+    const original = within(history.container).getByRole('button', { name: `Translation: ${record.text}` });
+    let target: HTMLElement = original;
+    if (origin === 'detail') {
+      await select(record.id);
+      target = within(translation.container).getByRole('region', { name: 'Primary language' });
+    } else {
+      await windowState({ translationVisible: false, translationExtent: 0 });
+    }
+    act(() => target.focus());
+    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]).toMatchObject({ text: record.text, targets: record.targetLanguages });
+    await waitFor(() => {
+      const newest = history.container.querySelector('[data-record-id="translation-test"] .history-row-select');
+      expect(newest?.getAttribute('aria-pressed')).toBe('true');
+      expect(document.activeElement).toBe(newest);
+    });
+    expect(original.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('focuses the translation input from the selected history row with open details', async () => {
+    const translation = await mount(); const history = await mount('history');
+    await select(sample.id);
+    const row = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: 'f', code: 'KeyF', metaKey: true });
+    expect(document.activeElement).toBe(within(translation.container).getByRole('textbox', { name: 'Source text' }));
+    expect(calls('translation_focus_input')).toHaveLength(1);
+  });
+
+  it('reveals the fresh unstarred result when retranslating from Favorites', async () => {
+    await mount(); const history = await mount('history');
+    const list = within(history.container);
+    fireEvent.click(list.getByRole('button', { name: 'Favorite history' }));
+    const original = await list.findByRole('button', { name: `Translation: ${historySamples[1].text}` });
+    act(() => original.focus());
+    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true });
+    await waitFor(() => {
+      const result = history.container.querySelector('[data-record-id="translation-test"] .history-row-select');
+      expect(result).not.toBeNull();
+      expect(document.activeElement).toBe(result);
+    });
+    expect(list.getByRole('button', { name: 'Favorite history' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('does not move focus or create another record when retranslation fails', async () => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'translation_run') throw 'synthetic translation failure';
+      return invoke(name, args);
+    });
+    await mount(); const history = await mount('history');
+    await select(sample.id);
+    const original = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
+    act(() => original.focus());
+    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true, repeat: true });
+    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true });
+    await screen.findByText('synthetic translation failure');
+    expect(calls('translation_run')).toHaveLength(1);
+    expect(document.activeElement).toBe(original);
+    expect(original.getAttribute('aria-pressed')).toBe('true');
+    expect(history.container.querySelector('[data-record-id="translation-test"]')).toBeNull();
+  });
+
   it('selecting a row in the history view restores translation through the shared event bus', async () => {
     const user = userEvent.setup(); const translation = await mount(); const history = await mount('history');
     const button = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
@@ -469,21 +549,20 @@ describe('selection across native webviews', () => {
     expect(calls('window_hide')).toHaveLength(0);
   });
 
-  it('submitting a selected sample clears history selection and cached output', async () => {
+  it('retranslating from the detail input keeps the old selection until the new result is saved', async () => {
     await mount(); await select();
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: null, retranslate: false }]);
+    expect(bridge.history.selectedId).toBe(sample.id);
     expect(screen.queryByText(sample.translations[0])).toBeNull();
     expect(source().value).toBe(sample.text);
+    await waitFor(() => expect(bridge.history.selectedId).toBe('translation-test'));
   });
 
-  it('a one-target record turns off the second column and permits enabling it through Actions', async () => {
-    const user = userEvent.setup(); await mount(); await select('sample-07');
+  it('a one-target record turns off the second column and settings can re-enable it', async () => {
+    await mount(); await select('sample-07');
     expect(screen.queryByRole('region', { name: 'Secondary language' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Secondary language: None' })).toBeTruthy();
     expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: false });
-    fireEvent.keyDown(source(), { key: 'k', metaKey: true });
-    await user.click(screen.getByRole('menuitem', { name: 'Enable Second Language' }));
+    await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'zh-CN' });
     expect(screen.getByRole('region', { name: 'Secondary language' })).toBeTruthy();
     expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: true });
   });
@@ -634,16 +713,14 @@ describe('language dropdown and menu keyboard behavior', () => {
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
   });
 
-  it('moves through Actions and dismisses it with Tab without trapping focus', async () => {
-    await mount(); await select();
-    expect(screen.queryByRole('button', { name: /^Actions/ })).toBeNull();
-    fireEvent.keyDown(source(), { key: 'k', metaKey: true });
-    fireEvent.keyDown(document.activeElement!, { key: 'End' });
-    expect(document.activeElement).toBe(screen.getByRole('menuitemcheckbox'));
-    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /^Copy Primary Translation/ }));
-    fireEvent.keyDown(document.activeElement!, { key: 'Tab' });
-    expect(screen.queryByRole('menu')).toBeNull();
-    expect(document.activeElement).toBe(source());
+  it('uses the history shortcut without opening the retired Actions menu', async () => {
+    bridge.snapshot.capabilities.selection = false;
+    await mount();
+    const key = { key: '/', code: 'Slash', metaKey: true };
+    expect(fireEvent.keyDown(source(), key)).toBe(false);
+    expect(calls('history_toggle')).toHaveLength(1);
+    expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
+    fireEvent.keyDown(source(), { ...key, repeat: true });
+    expect(calls('history_toggle')).toHaveLength(1);
   });
 });

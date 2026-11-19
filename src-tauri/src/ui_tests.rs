@@ -1213,6 +1213,13 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             settle_chrome_dom(app)?;
             samples.push(check_right_control_dom(app, width)?);
         }
+        samples.push(evaluate_dom(app, r#"
+const button=document.querySelector('.translation-footer .language-picker');
+button.focus({preventScroll:true});
+const style=getComputedStyle(button), outline=style.outlineStyle;
+if(document.activeElement!==button||outline!=='none'||style.borderTopWidth!=='0px')throw Error('target language button still draws a focus border');
+return {languagePickerOutline:outline};
+"#)?);
         settle_chrome_dom(app)?;
         evaluate_dom(app, "document.querySelector('.translation-footer button[aria-label^=\"Secondary language:\"]').click(); return true;")?;
         wait_dom(
@@ -1238,16 +1245,82 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             app,
             "return { ready: !document.querySelector('.language-popover') };",
         )?;
-        evaluate_dom(
-            app,
-            r#"const input = document.querySelector('.source-input'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown', { key:'k', code:'KeyK', metaKey:true, bubbles:true, cancelable:true })); return true;"#,
-        )?;
-        samples.push(wait_dom(app, "const panel = document.querySelector('.action-menu'); const rect = panel?.getBoundingClientRect(); return { ready: !!panel, actionMenuInsideViewport: !!rect && rect.left >= 7 && rect.right <= innerWidth - 7 }; ")?);
-        if samples.last().unwrap()["actionMenuInsideViewport"] != true {
-            return Err("keyboard actions menu extends outside the narrow viewport".into());
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .history_visible = false;
+            apply_translation(app)
+        })?;
+        wait_motion(app)?;
+        on_main(app, |app| {
+            crate::sync_global_shortcuts(app);
+            Ok(())
+        })?;
+        let press_history = || {
+            on_main(app, |app| {
+                send_registered_hotkey(
+                    app,
+                    crate::shortcuts::KeyBinding::new("Slash", &["meta"]),
+                    6,
+                )
+            })
+        };
+        press_history()?;
+        samples.push(wait_records(app,"const row=document.querySelector('#translation-history .history-row-select'),input=document.querySelector('#translation-history input[type=search]');return {ready:!!row&&document.activeElement===input&&!row.closest('[hidden],[inert]'),historyShortcut:'opened'};")?);
+        press_history()?;
+        samples.push(wait_dom(app, "return {ready:document.querySelector('.history-trigger').getAttribute('aria-expanded')==='false'&&!document.querySelector('.action-menu'),historyShortcut:'closed'};")?);
+        wait_motion(app)?;
+        let expect_state = |history: bool, translation: bool, visible: bool| {
+            for _ in 0..100 {
+                let ready = on_main(app, move |app| {
+                    use crate::model::RecordView;
+                    let state = app.state::<AppState>();
+                    let regions = state.windows.lock().unwrap();
+                    let host = app.get_window("translation").ok_or("window_unavailable")?;
+                    Ok(regions.history_visible == history
+                        && regions.translation_visible == translation
+                        && (!history || regions.record_view == RecordView::Translation)
+                        && host.is_visible().map_err(|_| "window_geometry")? == visible)
+                })?;
+                if ready {
+                    return wait_motion(app);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(format!("history hotkey did not settle: history={history}, translation={translation}, visible={visible}"))
+        };
+        for details in [false, true] {
+            // Seed the clipboard region without reading the system clipboard.
+            on_main(app, move |app| {
+                let host = create(app, "translation")?;
+                {
+                    let state = app.state::<AppState>();
+                    let mut regions = state.windows.lock().unwrap();
+                    regions.dismiss();
+                    regions.set_record_view(crate::model::RecordView::Clipboard);
+                    if details {
+                        regions.toggle_record_details();
+                    }
+                }
+                apply_translation(app)?;
+                host.show().map_err(|_| "window_show".to_owned())
+            })?;
+            wait_motion(app)?;
+            press_history()?;
+            expect_state(true, details, true)?;
+            press_history()?;
+            expect_state(false, details, details)?;
+            samples.push(serde_json::json!({"historyShortcut":"clipboard", "details":details}));
         }
-        evaluate_dom(app, "document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true;")?;
-        wait_dom(app, "return { ready: !document.querySelector('.action-menu') && document.activeElement === document.querySelector('.source-input') };")?;
+        on_main(app, |app| hide(app, "translation"))?;
+        press_history()?;
+        expect_state(true, false, true)?;
+        press_history()?;
+        expect_state(false, false, false)?;
+        samples.push(serde_json::json!({"historyShortcut":"hidden host"}));
+        on_main(app, |app| show(app, "translation"))?;
         let mut blank = serde_json::Value::Null;
         for _ in 0..40 {
             blank = on_main(app, native_chrome_sample)?;
@@ -1281,6 +1354,7 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             return Err("native Translate did not invoke validated submit behavior".into());
         }
         samples.push(on_main(app, native_chrome_sample)?);
+        samples.extend(check_retranslation_shortcut(app)?);
         Ok::<(), String>(())
     })();
     DomCase {
@@ -1290,6 +1364,88 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
         error: result.err(),
         samples,
     }
+}
+
+fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let mut samples = Vec::new();
+    records_mode(app, "translation")?;
+    for detail in [false, true] {
+        if detail {
+            on_main(app, |app| {
+                app.get_webview("translation")
+                    .ok_or("translation view")?
+                    .set_focus()
+                    .map_err(|_| "detail focus")?;
+                Ok(())
+            })?;
+            wait_dom(app, "const result=document.querySelector('.result-column');result.focus();return {ready:document.hasFocus()&&document.activeElement===result};")?;
+        } else {
+            wait_records(app, "const row=document.querySelector('#translation-history .history-items .history-row-select');row?.focus();return {ready:!!row&&document.hasFocus()&&document.activeElement===row};")?;
+        }
+        post_records_key(app, 36, 1 << 20, "\r", "\r", false)?;
+        samples.push(wait_dom(app, &format!("const error=document.querySelector('.translation-status[role=alert]')?.textContent;return {{ready:error==='translation_network_disabled_in_tests',detail:{detail},error}};"))?);
+        if !detail {
+            // Restore the displayed translation so the detail shortcut starts on a saved record.
+            let id = app
+                .state::<AppState>()
+                .history
+                .lock()
+                .unwrap()
+                .selected_id()
+                .ok_or("shortcut did not select a history record")?
+                .to_owned();
+            on_main(app, move |app| {
+                crate::commands::select_history_sample(app, Some(id), false, false)
+            })?;
+            wait_dom(app, "return {ready:!!document.querySelector('.result-column span')&&!document.querySelector('.translation-status[role=alert]')};")?;
+        }
+    }
+    let mut result = {
+        let state = app.state::<AppState>();
+        let history = state.history.lock().unwrap();
+        history
+            .record(history.selected_id().ok_or("missing source selection")?)
+            .ok_or("source record missing")?
+    };
+    let origin = result.id.clone();
+    result.id = format!("retranslated-{}", uuid::Uuid::new_v4());
+    result.is_pinned = false;
+    result.is_favorite = false;
+    let id = result.id.clone();
+    let handle = app.clone();
+    let (send, receive) = mpsc::channel();
+    tauri::async_runtime::spawn(async move {
+        let revision = handle
+            .state::<AppState>()
+            .translation_revision
+            .load(Ordering::SeqCst);
+        let _ = send.send(
+            crate::history_runtime::commit_translation(
+                &handle,
+                result,
+                "edge".into(),
+                revision,
+                Some(origin),
+            )
+            .await,
+        );
+    });
+    receive
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "retranslation commit timeout")??;
+    samples.push(wait_records(app, &format!("const row=document.querySelector('[data-record-id={id}] .history-row-select');return {{ready:!!row&&row.getAttribute('aria-pressed')==='true'&&document.hasFocus()&&document.activeElement===row,retranslatedFocus:{id:?},focused:document.activeElement?.closest('[data-record-id]')?.dataset.recordId}};"))?);
+    post_records_key(app, 3, 1 << 20, "f", "f", false)?;
+    samples.push(wait_dom(app, "return {ready:document.hasFocus()&&document.activeElement===document.querySelector('.source-input'),focusInputFromHistory:true};")?);
+    let handle = app.clone();
+    let (send, receive) = mpsc::channel();
+    tauri::async_runtime::spawn(async move {
+        let _ = send
+            .send(crate::history_runtime::update_record(&handle, id, "delete".into(), None).await);
+    });
+    receive
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "retranslation cleanup timeout")??;
+    Ok(samples)
 }
 
 fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Value, String> {
@@ -1655,7 +1811,7 @@ return {ready:!!document.querySelector('#translation-shortcuts-heading')};
             app,
             "settings",
             r#"
-const recorder=document.querySelector('[aria-label="Open Translation Shortcut"]'), row=recorder.parentElement;
+const recorder=document.querySelector('[aria-label="Open Translation shortcut"]'), row=recorder.parentElement;
 const restore=document.querySelector('#translation-shortcuts-heading + button'), transparent='rgba(0, 0, 0, 0)';
 for(const control of [recorder,restore].filter(node=>!node.matches(':hover, :focus-visible'))) {
   const style=getComputedStyle(control);
@@ -1696,7 +1852,7 @@ return {focusVisible};
             return Err("recording did not suspend global shortcuts".into());
         }
         samples.push(wait_view_dom(app, "settings", r#"
-const recorder=document.querySelector('[aria-label="Open Translation Shortcut"]'), prompt=recorder.querySelector('.settings-recorder-prompt');
+const recorder=document.querySelector('[aria-label="Open Translation shortcut"]'), prompt=recorder.querySelector('.settings-recorder-prompt');
 if(!prompt)return {ready:false};
 const before=window.__shortcutRect, after=recorder.getBoundingClientRect();
 const anchored=Math.abs(before.left-after.left)<.1&&['y','height'].every(key=>Math.abs(before[key]-after[key])<.1);
@@ -2027,7 +2183,7 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='15,3,5')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='15,3,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
@@ -2036,12 +2192,12 @@ for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previou
 }
 if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
 for(const selector of ['.settings-recorder','.keycaps kbd','input']) {
-  const starts=(selector==='.keycaps kbd'?allRows:rows).map(row=>row.querySelector(selector).getBoundingClientRect().left);
+  const starts=rows.map(row=>row.querySelector(selector)).filter(Boolean).map(control=>control.getBoundingClientRect().left);
   if(Math.max(...starts)-Math.min(...starts)>.1)throw Error('shortcut column is not left aligned: '+selector+' '+starts);
 }
 if(getComputedStyle(document.querySelector('.hotkey-group .settings-clear')).color!==window.__clipboardMutedIcon)throw Error('shortcut clear must share the muted icon color');
 const button=document.querySelector('[aria-label="Open Clipboard History shortcut"]');
-if(!groups[1].contains(button)||button.disabled||!groups[2].firstElementChild?.querySelector('.settings-field-content')?.textContent?.includes('Open Translation'))throw Error('global launch shortcuts must be in their own groups');
+if(!groups[1].contains(button)||button.disabled||!groups[2].contains(document.querySelector('[aria-label="Open Translation shortcut"]')))throw Error('global launch shortcuts must be in their own groups');
 return {ready:true};
 "#,
         )?;
@@ -2064,7 +2220,8 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   await selection({code:'F7',modifiers:[]});
   let registration;
   try {await selection({code:'ShiftLeft',modifiers:[]});} catch(error) {registration=String(error);}
-  const selected=(await invoke('app_snapshot')).translationPreferences.shortcuts.selection;
+  const keys=(await invoke('app_snapshot')).translationPreferences.shortcuts, selected=keys.selection;
+  if(keys.openTranslation?.code!=='KeyT')throw Error('remapping Autofill Input also changed Open Translation');
   if(registration!=='shortcut_registration'||selected.code!=='F7')throw Error('global registration did not preserve the previous binding: '+JSON.stringify({registration,selected}));
   await selection({code:'KeyT',modifiers:['meta']});
   await set(binding);
@@ -2129,7 +2286,7 @@ return {paused:true};
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        if probe["conflict"] != "shortcut_conflict:selection"
+        if probe["conflict"] != "shortcut_conflict:openTranslation"
             || probe["afterConflict"]["code"] != "KeyJ"
         {
             return Err(format!("settings IPC or shortcut probe failed: {probe}"));
@@ -2262,7 +2419,7 @@ const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>i
 const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
 const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
 const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘O','⇧⌘T'].join(),bindings,kept};
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⇧⌘O'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -2288,6 +2445,7 @@ return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.
             r#"
 window.__customSelection = false;
 window.__TAURI_INTERNALS__.invoke('translation_shortcut_set',{action:'selection',binding:{code:'F7',modifiers:[]}})
+  .then(()=>window.__TAURI_INTERNALS__.invoke('translation_shortcut_set',{action:'openTranslation',binding:{code:'F8',modifiers:[]}}))
   .then(()=>window.__customSelection=true,error=>window.__customSelection=String(error));return true;
 "#,
         )?;
@@ -2322,7 +2480,7 @@ window.__occupiedRestore=null;
 (async()=>{
   let error;try {await invoke('translation_shortcuts_restore',{general:false});} catch(value) {error=String(value);}
   const preferences=(await invoke('app_snapshot')).translationPreferences;
-  window.__occupiedRestore={error,selection:preferences.shortcuts.selection?.code};
+  window.__occupiedRestore={error,selection:preferences.shortcuts.selection?.code,open:preferences.shortcuts.openTranslation?.code};
 })();return true;
 "#,
             )?;
@@ -2331,7 +2489,10 @@ window.__occupiedRestore=null;
                 "settings",
                 "return {ready:!!window.__occupiedRestore,...window.__occupiedRestore};",
             )?;
-            if observed["error"] != "shortcut_registration" || observed["selection"] != "F7" {
+            if observed["error"] != "shortcut_registration"
+                || observed["selection"] != "F7"
+                || observed["open"] != "F8"
+            {
                 return Err(format!("occupied default changed selection: {observed}"));
             }
             on_main(app, |app| {
@@ -2370,7 +2531,13 @@ window.__groupRestore=null;
 (async()=>{
   const local=(action,binding,enabled)=>invoke('clipboard_record_shortcut_set',{action,binding,enabled});
   const set=(action,binding,enabled)=>invoke('translation_shortcut_set',{action,binding,enabled});
+  const rejected=async request=>{try{await request();}catch(error){if(String(error)==='shortcut_clipboard_panel')return;throw error;}throw Error('shared preview/retranslate conflict accepted');};
+  const initial=await invoke('app_snapshot');
+  await rejected(()=>set('translate',initial.clipboardControls.shortcuts.preview.binding));
+  await rejected(()=>local('preview',initial.translationPreferences.shortcuts.translate));
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
+  await set('openTranslation',{code:'F8',modifiers:[]});
+  await set('openTranslation',null,false);
   await set('focusSearch',null,false);
   await set('translate',{code:'KeyZ',modifiers:['alt']});
   await set('translate',null,false);
@@ -2400,7 +2567,7 @@ window.__groupRestore=null;
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
   document.querySelector('#translation-shortcuts-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.translate.code==='Enter');t=p.translationPreferences;
-  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||!t.selectionEnabled||p.clipboardControls.shortcuts.preview.binding.modifiers[0]!=='meta')throw Error('translation restore changed another section or missed a translation default');
+  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||!t.selectionEnabled||t.shortcuts.openTranslation?.code!=='KeyT'||t.disabledShortcuts.includes('openTranslation')||p.clipboardControls.shortcuts.preview.binding.modifiers[0]!=='meta')throw Error('translation restore changed another section or missed a translation default');
   window.__groupRestore={done:true};
 })().catch(error=>window.__groupRestore={done:true,error:String(error)});
 return true;
@@ -4773,41 +4940,55 @@ fn summon_with_clipboard_hotkey(app: &AppHandle) -> Result<(), String> {
         app.global_shortcut()
             .register(shortcut)
             .map_err(|error| error.to_string())?;
-        // Deliver at the registered Carbon handler without posting to the global input stream.
-        let hotkey = [u32::from_be_bytes(*b"htrs"), shortcut.id()];
-        let mut event = std::ptr::null_mut();
-        unsafe {
-            let created = CreateEvent(
-                std::ptr::null(),
-                u32::from_be_bytes(*b"keyb"),
-                5,
-                0.0,
-                0,
-                &mut event,
-            );
-            if created != 0 || event.is_null() {
-                return Err(format!("create clipboard global hotkey event: {created}"));
-            }
-            let param = SetEventParameter(
-                event,
-                u32::from_be_bytes(*b"----"),
-                u32::from_be_bytes(*b"hkid"),
-                8,
-                hotkey.as_ptr().cast(),
-            );
-            let result = if param == 0 {
-                SendEventToEventTarget(event, GetApplicationEventTarget())
-            } else {
-                param
-            };
-            ReleaseEvent(event);
-            if result != 0 {
-                return Err(format!("dispatch clipboard global hotkey event: {result}"));
-            }
-        }
+        send_registered_hotkey(app, nami::shortcuts::clipboard_binding(), 5)?;
         *app.state::<AppState>().target.lock().unwrap() = None;
         Ok(())
     })
+}
+
+fn send_registered_hotkey(
+    app: &AppHandle,
+    binding: crate::shortcuts::KeyBinding,
+    kind: u32,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let shortcut = crate::binding_shortcut(&binding)?;
+    if !app.global_shortcut().is_registered(shortcut) {
+        return Err("global hotkey not registered".into());
+    }
+    // Deliver at the registered Carbon handler without posting to the global input stream.
+    let hotkey = [u32::from_be_bytes(*b"htrs"), shortcut.id()];
+    let mut event = std::ptr::null_mut();
+    unsafe {
+        let created = CreateEvent(
+            std::ptr::null(),
+            u32::from_be_bytes(*b"keyb"),
+            kind,
+            0.0,
+            0,
+            &mut event,
+        );
+        if created != 0 || event.is_null() {
+            return Err(format!("create clipboard global hotkey event: {created}"));
+        }
+        let param = SetEventParameter(
+            event,
+            u32::from_be_bytes(*b"----"),
+            u32::from_be_bytes(*b"hkid"),
+            8,
+            hotkey.as_ptr().cast(),
+        );
+        let result = if param == 0 {
+            SendEventToEventTarget(event, GetApplicationEventTarget())
+        } else {
+            param
+        };
+        ReleaseEvent(event);
+        if result != 0 {
+            return Err(format!("dispatch global hotkey event: {result}"));
+        }
+    }
+    Ok(())
 }
 
 fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
@@ -4870,15 +5051,15 @@ document.addEventListener('copy',event=>window.__smokeKeys.push({key:'Copy',trus
 return true;
 "#,
         )?;
-        press(44, CMD, "/", "/")?;
-        samples.push(check("Show Shortcuts", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Search')&&keys.at(-1)?.trusted")?);
+        press(40, CMD, "k", "k")?;
+        samples.push(check("Show Shortcuts", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Input')&&keys.at(-1)?.trusted")?);
         press(3, CMD, "f", "f")?;
-        samples.push(check("Focus Search", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
+        samples.push(check("Focus Input", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
         for pinned in [true, false] {
             press(35, CMD | SHIFT, "P", "P")?;
             samples.push(check("Pin / Unpin Window", &format!("panel?.querySelector('.history-pin')?.getAttribute('aria-pressed')==='{pinned}'&&keys.at(-1)?.trusted"))?);
         }
-        press(44, CMD, "/", "/")?;
+        press(40, CMD, "k", "k")?;
         check(
             "Keep the running record view open",
             "!!panel?.querySelector('.history-shortcuts-panel')&&!focused",
@@ -4911,11 +5092,11 @@ if(typeof window.__focusShortcutSaved==='string')throw Error(window.__focusShort
 return {ready:window.__focusShortcutSaved===true};
 "#,
         )?;
-        check("Receive changed hotkey in the open record view", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Search⇧ ⌘ F')")?;
+        check("Receive changed hotkey in the open record view", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Input⇧ ⌘ F')")?;
         press(3, CMD | SHIFT, "F", "F")?;
-        samples.push(check("Focus Search after remapping", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
-        press(125, CMD, "\u{f701}", "\u{f701}")?;
-        samples.push(check("Focus Record List", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted")?);
+        samples.push(check("Focus Input after remapping", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
+        press(125, 0, "\u{f701}", "\u{f701}")?;
+        samples.push(check("Down focuses the record list", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted")?);
         press(125, 0, "\u{f701}", "\u{f701}")?;
         samples.push(check("Down", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-first'&&keys.at(-1)?.trusted")?);
         press(126, 0, "\u{f700}", "\u{f700}")?;
@@ -5024,13 +5205,13 @@ return true;
             "settings",
             r#"
 window.__copyShortcutSaved=false;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_shortcut_set',{action:'copyRecord',binding:{code:'KeyC',modifiers:['meta']}}).then(()=>window.__copyShortcutSaved=true,error=>window.__copyShortcutSaved=String(error));return true;
+(async()=>{const invoke=window.__TAURI_INTERNALS__.invoke;await invoke('clipboard_record_shortcut_set',{action:'copyRecord',binding:{code:'KeyC',modifiers:['meta']}});await invoke('clipboard_record_shortcut_set',{action:'focusRecords',binding:{code:'F8',modifiers:[]}});})().then(()=>window.__copyShortcutSaved=true,error=>window.__copyShortcutSaved=String(error));return true;
 "#,
         )?;
         wait_view_dom(app,"settings", "if(typeof window.__copyShortcutSaved==='string')throw Error(window.__copyShortcutSaved);return {ready:window.__copyShortcutSaved===true};")?;
-        press(125, CMD, "\u{f701}", "\u{f701}")?;
+        press(100, 0, "\u{f70b}", "\u{f70b}")?;
         check(
-            "Focus record for Command-C",
+            "Focus record with custom F8 for Command-C",
             "document.activeElement===row?.querySelector('.history-row-select')&&!row?.querySelector('.record-copied')",
         )?;
         samples.push(activate("Command-C copies focused record", Some(CMD))?);
@@ -5449,9 +5630,13 @@ fn run_selection_open(app: &AppHandle) -> DomCase {
                 .translation_revision
                 .load(Ordering::SeqCst);
             let started = std::time::Instant::now();
-            on_main(app, |app| {
+            on_main(app, move |app| {
                 activate_application();
-                crate::selection::test_empty_summon(app)
+                if index == 1 {
+                    crate::selection::show_blank(app)
+                } else {
+                    crate::selection::test_empty_summon(app, true)
+                }
             })?;
             let script = r#"
 const input=document.querySelector('.source-input'),panel=document.querySelector('.translation-clip'),probe=window.__selectionOpenProbe;
@@ -5503,6 +5688,22 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
             }
             samples.push(sample);
         }
+        let state = app.state::<AppState>();
+        let before = state.translation_revision.load(Ordering::SeqCst);
+        on_main(app, |app| crate::selection::test_empty_summon(app, false))?;
+        for _ in 0..100 {
+            if !state.selection_busy.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if state.selection_busy.load(Ordering::SeqCst)
+            || state.translation_revision.load(Ordering::SeqCst) != before
+            || state.selection.lock().unwrap().is_some()
+        {
+            return Err("selection-only shortcut without text interrupted a translation".into());
+        }
+        samples.push(serde_json::json!({"phase":"selection-only-empty-preserves-translation"}));
         Ok(())
     })();
     DomCase {
@@ -6253,6 +6454,7 @@ return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.in
                 completed,
                 "google".into(),
                 revision,
+                None,
             )
             .await;
             let _ = send.send(result.map(|_| ()));

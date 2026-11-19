@@ -205,12 +205,51 @@ fn selection_is_current(state: &AppState, revision: u64) -> bool {
     state.selection_revision.load(Ordering::SeqCst) == revision
 }
 
-pub fn show_selected(app: &AppHandle) -> Result<(), String> {
+pub fn show_blank(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.selection_origin.lock().unwrap().take();
+    state.translation_revision.fetch_add(1, Ordering::SeqCst);
+    let revision = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    queue_input(
+        app,
+        revision,
+        platform::capture_target(),
+        String::new(),
+        None,
+    )
+}
+
+fn queue_input(
+    app: &AppHandle,
+    revision: u64,
+    target: Option<platform::Target>,
+    text: String,
+    error: Option<String>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let source_app = if text.is_empty() {
+        None
+    } else {
+        target.and_then(platform::target_app_info)
+    };
+    *state.selection_source.lock().unwrap() = source_app.clone();
+    *state.selection.lock().unwrap() = Some(SelectionContext {
+        text,
+        source_app,
+        error,
+        presentation_id: Some(revision),
+    });
+    *state.selection_presentation.lock().unwrap() = Some(revision);
+    *state.target.lock().unwrap() = target;
+    state.operation.fetch_add(1, Ordering::SeqCst);
+    dispatch(app)
+}
+
+pub fn show_selected(app: &AppHandle, open_when_empty: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     if state.selection_busy.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    state.translation_revision.fetch_add(1, Ordering::SeqCst);
     let revision = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
     *state.selection.lock().unwrap() = None;
     *state.selection_presentation.lock().unwrap() = None;
@@ -265,28 +304,11 @@ pub fn show_selected(app: &AppHandle) -> Result<(), String> {
                 Err("selection_empty" | "selection_secure") => (String::new(), None),
                 Err(code) => (String::new(), Some(code.to_string())),
             };
-            // An ordinary summon has no source record: do not export an app icon for it.
-            let source_app = if text.is_empty() {
-                None
-            } else {
-                target.and_then(platform::target_app_info)
-            };
-            *state.selection_source.lock().unwrap() = if text.is_empty() {
-                None
-            } else {
-                source_app.clone()
-            };
-            *state.selection.lock().unwrap() = Some(SelectionContext {
-                text,
-                source_app,
-                error,
-                presentation_id: Some(revision),
-            });
-            *state.selection_presentation.lock().unwrap() = Some(revision);
-            *state.target.lock().unwrap() = target;
-            state.operation.fetch_add(1, Ordering::SeqCst);
-            let result = dispatch(&owned);
-            if let Err(code) = result {
+            if text.is_empty() && !open_when_empty && error.is_none() {
+                return;
+            }
+            state.translation_revision.fetch_add(1, Ordering::SeqCst);
+            if let Err(code) = queue_input(&owned, revision, target, text, error) {
                 state.shortcut_errors.lock().unwrap().push(code);
             }
         });
@@ -322,13 +344,13 @@ pub(crate) fn present(app: &AppHandle, presentation_id: u64) -> Result<(), Strin
     target_os = "macos",
     not(feature = "portable-ui")
 ))]
-pub(crate) fn test_empty_summon(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn test_empty_summon(app: &AppHandle, open_when_empty: bool) -> Result<(), String> {
     if app.config().identifier != "dev.local.nami.ui-tests" {
         return Err("permission_denied".into());
     }
     *app.state::<AppState>().selection_origin.lock().unwrap() =
         Some(SelectionOrigin { target: None });
-    show_selected(app)
+    show_selected(app, open_when_empty)
 }
 
 #[cfg(test)]

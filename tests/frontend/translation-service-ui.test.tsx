@@ -225,20 +225,24 @@ describe('translation engine settings', () => {
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'google' });
   });
 
-  it('explains the shared open shortcut and keeps the binding visible when turned off', async () => {
+  it('shows independent open and autofill shortcuts with the same default', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
-    const toggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Open Translation' });
-    const recorder = screen.getByRole<HTMLButtonElement>('button', { name: /^Open Translation Shortcut/ });
-    expect(toggle.getAttribute('aria-description')).toBe('Opens the window, or translates selected text.');
-    expect(recorder.textContent).toBe('⌘T');
-    await user.click(toggle);
-    await waitFor(() => expect(toggle.checked).toBe(false));
-    expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'selection', enabled: false });
-    expect(recorder.disabled).toBe(false);
-    expect(recorder.textContent).toBe('⌘T');
-    await user.click(toggle);
-    await waitFor(() => expect(toggle.checked).toBe(true));
+    const group = within(screen.getByRole('group', { name: 'Translation' }));
+    const open = group.getByRole<HTMLInputElement>('checkbox', { name: 'Open Translation' });
+    const autofill = group.getByRole<HTMLInputElement>('checkbox', { name: 'Autofill Input' });
+    const openKey = group.getByRole('button', { name: /^Open Translation Shortcut/i });
+    const autofillKey = group.getByRole('button', { name: /^Autofill Input Shortcut/i });
+    expect(openKey.textContent).toBe('⌘T');
+    expect(autofillKey.textContent).toBe('⌘T');
+    await user.click(open);
+    await waitFor(() => expect(open.checked).toBe(false));
+    expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'openTranslation', enabled: false });
+    expect(autofill.checked).toBe(true);
+    await user.click(autofillKey);
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
+    await waitFor(() => expect(autofillKey.textContent).toBe('⌘J'));
+    expect(openKey.textContent).toBe('⌘T');
   });
 
   it('records a local shortcut without turning it on', async () => {
@@ -330,9 +334,10 @@ describe('translation engine settings', () => {
     for (const name of ['Languages', 'Connection']) expect(screen.getByRole('region', { name })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Actions shortcut' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Actions shortcut' }));
+    expect(screen.queryByRole('button', { name: 'Actions shortcut' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Translation History shortcut' }));
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
-    await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'actions', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
+    await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'toggleHistory', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
     fireEvent.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
     fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true });
     expect((await screen.findByRole('alertdialog')).textContent).toContain('Already assigned to Open Clipboard.');

@@ -61,14 +61,14 @@ describe('unified records workspace', () => {
       key('KeyP', 'P', true);
       expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'history', pinned: false });
       await windowState({ historyPinned: false });
-      key('Slash', '/');
-      expect(help()?.textContent).toContain('Focus Search');
+      key('KeyK', 'k');
+      expect(help()?.textContent).toContain('Focus Input');
       expect(screen.getAllByRole('dialog', { name: 'Keyboard shortcuts' })).toHaveLength(1);
-      key('Slash', '/', false, true);
+      key('KeyK', 'k', false, true);
       expect(help()).toBeTruthy();
-      key('Slash', '/');
+      key('KeyK', 'k');
       expect(help()).toBeNull();
-      key('Slash', '/');
+      key('KeyK', 'k');
       fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
       expect(help()).toBeNull();
       expect(calls('window_hide')).toHaveLength(0);
@@ -105,7 +105,7 @@ describe('unified records workspace', () => {
     await mount('clipboard');
     const button = within(panel('clipboard')).getByRole('button', { name: 'Keyboard shortcuts' });
     button.focus();
-    fireEvent.keyDown(button, { key: '/', code: 'Slash', metaKey: true });
+    fireEvent.keyDown(button, { key: 'k', code: 'KeyK', metaKey: true });
     expect(button.getAttribute('aria-expanded')).toBe('false');
     fireEvent.keyDown(button, { key: 'f', code: 'KeyF', metaKey: true });
     fireEvent.keyDown(button, { key: 'j', code: 'KeyJ', altKey: true, isComposing: true });
@@ -502,6 +502,7 @@ describe('unified records workspace', () => {
       fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
       expect(document.activeElement).toBe(input);
       expect(input.value).toBe(query);
+      expect([input.selectionStart, input.selectionEnd]).toEqual([0, query.length]);
     }
   });
 
@@ -656,6 +657,22 @@ describe('unified records workspace', () => {
       : { sampleId: selected.closest('article')?.dataset.recordId, part: 'source' });
   });
 
+  it('toggles translation history from the records WebView with the current binding', async () => {
+    bridge.snapshot.capabilities.selection = false;
+    await mount('clipboard'); await switchView('translation');
+    const preferences = bridge.snapshot.translationPreferences;
+    const key = { key: '/', code: 'Slash', metaKey: true };
+    expect(fireEvent.keyDown(search('translation'), key)).toBe(false);
+    expect(calls('history_toggle')).toHaveLength(1);
+    await emit('translation_preferences_changed', { ...preferences, disabledShortcuts: ['toggleHistory'] });
+    expect(fireEvent.keyDown(search('translation'), key)).toBe(true);
+    await emit('translation_preferences_changed', { ...preferences, shortcuts: { ...preferences.shortcuts, toggleHistory: { code: 'KeyJ', modifiers: [] } } });
+    expect(fireEvent.keyDown(search('translation'), { key: 'j', code: 'KeyJ' })).toBe(true);
+    const row = panel('translation').querySelector('.history-row-select')!;
+    expect(fireEvent.keyDown(row, { key: 'j', code: 'KeyJ' })).toBe(false);
+    expect(calls('history_toggle')).toHaveLength(2);
+  });
+
   it('previews the focused translation with the shared shortcut and closes on the next press', async () => {
     await mount('clipboard');
     await switchView('translation');
@@ -741,7 +758,7 @@ describe('unified records workspace', () => {
     expect(list.scrollTop).toBe(100);
   });
 
-  it('keeps row focus when opening details and focuses the translation input only for retranslation', async () => {
+  it('keeps row focus when opening details and moves it to the new row after retranslation', async () => {
     const user = userEvent.setup();
     await mount('translation'); await switchView('translation');
     const row = panel('translation').querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
@@ -751,7 +768,7 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
     fireEvent.contextMenu(row);
     await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
-    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Source text' }));
+    await waitFor(() => expect(document.activeElement?.closest('[data-record-id]')?.getAttribute('data-record-id')).toBe('translation-test'));
   });
 
   it('opens translation details on the first unpinned record and follows hover or focus', async () => {

@@ -323,30 +323,27 @@ pub fn records_navigation_resolve(
 }
 
 #[tauri::command]
+pub fn translation_focus_input(window: Webview, app: AppHandle) -> Result<(), String> {
+    authorize(&window, &["clipboard", "history", "translation"])?;
+    let state = app.state::<AppState>();
+    let regions = state.windows.lock().unwrap();
+    if !regions.translation_visible
+        || regions.record_view != crate::model::RecordView::Translation
+        || regions.records_editor_open
+    {
+        return Ok(());
+    }
+    drop(regions);
+    let view = app.get_webview("translation").ok_or("window_unavailable")?;
+    view.set_focus().map_err(|_| "window_focus")?;
+    view.emit("translation_focus_requested", ())
+        .map_err(|_| "event_emit".into())
+}
+
+#[tauri::command]
 pub fn history_toggle(window: Webview, app: AppHandle) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
-    {
-        let state = app.state::<AppState>();
-        let mut windows = state.windows.lock().unwrap();
-        windows.toggle_history();
-        if windows.history_visible {
-            windows.records_focus += 1;
-        }
-    }
-    windows::apply_translation(&app)?;
-    if platform::capabilities().native_history
-        && app
-            .state::<AppState>()
-            .windows
-            .lock()
-            .unwrap()
-            .history_visible
-    {
-        if let Some(view) = app.get_webview("clipboard") {
-            view.set_focus().map_err(|_| "window_focus")?;
-        }
-    }
-    Ok(())
+    authorize(&window, &["translation", "history", "clipboard"])?;
+    crate::records_runtime::toggle_translation_history(&app)
 }
 
 #[tauri::command]
@@ -542,9 +539,6 @@ pub(crate) fn select_history_sample(
             windows::apply_translation(app)?;
             if let Some(view) = app.get_webview("translation") {
                 view.window().show().map_err(|_| "window_show")?;
-                if retranslate {
-                    view.set_focus().map_err(|_| "window_focus")?;
-                }
             }
         } else {
             windows::apply_translation(app)?;
@@ -925,20 +919,27 @@ fn publish_preferences(
 }
 
 // Keep the active key registered until macOS accepts the replacement and storage succeeds.
-async fn stage_global_shortcut(
+async fn stage_global_shortcuts(
     app: &AppHandle,
-    next: Option<tauri_plugin_global_shortcut::Shortcut>,
-) -> Result<Option<tauri_plugin_global_shortcut::Shortcut>, String> {
+    next: impl IntoIterator<Item = tauri_plugin_global_shortcut::Shortcut>,
+) -> Result<Vec<tauri_plugin_global_shortcut::Shortcut>, String> {
+    let next: Vec<_> = next.into_iter().collect();
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     on_main(app, move |app| {
-        let Some(next) = next else { return Ok(None) };
-        if app.global_shortcut().is_registered(next) {
-            return Ok(None);
+        let mut staged = Vec::new();
+        for shortcut in next {
+            if app.global_shortcut().is_registered(shortcut) {
+                continue;
+            }
+            if app.global_shortcut().register(shortcut).is_err() {
+                for shortcut in staged {
+                    let _ = app.global_shortcut().unregister(shortcut);
+                }
+                return Err("shortcut_registration".into());
+            }
+            staged.push(shortcut);
         }
-        app.global_shortcut()
-            .register(next)
-            .map_err(|_| "shortcut_registration")?;
-        Ok(Some(next))
+        Ok(staged)
     })
     .await?
 }
@@ -1005,51 +1006,49 @@ pub async fn translation_shortcut_set(
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
     let mut preferences = state.translation_preferences.lock().unwrap().clone();
+    let shortcut_action = crate::shortcuts::ShortcutAction::parse(&action)?;
     if let Some(enabled) = enabled {
         if binding.is_some() {
             return Err("invalid_argument".into());
         }
         preferences.set_shortcut_enabled(&action, enabled)?;
     } else {
-        if crate::shortcuts::GENERAL_SHORTCUT_ACTIONS
-            .contains(&crate::shortcuts::ShortcutAction::parse(&action)?)
-            && binding.as_ref().is_some_and(|binding| {
-                state
-                    .clipboard_options
-                    .lock()
-                    .unwrap()
-                    .record_shortcuts
-                    .conflicts(binding, None)
-            })
-        {
+        if binding.as_ref().is_some_and(|binding| {
+            let options = state.clipboard_options.lock().unwrap();
+            let records = &options.record_shortcuts;
+            if shortcut_action == crate::shortcuts::ShortcutAction::Translate {
+                records.conflicts_with_translation(binding)
+            } else {
+                crate::shortcuts::GENERAL_SHORTCUT_ACTIONS.contains(&shortcut_action)
+                    && records.conflicts(binding, None)
+            }
+        }) {
             return Err("shortcut_clipboard_panel".into());
         }
         let clipboard = state.clipboard_shortcut.lock().unwrap().binding.clone();
         preferences.set_shortcut(&action, binding, clipboard.as_ref())?;
     }
-    if action != "selection" || !platform::capabilities().selection {
+    if !shortcut_action.is_global() || !platform::capabilities().selection {
         return commit_preferences(&app, preferences, false).await;
     }
     let next = preferences
-        .shortcuts
-        .selection
-        .as_ref()
-        .filter(|_| preferences.selection_enabled)
+        .global_binding(shortcut_action)
         .map(crate::binding_shortcut)
         .transpose()?;
-    let staged = stage_global_shortcut(&app, next).await?;
+    let staged = stage_global_shortcuts(&app, next).await?;
     if let Err(error) = store_preferences(&app, preferences.clone()).await {
-        if let Some(staged) = staged {
-            use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            let _ = on_main(&app, move |app| app.global_shortcut().unregister(staged)).await;
-        }
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let _ = on_main(&app, move |app| {
+            for shortcut in staged {
+                let _ = app.global_shortcut().unregister(shortcut);
+            }
+        })
+        .await;
         return Err(error);
     }
     on_main(&app, move |app| {
         let state = app.state::<AppState>();
-        if let Some(staged) = staged {
-            state.registered_shortcuts.lock().unwrap().push(staged);
-        }
+        state.registered_shortcuts.lock().unwrap().extend(staged);
         *state.translation_preferences.lock().unwrap() = preferences.clone();
         crate::sync_global_shortcuts(&app);
         publish_preferences(&app, &preferences)
@@ -1098,6 +1097,11 @@ pub async fn translation_shortcuts_restore(
         || clipboard
             .as_ref()
             .is_some_and(|binding| next_records.conflicts(binding, None))
+        || preferences
+            .shortcuts
+            .translate
+            .as_ref()
+            .is_some_and(|binding| next_records.conflicts_with_translation(binding))
     {
         return Err("shortcut_clipboard_panel".into());
     }
@@ -1110,17 +1114,14 @@ pub async fn translation_shortcuts_restore(
         .map(|value| json(serde_json::to_string(value)))
         .transpose()?;
     let selection_enabled = preferences.selection_enabled;
-    let next = if !general && platform::capabilities().selection {
-        preferences
-            .shortcuts
-            .selection
-            .as_ref()
-            .map(crate::binding_shortcut)
-            .transpose()?
-    } else {
-        None
-    };
-    let staged = stage_global_shortcut(&app, next).await?;
+    use crate::shortcuts::ShortcutAction::{Selection, ToggleHistory};
+    let next = [Selection, ToggleHistory]
+        .into_iter()
+        .filter(|_| !general && platform::capabilities().selection)
+        .filter_map(|action| preferences.global_binding(action))
+        .map(crate::binding_shortcut)
+        .collect::<Result<Vec<_>, _>>()?;
+    let staged = stage_global_shortcuts(&app, next).await?;
     let saved = crate::clipboard_runtime::database(&app, move |db| {
         db.reset_shortcut_group(
             &bindings,
@@ -1134,14 +1135,12 @@ pub async fn translation_shortcuts_restore(
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let state = app.state::<AppState>();
         if let Err(error) = saved {
-            if let Some(staged) = staged {
-                let _ = app.global_shortcut().unregister(staged);
+            for shortcut in staged {
+                let _ = app.global_shortcut().unregister(shortcut);
             }
             return Err(error);
         }
-        if let Some(staged) = staged {
-            state.registered_shortcuts.lock().unwrap().push(staged);
-        }
+        state.registered_shortcuts.lock().unwrap().extend(staged);
         *state.translation_preferences.lock().unwrap() = preferences.clone();
         if let Some(records) = records {
             state.clipboard_options.lock().unwrap().record_shortcuts = records;
@@ -1352,7 +1351,16 @@ pub(crate) async fn run_translation(
         is_pinned: false,
         source_app,
     };
-    crate::history_runtime::commit_translation(&app, record, engine, revision).await
+    crate::history_runtime::commit_translation(
+        &app,
+        record,
+        engine,
+        revision,
+        reuse
+            .filter(|reuse| reuse.focus_history)
+            .map(|reuse| reuse.record_id),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1625,7 +1633,7 @@ pub async fn clipboard_shortcut_set(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|_| "storage_record")?;
-    let staged = stage_global_shortcut(&app, next).await?;
+    let staged = stage_global_shortcuts(&app, next).await?;
     let saved = crate::clipboard_runtime::database(&app, move |database| {
         if let Some(records) = defaults_json {
             database.reset_clipboard_shortcuts(&value, &records)
@@ -1638,14 +1646,12 @@ pub async fn clipboard_shortcut_set(
     on_main(&app, move |app| {
         let state = app.state::<AppState>();
         if let Err(error) = saved {
-            if let Some(staged) = staged {
-                let _ = app.global_shortcut().unregister(staged);
+            for shortcut in staged {
+                let _ = app.global_shortcut().unregister(shortcut);
             }
             return Err(error);
         }
-        if let Some(staged) = staged {
-            state.registered_shortcuts.lock().unwrap().push(staged);
-        }
+        state.registered_shortcuts.lock().unwrap().extend(staged);
         *state.clipboard_shortcut.lock().unwrap() = shortcut;
         if let Some(defaults) = defaults {
             state.clipboard_options.lock().unwrap().record_shortcuts = defaults;

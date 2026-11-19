@@ -1,6 +1,6 @@
 import { translationShortcutEnabled, type AppSnapshot } from './contracts';
 import type { MessageKey } from './i18n';
-import { bindingFromEvent, editsText, recordWindowActions, sameBinding, type KeyBinding } from './shortcuts';
+import { bindingFromEvent, editsText, globalTranslationActions, recordWindowActions, sameBinding, type KeyBinding } from './shortcuts';
 
 export const recordNavigationActions = ['navigateUp', 'navigateDown', 'previousCategory', 'nextCategory'] as const;
 export const sharedRecordActions = [...recordNavigationActions, 'switchView', 'focusRecords', 'preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
@@ -18,7 +18,7 @@ export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
     note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', [primary, 'shift']),
     navigateUp: shortcut('ArrowUp', []), navigateDown: shortcut('ArrowDown', []),
     previousCategory: shortcut('ArrowLeft', []), nextCategory: shortcut('ArrowRight', []),
-    switchView: shortcut('Tab', []), focusRecords: shortcut('ArrowDown', [primary]), copyRecord: shortcut('KeyC', [primary, 'shift']),
+    switchView: shortcut('Tab', []), focusRecords: { binding: null, enabled: true }, copyRecord: shortcut('KeyC', [primary, 'shift']),
     favorite: shortcut('KeyF'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
   };
 }
@@ -40,7 +40,8 @@ export function clipboardPanelShortcuts(snapshot: AppSnapshot) {
     const { binding } = shortcut;
     const globalConflict = !!binding && [
       snapshot.clipboardShortcutEnabled ? snapshot.clipboardBinding : null,
-      snapshot.translationPreferences.selectionEnabled ? snapshot.translationPreferences.shortcuts.selection : null,
+      ...globalTranslationActions.filter((action) => translationShortcutEnabled(snapshot.translationPreferences, action)).map((action) => snapshot.translationPreferences.shortcuts[action]),
+      translationShortcutEnabled(snapshot.translationPreferences, 'toggleHistory') ? snapshot.translationPreferences.shortcuts.toggleHistory : null,
       ...(action === 'copyRecord' || action === 'focusRecords' ? recordWindowActions.filter((action) => translationShortcutEnabled(snapshot.translationPreferences, action)).map((action) => snapshot.translationPreferences.shortcuts[action]) : []),
     ].some((global) => global && sameBinding(global, binding));
     return { action, ...shortcut, globalConflict };

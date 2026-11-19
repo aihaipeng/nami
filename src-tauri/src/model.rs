@@ -154,9 +154,13 @@ impl WindowState {
     }
 
     pub fn toggle_history(&mut self) {
-        self.history_visible = self.record_view != RecordView::Translation || !self.history_visible;
-        self.record_view = RecordView::Translation;
-        self.show_translation();
+        if self.history_visible && self.record_view == RecordView::Clipboard {
+            self.set_record_view(RecordView::Translation);
+        } else {
+            self.record_view = RecordView::Translation;
+            self.history_visible = !self.history_visible;
+            self.restore_translation_width();
+        }
     }
 
     pub fn show_translation(&mut self) {
@@ -460,7 +464,7 @@ mod tests {
         assert!(!state.history_visible && state.translation_visible);
         state.set_record_view(super::RecordView::Clipboard);
         state.toggle_history();
-        assert!(state.history_visible && state.translation_visible);
+        assert!(state.history_visible && !state.translation_visible);
         assert_eq!(state.record_view, super::RecordView::Translation);
     }
 
@@ -756,6 +760,34 @@ mod tests {
             closed.spring(open, PanelFrame::default(), 0.5).0.history,
             441.0
         );
+    }
+
+    #[test]
+    fn history_shortcut_preserves_the_right_pane_in_all_three_entry_points() {
+        for details in [false, true] {
+            let mut state = WindowState::default();
+            state.set_record_view(RecordView::Clipboard);
+            if details {
+                state.toggle_record_details();
+            }
+            state.toggle_history();
+            assert_eq!(state.record_view, RecordView::Translation);
+            assert!(state.history_visible);
+            assert_eq!(state.translation_visible, details);
+            state.toggle_history();
+            assert!(!state.history_visible);
+            assert_eq!(state.translation_visible, details);
+        }
+        let mut state = WindowState::default();
+        state.summon_translation();
+        state.toggle_history();
+        assert!(state.history_visible && state.translation_visible);
+        state.toggle_history();
+        assert!(!state.history_visible && state.translation_visible);
+        state.dismiss();
+        state.toggle_history();
+        assert!(state.history_visible && !state.translation_visible);
+        assert_eq!(state.record_view, RecordView::Translation);
     }
 
     #[test]

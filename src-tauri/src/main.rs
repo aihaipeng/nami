@@ -214,27 +214,22 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
     let suspended = state
         .shortcuts_suspended
         .load(std::sync::atomic::Ordering::SeqCst);
-    let (selection, selection_enabled) = {
-        let preferences = state.translation_preferences.lock().unwrap();
-        (
-            preferences.shortcuts.selection.clone(),
-            preferences.selection_enabled,
-        )
-    };
+    use shortcuts::ShortcutAction::{OpenTranslation, Selection, ToggleHistory};
     let previous = state.registered_shortcuts.lock().unwrap().clone();
     let mut desired = Vec::new();
     if !suspended {
         desired.extend(clipboard_shortcut(&state));
-        if selection_enabled {
-            if let Some(binding) = selection {
-                if let Ok(shortcut) = binding_shortcut(&binding) {
-                    if !desired
-                        .iter()
-                        .any(|current| same_shortcut(current, &shortcut))
-                    {
-                        desired.push(shortcut);
-                    }
-                }
+        let preferences = state.translation_preferences.lock().unwrap();
+        for shortcut in [Selection, OpenTranslation, ToggleHistory]
+            .into_iter()
+            .filter_map(|action| preferences.global_binding(action))
+            .filter_map(|binding| binding_shortcut(binding).ok())
+        {
+            if !desired
+                .iter()
+                .any(|current| same_shortcut(current, &shortcut))
+            {
+                desired.push(shortcut);
             }
         }
     }
@@ -289,16 +284,26 @@ fn main() {
                         {
                             return;
                         }
-                        let selection = {
-                            let prefs = state.translation_preferences.lock().unwrap();
-                            prefs
-                                .selection_enabled
-                                .then_some(prefs.shortcuts.selection.as_ref())
-                                .flatten()
-                                .and_then(|binding| binding_shortcut(binding).ok())
+                        use shortcuts::ShortcutAction::{
+                            OpenTranslation, Selection, ToggleHistory,
                         };
                         let matches = |candidate: &Shortcut| {
                             candidate.key == key && candidate.mods == modifiers
+                        };
+                        let (selection, open, history) = {
+                            let prefs = state.translation_preferences.lock().unwrap();
+                            let matched = |action| {
+                                prefs
+                                    .global_binding(action)
+                                    .and_then(|binding| binding_shortcut(binding).ok())
+                                    .as_ref()
+                                    .is_some_and(matches)
+                            };
+                            (
+                                matched(Selection),
+                                matched(OpenTranslation),
+                                matched(ToggleHistory),
+                            )
                         };
                         let result = if clipboard_shortcut(&state).as_ref().is_some_and(matches) {
                             if pressed {
@@ -306,13 +311,17 @@ fn main() {
                             } else {
                                 Ok(())
                             }
-                        } else if selection.as_ref().is_some_and(matches) {
+                        } else if selection {
                             if pressed {
                                 selection::prepare_selected(&owned);
                                 Ok(())
                             } else {
-                                selection::show_selected(&owned)
+                                selection::show_selected(&owned, open)
                             }
+                        } else if open && pressed {
+                            selection::show_blank(&owned)
+                        } else if history && !pressed {
+                            records_runtime::toggle_translation_history(&owned)
                         } else {
                             Ok(())
                         };
@@ -349,6 +358,7 @@ fn main() {
             commands::records_navigation_resolve,
             commands::history_visibility_set,
             commands::history_toggle,
+            commands::translation_focus_input,
             commands::history_width_set,
             commands::translation_chrome_update,
             commands::history_sample_select,

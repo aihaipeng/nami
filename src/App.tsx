@@ -129,7 +129,8 @@ export default function App() {
       });
       if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {
         const visible = name === 'history_toggle' ? value.window.recordView !== 'translation' || !value.window.historyVisible : Boolean(args?.visible);
-        return { ...value, window: { ...value.window, recordView: 'translation', translationVisible: true, translationExtent: value.window.translationWidth, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };
+        const translationVisible = name === 'history_toggle' ? value.window.translationVisible : true;
+        return { ...value, window: { ...value.window, recordView: 'translation', translationVisible, translationExtent: translationVisible ? value.window.translationWidth : 0, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };
       });
       if (name === 'history_width_set') setSnapshot((value) => ({ ...value, window: { ...value.window, historyWidth: Math.min(720, Math.max(280, Number(args?.width))), historyExtent: value.window.historyVisible ? Math.min(720, Math.max(280, Number(args?.width))) : 0 } }));
       if (name === 'translation_columns_set') setSnapshot((value) => ({ ...value, window: { ...value.window, secondaryEnabled: Boolean(args?.secondaryEnabled) } }));
@@ -147,7 +148,7 @@ export default function App() {
       if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
       return;
     }
-    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'records_open_focus_set'].includes(name);
+    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'translation_focus_input', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'records_open_focus_set'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);

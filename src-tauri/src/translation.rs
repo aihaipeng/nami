@@ -183,9 +183,21 @@ impl Preferences {
             preferences.selection_enabled = enabled == "true";
         }
         if let Some(disabled) = read("translation_disabled_shortcuts")
-            .and_then(|value| serde_json::from_str(&value).ok())
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
         {
-            preferences.disabled_shortcuts = disabled;
+            preferences.disabled_shortcuts = disabled
+                .iter()
+                .filter_map(|action| shortcuts::ShortcutAction::parse(action).ok())
+                .collect();
+        }
+        if !preferences.selection_enabled
+            && read("translation_shortcuts")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .is_none_or(|value| value.get("openTranslation").is_none())
+        {
+            preferences
+                .disabled_shortcuts
+                .push(shortcuts::ShortcutAction::OpenTranslation);
         }
         preferences.shortcuts = TranslationShortcuts::from_store(read, primary);
         preferences
@@ -251,6 +263,17 @@ impl Preferences {
         let action = shortcuts::ShortcutAction::parse(action)?;
         self.shortcuts = shortcuts::assign_shortcut(&self.shortcuts, action, binding, clipboard)?;
         Ok(())
+    }
+
+    pub fn global_binding(&self, action: shortcuts::ShortcutAction) -> Option<&KeyBinding> {
+        use shortcuts::ShortcutAction::{OpenTranslation, Selection, ToggleHistory};
+        match action {
+            Selection if self.selection_enabled => self.shortcuts.get(action),
+            OpenTranslation | ToggleHistory if !self.disabled_shortcuts.contains(&action) => {
+                self.shortcuts.get(action)
+            }
+            _ => None,
+        }
     }
 
     pub fn set_shortcut_enabled(&mut self, action: &str, enabled: bool) -> Result<(), String> {
@@ -333,6 +356,8 @@ pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Resul
 pub struct TranslationReuse {
     pub record_id: String,
     pub target_index: Option<usize>,
+    #[serde(default)]
+    pub focus_history: bool,
 }
 
 pub fn source_app_for_translation(
@@ -705,6 +730,59 @@ pub async fn translate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_launch_binding_and_disabled_state_survive_separation() {
+        use shortcuts::ShortcutAction::{OpenTranslation, Selection};
+        let mut legacy = serde_json::to_value(TranslationShortcuts::defaults("meta")).unwrap();
+        legacy.as_object_mut().unwrap().remove("openTranslation");
+        legacy["selection"] = serde_json::to_value(KeyBinding::new("F7", &[])).unwrap();
+        let mut preferences = Preferences::from_store(
+            |key| match key {
+                "translation_shortcuts" => Some(legacy.to_string()),
+                "translation_selection_enabled" => Some("false".into()),
+                "translation_disabled_shortcuts" => Some(r#"["actions","copyPrimary"]"#.into()),
+                _ => None,
+            },
+            "meta",
+        );
+        assert_eq!(
+            preferences.shortcuts.get(OpenTranslation),
+            preferences.shortcuts.get(Selection)
+        );
+        assert_eq!(preferences.global_binding(OpenTranslation), None);
+        assert_eq!(
+            preferences.disabled_shortcuts,
+            [shortcuts::ShortcutAction::CopyPrimary, OpenTranslation]
+        );
+        assert_eq!(preferences.global_binding(Selection), None);
+        preferences
+            .set_shortcut_enabled("openTranslation", true)
+            .unwrap();
+        assert_eq!(
+            preferences.global_binding(OpenTranslation),
+            Some(&KeyBinding::new("F7", &[]))
+        );
+        assert_eq!(preferences.global_binding(Selection), None);
+        preferences
+            .set_shortcut("openTranslation", None, None)
+            .unwrap();
+        let prefs = preferences.entries();
+        let restored = Preferences::from_store(
+            |key| {
+                prefs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.clone())
+            },
+            "meta",
+        );
+        assert_eq!(restored.shortcuts.get(OpenTranslation), None);
+        assert_eq!(
+            restored.shortcuts.get(Selection),
+            Some(&KeyBinding::new("F7", &[]))
+        );
+    }
 
     #[test]
     fn disabled_shortcuts_round_trip_without_changing_bindings() {

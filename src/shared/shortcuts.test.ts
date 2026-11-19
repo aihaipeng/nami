@@ -5,10 +5,13 @@ describe('translation shortcuts', () => {
   const shortcuts = defaultTranslationShortcuts('meta');
 
   it('keeps the current translation bindings as defaults', () => {
+    expect(shortcuts.openTranslation).toEqual(shortcuts.selection);
+    expect(shortcutError('openTranslation', shortcuts.selection, shortcuts)).toBeNull();
     expect(shortcuts.selection).toEqual({ code: 'KeyT', modifiers: ['meta'] });
+    expect(shortcuts.showShortcuts).toEqual({ code: 'KeyK', modifiers: ['meta'] });
     expect(shortcuts.translate).toEqual({ code: 'Enter', modifiers: ['meta'] });
     expect(shortcuts.pin).toEqual({ code: 'KeyP', modifiers: ['shift', 'meta'] });
-    expect(defaultTranslationShortcuts('control').actions).toEqual({ code: 'KeyK', modifiers: ['control'] });
+    expect(defaultTranslationShortcuts('control').toggleHistory).toEqual({ code: 'Slash', modifiers: ['control'] });
   });
 
   it('matches a keyboard event and rejects reserved, clipboard, and duplicate bindings', () => {
@@ -16,9 +19,9 @@ describe('translation shortcuts', () => {
     expect(matchesBinding(shortcuts.pin, { key: 'p', code: 'KeyP', metaKey: true, ctrlKey: false, altKey: false, shiftKey: true })).toBe(true);
     expect(shortcutError('translate', { code: 'KeyW', modifiers: ['meta'] }, shortcuts)).toBeNull();
     expect(shortcutError('translate', { code: 'KeyZ', modifiers: ['meta', 'shift'] }, shortcuts)).toBeNull();
-    expect(shortcutError('actions', { code: 'Backquote', modifiers: ['control'] }, shortcuts)).toBe('shortcut_clipboard');
+    expect(shortcutError('toggleHistory', { code: 'Backquote', modifiers: ['control'] }, shortcuts)).toBe('shortcut_clipboard');
     expect(shortcutError('pin', { code: 'Enter', modifiers: ['meta'] }, shortcuts)).toBe('shortcut_conflict:translate');
     expect(shortcutError('translate', { code: 'KeyP', modifiers: ['shift'] }, shortcuts)).toBeNull();
-    expect(shortcutError('actions', null, shortcuts)).toBeNull();
+    expect(shortcutError('toggleHistory', null, shortcuts)).toBeNull();
   });
 });

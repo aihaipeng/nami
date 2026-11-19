@@ -18,6 +18,52 @@ pub(crate) fn defer_navigation(app: &AppHandle, target: &str) -> Result<bool, St
     Ok(true)
 }
 
+pub(crate) fn toggle_translation_history(app: &AppHandle) -> Result<(), String> {
+    if defer_navigation(app, "toggle:history")? {
+        return Ok(());
+    }
+    let state = app.state::<AppState>();
+    let was_hidden = app
+        .get_window("translation")
+        .map(|window| window.is_visible())
+        .transpose()
+        .map_err(|_| "window_geometry")?
+        != Some(true);
+    let (history, translation) = {
+        let mut regions = state.windows.lock().unwrap();
+        if was_hidden {
+            regions.dismiss();
+        }
+        if regions.history_visible && regions.record_view == nami::model::RecordView::Clipboard {
+            state.operation.fetch_add(1, Ordering::SeqCst);
+        }
+        regions.toggle_history();
+        if regions.history_visible {
+            regions.records_focus += 1;
+        }
+        (regions.history_visible, regions.translation_visible)
+    };
+    if was_hidden {
+        *state.target.lock().unwrap() = crate::platform::capture_target();
+        windows::prewarm_records(app)?;
+    }
+    windows::apply_translation(app)?;
+    if history && crate::platform::capabilities().native_history {
+        if was_hidden {
+            app.get_window("translation")
+                .ok_or("window_unavailable")?
+                .show()
+                .map_err(|_| "window_show")?;
+        }
+        windows::focus_records_editor(app)?;
+    } else if translation {
+        if let Some(view) = app.get_webview("translation") {
+            view.set_focus().map_err(|_| "window_focus")?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pending = state.records_navigation.lock().unwrap().take();
@@ -33,6 +79,7 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
     match pending.as_deref() {
         Some("view:clipboard") => windows::set_record_view(app, "clipboard"),
         Some("view:translation") => windows::set_record_view(app, "translation"),
+        Some("toggle:history") => toggle_translation_history(app),
         Some(target) => {
             if target == "translation" {
                 if state.selection.lock().unwrap().is_some() {

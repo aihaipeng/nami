@@ -26,8 +26,8 @@ describe('clipboard recording settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     const restore = (name: string) => within(screen.getByRole('region', { name })).getByRole('button', { name: 'Restore Default Shortcuts' });
     fireEvent.click(restore('General'));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Focus Search shortcut' }).textContent).toBe('⌘F'));
-    expect(screen.getByRole('checkbox', { name: 'Focus Search' })).toHaveProperty('checked', true);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Focus Input shortcut' }).textContent).toBe('⌘F'));
+    expect(screen.getByRole('checkbox', { name: 'Focus Input' })).toHaveProperty('checked', true);
     expect(screen.getByRole('checkbox', { name: 'Add/Remove Note' })).toHaveProperty('checked', true);
     expect(records.note.binding?.code).toBe('KeyN');
     expect(records.preview).toEqual({ binding: { code: 'KeyY', modifiers: ['meta'] }, enabled: true });
@@ -62,22 +62,26 @@ describe('clipboard recording settings', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['General', 'Clipboard', 'Translation']);
     const general = within(screen.getByRole('group', { name: 'General' }));
     expect(general.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
-      'Pin / Unpin Window', 'Show Shortcuts', 'Focus Search', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Switch Record View', 'Focus Record List', 'Preview', 'Add/Remove Note', 'Favorite/Unfavorite', 'Pin/Unpin', 'Copy', 'Delete',
+      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Focus Record List', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts',
     ]);
     const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
     for (const [name, key] of [['Navigate Up', '↑'], ['Navigate Down', '↓'], ['Previous Category', '←'], ['Next Category', '→']]) {
       expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
     }
     expect(general.getByRole('button', { name: 'Switch Record View shortcut' }).textContent).toBe('Tab');
-    expect(clipboard.getAllByRole('checkbox')).toHaveLength(3);
-    for (const name of ['Open Clipboard History', 'Extract Text', 'Translate']) {
+    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Extract Text'];
+    expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
+    for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
       expect(clipboard.getByRole<HTMLInputElement>('checkbox', { name }).checked).toBe(true);
     }
     const translation = within(screen.getByRole('group', { name: 'Translation' }));
     expect(translation.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
-      'Open Translation', 'Translate', 'Copy Primary Translation', 'Copy Secondary Translation', 'Actions',
+      'Autofill Input', 'Open Translation', 'Translate', 'Open Translation History', 'Copy Primary Translation', 'Copy Secondary Translation',
     ]);
+    await emit('locale_changed', 'zh-CN');
+    expect(screen.getByRole('checkbox', { name: '打开翻译历史' })).toBeTruthy();
+    await emit('locale_changed', 'en');
     fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
     expect(screen.queryByRole('button', { name: 'Open Clipboard History shortcut' })).toBeNull();
   });
@@ -86,7 +90,7 @@ describe('clipboard recording settings', () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     const general = within(screen.getByRole('group', { name: 'General' }));
-    const search = general.getByRole('button', { name: 'Focus Search shortcut' });
+    const search = general.getByRole('button', { name: 'Focus Input shortcut' });
     const preview = screen.getByRole('button', { name: 'Preview shortcut' });
     fireEvent.click(preview);
     fireEvent.keyDown(window, { key: 'f', code: 'KeyF', metaKey: true });
@@ -121,6 +125,19 @@ describe('clipboard recording settings', () => {
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(0);
   });
 
+  it('leaves list focus unbound by default and hides the unused secondary copy shortcut', async () => {
+    const prefs = bridge.snapshot.translationPreferences;
+    const saved = { code: 'KeyU', modifiers: ['meta'] as const };
+    prefs.shortcuts.copySecondary = { ...saved, modifiers: [...saved.modifiers] };
+    prefs.secondaryLanguage = 'none';
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    expect(screen.getByRole('button', { name: 'Focus Record List shortcut' }).textContent).toBe('Add Hotkey');
+    expect(screen.queryByRole('button', { name: 'Copy Secondary Translation shortcut' })).toBeNull();
+    await emit('translation_preferences_changed', { ...prefs, secondaryLanguage: 'fr' });
+    expect(screen.getByRole('button', { name: 'Copy Secondary Translation shortcut' }).textContent).toBe('⌘U');
+  });
+
   it('describes both operations for note, favorite, and pin in Simplified Chinese', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
@@ -132,7 +149,7 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', '⌘↓'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⇧⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫']])(
+  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⇧⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));

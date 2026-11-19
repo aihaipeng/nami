@@ -6,11 +6,12 @@ pub const CLIPBOARD_SHORTCUT_CODE: &str = "Backquote";
 #[serde(rename_all = "camelCase")]
 pub enum ShortcutAction {
     Selection,
+    OpenTranslation,
     Translate,
     CopyPrimary,
     CopySecondary,
     Pin,
-    Actions,
+    ToggleHistory,
     ShowShortcuts,
     FocusSearch,
 }
@@ -19,25 +20,35 @@ impl ShortcutAction {
     pub fn parse(value: &str) -> Result<Self, String> {
         Ok(match value {
             "selection" => Self::Selection,
+            "openTranslation" => Self::OpenTranslation,
             "translate" => Self::Translate,
             "copyPrimary" => Self::CopyPrimary,
             "copySecondary" => Self::CopySecondary,
             "pin" => Self::Pin,
-            "actions" => Self::Actions,
+            "toggleHistory" => Self::ToggleHistory,
             "showShortcuts" => Self::ShowShortcuts,
             "focusSearch" => Self::FocusSearch,
             _ => return Err("invalid_argument".into()),
         })
     }
 
+    pub fn is_global_translation(self) -> bool {
+        matches!(self, Self::Selection | Self::OpenTranslation)
+    }
+
+    pub fn is_global(self) -> bool {
+        self.is_global_translation() || self == Self::ToggleHistory
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Selection => "selection",
+            Self::OpenTranslation => "openTranslation",
             Self::Translate => "translate",
             Self::CopyPrimary => "copyPrimary",
             Self::CopySecondary => "copySecondary",
             Self::Pin => "pin",
-            Self::Actions => "actions",
+            Self::ToggleHistory => "toggleHistory",
             Self::ShowShortcuts => "showShortcuts",
             Self::FocusSearch => "focusSearch",
         }
@@ -67,11 +78,14 @@ impl KeyBinding {
 #[serde(rename_all = "camelCase")]
 pub struct TranslationShortcuts {
     pub selection: Option<KeyBinding>,
+    #[serde(default)]
+    pub open_translation: Option<KeyBinding>,
     pub translate: Option<KeyBinding>,
     pub copy_primary: Option<KeyBinding>,
     pub copy_secondary: Option<KeyBinding>,
     pub pin: Option<KeyBinding>,
-    pub actions: Option<KeyBinding>,
+    #[serde(default)]
+    pub toggle_history: Option<KeyBinding>,
     #[serde(default)]
     pub show_shortcuts: Option<KeyBinding>,
     #[serde(default)]
@@ -82,12 +96,13 @@ impl TranslationShortcuts {
     pub fn defaults(primary: &str) -> Self {
         Self {
             selection: Some(KeyBinding::new("KeyT", &[primary])),
+            open_translation: Some(KeyBinding::new("KeyT", &[primary])),
             translate: Some(KeyBinding::new("Enter", &[primary])),
             copy_primary: Some(KeyBinding::new("Digit1", &[primary])),
             copy_secondary: Some(KeyBinding::new("Digit2", &[primary])),
             pin: Some(KeyBinding::new("KeyP", &[primary, "shift"])),
-            actions: Some(KeyBinding::new("KeyK", &[primary])),
-            show_shortcuts: Some(KeyBinding::new("Slash", &[primary])),
+            toggle_history: Some(KeyBinding::new("Slash", &[primary])),
+            show_shortcuts: Some(KeyBinding::new("KeyK", &[primary])),
             focus_search: Some(KeyBinding::new("KeyF", &[primary])),
         }
     }
@@ -102,11 +117,39 @@ impl TranslationShortcuts {
             });
         let (keys, mut shortcuts) =
             stored.unwrap_or_else(|| (serde_json::Value::Null, defaults.clone()));
+        if keys.get("openTranslation").is_none() {
+            shortcuts.open_translation = shortcuts.selection.clone();
+        }
         let clipboard = read("clipboard_shortcut")
             .and_then(|value| serde_json::from_str::<Option<KeyBinding>>(&value).ok())
             .unwrap_or_else(|| Some(clipboard_binding()));
         let records = ClipboardRecordShortcuts::from_store(read("clipboard_record_shortcuts"));
-        for action in [ShortcutAction::ShowShortcuts, ShortcutAction::FocusSearch] {
+        // Move the old defaults together, leaving custom or cleared bindings alone.
+        if shortcuts.show_shortcuts == defaults.toggle_history {
+            if shortcuts.toggle_history == defaults.show_shortcuts {
+                std::mem::swap(&mut shortcuts.toggle_history, &mut shortcuts.show_shortcuts);
+            } else if keys.get("toggleHistory").is_none() {
+                let binding = defaults.show_shortcuts.clone();
+                if !binding
+                    .as_ref()
+                    .is_some_and(|key| records.conflicts(key, None))
+                {
+                    if let Ok(next) = assign_shortcut(
+                        &shortcuts,
+                        ShortcutAction::ShowShortcuts,
+                        binding,
+                        clipboard.as_ref(),
+                    ) {
+                        shortcuts = next;
+                    }
+                }
+            }
+        }
+        for action in [
+            ShortcutAction::ShowShortcuts,
+            ShortcutAction::FocusSearch,
+            ShortcutAction::ToggleHistory,
+        ] {
             if keys.get(action.as_str()).is_none() {
                 let binding = defaults.get(action).cloned().filter(|binding| {
                     !records.conflicts(binding, None)
@@ -150,11 +193,12 @@ impl TranslationShortcuts {
     pub fn get(&self, action: ShortcutAction) -> Option<&KeyBinding> {
         match action {
             ShortcutAction::Selection => self.selection.as_ref(),
+            ShortcutAction::OpenTranslation => self.open_translation.as_ref(),
             ShortcutAction::Translate => self.translate.as_ref(),
             ShortcutAction::CopyPrimary => self.copy_primary.as_ref(),
             ShortcutAction::CopySecondary => self.copy_secondary.as_ref(),
             ShortcutAction::Pin => self.pin.as_ref(),
-            ShortcutAction::Actions => self.actions.as_ref(),
+            ShortcutAction::ToggleHistory => self.toggle_history.as_ref(),
             ShortcutAction::ShowShortcuts => self.show_shortcuts.as_ref(),
             ShortcutAction::FocusSearch => self.focus_search.as_ref(),
         }
@@ -163,11 +207,12 @@ impl TranslationShortcuts {
     pub fn set(&mut self, action: ShortcutAction, binding: Option<KeyBinding>) {
         let slot = match action {
             ShortcutAction::Selection => &mut self.selection,
+            ShortcutAction::OpenTranslation => &mut self.open_translation,
             ShortcutAction::Translate => &mut self.translate,
             ShortcutAction::CopyPrimary => &mut self.copy_primary,
             ShortcutAction::CopySecondary => &mut self.copy_secondary,
             ShortcutAction::Pin => &mut self.pin,
-            ShortcutAction::Actions => &mut self.actions,
+            ShortcutAction::ToggleHistory => &mut self.toggle_history,
             ShortcutAction::ShowShortcuts => &mut self.show_shortcuts,
             ShortcutAction::FocusSearch => &mut self.focus_search,
         };
@@ -192,6 +237,12 @@ pub enum ClipboardRecordAction {
     NavigateDown,
     PreviousCategory,
     NextCategory,
+}
+
+impl ClipboardRecordAction {
+    pub fn shared_with_translation(self) -> bool {
+        !matches!(self, Self::Ocr | Self::Translate)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -245,7 +296,10 @@ impl Default for ClipboardRecordShortcuts {
             delete: enabled("Backspace", &[primary]),
             copy_record: enabled("KeyC", &shifted),
             switch_view: enabled("Tab", &[]),
-            focus_records: enabled("ArrowDown", &[primary]),
+            focus_records: RecordShortcut {
+                binding: None,
+                enabled: true,
+            },
             navigate_up: enabled("ArrowUp", &[]),
             navigate_down: enabled("ArrowDown", &[]),
             previous_category: enabled("ArrowLeft", &[]),
@@ -316,6 +370,16 @@ impl ClipboardRecordShortcuts {
                     .binding
                     .as_ref()
                     .is_some_and(|current| same_binding(current, binding))
+        })
+    }
+
+    pub fn conflicts_with_translation(&self, binding: &KeyBinding) -> bool {
+        self.entries().into_iter().any(|(action, shortcut)| {
+            action.shared_with_translation()
+                && shortcut
+                    .binding
+                    .as_ref()
+                    .is_some_and(|key| same_binding(key, binding))
         })
     }
 
@@ -467,22 +531,25 @@ pub fn normalize_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
     Ok(KeyBinding { code, modifiers })
 }
 
-const TRANSLATION_ACTIONS: [ShortcutAction; 8] = [
+const TRANSLATION_ACTIONS: [ShortcutAction; 9] = [
+    ShortcutAction::OpenTranslation,
     ShortcutAction::Selection,
     ShortcutAction::Translate,
     ShortcutAction::CopyPrimary,
     ShortcutAction::CopySecondary,
     ShortcutAction::Pin,
-    ShortcutAction::Actions,
+    ShortcutAction::ToggleHistory,
     ShortcutAction::ShowShortcuts,
     ShortcutAction::FocusSearch,
 ];
 
-pub const GENERAL_SHORTCUT_ACTIONS: [ShortcutAction; 4] = [
+pub const GENERAL_SHORTCUT_ACTIONS: [ShortcutAction; 6] = [
     ShortcutAction::Selection,
+    ShortcutAction::OpenTranslation,
     ShortcutAction::Pin,
     ShortcutAction::ShowShortcuts,
     ShortcutAction::FocusSearch,
+    ShortcutAction::ToggleHistory,
 ];
 
 pub fn is_general_window_action(action: ShortcutAction) -> bool {
@@ -499,6 +566,8 @@ fn translation_conflict(
 ) -> Result<(), String> {
     for action in TRANSLATION_ACTIONS {
         if Some(action) != except
+            && !(action.is_global_translation()
+                && except.is_some_and(ShortcutAction::is_global_translation))
             && shortcuts
                 .get(action)
                 .is_some_and(|current| same_binding(current, binding))
@@ -591,10 +660,13 @@ mod tests {
         );
         assert!(!restored.favorite.enabled);
         assert!(restored.pin.binding.is_none());
+        assert!(restored.focus_records.binding.is_none());
         for (_, shortcut) in restored.entries().into_iter().filter(|(action, _)| {
             !matches!(
                 action,
-                ClipboardRecordAction::Favorite | ClipboardRecordAction::Pin
+                ClipboardRecordAction::Favorite
+                    | ClipboardRecordAction::Pin
+                    | ClipboardRecordAction::FocusRecords
             )
         }) {
             let binding = shortcut.binding.clone().unwrap();
@@ -623,6 +695,30 @@ mod tests {
         for action in ["copy", "paste"] {
             assert!(serde_json::from_value::<ClipboardRecordAction>(action.into()).is_err());
         }
+    }
+
+    #[test]
+    fn record_list_focus_has_no_default_but_preserves_saved_binding() {
+        let mut saved = ClipboardRecordShortcuts::default();
+        assert!(saved.focus_records.binding.is_none());
+        let custom = KeyBinding::new("F6", &[]);
+        saved
+            .set(
+                ClipboardRecordAction::FocusRecords,
+                Some(custom.clone()),
+                None,
+                &[],
+            )
+            .unwrap();
+        let saved =
+            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&saved).unwrap()));
+        assert_eq!(saved.focus_records.binding, Some(custom));
+        assert!(saved
+            .restore_general()
+            .unwrap()
+            .focus_records
+            .binding
+            .is_none());
     }
 
     #[test]
@@ -734,8 +830,8 @@ mod tests {
             Some(KeyBinding::new("KeyP", &["meta", "shift"]))
         );
         assert_eq!(
-            TranslationShortcuts::defaults("control").actions,
-            Some(KeyBinding::new("KeyK", &["control"]))
+            TranslationShortcuts::defaults("control").toggle_history,
+            Some(KeyBinding::new("Slash", &["control"]))
         );
     }
 
@@ -764,7 +860,7 @@ mod tests {
         assert_eq!(restored.pin, Some(custom_pin));
         assert_eq!(
             restored.show_shortcuts,
-            Some(KeyBinding::new("Slash", &["meta"]))
+            Some(KeyBinding::new("KeyK", &["meta"]))
         );
         assert_eq!(
             restored.focus_search,
@@ -778,11 +874,59 @@ mod tests {
         assert!(restored.focus_search.is_none());
 
         old["focusSearch"] = serde_json::Value::Null;
+        old.as_object_mut().unwrap().remove("toggleHistory");
         old["actions"] = serde_json::to_value(KeyBinding::new("Slash", &["meta"])).unwrap();
         let restored = load(&old, None, ClipboardRecordShortcuts::default());
         assert!(restored.focus_search.is_none());
-        assert!(restored.show_shortcuts.is_none());
-        assert_eq!(restored.actions, Some(KeyBinding::new("Slash", &["meta"])));
+        assert_eq!(
+            restored.show_shortcuts,
+            Some(KeyBinding::new("KeyK", &["meta"]))
+        );
+        assert_eq!(
+            restored.toggle_history,
+            Some(KeyBinding::new("Slash", &["meta"]))
+        );
+        let mut records = ClipboardRecordShortcuts::default();
+        records.preview.binding = restored.toggle_history;
+        assert!(load(&old, None, records).toggle_history.is_none());
+    }
+
+    #[test]
+    fn swaps_old_help_and_history_defaults_without_replacing_custom_bindings() {
+        let defaults = TranslationShortcuts::defaults("meta");
+        let mut old = defaults.clone();
+        std::mem::swap(&mut old.toggle_history, &mut old.show_shortcuts);
+        let load = |stored: &serde_json::Value| {
+            TranslationShortcuts::from_store(
+                |key| (key == "translation_shortcuts").then(|| stored.to_string()),
+                "meta",
+            )
+        };
+        let stored = serde_json::to_value(&old).unwrap();
+        assert_eq!(load(&stored), defaults);
+        let mut legacy = stored;
+        legacy.as_object_mut().unwrap().remove("toggleHistory");
+        assert_eq!(load(&legacy), defaults);
+        old.toggle_history = Some(KeyBinding::new("KeyJ", &["meta"]));
+        assert_eq!(load(&serde_json::to_value(&old).unwrap()), old);
+        old.toggle_history = None;
+        assert_eq!(load(&serde_json::to_value(&old).unwrap()), old);
+    }
+
+    #[test]
+    fn open_and_autofill_can_share_a_key_but_cannot_share_other_actions() {
+        use ShortcutAction::{OpenTranslation, Selection, Translate};
+        let defaults = TranslationShortcuts::defaults("meta");
+        let custom = Some(KeyBinding::new("F7", &[]));
+        let next = assign_shortcut(&defaults, Selection, custom.clone(), None).unwrap();
+        assert_eq!(next.get(OpenTranslation), defaults.get(OpenTranslation));
+        let next = assign_shortcut(&next, OpenTranslation, custom.clone(), None).unwrap();
+        assert_eq!(next.get(Selection), next.get(OpenTranslation));
+        assert_eq!(
+            assign_shortcut(&next, Translate, custom, None),
+            Err("shortcut_conflict:openTranslation".into())
+        );
+        assert_eq!(next.restore_group(false, "meta", None).unwrap(), defaults);
     }
 
     #[test]
@@ -791,7 +935,7 @@ mod tests {
         let new_clipboard = KeyBinding::new("KeyJ", &["control"]);
         assert_eq!(
             validate_clipboard_binding(KeyBinding::new("KeyT", &["meta"]), &translations),
-            Err("shortcut_conflict:selection".into())
+            Err("shortcut_conflict:openTranslation".into())
         );
         assert_eq!(
             validate_clipboard_binding(new_clipboard.clone(), &translations),
@@ -835,7 +979,7 @@ mod tests {
         assert_eq!(
             assign_shortcut(
                 &shortcuts,
-                ShortcutAction::Actions,
+                ShortcutAction::ToggleHistory,
                 Some(KeyBinding::new("Backquote", &["control"])),
                 Some(&clipboard_binding())
             )
@@ -866,12 +1010,12 @@ mod tests {
         );
         let cleared = assign_shortcut(
             &shortcuts,
-            ShortcutAction::Actions,
+            ShortcutAction::ToggleHistory,
             None,
             Some(&clipboard_binding()),
         )
         .unwrap();
-        assert_eq!(cleared.actions, None);
+        assert_eq!(cleared.toggle_history, None);
         let rebound = assign_shortcut(
             &shortcuts,
             ShortcutAction::Selection,

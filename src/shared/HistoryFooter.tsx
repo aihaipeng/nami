@@ -43,12 +43,21 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       event.preventDefault();
       if (event.repeat) return;
       if (shortcut.action === 'pin') void command('window_pin', { region: 'history', pinned: !state.historyPinned });
-      else if (shortcut.action === 'focusSearch') { setOpen(false); search.current?.focus({ preventScroll: true }); }
+      else if (shortcut.action === 'focusSearch') {
+        setOpen(false);
+        if (!clipboard && state.translationVisible && target instanceof HTMLElement && target.closest('.history-row')) {
+          if (native) void command('translation_focus_input');
+          else document.querySelector<HTMLTextAreaElement>('.source-input')?.focus({ preventScroll: true });
+        } else {
+          search.current?.focus({ preventScroll: true });
+          search.current?.select();
+        }
+      }
       else { setOpen((shown) => !shown); button.current?.focus({ preventScroll: true }); }
     };
     window.addEventListener('keydown', keydown, true);
     return () => window.removeEventListener('keydown', keydown, true);
-  }, [active, command, search, shortcuts, state.historyPinned]);
+  }, [active, clipboard, command, native, search, shortcuts, state.historyPinned, state.translationVisible]);
 
   return <footer ref={footer} className="history-footer" onKeyDown={(event) => {
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }

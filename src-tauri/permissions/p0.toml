@@ -6,7 +6,7 @@ commands.allow = ["app_snapshot", "window_show", "window_hide"]
 [[permission]]
 identifier = "allow-p0-translation"
 description = "Translation host layout only."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "history_record_note", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "translation_preferences_set", "selection_take", "selection_present", "clipboard_translation_take"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "history_visibility_set", "history_toggle", "translation_focus_input", "history_width_set", "history_sample_select", "history_snapshot", "history_query", "history_load_more", "history_record_update", "history_record_note", "translation_columns_set", "translation_sample_copy", "translation_chrome_update", "translation_run", "translation_cancel", "translation_preferences_set", "selection_take", "selection_present", "clipboard_translation_take"]
 
 [[permission]]
 identifier = "allow-p0-clipboard"
@@ -20,5 +20,5 @@ commands.allow = ["locale_set", "permission_request", "translation_engine_set", 
 
 [[permission]]
 identifier = "allow-p0-records-history"
-description = "Unified records may read, query, select, mark and copy local translation history."
-commands.allow = ["history_snapshot", "history_query", "history_load_more", "history_record_update", "history_record_note", "history_sample_select", "translation_sample_copy"]
+description = "Unified records may toggle, query, select, mark and copy local translation history."
+commands.allow = ["history_toggle", "translation_focus_input", "history_snapshot", "history_query", "history_load_more", "history_record_update", "history_record_note", "history_sample_select", "translation_sample_copy"]

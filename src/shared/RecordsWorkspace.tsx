@@ -4,7 +4,8 @@ import { Clipboard } from '../clipboard/Clipboard';
 import { HistoryPanel } from '../translation/HistoryPanel';
 import type { HistoryRecord } from '../translation/history';
 import { focusRecordList } from './recordFocus';
-import { matchesBinding } from './shortcuts';
+import { editsText, matchesBinding } from './shortcuts';
+import { translationShortcutEnabled } from './contracts';
 import { clipboardKeyAction, clipboardPanelShortcuts } from './clipboardShortcuts';
 
 export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: ViewProps & {
@@ -23,6 +24,13 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
       if (document.querySelector('.clipboard-editor-layer, .clipboard-context-menu, .history-shortcuts-panel')) return;
       const root = workspace.current;
       if (!root || (target instanceof HTMLElement && target !== document.body && !root.contains(target))) return;
+      const preferences = snapshot.translationPreferences;
+      if (!snapshot.capabilities.selection && !editsText(event) && translationShortcutEnabled(preferences, 'toggleHistory')
+        && matchesBinding(preferences.shortcuts.toggleHistory, event)) {
+        event.preventDefault();
+        if (!event.repeat) void command('history_toggle');
+        return;
+      }
       const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), event);
       if (action === 'focusRecords') {
         if (!event.repeat && focusRecordList(root.querySelector('.record-view:not([hidden]) .history-panel[data-focus-ready]'))) event.preventDefault();
