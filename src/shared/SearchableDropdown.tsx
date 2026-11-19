@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Check, ChevronDown, Search } from 'lucide-react';
-import { FloatingPanel } from './FloatingPanel';
+import { FloatingPanel, restorePanelFocus } from './FloatingPanel';
 import { matchesLanguage } from './languages';
 import type { Translate } from './i18n';
 
@@ -29,7 +29,7 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   function choose(code: string) {
     onChange(code);
     onOpenChange(false);
-    trigger.current?.focus({ preventScroll: true });
+    restorePanelFocus(trigger.current);
   }
 
   return <>

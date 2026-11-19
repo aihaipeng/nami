@@ -82,7 +82,7 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
         <div className="history-items">{children}</div>
       </motion.div>
     </motion.div>
-    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
+    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
       onKeyDown={(event) => {
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;
         if (delta || event.key === 'Home' || event.key === 'End') { showScrollbar(); event.preventDefault(); event.stopPropagation(); move(event.key === 'Home' ? 0 : event.key === 'End' ? maximum : scroll.top + delta); }

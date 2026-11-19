@@ -366,7 +366,6 @@ pub struct TranslationChromeState {
     translate_label: String,
     actions_label: String,
     can_translate: bool,
-    actions_visible: bool,
 }
 
 #[tauri::command]
@@ -400,7 +399,6 @@ pub fn translation_chrome_update(
         state.translate_label,
         state.actions_label,
         state.can_translate,
-        state.actions_visible,
     )?;
     Ok(true)
 }

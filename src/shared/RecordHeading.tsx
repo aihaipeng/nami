@@ -13,7 +13,7 @@ export function RecordHeading({ date: value, label, sourceApp }: {
   return <span className="history-row-heading">
     {sourceApp?.iconDataUrl
       ? <img className="history-origin" src={sourceApp.iconDataUrl} alt={name} title={name} />
-      : <span className="history-origin history-symbol" role="img" aria-label={name} title={name} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0, background: '#fff' } as CSSProperties} />}
+      : <span className="history-origin history-symbol" role="img" aria-label={name} title={name} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0 } as CSSProperties} />}
     <span className="history-languages" title={label}>{label}</span>
     <time dateTime={value}>{time}</time>
   </span>;

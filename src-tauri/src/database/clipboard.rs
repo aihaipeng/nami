@@ -118,6 +118,46 @@ pub(super) fn migrate_v5(connection: &mut rusqlite::Connection) -> Result<(), St
     tx.commit().map_err(storage_error)
 }
 
+pub(super) fn migrate_v6(connection: &mut rusqlite::Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch("CREATE TABLE clipboard_titles (
+        sequence INTEGER PRIMARY KEY REFERENCES clipboard_records(sequence) ON DELETE CASCADE,
+        search_folded TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE clipboard_title_search USING fts5(search_folded,content='clipboard_titles',content_rowid='sequence',tokenize='trigram case_sensitive 1');
+    CREATE TRIGGER clipboard_title_insert AFTER INSERT ON clipboard_titles BEGIN
+        INSERT INTO clipboard_title_search(rowid,search_folded) VALUES(new.sequence,new.search_folded);
+    END;
+    CREATE TRIGGER clipboard_title_delete AFTER DELETE ON clipboard_titles BEGIN
+        INSERT INTO clipboard_title_search(clipboard_title_search,rowid,search_folded) VALUES('delete',old.sequence,old.search_folded);
+    END;")
+    .map_err(storage_error)?;
+    {
+        let mut source = tx
+            .prepare("SELECT sequence,title FROM clipboard_records WHERE title!=''")
+            .map_err(storage_error)?;
+        let mut rows = source.query([]).map_err(storage_error)?;
+        let mut insert = tx
+            .prepare("INSERT INTO clipboard_titles(sequence,search_folded) VALUES(?1,?2)")
+            .map_err(storage_error)?;
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            insert
+                .execute(params![
+                    row.get::<_, i64>(0).map_err(storage_error)?,
+                    row.get::<_, String>(1)
+                        .map_err(storage_error)?
+                        .to_lowercase()
+                ])
+                .map_err(storage_error)?;
+        }
+    }
+    tx.pragma_update(None, "user_version", 6)
+        .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
 fn valid_file_representation(
     record: &ClipboardRecord,
     representation: &ClipboardFileRepresentation,
@@ -215,7 +255,7 @@ impl HistoryDatabase {
             let mut probe = self
                 .connection
                 .prepare_cached(
-                    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?1 LIMIT 1024",
+                    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?1 UNION ALL SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH ?1 LIMIT 1024",
                 )
                 .map_err(storage_error)?;
             let mut rows = probe.query([&matched]).map_err(storage_error)?;
@@ -230,9 +270,9 @@ impl HistoryDatabase {
         let search = if needle.is_empty() {
             ""
         } else if indexed && !broad {
-            " AND sequence IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match) AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)"
+            " AND sequence IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match UNION SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH :match) AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0) OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0))"
         } else {
-            " AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)"
+            " AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0) OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0))"
         };
         let hint = if broad {
             if kind.is_some() && favorites_only {
@@ -587,6 +627,15 @@ impl HistoryDatabase {
             )
             .map_err(storage_error)?;
         }
+        tx.execute("DELETE FROM clipboard_titles WHERE sequence=?1", [sequence])
+            .map_err(storage_error)?;
+        if !title.is_empty() {
+            tx.execute(
+                "INSERT INTO clipboard_titles(sequence,search_folded) VALUES(?1,?2)",
+                params![sequence, title.to_lowercase()],
+            )
+            .map_err(storage_error)?;
+        }
         tx.execute(
             "UPDATE clipboard_records SET title=?2 WHERE id=?1",
             params![id, title],
@@ -755,6 +804,158 @@ mod tests {
     }
 
     #[test]
+    fn title_search_matches_literal_unicode_and_full_body_with_paging() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        for index in 0..103 {
+            let id = format!("title-{index}");
+            db.clipboard_insert(&record(&id, &format!("{} body {index}", "x".repeat(300))))
+                .unwrap();
+            db.clipboard_edit(&id, "PLAN 海浪 100%_literal \"quoted\"", None)
+                .unwrap();
+        }
+        db.clipboard_update("title-0", "favorite").unwrap();
+        for needle in ["plan", "海", "海浪", "100%_literal", "\"quoted\"", "body"] {
+            let first = db.clipboard_page(needle, false, None, 100).unwrap();
+            assert_eq!(first.total_records, 103, "{needle}");
+            assert_eq!(first.records.len(), 100);
+            assert!(first.has_more);
+            let last = db
+                .clipboard_page(needle, false, first.cursor.as_ref(), 100)
+                .unwrap();
+            assert_eq!(last.records.len(), 3);
+            assert_eq!(last.total_records, 103);
+            assert!(!last.has_more);
+            assert_eq!(
+                db.clipboard_page(needle, true, None, 100)
+                    .unwrap()
+                    .total_records,
+                1
+            );
+        }
+        assert_eq!(
+            db.clipboard_page("100_other", false, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        db.clipboard_edit("title-0", "Replacement", None).unwrap();
+        assert_eq!(
+            db.clipboard_page("plan", true, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        assert_eq!(
+            db.clipboard_page("replacement", true, None, 100)
+                .unwrap()
+                .total_records,
+            1
+        );
+        db.clipboard_edit("title-0", "", None).unwrap();
+        assert_eq!(
+            db.clipboard_page("replacement", true, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        assert!(db
+            .clipboard_detail("title-0")
+            .unwrap()
+            .text
+            .ends_with("body 0"));
+    }
+
+    #[test]
+    fn title_search_migrates_v5_additively_and_reopens_without_changing_payloads() {
+        let root = std::env::temp_dir().join(format!("nami-title-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        db.clipboard_insert(&record("preserved", &"Original 🌊 body ".repeat(100)))
+            .unwrap();
+        db.clipboard_update("preserved", "favorite").unwrap();
+        db.clipboard_update("preserved", "pin").unwrap();
+        db.clipboard_edit("preserved", "ÉCOLE 海浪 \"100%_\"", None)
+            .unwrap();
+        let before = serde_json::to_value(db.clipboard_detail("preserved").unwrap()).unwrap();
+        db.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; PRAGMA user_version=5;").unwrap();
+        drop(db);
+        for _ in 0..2 {
+            let db = HistoryDatabase::open(&path).unwrap();
+            assert_eq!(
+                serde_json::to_value(db.clipboard_detail("preserved").unwrap()).unwrap(),
+                before
+            );
+            for query in ["école", "ÉCOLE", "海", "\"100%_\"", "🌊 body"] {
+                assert_eq!(
+                    db.clipboard_page(query, true, None, 100)
+                        .unwrap()
+                        .total_records,
+                    1,
+                    "{query}"
+                );
+            }
+            let plan: String = db.connection.query_row("EXPLAIN QUERY PLAN SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH '\"école\"'", [], |row| row.get(3)).unwrap();
+            assert!(plan.contains("VIRTUAL TABLE INDEX"), "{plan}");
+        }
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        db.clipboard_update("preserved", "favorite").unwrap();
+        db.clipboard_update("preserved", "pin").unwrap();
+        db.clipboard_update("preserved", "delete").unwrap();
+        assert_eq!(
+            db.connection
+                .query_row("SELECT count(*) FROM clipboard_titles", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.clipboard_page("école", false, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn broad_title_search_counts_union_once_and_preserves_filters_and_cursors() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        for index in 0..1030 {
+            let id = format!("broad-title-{index}");
+            db.clipboard_insert(&record(&id, &format!("shared body {index}")))
+                .unwrap();
+            db.clipboard_edit(&id, "Shared title", None).unwrap();
+            if index % 2 == 0 {
+                db.clipboard_update(&id, "favorite").unwrap();
+            }
+        }
+        for (needle, favorite, total) in [
+            ("title", false, 1030),
+            ("shared", false, 1030),
+            ("shared", true, 515),
+        ] {
+            let mut cursor = None;
+            let mut ids = std::collections::HashSet::new();
+            loop {
+                let page = db
+                    .clipboard_page_filtered(needle, favorite, Some("text"), cursor.as_ref(), 100)
+                    .unwrap();
+                assert_eq!(page.total_records, total);
+                for record in page.records {
+                    assert!(ids.insert(record.id));
+                }
+                if !page.has_more {
+                    break;
+                }
+                cursor = page.cursor;
+            }
+            assert_eq!(ids.len(), total);
+        }
+    }
+
+    #[test]
     fn clipboard_editor_migrates_v3_and_preserves_full_content_flags_and_identity() {
         let root = std::env::temp_dir().join(format!("nami-editor-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -765,7 +966,7 @@ mod tests {
         db.clipboard_update("edit", "favorite").unwrap();
         db.connection
             .execute_batch(
-                "DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
+                "DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
             )
             .unwrap();
         drop(db);
@@ -910,7 +1111,7 @@ mod tests {
         files.kind = "files".into();
         db.clipboard_insert(&files).unwrap();
         db.connection
-            .execute_batch("DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; PRAGMA user_version=4;")
             .unwrap();
         drop(db);
 
@@ -919,7 +1120,7 @@ mod tests {
             db.connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            super::super::VERSION
         );
         assert_eq!(db.clipboard_record("text").unwrap().text, original.text);
         assert!(db.clipboard_record("text").unwrap().is_favorite);
@@ -1231,7 +1432,7 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join("test.sqlite3");
             let mut db = HistoryDatabase::open(&path).unwrap();
-            db.connection.execute_batch("DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
+            db.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
             migrate(&mut db.connection).unwrap();
             let source =
                 serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,test"})
@@ -2156,7 +2357,7 @@ mod tests {
             source_app: None,
         };
         database.insert(&translation, "edge", || true).unwrap();
-        database.connection.execute_batch("DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
+        database.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
         database
             .connection
             .execute(

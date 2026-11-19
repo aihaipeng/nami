@@ -282,19 +282,13 @@ pub fn update(
     translate_label: String,
     actions_label: String,
     can_translate: bool,
-    actions_visible: bool,
 ) -> Result<(), String> {
     let window = app.get_window("translation").ok_or("window_unavailable")?;
     let stage = translation_stage(&window)?;
-    for (tag, label, enabled, visible) in [
-        (SOURCE_TAG, source_label, true, true),
-        (
-            TRANSLATE_TAG,
-            translate_label,
-            can_translate,
-            actions_visible,
-        ),
-        (ACTIONS_TAG, actions_label, true, actions_visible),
+    for (tag, label, enabled) in [
+        (SOURCE_TAG, source_label, true),
+        (TRANSLATE_TAG, translate_label, can_translate),
+        (ACTIONS_TAG, actions_label, true),
     ] {
         let button = button(&stage, tag).ok_or("window_geometry")?;
         let width = if tag == SOURCE_TAG {
@@ -303,7 +297,7 @@ pub fn update(
             unsafe { text_size(&label, 13.0).width.ceil() + 83.0 }
         };
         button.ivars().width.set(width);
-        button.ivars().visible.set(visible);
+        button.ivars().visible.set(true);
         *button.ivars().label.borrow_mut() = label.clone();
         unsafe {
             let title = objc2_foundation::NSString::from_str(&label);

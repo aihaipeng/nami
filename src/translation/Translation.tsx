@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { languageName, languages, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
-import { FloatingPanel } from '../shared/FloatingPanel';
+import { FloatingPanel, restorePanelFocus } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { keycapLabels, matchesBinding } from '../shared/shortcuts';
@@ -43,7 +43,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const [secondary, setSecondary] = useState(snapshot.translationPreferences.secondaryLanguage);
   const [notice, setNotice] = useState<'inputLimit' | null>(null);
   const [serviceError, setServiceError] = useState<string | null>(null);
-  const [copyFailed, setCopyFailed] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<'copyFailed' | 'copiedPrimary' | 'copiedSecondary' | null>(null);
+  const copyFeedbackTimer = useRef<number | undefined>(undefined);
   const copyOperation = useRef(0);
   const copying = useRef(new Map<number, number>());
   const requestRevision = useRef(0);
@@ -54,7 +55,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const [popup, setPopup] = useState<Popup | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cachedResults, setCachedResults] = useState<string[]>([]);
-  const [actionsFit, setActionsFit] = useState(true);
+  const [stackFooter, setStackFooter] = useState(false);
   const [sourceWidth, setSourceWidth] = useState(140);
   const footer = useRef<HTMLElement>(null);
   const sourceBar = useRef<HTMLElement>(null);
@@ -82,9 +83,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
   useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
   useEffect(() => {
-    ++copyOperation.current; copying.current.clear(); setCopyFailed(false);
-    return () => { ++copyOperation.current; };
-  }, [selectedId, draft, state.recordView, state.translationVisible, state.recordsSession]);
+    ++copyOperation.current; copying.current.clear(); setCopyFeedback(null);
+    return () => { ++copyOperation.current; window.clearTimeout(copyFeedbackTimer.current); };
+  }, [selectedId, draft, cachedResults, state.recordView, state.translationVisible, state.recordsSession]);
   const capabilities = snapshot.capabilities;
   const languagesAvailable = supportsTranslation(snapshot.translationEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
   const currentWindow = useRef(state);
@@ -100,7 +101,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     sourceLabel,
     sourceWidth,
     translateLabel: t('translation'), actionsLabel: t('actions'),
-    canTranslate: Boolean(draft.trim()) && !snapshot.storageError && languagesAvailable, actionsVisible: actionsFit,
+    canTranslate: Boolean(draft.trim()) && !snapshot.storageError && languagesAvailable,
   }, (action) => {
     if (action === 'translate') submit();
     else setPopup((current) => current === action ? null : action);
@@ -220,7 +221,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       }
       const last = [...element.querySelectorAll('.language-slot:not(.secondary-off) .language-picker')].at(-1)?.getBoundingClientRect();
       const actions = actionGroup.current?.getBoundingClientRect();
-      setActionsFit(Boolean(last && actions && last.right + 12 <= actions.left));
+      if (last && actions) setStackFooter(last.right + 12 > actions.left);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(element);
@@ -364,11 +365,16 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   function copyTranslation(index: number) {
     const recordId = completedRecord.current?.id ?? selectedId;
     if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
-    setPopup(null); setCopyFailed(false);
+    if (popup === 'actions') restorePanelFocus(actionButton.current);
+    setPopup(null); setCopyFeedback(null); window.clearTimeout(copyFeedbackTimer.current);
     const operation = ++copyOperation.current;
     copying.current.set(index, operation);
     void invoke('translation_sample_copy', { sampleId: recordId, part: index ? 'secondary' : 'primary' })
-      .catch(() => { if (operation === copyOperation.current) setCopyFailed(true); })
+      .then(() => {
+        if (operation !== copyOperation.current) return;
+        setCopyFeedback(index ? 'copiedSecondary' : 'copiedPrimary');
+        copyFeedbackTimer.current = window.setTimeout(() => setCopyFeedback(null), 1000);
+      }, () => { if (operation === copyOperation.current) setCopyFeedback('copyFailed'); })
       .finally(() => { if (copying.current.get(index) === operation) copying.current.delete(index); });
   }
 
@@ -428,6 +434,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       onOpenChange={(open) => setPopup(open ? id : null)} />;
   }
 
+  const taskStatus = serviceError ?? (notice ? t(notice) : !languagesAvailable ? t('languageNotSupported') : null);
+  const hasResults = !notice && cachedResults.some(Boolean);
   const shellStyle = {
     '--history-width': `${state.historyWidth}px`,
     '--translation-width': `${state.translationWidth}px`,
@@ -465,20 +473,20 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           onPointerDown={beginSourceDrag} onPointerMove={moveSourceDrag} onPointerUp={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onPointerCancel={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onBlur={() => stopSourceDrag()} />
         {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
       </header>
-      <div className={cn('result-columns', secondary === 'none' && 'single-column')}>
+      <div className={cn('result-columns', secondary === 'none' && 'single-column', taskStatus && !hasResults && 'task-status-only')}>
         {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
-          {index === 0 && !languagesAvailable && <p className="translation-status" role="status">{t('languageNotSupported')}</p>}
           {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
-          {serviceError && !cachedResults[index] && <p className="translation-status" data-tauri-drag-region="false" role="alert">{serviceError}</p>}
-          {notice && <p className="translation-status" data-tauri-drag-region="false" role="status">{t(notice)}</p>}
         </section>)}
+        {taskStatus && !hasResults && <p className="translation-status" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
+        <RecordFeedback message={copyFeedback ? t(copyFeedback) : null} />
       </div>
-      <footer ref={footer} className={cn('translation-footer', secondary === 'none' && 'single-column')}>
+      {taskStatus && hasResults && <p className="translation-status with-results" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
+      <footer ref={footer} className={cn('translation-footer', secondary === 'none' && 'single-column', stackFooter && 'stacked-footer')}>
         <div className="language-slot">{picker('primary', primary, (value) => changeLanguage('primary', value))}</div>
         <div className={cn('language-slot', secondary === 'none' && 'secondary-off')}>
           {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
         </div>
-        <div ref={actionGroup} className={cn('translation-actions', !actionsFit && 'actions-overflow')} aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
+        <div ref={actionGroup} className="translation-actions" aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
           <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError) || !languagesAvailable} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
           <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={shortcutKeys('actions')} /></button>
         </div>
@@ -500,7 +508,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           <button role="menuitemcheckbox" aria-checked={state.translationPinned} onClick={togglePin}>{state.translationPinned ? 'Unpin Window' : 'Pin Window'}<Keycaps keys={shortcutKeys('pin')} /></button>
         </div>
       </FloatingPanel>}
-      <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
     </section>
     </div>
     {!capabilities.nativeHistory && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}

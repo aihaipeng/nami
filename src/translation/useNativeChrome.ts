@@ -9,7 +9,6 @@ export interface ChromeState {
   translateLabel: string;
   actionsLabel: string;
   canTranslate: boolean;
-  actionsVisible: boolean;
 }
 
 export function useNativeChrome(native: boolean, state: ChromeState, onAction: (action: ChromeAction) => void) {
@@ -26,14 +25,14 @@ export function useNativeChrome(native: boolean, state: ChromeState, onAction: (
     void remove.then(() => { if (!disposed) setConnected(true); }).catch(() => {});
     return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
   }, [native]);
-  const { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible } = state;
+  const { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate } = state;
   useEffect(() => {
     if (!native || !connected) return;
     let disposed = false;
     void invoke<boolean>('translation_chrome_update', {
-      state: { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible },
+      state: { sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate },
     }).then((installed) => { if (!disposed && installed === true) setReady(true); }).catch(() => {});
     return () => { disposed = true; };
-  }, [native, connected, sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate, actionsVisible]);
+  }, [native, connected, sourceLabel, sourceWidth, translateLabel, actionsLabel, canTranslate]);
   return native && ready;
 }

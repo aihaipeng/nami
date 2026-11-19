@@ -1,6 +1,13 @@
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 
+export function restorePanelFocus(trigger: HTMLElement | null) {
+  if (trigger?.isConnected && !trigger.closest('[inert]')
+    && getComputedStyle(trigger).visibility !== 'hidden' && getComputedStyle(trigger).display !== 'none') {
+    trigger.focus({ preventScroll: true });
+  } else document.querySelector<HTMLTextAreaElement>('.source-input')?.focus({ preventScroll: true });
+}
+
 export function panelHorizontalPosition(anchorLeft: number, width: number, visibleLeft: number, visibleWidth: number) {
   const maxWidth = Math.min(width, visibleWidth - 16);
   return { left: Math.max(visibleLeft + 8, Math.min(anchorLeft, visibleLeft + visibleWidth - maxWidth - 8)), maxWidth };
@@ -58,9 +65,7 @@ export function FloatingPanel({ anchor, onClose, label, role, width, side, child
 
   function restoreFocus() {
     close.current();
-    const trigger = anchor.current;
-    if (trigger && getComputedStyle(trigger).visibility !== 'hidden') trigger.focus({ preventScroll: true });
-    else document.querySelector<HTMLTextAreaElement>('.source-input')?.focus({ preventScroll: true });
+    restorePanelFocus(anchor.current);
   }
 
   return createPortal(<div ref={panel} role={role} aria-label={label} className={`floating-panel ${className}`}

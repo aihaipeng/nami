@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 pub const PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -160,6 +160,9 @@ impl HistoryDatabase {
         }
         if version < 5 {
             clipboard::migrate_v5(&mut connection)?;
+        }
+        if version < 6 {
+            clipboard::migrate_v6(&mut connection)?;
         }
         clipboard::ensure_filter_indexes(&connection)?;
         clipboard::ensure_translation_preferences(&connection)?;
@@ -533,7 +536,7 @@ mod tests {
             db.connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            VERSION
         );
         let page = db.page(&HistoryQuery::default(), None, 100).unwrap();
         assert_eq!(

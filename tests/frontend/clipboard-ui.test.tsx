@@ -948,8 +948,30 @@ describe('database clipboard history', () => {
     const { result } = renderHook(() => useClipboard(true, 'Saved', false, () => true));
     await waitFor(() => expect(result.current.page.records).toHaveLength(1));
     const queried = calls('clipboard_query').length;
-    act(() => result.current.applyEdit('first', { title: 'Saved title is not indexed', text: 'Different original content' }));
+    act(() => result.current.applyEdit('first', { title: 'Different title', text: 'Different original content' }));
     expect(result.current.page.records).toHaveLength(0);
+    expect(result.current.page.totalRecords).toBe(0);
+    expect(calls('clipboard_query')).toHaveLength(queried);
+  });
+
+  it('keeps edited title matches in cached search results and removes them when the title is cleared', async () => {
+    records[0].isFavorite = true;
+    queryHandler = async ({ favoritesOnly }) => {
+      const matching = records.filter((record) => (!favoritesOnly || record.isFavorite) && record.text.includes('Saved'));
+      return { records: matching, cursor: null, hasMore: false, totalRecords: matching.length };
+    };
+    const { result, rerender } = renderHook(({ favorite }) => useClipboard(true, 'Saved', favorite, () => true), { initialProps: { favorite: false } });
+    await waitFor(() => expect(result.current.page.records).toHaveLength(1));
+    const queried = calls('clipboard_query').length;
+    act(() => result.current.applyEdit('first', { title: 'SAVED 海浪', text: 'Different original content' }));
+    expect(result.current.page.records).toHaveLength(1);
+    expect(result.current.page.totalRecords).toBe(1);
+    rerender({ favorite: true });
+    await waitFor(() => expect(result.current.page.totalRecords).toBe(1));
+    act(() => result.current.applyEdit('first', { title: '', text: 'Different original content' }));
+    expect(result.current.page.records).toHaveLength(0);
+    expect(result.current.page.totalRecords).toBe(0);
+    rerender({ favorite: false });
     expect(result.current.page.totalRecords).toBe(0);
     expect(calls('clipboard_query')).toHaveLength(queried);
   });
@@ -1081,7 +1103,8 @@ describe('database clipboard history', () => {
     expect(fallback.classList.contains('history-symbol')).toBe(true);
     expect(fallback.style.getPropertyValue('--symbol-url')).toContain('reference-nami.png');
     expect(fallback.style.borderRadius).toBe('0px');
-    expect(fallback.style.background).toBe('rgb(255, 255, 255)');
+    expect(fallback.style.background).toBe(''); // The shared mask uses the theme foreground.
+    expect(fallback.closest('.history-row-heading')).toBeTruthy();
     const source = within(row('pinned')).getByRole('img', { name: 'Synthetic Source' });
     expect(source.getAttribute('src')).toBe('data:image/png;base64,c3ludGhldGlj');
     expect(source.classList.contains('history-symbol')).toBe(false);
@@ -1790,6 +1813,39 @@ describe('database clipboard history', () => {
     result.unmount();
     expect(bridge.listeners.get('clipboard_changed')?.size).toBe(0);
     expect(bridge.listeners.get('clipboard_capture_error')?.size).toBe(0);
+  });
+
+  it.each([
+    ['Text', 'text', 'No text clipboard records yet', false],
+    ['Image', 'image', 'No image clipboard records yet', false],
+    ['File', 'files', 'No file clipboard records yet', false],
+    ['Image', 'image', 'No image clipboard records yet', true],
+  ] as const)('explains an empty %s filter (%s, %s, capture=%s) and clears it', async (label, kind, message, capture) => {
+    records = [{ ...records[0], kind: kind === 'text' ? 'files' : 'text' }];
+    bridge.snapshot.clipboardCaptureEnabled = capture;
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: `${label} clipboard records` }));
+    await screen.findByText(message);
+    expect(screen.queryByRole('button', { name: 'Open settings' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }));
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    expect(screen.getByRole('button', { name: `${label} clipboard records` }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByText(message)).toBeNull();
+  });
+
+  it('preserves a search when clearing an empty kind filter', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const search = screen.getByRole('searchbox', { name: 'Search clipboard' });
+    fireEvent.change(search, { target: { value: 'Saved' } });
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
+    await screen.findByText('No matching clipboard records');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }));
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    expect(search).toHaveProperty('value', 'Saved');
+    expect(screen.getByRole('button', { name: 'Image clipboard records' }).getAttribute('aria-pressed')).toBe('false');
   });
 
   it('shows a useful empty state and respects platform clipboard capabilities', async () => {

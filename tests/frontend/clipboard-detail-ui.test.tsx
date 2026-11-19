@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import { ClipboardDetail, type ClipboardDetailData } from '../../src/clipboard/ClipboardDetail';
+import { listen } from '@tauri-apps/api/event';
 import { translator } from '../../src/shared/i18n';
 
 let records: ClipboardDetailData[];
@@ -225,20 +226,27 @@ describe('clipboard details', () => {
     expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
   });
 
-  it('does not show a loading beam while the next record detail is still loading', async () => {
+  it('disables every retained detail action while a new record loads and delays the shared activity beam', async () => {
     let resolve!: (value: ClipboardDetailData) => void;
     fetchDetail = (id) => id === 'second' ? new Promise((done) => { resolve = done; }) : Promise.resolve(structuredClone(records.find((record) => record.id === id)!));
     await open();
     const stable = ['Note', 'Favorite', 'Pin record', 'Delete clipboard record'].map((name) => within(pane()).getByRole('button', { name }));
+    const viewport = pane().querySelector('.history-viewport');
     fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')).toBeNull());
-    expect(pane().querySelector('[role="progressbar"]')).toBeNull();
+    const beam = within(pane()).getByRole('progressbar', { name: 'Working' });
+    expect(beam.getAttribute('data-visible')).toBe('false');
+    for (const button of within(pane()).getAllByRole('button')) expect(button).toHaveProperty('disabled', true);
+    await waitFor(() => expect(beam.getAttribute('data-visible')).toBe('true'));
+    expect(pane().querySelector('.history-viewport')).toBe(viewport);
     expect(stable.map((button) => button.isConnected)).toEqual([true, true, true, true]);
     stable.forEach((button, index) => expect(within(pane()).getByRole('button', { name: ['Note', 'Favorite', 'Pin record', 'Delete clipboard record'][index] })).toBe(button));
     fireEvent.click(stable[0]);
     expect(calls('clipboard_note_open')).toHaveLength(0);
     await act(async () => resolve(structuredClone(records.find((record) => record.id === 'second')!)));
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+    expect(within(pane()).queryByRole('progressbar')).toBeNull();
+    expect(within(pane()).getByRole('button', { name: 'Copy' })).toHaveProperty('disabled', false);
   });
 
   it('ignores an old detail response after moving to another record or hiding', async () => {
@@ -336,7 +344,7 @@ describe('clipboard details', () => {
     expect(within(pane()).getByRole('button', { name: 'Copy' })).toHaveProperty('disabled', false);
   });
 
-  it('keeps the scrollbar hidden until user scroll, then hides after idle', async () => {
+  it('shows the detail scrollbar on keyboard focus or scroll, then hides after idle', async () => {
     direct();
     await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
     const scroller = pane().querySelector('.history-list')!;
@@ -344,22 +352,59 @@ describe('clipboard details', () => {
     fireEvent.scroll(scroller);
     const bar = within(pane()).getByRole('scrollbar');
     expect(bar.classList.contains('visible')).toBe(false);
-    fireEvent.pointerMove(bar); fireEvent.focus(bar);
+    fireEvent.pointerMove(bar);
     expect(bar.classList.contains('visible')).toBe(false);
+    fireEvent.focus(bar);
+    expect(bar.classList.contains('visible')).toBe(true);
     fireEvent.blur(bar);
-    expect(bar.classList.contains('visible')).toBe(false);
+    await waitFor(() => expect(bar.classList.contains('visible')).toBe(false), { timeout: 1600 });
     fireEvent.wheel(scroller);
     expect(bar.classList.contains('visible')).toBe(true);
     await waitFor(() => expect(bar.classList.contains('visible')).toBe(false), { timeout: 1600 });
   });
 
-  it('shows unavailable instead of stale content after deletion, and handles Escape', async () => {
+  it('offers Retry after a transient detail error and recovers the selected record', async () => {
+    fetchDetail = async () => { throw 'storage_worker'; };
+    direct();
+    expect(await within(pane()).findByRole('alert')).toHaveProperty('textContent', 'Unable to load this record. Try again.Retry');
+    fetchDetail = async () => structuredClone(first());
+    fireEvent.click(within(pane()).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+    expect(within(pane()).queryByRole('alert')).toBeNull();
+    expect(within(pane()).queryByRole('progressbar')).toBeNull();
+  });
+
+  it('rejects a late Retry response after changing the selected record', async () => {
+    await open();
+    fetchDetail = async () => { throw new Error('storage_worker'); };
+    await emit('clipboard_changed', 2);
+    const retry = await within(pane()).findByRole('button', { name: 'Retry' });
+    let resolve!: (value: ClipboardDetailData) => void;
+    fetchDetail = (id) => id === 'first' ? new Promise((done) => { resolve = done; }) : Promise.resolve(structuredClone(records.find((record) => record.id === id)!));
+    fireEvent.click(retry);
+    await waitFor(() => expect(resolve).toBeTypeOf('function'));
+    fireEvent.mouseMove(row('second'));
+    await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+    await act(async () => resolve(structuredClone(first())));
+    expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('Second text');
+  });
+
+  it('reestablishes a failed detail subscription on Retry', async () => {
+    vi.mocked(listen).mockRejectedValueOnce(new Error('subscription_failed'));
+    direct();
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+    expect(bridge.listeners.get('clipboard_changed')?.size).toBe(1);
+  });
+
+  it.each([new Error('not_found'), 'not_found'])('shows unavailable instead of stale content after deletion (%s), and handles Escape', async (error) => {
     direct();
     await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
-    fetchDetail = async () => { throw new Error('not_found'); };
+    fetchDetail = async () => { throw error; };
     await emit('clipboard_changed', 2);
     expect(await within(pane()).findByRole('alert')).toHaveProperty('textContent', 'This record is unavailable.');
     expect(pane().querySelector('.clipboard-detail-content')).toBeNull();
+    expect(within(pane()).queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'translation' });
   });

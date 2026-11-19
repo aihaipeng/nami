@@ -6,6 +6,7 @@ import { clipboardUseError, clipboardUseFeedback } from './feedback';
 import type { ClipboardResult } from '../shared/contracts';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordHeading } from '../shared/RecordHeading';
+import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
 import { FileList, ImagePreview, type FileEntry } from './ClipboardMedia';
@@ -29,7 +30,9 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const id = snapshot.window.clipboardDetailId;
   const active = snapshot.window.recordView === 'clipboard' && snapshot.window.translationVisible;
   const [detail, setDetail] = useState<ClipboardDetailData | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<'unavailable' | 'retry' | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const operation = useRef(0);
@@ -40,29 +43,37 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const matched = detail && detail.id === id ? [detail] : [];
   const imageText = useClipboardImageText(matched, active && native && snapshot.capabilities.imageOcr && matched.length > 0);
   useEffect(() => {
-    ++operation.current; processing.current = false; setBusy(false); setFeedback(null); setFailed(false);
+    ++operation.current; processing.current = false; setBusy(false); setFeedback(null); setFailed(null);
     list.current?.scrollTo(0, 0);
-    if (!active || !native || !id) { setDetail(null); return; }
+    if (!active || !native || !id) { setDetail(null); setLoading(false); return; }
     let disposed = false;
     let request = 0;
     const load = async () => {
+      if (disposed) return;
       const current = ++request;
+      setLoading(true); setFailed(null);
       try {
         const value = await invoke<ClipboardDetailData>('clipboard_record_detail', { recordId: id });
-        if (!disposed && current === request) { setDetail(value); setFailed(false); }
-      } catch { if (!disposed && current === request) { setDetail(null); setFailed(true); } }
+        if (!disposed && current === request) { setDetail(value); setFailed(null); }
+      } catch (error) {
+        if (!disposed && current === request) {
+          setDetail(null);
+          setFailed((error instanceof Error ? error.message : error) === 'not_found' ? 'unavailable' : 'retry');
+        }
+      } finally { if (!disposed && current === request) setLoading(false); }
     };
     const remove = listen('clipboard_changed', () => { void load(); });
-    void remove.then(load).catch(() => { if (!disposed) setFailed(true); });
+    setLoading(true);
+    void remove.then(load).catch(() => { if (!disposed) { setDetail(null); setFailed('retry'); setLoading(false); } });
     return () => { disposed = true; ++operation.current; void remove.then((unlisten) => unlisten()).catch(() => {}); };
-  }, [id, active, native, snapshot.window.recordsSession]);
+  }, [id, active, native, snapshot.window.recordsSession, attempt]);
   const shown = active && detail && !failed ? detail : null;
   const current = shown?.id === id ? shown : null;
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
   async function action(type: 'copy' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
     const process = type === 'translate' || type === 'ocr';
-    if (!current || processing.current && (process || type === 'delete')) return false;
+    if (!current || loading || processing.current && (process || type === 'delete')) return false;
     if (type === 'delete' && (current.isFavorite || current.isPinned)) return false;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
@@ -97,16 +108,17 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
   }, [active, snapshot.window.recordsEditorOpen, snapshot.capabilities.primaryModifier, command]);
-  return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details">
+  return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details" aria-busy={loading}>
+    <ActivityBeam label={t('working')} active={active && loading} />
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
-      {shown && <RecordActions recordId={shown.id} t={t} native={native} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
+      {shown && <RecordActions recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
         onCopy={() => action('copy')} onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
         onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
     </header>
-    <HistoryList scrollOnly key={id ?? 'empty'} active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
+    <HistoryList scrollOnly active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
         {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} />}
-      </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? 'This record is unavailable.' : !id ? 'No record selected' : ''}</div>}
+      </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
     {current && <footer className="clipboard-detail-metadata">
       <div><span>Application</span><RecordHeading date={current.date} label={current.sourceApp?.name ?? 'Nami'} sourceApp={current.sourceApp} /></div>

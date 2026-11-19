@@ -463,7 +463,7 @@ describe('history list and session actions', () => {
     expect(wordmark.style.getPropertyValue('--wordmark-url')).toContain('nami-wordmark.svg');
     expect(wordmark.style.width).toBe('44px');
     expect(wordmark.style.height).toBe('20px');
-    expect(wordmark.style.background).toBe('rgb(255, 255, 255)');
+    expect(wordmark.style.background).toBe(''); // The shared mask uses the theme foreground.
     expect(wordmark.style.fontFamily).toBe('');
     const svg = new DOMParser().parseFromString(wordmarkSvg, 'image/svg+xml').documentElement;
     expect(svg.getAttribute('viewBox')).toBe('155 340 680 280');
@@ -480,7 +480,7 @@ describe('history list and session actions', () => {
     const fallback = within(row('sample-01')).getByRole('img', { name: 'Nami' });
     expect(fallback.classList.contains('history-symbol')).toBe(true);
     expect(fallback.style.getPropertyValue('--symbol-url')).toContain('reference-nami.png');
-    expect(fallback.style.background).toBe('rgb(255, 255, 255)');
+    expect(fallback.style.background).toBe('');
     const source = within(row('sample-03')).getByRole('img', { name: 'Synthetic Source' });
     expect(source.getAttribute('src')).toBe('data:image/png;base64,c3ludGhldGlj');
     expect(source.classList.contains('history-symbol')).toBe(false);

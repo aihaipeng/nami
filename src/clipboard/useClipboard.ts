@@ -274,7 +274,8 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     ++defaultRevision.current;
     const previous = latest.current.records.find((record) => record.id === recordId);
     if (!active.current || !previous) return;
-    const matches = detail.text.toLowerCase().includes(filters.current.query.trim().toLowerCase());
+    const needle = filters.current.query.trim().toLowerCase();
+    const matches = detail.text.toLowerCase().includes(needle) || detail.title.toLowerCase().includes(needle);
     const updated = { ...previous, title: detail.title, text: [...detail.text].slice(0, 256).join('') };
     if (defaultPage.current) defaultPage.current.page = { ...defaultPage.current.page, records: defaultPage.current.page.records.map((record) => record.id === recordId ? updated : record) };
     const patch = (cached: ClipboardPage, key: string): ClipboardPage => {

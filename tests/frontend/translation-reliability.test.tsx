@@ -18,6 +18,29 @@ function deferred() {
 }
 
 describe('translation reliability', () => {
+  it('reports one task error for a failed dual-target request', async () => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.reject('Service unavailable') : invoke(name, args));
+    await mount(); submit('Fail both targets');
+    await waitFor(() => expect(screen.getAllByRole('alert').map((value) => value.textContent)).toEqual(['Service unavailable']));
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
+  it('confirms copying a result locally and ignores completion after the draft changes', async () => {
+    await mount(); submit('Text for copy');
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBeTruthy());
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    expect((await screen.findByText('Primary translation copied')).getAttribute('role')).toBe('status');
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
+    fireEvent.keyDown(source(), { key: '2', metaKey: true });
+    fireEvent.change(source(), { target: { value: 'Different draft' } });
+    await act(async () => finish());
+    expect(screen.queryByText(/translation copied/)).toBeNull();
+  });
+
   it('keeps an active translation running while browsing history and does not replace the browsed record on completion', async () => {
     const pending = deferred(); const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : original(name, args));

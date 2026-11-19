@@ -1189,6 +1189,7 @@ fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
 fn run_right_control_dom(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
+        on_main(app, |app| create(app, "translation").map(|_| ()))?;
         on_main(app, |app| reset(app, 360.0, 920.0))?;
         wait_dom(app, "return { ready: document.fonts.status === 'loaded' && document.querySelector('[data-native-chrome=true]') !== null, fonts:document.fonts.status, chrome:document.querySelector('.translation-panel')?.dataset.nativeChrome, error:document.querySelector('.global-error')?.textContent };")?;
         evaluate_dom(app,"const input=document.querySelector('.source-input');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
@@ -1202,9 +1203,10 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             "return { ready: !!document.querySelector('.language-options [role=option]') };",
         )?;
         evaluate_dom(app, "const option = [...document.querySelectorAll('.language-options [role=option]')].find(e => e.textContent === 'Chinese (Traditional)'); if (!option) throw Error('missing long source language'); option.click(); return true;")?;
-        wait_dom(app, "return { ready: document.querySelector('.source-bar > .language-picker').textContent === 'Chinese (Traditional)' && !document.querySelector('.language-popover') };")?;
+        wait_dom(app, "return { ready: document.querySelector('.source-bar > .language-picker').textContent === 'Chinese (Traditional)' && !document.querySelector('.language-popover') && document.activeElement===document.querySelector('.source-input') };")?;
         for width in [700.0, 920.0, 1200.0] {
             on_main(app, move |app| reset(app, 360.0, width))?;
+            settle_chrome_dom(app)?;
             samples.push(check_right_control_dom(app, width)?);
         }
         settle_chrome_dom(app)?;
@@ -1219,6 +1221,7 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             set_native_width(app, 360.0 + 480.0, true)?;
             track_translation_resize(app, &app.get_window("translation").unwrap())
         })?;
+        settle_chrome_dom(app)?;
         samples.push(check_right_control_dom(app, 480.0)?);
 
         click_native_chrome(app, 101)?;
@@ -1292,14 +1295,15 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
         const actions = document.querySelector('.translation-actions');
         const input = document.querySelector('.source-input');
         const s = source.getBoundingClientRect(), a = actions.getBoundingClientRect(), i = input.getBoundingClientRect();
-        return {{ ready: Math.abs(innerWidth - {width}) < .01 && i.right <= s.left - 1,
+        const pickers = [...document.querySelectorAll('.translation-footer .language-slot:not(.secondary-off) .language-picker')].map(p => p.getBoundingClientRect().toJSON());
+        return {{ pickers, ready: Math.abs(innerWidth - {width}) < .01 && i.right <= s.left - 1,
             width: innerWidth, native: document.documentElement.dataset.native,
             sourcePosition: getComputedStyle(source).position, actionsPosition: getComputedStyle(actions).position,
             sourceVisibility: getComputedStyle(source).visibility, actionsVisibility: getComputedStyle(actions).visibility,
             sourceAriaHidden: source.getAttribute('aria-hidden'), actionsAriaHidden: actions.getAttribute('aria-hidden'),
             nativeChrome: document.querySelector('.translation-panel').dataset.nativeChrome,
             sourceRightInset: innerWidth - s.right, sourceTopInset: s.top,
-            actionsRightInset: innerWidth - a.right, actionsBottomInset: innerHeight - a.bottom,
+            actionsRightInset: innerWidth - a.right, actionsBottomInset: innerHeight - a.bottom, actionsTop: a.top,
             inputPickerGap: s.left - i.right, sourceLabel: source.textContent }};
     "#
     );
@@ -1323,6 +1327,33 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
     assert_chrome_anchors(&native)?;
     if native["buttons"][0]["title"] != value["sourceLabel"] {
         return Err("native source label did not follow React selection".into());
+    }
+    if native["buttons"][1]["hidden"] != false || native["buttons"][2]["hidden"] != false {
+        return Err(format!(
+            "native footer actions hidden at {width}pt: {native}"
+        ));
+    }
+    let actions_left = width
+        - 24.0
+        - native["buttons"][2]["width"]
+            .as_f64()
+            .ok_or("missing Actions width")?
+        - 8.0
+        - native["buttons"][1]["width"]
+            .as_f64()
+            .ok_or("missing Translate width")?;
+    for picker in value["pickers"]
+        .as_array()
+        .ok_or("missing language pickers")?
+    {
+        if picker["right"].as_f64().ok_or("missing picker right")? > actions_left
+            && picker["bottom"].as_f64().ok_or("missing picker bottom")?
+                > value["actionsTop"].as_f64().ok_or("missing footer top")?
+        {
+            return Err(format!(
+                "native footer overlaps language picker at {width}pt: {value}"
+            ));
+        }
     }
     if native["buttons"][1]["title"] != "Translate" || native["buttons"][2]["title"] != "Actions" {
         return Err("native action labels did not follow interface language".into());
@@ -1694,7 +1725,7 @@ fn verify_clipboard_action_feedback(
     let copied = wait_records(
         app,
         r#"
-const button=window.__copyButton,icon=button.querySelector('.copy-success'),r=icon?.getBoundingClientRect(),color=icon&&getComputedStyle(icon).color,green=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(73, 170, 25)':'rgb(82, 196, 26)';
+const button=window.__copyButton,icon=button.querySelector('.copy-success'),r=icon?.getBoundingClientRect(),color=icon&&getComputedStyle(icon).color,green=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(73, 170, 25)':'rgb(40, 125, 22)';
 return {ready:!!icon&&color===green,width:r?.width,height:r?.height,before:window.__copyBefore,color,beams:document.querySelectorAll('[role=progressbar]').length};
 "#,
     )?;
@@ -4069,6 +4100,7 @@ return {{ready:text==={expected}&&!!scrollbar&&actions.includes('note'),length:t
             return Err(format!("clipboard detail contents or layout: {first}"));
         }
         samples.push(first);
+
         for (action, pressed) in [("favorite", "Remove favorite"), ("pin", "Unpin record")] {
             evaluate_dom(app, &format!("document.querySelector('.clipboard-detail [data-action={action}] button').click();return true;"))?;
             let protected = wait_dom(
@@ -4171,6 +4203,11 @@ return {{ready:mark?.getAttribute('aria-label')==='{pressed}',protectedAction:'{
             ));
         }
         samples.push(pointer);
+        evaluate_dom(
+            app,
+            "document.querySelector('.clipboard-detail [role=scrollbar]').focus(); return true;",
+        )?;
+        samples.push(wait_dom(app, "const bar=document.querySelector('.clipboard-detail [role=scrollbar]');return {ready:document.activeElement===bar&&bar.classList.contains('visible'),thumb:getComputedStyle(bar.firstElementChild).opacity};")?);
         evaluate_dom(
             app,
             r#"document.querySelector('.clipboard-detail .history-list').dispatchEvent(new WheelEvent('wheel',{bubbles:true,deltaY:80}));return true;"#,
@@ -5075,6 +5112,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-kind-text",
             "clipboard-details",
             "translation-actions",
+            "translation-controls",
             "unified-records",
             "records-geometry",
             "records-pinned",
@@ -5104,6 +5142,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_records_pinned(&app)
             } else if case == "unified-records" {
                 run_unified_records(&app)
+            } else if case == "translation-controls" {
+                run_right_control_dom(&app)
             } else if case == "translation-actions" {
                 run_translation_action_timing(&app)
             } else if case == "clipboard-actions" {

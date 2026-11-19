@@ -17,7 +17,6 @@ pub fn update_translation_chrome(
     _: String,
     _: String,
     _: bool,
-    _: bool,
 ) -> Result<(), String> {
     Err("platform_unavailable".into())
 }

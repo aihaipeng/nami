@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, windowState } from './harness';
 import { historySamples } from '../../src/translation/history';
+// @ts-expect-error Vitest runs in Node; the app's TypeScript configuration includes browser types only.
+import { readFileSync } from 'node:fs';
 
 const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
 const sample = historySamples[0];
@@ -225,7 +227,7 @@ describe('translation input and shortcuts', () => {
     await mount();
     expect(screen.getByRole('button', { name: 'Source language: Auto-Detect' })).toBeTruthy();
     expect(calls('translation_chrome_update').at(-1)?.[1]).toEqual({ state: {
-      sourceLabel: 'Auto-Detect', sourceWidth: 140, translateLabel: 'Translate', actionsLabel: 'Actions', canTranslate: false, actionsVisible: false,
+      sourceLabel: 'Auto-Detect', sourceWidth: 140, translateLabel: 'Translate', actionsLabel: 'Actions', canTranslate: false,
     } });
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'translation_chrome_update' ? true : invoke(name, args));
@@ -533,6 +535,55 @@ describe('selection across native webviews', () => {
 });
 
 describe('language dropdown and menu keyboard behavior', () => {
+  it.each(['choose', 'Escape', 'Tab'])('restores source input after %s from the native source language picker', async (action) => {
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'translation_chrome_update' ? true : original(name, args));
+    const user = userEvent.setup(); await mount();
+    await waitFor(() => expect(document.querySelector('.translation-panel')?.getAttribute('data-native-chrome')).toBe('true'));
+    await emit('translation_chrome_action', 'source');
+    expect(document.activeElement).toBe(screen.getByRole('combobox'));
+    if (action === 'choose') {
+      await user.type(screen.getByRole('combobox'), 'French');
+      await user.keyboard('{Enter}');
+    } else await user.keyboard(`{${action}}`);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(source());
+  });
+
+  it('does not restore the language trigger over an outside button receiving focus', async () => {
+    const user = userEvent.setup(); await mount();
+    await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
+    const outside = document.createElement('button');
+    outside.textContent = 'External target'; document.body.append(outside);
+    try {
+      await user.click(outside); await flushFrames();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(document.activeElement).toBe(outside);
+    } finally { outside.remove(); }
+  });
+
+  it('allows long language names to wrap without losing the checkmark or viewport bounds', async () => {
+    const dropdownStyles = readFileSync('src/styles.css', 'utf8') as string;
+    const rules = ['.language-options button {', '.language-options button span {', '.language-options button svg {'];
+    const style = document.createElement('style');
+    style.textContent = rules.map((selector) => selector + dropdownStyles.split(selector)[1].split('}')[0] + '}').join('\n');
+    document.head.append(style);
+    try {
+      const user = userEvent.setup(); await mount();
+      await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
+      const longName = screen.getByRole('option', { name: 'Chinese (Traditional)' });
+      const row = getComputedStyle(longName), text = getComputedStyle(longName.querySelector('span')!);
+      expect(row.minHeight).toBe('40px');
+      expect(row.height).not.toBe('40px');
+      expect(text.whiteSpace).toBe('normal');
+      expect(text.overflowWrap).toBe('anywhere');
+      expect(text.textOverflow).not.toBe('ellipsis');
+      expect(screen.getByRole('option', { name: 'English' }).querySelector('svg')).not.toBeNull();
+      const panel = screen.getByRole('dialog');
+      expect(Number.parseFloat(panel.style.maxWidth)).toBeLessThanOrEqual(innerWidth - 16);
+    } finally { style.remove(); }
+  });
+
   it('searches languages, moves with arrows and chooses the active option with Return', async () => {
     const user = userEvent.setup(); await mount();
     await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
