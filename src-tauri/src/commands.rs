@@ -648,7 +648,9 @@ pub async fn clipboard_record_use(
             + 1
     })
     .await?;
-    let promote_id = record_id.clone();
+    let state = app.state::<AppState>();
+    let write = state.clipboard_writes.lock().await;
+    let used_id = record_id.clone();
     let payload = crate::clipboard_runtime::payload(&app, record_id, true).await?;
     // Transcode TIFF before taking the main thread. PNG bytes are left unchanged.
     let payload =
@@ -717,17 +719,19 @@ pub async fn clipboard_record_use(
     let (target, version, written_at) = match initial {
         Ok(values) => {
             // Clicking a row writes the clipboard before it pastes. That write is the same copy.
-            promote_used_record(&app, promote_id.clone()).await?;
+            save_record_use(&app, used_id, false).await?;
             values
         }
         Err(result) => {
             if result.copy_status == "current" {
-                promote_used_record(&app, promote_id).await?;
+                save_record_use(&app, used_id, result.status == "copied").await?;
             }
+            drop(write);
             reveal_failure(&app, operation, &result).await?;
             return Ok(result);
         }
     };
+    drop(write);
     let mut keys_down = false;
     for _ in 0..30 {
         let attempt = on_main(&app, move |app| {
@@ -816,14 +820,16 @@ pub async fn clipboard_record_use(
     Ok(result)
 }
 
-async fn promote_used_record(app: &AppHandle, id: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let _write = state.clipboard_writes.lock().await;
-    crate::clipboard_runtime::database(app, move |database| database.clipboard_promote(&id))
-        .await?;
-    crate::clipboard_runtime::changed(app)?;
-    drop(_write);
-    Ok(())
+async fn save_record_use(app: &AppHandle, id: String, copied: bool) -> Result<(), String> {
+    crate::clipboard_runtime::database(app, move |database| {
+        if copied {
+            database.clipboard_duplicate(&id)
+        } else {
+            database.clipboard_promote(&id)
+        }
+    })
+    .await?;
+    crate::clipboard_runtime::changed(app)
 }
 
 async fn reveal_failure(
@@ -1703,7 +1709,11 @@ pub async fn clipboard_image(
     if !(128..=2048).contains(&max_pixels) {
         return Err("invalid_argument".into());
     }
-    let payload = crate::clipboard_runtime::payload(&app, record_id, false).await?;
+    let payload = {
+        let state = app.state::<AppState>();
+        let _write = state.clipboard_writes.lock().await;
+        crate::clipboard_runtime::payload(&app, record_id, false).await?
+    };
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let bytes = match payload {
             platform::ClipboardPayload::Image { bytes, .. }

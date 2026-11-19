@@ -166,8 +166,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     try {
       const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId, action });
       if (!mounted.current) return false;
-      // Closing the panel bumps the operation generation before this returns. A row click writes the clipboard too.
-      if (result.copyStatus === 'current') clipboard.noteCopied(recordId);
+      // Paste promotes the original; a standalone copy arrives as a new record through clipboard_changed.
+      if (result.copyStatus === 'current' && result.status !== 'copied') clipboard.noteCopied(recordId);
       if (operation.current !== current) return false;
       setFeedback(clipboardUseFeedback(result));
       return result.copyStatus === 'current' && result.status === 'copied';

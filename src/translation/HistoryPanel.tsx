@@ -1,5 +1,5 @@
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { HistoryIcon } from './HistoryIcon';
 import { RecordToolbar } from '../shared/RecordToolbar';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
@@ -39,6 +39,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   useEffect(() => { if (!active || !snapshot.window.translationVisible) clickedRecord.current = null; }, [active, snapshot.window.translationVisible, snapshot.window.recordsSession]);
   useEffect(() => { ++copyOperation.current; setCopyFailed(false); }, [active, snapshot.window.recordsSession]);
   useEffect(() => () => { ++copyOperation.current; }, []);
+  const panel = useRef<HTMLElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
@@ -162,6 +163,27 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     else await command('records_details_toggle');
   }
 
+  function previewKeyDown(key: globalThis.KeyboardEvent, rowId?: string) {
+    if (key.defaultPrevented || key.isComposing || key.keyCode === 229 || key.key === 'Dead'
+      || !active || !state.historyVisible || editing || menu || panel.current?.querySelector('.history-shortcuts-panel')) return;
+    key.preventDefault();
+    if (key.repeat) return;
+    if (state.translationVisible) { void toggleDetails(); return; }
+    const record = filtered.find(({ id }) => id === (rowId ?? keyboardId));
+    if (focusReady && record) void toggleDetails(record);
+  }
+
+  const previewFromBody = useEffectEvent((event: globalThis.KeyboardEvent) => {
+    // WebKit can leave focus on the body after a click on the list background.
+    if (event.target === document.body && clipboardKeyAction(clipboardPanelShortcuts(snapshot), event) === 'preview') previewKeyDown(event);
+  });
+  useEffect(() => {
+    if (!active || !state.historyVisible) return;
+    const keydown = (event: globalThis.KeyboardEvent) => previewFromBody(event);
+    window.addEventListener('keydown', keydown);
+    return () => window.removeEventListener('keydown', keydown);
+  }, [active, state.historyVisible]);
+
   function focusRow(id: string) {
     const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])]);
     const button = buttons.find((button) => button.closest<HTMLElement>('article')?.dataset.recordId === id);
@@ -175,8 +197,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const target = event.target as HTMLElement;
     const fromSearch = target === search.current;
     const row = target.closest<HTMLElement>('article[data-record-id]');
-    if (!row && !fromSearch && !target.closest('.history-toolbar, .history-footer')) return;
     const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), key);
+    if (action === 'preview') {
+      previewKeyDown(key, row?.dataset.recordId);
+      return;
+    }
+    if (!row && !fromSearch && !target.closest('.history-toolbar, .history-footer')) return;
     if (action === 'previousCategory' || action === 'nextCategory') {
       if (target.closest('.history-footer')?.querySelector('[role=dialog]')) return;
       event.preventDefault();
@@ -206,10 +232,6 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (!record || !clipboardShortcutAvailable(snapshot, native, action)) return;
     event.preventDefault();
     if (key.repeat) return;
-    if (action === 'preview') {
-      if (focusReady) void toggleDetails(record);
-      return;
-    }
     const actionId = action === 'copyRecord' ? 'copy' : action;
     const article = row ?? [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLElement>('article[data-record-id]') ?? [])]).find((element) => element.dataset.recordId === record.id);
     const button = article?.querySelector<HTMLButtonElement>(`[data-action=${actionId}] button:not(:disabled)`);
@@ -253,7 +275,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     </article>;
   }
 
-  return <aside data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
+  return <aside ref={panel} data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
     <ActivityBeam label={t('working')} active={active && history.showLoading} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />

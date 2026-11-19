@@ -80,7 +80,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const invalidPages = useRef(new Map<string, number>());
   const defaultPage = useRef<{ page: ClipboardPage; revision: number } | null>(null);
   const defaultRevision = useRef(0);
-  const deferred = useRef(false);
+  const deferred = useRef<'local' | 'external' | null>(null);
   const localWrites = useRef(0);
   const writeQueue = useRef(Promise.resolve());
   const copiedMark = useRef<{ id: string; date: string; previousDate: string | undefined } | null>(null);
@@ -157,7 +157,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const removers: (() => void)[] = [];
     if (native) void (async () => {
       for (const subscribe of [
-        () => listen<number>('clipboard_changed', () => { if (!disposed) { ++defaultRevision.current; setCaptureError(false); if (localWrites.current || shouldDefer.current?.()) deferred.current = true; else { pages.current.clear(); invalidPages.current.clear(); deferred.current = false; void fetchPage(false, false); } } }),
+        () => listen<number>('clipboard_changed', () => { if (!disposed) { ++defaultRevision.current; setCaptureError(false); if (localWrites.current) deferred.current ??= 'local'; else if (shouldDefer.current?.()) deferred.current = 'external'; else { pages.current.clear(); invalidPages.current.clear(); deferred.current = null; void fetchPage(false, false); } } }),
         () => listen<string>('clipboard_capture_error', () => { if (!disposed) setCaptureError(true); }),
       ]) {
         const remove = await subscribe();
@@ -189,6 +189,11 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       resetPending.current = false;
       morePending.current = false;
       setPage(cached); setLoading(false); setShowActivity(false); setError(false);
+      // A category switch should show new copies even if the previous list was scrolled.
+      if (deferred.current === 'external' && !localWrites.current) {
+        invalidPages.current.set(cacheKey(kind, favoritesOnly), cached.records.length);
+        void fetchPage(false, false);
+      }
       return;
     }
     if (!queryChanged && (favoritesChanged || kindChanged)) {
@@ -223,7 +228,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       if (action === 'pin') copiedMark.current = null;
       if (action === 'delete' && defaultPage.current) defaultPage.current.page = { ...defaultPage.current.page, records: defaultPage.current.page.records.filter((record) => record.id !== recordId) };
       if (!shouldDefer.current?.()) {
-        pages.current.clear(); invalidPages.current.clear(); deferred.current = false; void fetchPage(false, false);
+        pages.current.clear(); invalidPages.current.clear(); deferred.current = null; void fetchPage(false, false);
       } else if (previous) {
         const updated = action === 'delete' ? null : { ...previous, ...(action === 'favorite' ? { isFavorite: !previous.isFavorite } : { isPinned: !previous.isPinned }) };
         const pinOrder = new Map(latest.current.records.filter((record) => record.isPinned).map((record, index) => [record.id, index]));
@@ -301,10 +306,10 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     pages.current.clear(); invalidPages.current.clear();
     defaultPage.current = null;
     ++defaultRevision.current;
-    deferred.current = false;
+    deferred.current = null;
     resetPending.current = true;
     morePending.current = false;
     if (ready.current) void fetchPage(false, false);
   }, [fetchPage]);
-  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = false; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error || captureError, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

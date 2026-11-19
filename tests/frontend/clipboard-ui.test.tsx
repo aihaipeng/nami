@@ -66,7 +66,7 @@ beforeEach(() => {
       bridge.listeners.get('clipboard_changed')?.forEach((callback) => callback({ payload: ++revision }));
       return;
     }
-    if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
+    if (name === 'clipboard_record_use') return { status: (args as { action: string }).action === 'copy' ? 'copied' : 'dispatched', copyStatus: 'current', code: null };
     return original(name, args);
   });
 });
@@ -97,6 +97,30 @@ describe('clipboard type filters', () => {
     expect(calls('window_hide')).toHaveLength(0);
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(bridge.snapshot.window.historyVisible).toBe(true);
+  });
+
+  it('keeps the original rows and current category when a copy creates a new record', async () => {
+    const original = { ...records[0], isFavorite: true };
+    const newer = { ...original, id: 'newer', date: '2026-11-15T12:00:00Z' };
+    records = [records[1], newer, original];
+    await mount('clipboard');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    const favorites = screen.getByRole('button', { name: 'Favorite clipboard records' });
+    fireEvent.click(favorites);
+    const ids = () => [...listRows()].map((element) => (element as HTMLElement).dataset.recordId);
+    await waitFor(() => expect(ids()).toEqual(['pinned', 'newer', 'first']));
+    const originalRow = row('first');
+    const list = originalRow.closest('.history-list')!;
+    list.scrollTop = 20;
+    await act(async () => fireEvent.click(within(originalRow).getByRole('button', { name: 'Copy' })));
+    expect(ids()).toEqual(['pinned', 'newer', 'first']);
+    records = [records[0], { ...original, id: 'copy', isFavorite: false, date: '2099-01-01T00:00:00Z' }, newer, original];
+    await emit('clipboard_changed', 1);
+    expect(favorites.getAttribute('aria-pressed')).toBe('true');
+    expect(row('first')).toBe(originalRow);
+    expect(list.scrollTop).toBe(20);
+    fireEvent.click(favorites);
+    await waitFor(() => expect(ids()).toEqual(['pinned', 'copy', 'newer', 'first']));
   });
 
   it('does not show copy success or a beam when copying fails', async () => {
@@ -1434,7 +1458,7 @@ describe('database clipboard history', () => {
     expect(document.querySelectorAll('.clipboard-panel .history-row')).toHaveLength(pageSize + 1);
   });
 
-  it('moves a copied or clicked record to the top of its pin group', async () => {
+  it('moves a pasted record to the top of its pin group', async () => {
     records = [
       { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
       { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
@@ -1452,7 +1476,7 @@ describe('database clipboard history', () => {
     expect(ids()).toEqual(['pin-new', 'pin-old', 'plain-old', 'plain-new']);
   });
 
-  it('keeps a newly copied image ahead of an image copied earlier', async () => {
+  it('keeps a newly captured image ahead of an image reused earlier', async () => {
     records = [
       { id: 'img-b', kind: 'image', text: '', date: '2020-01-02T00:00:00.000Z', isFavorite: true, isPinned: false },
       { id: 'img-a', kind: 'image', text: '', date: '2020-01-01T00:00:00.000Z', isFavorite: true, isPinned: false },
@@ -1574,7 +1598,7 @@ describe('database clipboard history', () => {
     expect(ids()).toEqual(['img-new', 'img-b', 'img-a']);
   });
 
-  it('still moves a copied record to the top when closing the panel ends the session first', async () => {
+  it('keeps a copied record in place when closing the panel ends the session first', async () => {
     records = [
       { id: 'plain-new', kind: 'text', text: 'Newer text', date: '2020-01-02T00:00:00Z', isFavorite: false, isPinned: false },
       { id: 'plain-old', kind: 'text', text: 'Older text', date: '2020-01-01T00:00:00Z', isFavorite: false, isPinned: false },
@@ -1588,7 +1612,7 @@ describe('database clipboard history', () => {
     fireEvent.click(row('plain-old').querySelector('.history-row-select')!);
     await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
     await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
-    expect(ids()).toEqual(['plain-old', 'plain-new']);
+    expect(ids()).toEqual(['plain-new', 'plain-old']);
   });
 
   it('still moves a clicked record to the top when closing the panel ends the session first', async () => {

@@ -2532,14 +2532,20 @@ fn verify_clipboard_action_feedback(
     )?;
     samples.push(wait_records(app, r#"
 const search=document.querySelector('.clipboard-panel input[type=search]'), row=document.querySelector('[data-record-id=action-feedback][data-keyboard-current]');
-if(document.activeElement!==search||!row)return {ready:false};
+if(!row)return {ready:false};
 const button=row.querySelector('.history-row-select');
-const probe=row.cloneNode(false);delete probe.dataset.keyboardCurrent;probe.classList.add('context-target');row.after(probe);
+const probe=row.cloneNode(false);delete probe.dataset.keyboardCurrent;probe.dataset.recordTarget='true';row.after(probe);
 const hoverBackground=getComputedStyle(probe).backgroundColor;probe.remove();
 const sameHighlight=()=>getComputedStyle(row).backgroundColor===hoverBackground&&getComputedStyle(row).boxShadow==='none';
-if(hoverBackground==='rgba(0, 0, 0, 0)'||!sameHighlight())throw Error('search keyboard target must use the hover background without a frame');
-button.focus();
-if(document.activeElement!==button||!sameHighlight()||getComputedStyle(button).outlineStyle!=='none')throw Error('focused record must use the hover background without a frame');
+if(!window.__clipboardActionFocusProbe){
+  if(document.activeElement!==search)return {ready:false};
+  if(hoverBackground==='rgba(0, 0, 0, 0)'||row.hasAttribute('data-record-target')||getComputedStyle(row).backgroundColor!=='rgba(0, 0, 0, 0)')throw Error('search focus must not highlight the initial keyboard target');
+  window.__clipboardActionFocusProbe=true;
+  button.focus();
+}
+if(document.activeElement!==button||getComputedStyle(button).outlineStyle!=='none')throw Error('record button must receive focus without a frame');
+if(!sameHighlight())return {ready:false};
+delete window.__clipboardActionFocusProbe;
 search.focus({preventScroll:true});
 if(!search.dispatchEvent(new KeyboardEvent('keydown',{key:' ',code:'Space',bubbles:true,cancelable:true})))throw Error('search cannot type a space');
 return {ready:true,keyboardTarget:row.dataset.recordId};
@@ -2569,6 +2575,10 @@ const button=document.querySelector('[data-record-id=action-feedback] [data-acti
     samples.push(wait_records(app, r#"
 const panel=document.querySelector('.clipboard-panel'),button=panel.querySelector('[data-record-id=action-feedback] [data-action=copy] button');
 return {ready:!!button?.querySelector('.copy-success')&&!panel.closest('[hidden]'),copiedWhileOpen:true};
+"#)?);
+    samples.push(wait_records(app, r#"
+const rows=[...document.querySelectorAll('.clipboard-panel .history-row')].filter(row=>row.querySelector('.history-row-select')?.getAttribute('aria-label')==='Clipboard: Synthetic copy feedback');
+return {ready:rows.length===2&&rows.some(row=>row.dataset.recordId==='action-feedback'),distinctRows:rows.map(row=>row.dataset.recordId)};
 "#)?);
     verify_record_beam_motion(app, samples)?;
     for (label, active) in [("Favorite", true), ("Remove favorite", false)] {
@@ -3160,54 +3170,98 @@ fn run_translation_action_timing(app: &AppHandle) -> DomCase {
         })?;
         wait_motion(app)?;
         wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false'};")?;
-        let preview = "const row=document.querySelector('#translation-history .history-items .history-row-select');row.dispatchEvent(new KeyboardEvent('keydown',{key:'y',code:'KeyY',metaKey:true,bubbles:true,cancelable:true}));return true;";
-        evaluate_view_dom(app, "clipboard", preview)?;
-        case.samples.push(wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true',previewShortcut:'opened'};")?);
-        evaluate_view_dom(app, "clipboard", preview)?;
-        case.samples.push(wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',previewShortcut:'closed'};")?);
-        wait_motion(app)?;
-        evaluate_view_dom(app, "clipboard", "window.__clickedRow=document.querySelector('#translation-history .history-items .history-row-select');window.__clickedRow.click();return true;")?;
-        wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
-        wait_motion(app)?;
-        let pre_motion_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = pre_motion_events.clone();
-        let owned_app = app.clone();
-        let close_listener = app.listen_any("history_changed", move |_| {
-            let state = owned_app.state::<AppState>();
-            let state = state.windows.lock().unwrap();
-            if !state.translation_visible
-                && state.motion_anchor.is_none()
-                && state.translation_extent > 0.0
-            {
-                observed.fetch_add(1, Ordering::SeqCst);
+        let controls = {
+            let state = app.state::<AppState>();
+            let mut options = state.clipboard_options.lock().unwrap().clone();
+            options.record_shortcuts.set(
+                nami::shortcuts::ClipboardRecordAction::Preview,
+                Some(nami::shortcuts::KeyBinding::new("Space", &[])),
+                None,
+                &[],
+            )?;
+            options.controls()
+        };
+        app.get_webview("clipboard")
+            .ok_or("records child")?
+            .emit("clipboard_controls_changed", controls)
+            .map_err(|_| "event_emit")?;
+        let setup = r#"
+const panel=document.querySelector('#translation-history'),row=panel.querySelector('.history-items .history-row-select');
+row.focus();row.blur();
+window.__detailKeys=[];
+window.addEventListener('keydown',e=>{if(e.code==='Space')window.__detailKeys.push({trusted:e.isTrusted,handled:e.defaultPrevented,body:e.target===document.body});});
+return document.activeElement===document.body;
+"#;
+        if evaluate_view_dom(app, "clipboard", setup)? != true {
+            return Err("could not leave focus on the records body".into());
+        }
+        for (trigger, open, close) in [
+            ("space", "", ""),
+            ("toolbar", "document.querySelector('#translation-history .records-details').click();return true;", "document.querySelector('#translation-history .records-details').click();return true;"),
+            ("row", "window.__clickedRow=document.querySelector('#translation-history .history-items .history-row-select');window.__clickedRow.click();return true;", "window.__clickedRow.click();window.__clickedRow.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,detail:2}));return true;"),
+        ] {
+            if trigger == "space" {
+                post_records_key(app, 49, 0, " ", " ", false)?;
+            } else {
+                evaluate_view_dom(app, "clipboard", open)?;
             }
-        });
-        let clicked_at = std::time::Instant::now();
-        evaluate_view_dom(app, "clipboard", "window.__clickedRow.click();window.__clickedRow.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,detail:2}));return true;")?;
-        let mut first_move_ms = None;
-        for _ in 0..100 {
-            let moved = on_main(app, |app| {
-                let state = app.state::<AppState>();
+            wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
+            wait_motion(app)?;
+            let pre_motion_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = pre_motion_events.clone();
+            let owned_app = app.clone();
+            let close_listener = app.listen_any("history_changed", move |_| {
+                let state = owned_app.state::<AppState>();
                 let state = state.windows.lock().unwrap();
-                Ok(state.translation_extent < state.translation_width - 0.5)
-            })?;
-            if moved {
-                first_move_ms = Some(clicked_at.elapsed().as_secs_f64() * 1000.0);
-                break;
+                if !state.translation_visible
+                    && state.translation_extent >= state.translation_width - 0.5
+                {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let clicked_at = std::time::Instant::now();
+            if trigger == "space" {
+                post_records_key(app, 49, 0, " ", " ", false)?;
+            } else {
+                evaluate_view_dom(app, "clipboard", close)?;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            let mut first_move_ms = None;
+            for _ in 0..100 {
+                let moved = on_main(app, |app| {
+                    let state = app.state::<AppState>();
+                    let state = state.windows.lock().unwrap();
+                    Ok(state.translation_extent < state.translation_width - 0.5)
+                })?;
+                if moved {
+                    first_move_ms = Some(clicked_at.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            app.unlisten(close_listener);
+            let pre_motion_events = pre_motion_events.load(Ordering::SeqCst);
+            case.samples.push(serde_json::json!({"trigger":trigger,"closeFirstMoveMs":first_move_ms,"historySnapshotsBeforeMotion":pre_motion_events}));
+            if pre_motion_events != 0 || first_move_ms.is_none_or(|elapsed| elapsed > 75.0) {
+                return Err(format!("{trigger} close waited before moving: historySnapshots={pre_motion_events}, firstMoveMs={first_move_ms:?}"));
+            }
+            let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
+            if closed["beam"] != false {
+                return Err(format!("{trigger} close showed activity"));
+            }
+            wait_motion(app)?;
         }
-        let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
-        app.unlisten(close_listener);
-        let pre_motion_events = pre_motion_events.load(Ordering::SeqCst);
-        case.samples.push(serde_json::json!({"closeFirstMoveMs":first_move_ms,"historySnapshotsBeforeMotion":pre_motion_events}));
-        if pre_motion_events != 0 || first_move_ms.is_none_or(|elapsed| elapsed > 75.0) {
-            return Err(format!("close waited before moving: historySnapshots={pre_motion_events}, firstMoveMs={first_move_ms:?}"));
-        }
-        if closed["beam"] != false {
-            return Err("record click showed activity".to_string());
-        }
-        case.samples.push(closed);
+        case.samples.push(wait_records(app, "const keys=window.__detailKeys;return {ready:keys.length===2&&keys.every(k=>k.trusted&&k.handled&&k.body),keys};")?);
+        app.get_webview("clipboard")
+            .ok_or("records child")?
+            .emit(
+                "clipboard_controls_changed",
+                app.state::<AppState>()
+                    .clipboard_options
+                    .lock()
+                    .unwrap()
+                    .controls(),
+            )
+            .map_err(|_| "event_emit")?;
         verify_direct_delete(app, "translation", &mut case.samples)?;
         on_main(app, |app| {
             app.state::<AppState>()
@@ -5065,9 +5119,14 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
                 "first" => "&&marked('pin')",
                 _ => "",
             };
+            let (before, after) = if kind == "second" {
+                ("4 records", "3 records")
+            } else {
+                ("1 record", "0 records")
+            };
             check(
                 "Search loaded",
-                &format!("focused&&row?.dataset.recordId==={id:?}&&count==='1 record'{marked}"),
+                &format!("focused&&row?.dataset.recordId==={id:?}&&count==={before:?}{marked}"),
             )?;
             if kind == "normal" {
                 post_records_key(app, 51, CMD, "\u{7f}", "\u{7f}", true)?;
@@ -5080,7 +5139,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
             samples.push(check(
                 &format!("Delete directly: {label}"),
                 &format!(
-                    "focused&&count==='0 records'&&search?.value==={query:?}&&keys.at(-1)?.trusted"
+                    "focused&&count==={after:?}&&search?.value==={query:?}&&keys.at(-1)?.trusted"
                 ),
             )?);
             let state = app.state::<AppState>();
@@ -5124,7 +5183,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         press(31, CMD | SHIFT, "O", "O")?;
         let ocr = check(
             "Extract Text",
-            "focused&&count==='3 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
+            "focused&&count==='6 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
         )?;
         let text = on_main(app, |_| {
             let capture = crate::platform::read_clipboard(|_| false)?

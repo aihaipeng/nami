@@ -1155,7 +1155,7 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     window
         .set_max_size::<LogicalSize<f64>>(None)
         .map_err(|_| "window_geometry")?;
-    update_translation_level(app)?;
+    sync_translation_level(app, &window)?;
     if !animated
         || !visible
         || platform::reduce_motion()
@@ -1191,11 +1191,52 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             }
         }
     };
-    let app = app.clone();
+    let advance = move |app: &AppHandle, window: &Window, elapsed: f64| {
+        let (mut frame, mut speed) = start.spring(target, velocity, elapsed);
+        let state = app.state::<AppState>().windows.lock().unwrap().clone();
+        let anchor = frame.left + frame.history;
+        if frame.history < 0.0 || frame.history > state.history_width {
+            frame.history = frame.history.clamp(0.0, state.history_width);
+            speed.left += speed.history;
+            speed.history = 0.0;
+        }
+        frame.left = anchor - frame.history;
+        if frame.translation < 0.0 || frame.translation > state.translation_width {
+            frame.translation = frame.translation.clamp(0.0, state.translation_width);
+            speed.translation = 0.0;
+        }
+        let finished = frame.settled(target, speed);
+        set_panel_frame(
+            app,
+            window,
+            revision,
+            if finished {
+                (target, PanelFrame::default())
+            } else {
+                (frame, speed)
+            },
+            top,
+            height,
+            finished,
+        )
+    };
+    let period = std::time::Duration::from_secs_f64(1.0 / refresh_rate);
+    let now = std::time::Instant::now();
+    let detail_only =
+        start.history == target.history && (start.translation - target.translation).abs() >= 0.5;
+    let (began, next_tick) = if detail_only {
+        // Present the first detail frame before publishing selection and window changes.
+        if !advance(app, &window, period.as_secs_f64())? {
+            return Ok(());
+        }
+        (now - period, now + period)
+    } else {
+        (now, now)
+    };
+    let owned = app.clone();
     tauri::async_runtime::spawn(async move {
-        let began = std::time::Instant::now();
-        let mut ticks =
-            tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / refresh_rate));
+        let app = owned;
+        let mut ticks = tokio::time::interval_at(next_tick.into(), period);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;
@@ -1204,40 +1245,11 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             let (send, receive) = tokio::sync::oneshot::channel();
             if app
                 .run_on_main_thread(move || {
-                    let (mut frame, mut speed) =
-                        start.spring(target, velocity, began.elapsed().as_secs_f64());
-                    let state = owned_app
-                        .state::<AppState>()
-                        .windows
-                        .lock()
-                        .unwrap()
-                        .clone();
-                    let anchor = frame.left + frame.history;
-                    if frame.history < 0.0 || frame.history > state.history_width {
-                        frame.history = frame.history.clamp(0.0, state.history_width);
-                        speed.left += speed.history;
-                        speed.history = 0.0;
-                    }
-                    frame.left = anchor - frame.history;
-                    if frame.translation < 0.0 || frame.translation > state.translation_width {
-                        frame.translation = frame.translation.clamp(0.0, state.translation_width);
-                        speed.translation = 0.0;
-                    }
-                    let finished = frame.settled(target, speed);
-                    let result = set_panel_frame(
+                    let _ = send.send(advance(
                         &owned_app,
                         &owned_window,
-                        revision,
-                        if finished {
-                            (target, PanelFrame::default())
-                        } else {
-                            (frame, speed)
-                        },
-                        top,
-                        height,
-                        finished,
-                    );
-                    let _ = send.send(result);
+                        began.elapsed().as_secs_f64(),
+                    ));
                 })
                 .is_err()
             {
@@ -1253,17 +1265,22 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             }
         }
     });
+    emit_state(app)
+}
+
+fn sync_translation_level(app: &AppHandle, window: &Window) -> Result<(), String> {
+    let state = app.state::<AppState>().windows.lock().unwrap().clone();
+    let pinned = (state.translation_visible && state.translation_pinned)
+        || (state.history_visible && state.history_pinned);
+    if window.is_always_on_top().map_err(|_| "window_pin")? != pinned {
+        window.set_always_on_top(pinned).map_err(|_| "window_pin")?;
+    }
     Ok(())
 }
 
 pub fn update_translation_level(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>().windows.lock().unwrap().clone();
     if let Some(window) = app.get_window("translation") {
-        let pinned = (state.translation_visible && state.translation_pinned)
-            || (state.history_visible && state.history_pinned);
-        if window.is_always_on_top().map_err(|_| "window_pin")? != pinned {
-            window.set_always_on_top(pinned).map_err(|_| "window_pin")?;
-        }
+        sync_translation_level(app, &window)?;
     }
     emit_state(app)
 }

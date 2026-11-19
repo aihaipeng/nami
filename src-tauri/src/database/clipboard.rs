@@ -485,6 +485,26 @@ impl HistoryDatabase {
         record: &ClipboardRecord,
         representation: Option<&ClipboardFileRepresentation>,
     ) -> Result<ClipboardRecord, String> {
+        self.insert_clipboard_record(record, representation, true)
+    }
+
+    pub fn clipboard_duplicate(&mut self, id: &str) -> Result<(), String> {
+        let mut record = self.clipboard_record(id)?;
+        let representation = self.clipboard_file_representation(id)?;
+        record.id = uuid::Uuid::new_v4().to_string();
+        record.date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        record.is_favorite = false;
+        record.is_pinned = false;
+        self.insert_clipboard_record(&record, representation.as_ref(), false)?;
+        Ok(())
+    }
+
+    fn insert_clipboard_record(
+        &mut self,
+        record: &ClipboardRecord,
+        representation: Option<&ClipboardFileRepresentation>,
+        deduplicate: bool,
+    ) -> Result<ClipboardRecord, String> {
         if record.id.is_empty()
             || !["text", "image", "files"].contains(&record.kind.as_str())
             || record.text.len() > MAX_TEXT_BYTES
@@ -565,7 +585,11 @@ impl HistoryDatabase {
         } else {
             None
         };
-        let duplicate: Option<String> = transaction.query_row("SELECT id FROM clipboard_records WHERE fingerprint=?1 AND kind=?2 AND ((kind='image' AND image_path IS ?4) OR (kind!='image' AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND c.text=?3))) LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path], |row| row.get(0)).optional().map_err(storage_error)?;
+        let duplicate: Option<String> = if deduplicate {
+            transaction.query_row("SELECT id FROM clipboard_records WHERE fingerprint=?1 AND kind=?2 AND ((kind='image' AND image_path IS ?4) OR (kind!='image' AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND c.text=?3))) ORDER BY sequence DESC LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path], |row| row.get(0)).optional().map_err(storage_error)?
+        } else {
+            None
+        };
         let inserted = duplicate.is_none();
         let id = if let Some(id) = duplicate {
             transaction
@@ -1586,6 +1610,57 @@ mod tests {
         );
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clipboard_duplicate_preserves_original_and_restores_full_payload_by_new_id() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        for (original, attachment) in [
+            (
+                record("text", &"Synthetic clipboard text ".repeat(30)),
+                None,
+            ),
+            (
+                image_record("image"),
+                Some(representation(&image_record("image"), "original.png")),
+            ),
+        ] {
+            db.clipboard_insert_with_file_representation(&original, attachment.as_ref())
+                .unwrap();
+            db.clipboard_edit(&original.id, "Original note", None)
+                .unwrap();
+            db.clipboard_update(&original.id, "favorite").unwrap();
+            db.clipboard_update(&original.id, "pin").unwrap();
+            let before = serde_json::to_value(db.clipboard_detail(&original.id).unwrap()).unwrap();
+            db.clipboard_duplicate(&original.id).unwrap();
+            db.clipboard_duplicate(&original.id).unwrap();
+            let page = db
+                .clipboard_page_filtered("", false, Some(&original.kind), None, 100)
+                .unwrap();
+            assert_eq!(page.total_records, 3);
+            assert_eq!(page.records[0].id, original.id);
+            assert_ne!(page.records[1].id, page.records[2].id);
+            for row in &page.records[1..] {
+                let copy = db.clipboard_detail(&row.id).unwrap();
+                assert_eq!(copy.text, original.text);
+                assert_eq!(copy.image_path, original.image_path);
+                assert!(copy.title.is_empty() && !copy.is_favorite && !copy.is_pinned);
+                assert_eq!(
+                    db.clipboard_file_representation(&row.id).unwrap(),
+                    attachment
+                );
+            }
+            assert_eq!(
+                serde_json::to_value(db.clipboard_detail(&original.id).unwrap()).unwrap(),
+                before
+            );
+        }
+        assert_eq!(
+            db.clipboard_page("clipboard text", false, None, 100)
+                .unwrap()
+                .total_records,
+            3
+        );
     }
 
     #[test]

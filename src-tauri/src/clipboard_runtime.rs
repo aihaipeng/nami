@@ -53,14 +53,12 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// Caller holds clipboard_writes while reading the record and its image files.
 pub(crate) async fn payload(
     app: &AppHandle,
     id: String,
     restore_files: bool,
 ) -> Result<platform::ClipboardPayload, String> {
-    let state = app.state::<AppState>();
-    // Keep deletion and capture serialized while file reads run without the database mutex.
-    let _write = state.clipboard_writes.lock().await;
     let root = image_root(app)?;
     let (record, representation) = database(app, move |database| {
         Ok((

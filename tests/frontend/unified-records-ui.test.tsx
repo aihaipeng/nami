@@ -680,6 +680,28 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
   });
 
+  it('uses the last translation target for Space when focus leaves the row, without scrolling', async () => {
+    await mount('clipboard'); await switchView('translation');
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } } });
+    const history = panel('translation');
+    const row = history.querySelectorAll<HTMLButtonElement>('.history-row-select')[1];
+    act(() => row.focus());
+    await waitFor(() => expect(row.closest('article')?.hasAttribute('data-keyboard-current')).toBe(true));
+    row.blur();
+    expect(document.activeElement).toBe(document.body);
+    const press = (target: Element, repeat = false) => fireEvent.keyDown(target, { key: ' ', code: 'Space', repeat });
+    expect(press(document.body)).toBe(false);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    expect(calls('history_sample_select').at(-1)?.[1]).toMatchObject({ sampleId: row.closest('article')!.dataset.recordId });
+    const scrollbar = history.querySelector('.history-list')!;
+    expect(press(scrollbar, true)).toBe(false);
+    expect(calls('records_details_toggle')).toHaveLength(0);
+    expect(press(scrollbar)).toBe(false);
+    expect(calls('records_details_toggle')).toHaveLength(1);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+  });
+
   it('keeps translation keyboard navigation in the record pane until Return and respects IME before hiding', async () => {
     await mount('clipboard'); await switchView('translation');
     const input = search('translation');
