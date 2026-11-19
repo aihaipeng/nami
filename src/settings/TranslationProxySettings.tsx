@@ -32,25 +32,25 @@ export function TranslationProxySettings({ t, preferences, native, command }: Pi
   }
 
   return <section aria-labelledby="translation-connection-heading">
-    <h2 id="translation-connection-heading">{t('settingsConnection')}</h2>
+    <div className="settings-section-heading">
+      <h2 id="translation-connection-heading">{t('settingsConnection')}</h2>
+    </div>
     <form className="settings-group" onSubmit={(event) => {
       event.preventDefault();
       input.current?.focus({ preventScroll: true });
       void save();
     }}>
       <div className="settings-field settings-proxy-row">
-        <label className="settings-field-content" htmlFor="translation-proxy-url">{t('httpProxy')}</label>
-        <div className="settings-proxy-controls">
-          <input ref={input} id="translation-proxy-url" className="settings-text-input" value={value} placeholder="http://proxy.example.com:8080"
-            readOnly={saving} spellCheck={false} autoComplete="off" aria-invalid={feedback === 'proxyCredentials' || feedback === 'proxyUrlInvalid'}
-            aria-describedby={feedback ? 'translation-proxy-error' : undefined}
-            onChange={(event) => { setDraft(event.target.value); setError(null); }}
-            onKeyDown={(event) => { if (event.key === 'Escape' && !saving) { setDraft(null); setError(null); } }} />
-          {changed && <button type="submit" className="settings-action" aria-disabled={saving || undefined}>{t('saveProxy')}</button>}
-          <input className="settings-switch" type="checkbox" role="switch" aria-label={t('useHttpProxy')} aria-disabled={saving || undefined}
-            aria-describedby={feedback ? 'translation-proxy-error' : undefined} checked={preferences.proxyEnabled}
-            onChange={(event) => void save(event.target.checked)} />
-        </div>
+        <label className="settings-field-content" htmlFor="translation-proxy-enabled">{t('useHttpProxy')}</label>
+        <input ref={input} id="translation-proxy-url" className="settings-text-input" aria-label={t('httpProxy')} value={value} placeholder="http://proxy.example.com:8080"
+          readOnly={saving} spellCheck={false} autoComplete="off" aria-invalid={feedback === 'proxyCredentials' || feedback === 'proxyUrlInvalid'}
+          aria-describedby={feedback ? 'translation-proxy-error' : undefined}
+          onChange={(event) => { setDraft(event.target.value); setError(null); }}
+          onKeyDown={(event) => { if (event.key === 'Escape' && !saving) { setDraft(null); setError(null); } }} />
+        {changed && <button type="submit" className="settings-action" aria-disabled={saving || undefined}>{t('saveProxy')}</button>}
+        <input id="translation-proxy-enabled" className="settings-checkbox" type="checkbox" aria-disabled={saving || undefined}
+          aria-describedby={feedback ? 'translation-proxy-error' : undefined} checked={preferences.proxyEnabled}
+          onChange={(event) => void save(event.target.checked)} />
       </div>
       {feedback && <p id="translation-proxy-error" className="settings-field-note settings-error" role="alert">{t(feedback)}</p>}
     </form>

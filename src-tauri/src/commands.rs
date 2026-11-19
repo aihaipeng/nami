@@ -138,28 +138,54 @@ pub fn window_hide(
 }
 
 #[tauri::command]
-pub fn translation_sample_copy(
+pub async fn translation_sample_copy(
     window: Webview,
     app: AppHandle,
     sample_id: String,
     part: String,
 ) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
-    let record = windows::history_record(&app, &sample_id).ok_or("invalid_argument")?;
-    let text = match part.as_str() {
-        "source" => Some(record.text),
-        "primary" => record.translations.first().cloned(),
-        "secondary" => record.translations.get(1).cloned(),
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let text = on_main(&app, move |app| {
+        let record = windows::history_record(&app, &sample_id).ok_or("invalid_argument")?;
+        let text = translation_copy_part(&record, &part).ok_or("invalid_argument")?;
+        let version = platform::write_text(text).map_err(|(code, _)| code.to_owned())?;
+        app.state::<AppState>()
+            .clipboard_version
+            .store(version, Ordering::SeqCst);
+        Ok::<_, String>(text.to_owned())
+    })
+    .await??;
+    match crate::clipboard_runtime::database(&app, move |db| {
+        db.clipboard_insert_translation_copy(text)
+    })
+    .await
+    {
+        Ok(()) => {
+            crate::clipboard_preferences::enforce_history_locked(&app).await;
+            let _ = crate::clipboard_runtime::changed(&app);
+        }
+        Err(error) => eprintln!("Nami clipboard history after translation copy: {error}"),
+    }
+    Ok(())
+}
+
+fn translation_copy_part<'a>(
+    record: &'a nami::model::HistoryRecord,
+    part: &str,
+) -> Option<&'a str> {
+    match part {
+        "source" => Some(record.text.as_str()),
+        "primary" => record.translations.first().map(String::as_str),
+        "secondary" => record
+            .translations
+            .get(1)
+            .filter(|text| !text.is_empty())
+            .or_else(|| record.translations.first())
+            .map(String::as_str),
         _ => None,
     }
-    .ok_or("invalid_argument")?;
-    platform::write_text(&text)
-        .map(|version| {
-            app.state::<AppState>()
-                .clipboard_version
-                .store(version, Ordering::SeqCst);
-        })
-        .map_err(|(code, _)| code.into())
 }
 
 #[tauri::command]
@@ -379,8 +405,6 @@ pub fn history_width_set(
 pub struct TranslationChromeState {
     source_label: String,
     source_width: f64,
-    translate_label: String,
-    can_translate: bool,
 }
 
 #[tauri::command]
@@ -392,24 +416,16 @@ pub fn translation_chrome_update(
     authorize(&window, &["translation"])?;
     if !state.source_width.is_finite()
         || !(32.0..=360.0).contains(&state.source_width)
-        || [&state.source_label, &state.translate_label]
-            .iter()
-            .any(|label| {
-                label.is_empty() || label.chars().count() > 100 || label.contains(['\n', '\r'])
-            })
+        || state.source_label.is_empty()
+        || state.source_label.chars().count() > 100
+        || state.source_label.contains(['\n', '\r'])
     {
         return Err("invalid_argument".into());
     }
     if !platform::capabilities().native_chrome {
         return Ok(false);
     }
-    windows::update_translation_chrome(
-        &app,
-        state.source_label,
-        state.source_width,
-        state.translate_label,
-        state.can_translate,
-    )?;
+    windows::update_translation_chrome(&app, state.source_label, state.source_width)?;
     Ok(true)
 }
 
@@ -823,6 +839,9 @@ async fn save_record_use(app: &AppHandle, id: String, copied: bool) -> Result<()
         }
     })
     .await?;
+    if copied {
+        crate::clipboard_preferences::enforce_history_locked(app).await;
+    }
     crate::clipboard_runtime::changed(app)
 }
 
@@ -1751,6 +1770,29 @@ mod tests {
     use super::{image_history_paste, paste_release_result, remaining_image_settle, PASTE_KEY_GAP};
     use crate::platform::ClipboardPayload;
     use std::time::Duration;
+
+    #[test]
+    fn secondary_copy_falls_back_to_the_saved_primary_without_using_source() {
+        let mut record: nami::model::HistoryRecord = serde_json::from_value(serde_json::json!({
+            "id":"copy-test", "text":"source", "sourceLanguage":"auto", "targetLanguages":["en"],
+            "translations":["primary"], "date":"2026-11-20T00:00:00Z", "isFavorite":false, "isPinned":false
+        })).unwrap();
+        assert_eq!(
+            super::translation_copy_part(&record, "secondary"),
+            Some("primary")
+        );
+        record.translations.push("secondary".into());
+        assert_eq!(
+            super::translation_copy_part(&record, "secondary"),
+            Some("secondary")
+        );
+        assert_eq!(
+            super::translation_copy_part(&record, "primary"),
+            Some("primary")
+        );
+        record.translations.clear();
+        assert_eq!(super::translation_copy_part(&record, "secondary"), None);
+    }
 
     #[test]
     fn late_ocr_cannot_reserve_a_translation_after_a_newer_request() {

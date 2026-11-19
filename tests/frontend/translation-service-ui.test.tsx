@@ -288,7 +288,11 @@ describe('translation engine settings', () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'HTTP Proxy URL' });
-    const toggle = screen.getByRole<HTMLInputElement>('switch', { name: 'Use HTTP Proxy' });
+    const toggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Use HTTP Proxy' });
+    expect(input.closest('.settings-field')).toBe(toggle.closest('.settings-field'));
+    await user.click(input);
+    expect(input).toBe(document.activeElement);
+    expect(calls('translation_preferences_set')).toHaveLength(0);
     fireEvent.change(input, { target: { value: 'http://user:pass@127.0.0.1:7890' } });
     expect((await screen.findByRole('alert')).textContent).toContain('Proxy URLs cannot include a username or password.');
     await user.click(toggle);
@@ -325,6 +329,12 @@ describe('translation engine settings', () => {
     await user.keyboard('{Escape}');
     expect(input.value).toBe('https://example.test:8443');
     expect(screen.queryByRole('alert')).toBeNull();
+
+    await user.click(screen.getByText('Use HTTP Proxy', { exact: true }));
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyEnabled: false });
+    expect(input.value).toBe('https://example.test:8443');
+    expect(input.readOnly).toBe(false);
   });
 
   it('rebinds a shortcut without taking the clipboard shortcut', async () => {

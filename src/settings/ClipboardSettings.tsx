@@ -5,6 +5,8 @@ import type { ViewProps } from '../App';
 import { resolveLanguage } from '../shared/i18n';
 import { ClipboardExcludedApps, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
 
+import { HistoryStorageSettings } from './HistoryStorageSettings';
+
 const rows = [
   { kind: 'text', label: 'text', icon: FileText },
   { kind: 'image', label: 'clipboardImages', note: 'clipboardImageDescription', icon: Image },
@@ -49,7 +51,8 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
       </div>
     </section>
     <ClipboardExcludedApps t={t} state={options} available={canCapture} />
-    <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture} storageAvailable={canManage}
+    <HistoryStorageSettings t={t} available={canManage} view="clipboard" locale={resolveLanguage(snapshot.locale)} />
+    <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture}
       locale={resolveLanguage(snapshot.locale)} />
   </div>;
 }

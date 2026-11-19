@@ -2,11 +2,9 @@ use super::*;
 use std::cell::RefCell;
 
 const SOURCE_TAG: isize = 101;
-const TRANSLATE_TAG: isize = 102;
 
 struct ButtonState {
     app: AppHandle,
-    action: &'static str,
     label: RefCell<String>,
     width: Cell<f64>,
     hovered: Cell<bool>,
@@ -30,7 +28,7 @@ objc2::define_class!(
         #[unsafe(method(pressed:))]
         fn pressed(&self, _: *mut AnyObject) {
             if let Some(view) = self.ivars().app.get_webview("translation") {
-                if view.emit("translation_chrome_action", self.ivars().action).is_err() {
+                if view.emit("translation_chrome_action", "source").is_err() {
                     let _ = view.emit("layout_error", "native_control_event");
                 }
             }
@@ -97,17 +95,12 @@ unsafe fn text_size(text: &str, size: f64) -> objc2_foundation::NSSize {
     objc2::msg_send![&*text, sizeWithAttributes: &*attrs]
 }
 
-unsafe fn fill_round(rect: objc2_foundation::NSRect, radius: f64, alpha: f64, stroke: bool) {
+unsafe fn fill_round(rect: objc2_foundation::NSRect, radius: f64, alpha: f64) {
     let color: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), labelColor];
     let color: *mut AnyObject = objc2::msg_send![color, colorWithAlphaComponent: alpha];
     let _: () = objc2::msg_send![color, set];
     let path: *mut AnyObject = objc2::msg_send![objc2::class!(NSBezierPath), bezierPathWithRoundedRect: rect, xRadius: radius, yRadius: radius];
-    if stroke {
-        let _: () = objc2::msg_send![path, setLineWidth: 1.0_f64];
-        let _: () = objc2::msg_send![path, stroke];
-    } else {
-        let _: () = objc2::msg_send![path, fill];
-    }
+    let _: () = objc2::msg_send![path, fill];
 }
 
 unsafe fn draw_text(text: &str, x: f64, y: f64, size: f64, alpha: f64) {
@@ -122,104 +115,60 @@ unsafe fn draw_button(button: &ChromeButton) {
     let highlighted: bool = objc2::msg_send![button, isHighlighted];
     let alpha = if enabled { 1.0 } else { 0.45 };
     if enabled && (highlighted || button.ivars().hovered.get()) {
-        let mut background = bounds;
-        let radius = if button.ivars().action == "source" {
-            14.0
-        } else {
-            background.origin.y += 4.0;
-            background.size.height -= 8.0;
-            12.0
-        };
-        fill_round(
-            background,
-            radius,
-            if highlighted { 0.1 } else { 0.06 },
-            false,
-        );
+        fill_round(bounds, 14.0, if highlighted { 0.1 } else { 0.06 });
     }
     let label = button.ivars().label.borrow();
     let text_height = text_size(&label, 13.0).height;
-    if button.ivars().action == "source" {
-        let _: () = objc2::msg_send![objc2::class!(NSGraphicsContext), saveGraphicsState];
-        let clip = objc2_foundation::NSRect::new(
-            objc2_foundation::NSPoint::new(12.0, 0.0),
-            objc2_foundation::NSSize::new((bounds.size.width - 42.0).max(0.0), 32.0),
-        );
-        let path: *mut AnyObject =
-            objc2::msg_send![objc2::class!(NSBezierPath), bezierPathWithRect: clip];
-        let _: () = objc2::msg_send![path, addClip];
-        draw_text(&label, 12.0, (32.0 - text_height) / 2.0, 13.0, alpha);
-        let _: () = objc2::msg_send![objc2::class!(NSGraphicsContext), restoreGraphicsState];
-        let path: *mut AnyObject = objc2::msg_send![objc2::class!(NSBezierPath), bezierPath];
-        let x = bounds.size.width - 17.0;
-        let _: () =
-            objc2::msg_send![path, moveToPoint: objc2_foundation::NSPoint::new(x - 3.0, 14.5)];
-        let _: () = objc2::msg_send![path, lineToPoint: objc2_foundation::NSPoint::new(x, 17.5)];
-        let _: () =
-            objc2::msg_send![path, lineToPoint: objc2_foundation::NSPoint::new(x + 3.0, 14.5)];
-        let color: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), secondaryLabelColor];
-        let _: () = objc2::msg_send![color, setStroke];
-        let _: () = objc2::msg_send![path, setLineWidth: 1.0_f64];
-        let _: () = objc2::msg_send![path, stroke];
-    } else {
-        draw_text(&label, 14.0, (32.0 - text_height) / 2.0, 13.0, alpha);
-        let keys = ["⌘", "↵"];
-        let start = bounds.size.width - 14.0 - 43.0;
-        for (index, key) in keys.into_iter().enumerate() {
-            let x = start + index as f64 * 23.0;
-            let rect = objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(x + 0.5, 6.5),
-                objc2_foundation::NSSize::new(19.0, 19.0),
-            );
-            fill_round(rect, 4.0, 0.06 * alpha, false);
-            fill_round(rect, 4.0, 0.12 * alpha, true);
-            let size = text_size(key, 12.0);
-            draw_text(
-                key,
-                x + (20.0 - size.width) / 2.0,
-                (32.0 - size.height) / 2.0,
-                12.0,
-                alpha,
-            );
-        }
-    }
+    let _: () = objc2::msg_send![objc2::class!(NSGraphicsContext), saveGraphicsState];
+    let clip = objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(12.0, 0.0),
+        objc2_foundation::NSSize::new((bounds.size.width - 42.0).max(0.0), 32.0),
+    );
+    let path: *mut AnyObject =
+        objc2::msg_send![objc2::class!(NSBezierPath), bezierPathWithRect: clip];
+    let _: () = objc2::msg_send![path, addClip];
+    draw_text(&label, 12.0, (32.0 - text_height) / 2.0, 13.0, alpha);
+    let _: () = objc2::msg_send![objc2::class!(NSGraphicsContext), restoreGraphicsState];
+    let path: *mut AnyObject = objc2::msg_send![objc2::class!(NSBezierPath), bezierPath];
+    let x = bounds.size.width - 17.0;
+    let _: () = objc2::msg_send![path, moveToPoint: objc2_foundation::NSPoint::new(x - 3.0, 14.5)];
+    let _: () = objc2::msg_send![path, lineToPoint: objc2_foundation::NSPoint::new(x, 17.5)];
+    let _: () = objc2::msg_send![path, lineToPoint: objc2_foundation::NSPoint::new(x + 3.0, 14.5)];
+    let color: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), secondaryLabelColor];
+    let _: () = objc2::msg_send![color, setStroke];
+    let _: () = objc2::msg_send![path, setLineWidth: 1.0_f64];
+    let _: () = objc2::msg_send![path, stroke];
 }
 
-fn button(stage: &TranslationStage, tag: isize) -> Option<Retained<ChromeButton>> {
+fn button(stage: &TranslationStage) -> Option<Retained<ChromeButton>> {
     unsafe {
-        let pointer: *mut ChromeButton = objc2::msg_send![stage, viewWithTag: tag];
+        let pointer: *mut ChromeButton = objc2::msg_send![stage, viewWithTag: SOURCE_TAG];
         Retained::retain(pointer)
     }
 }
 
 pub(super) fn install(app: &AppHandle, stage: &TranslationStage) -> Result<(), String> {
     let marker = objc2::MainThreadMarker::new().ok_or("window_geometry")?;
-    for (tag, action, label, width) in [
-        (SOURCE_TAG, "source", "Auto-Detect", 142.0),
-        (TRANSLATE_TAG, "translate", "Translate", 140.0),
-    ] {
-        let allocated = ChromeButton::alloc(marker).set_ivars(ButtonState {
-            app: app.clone(),
-            action,
-            label: RefCell::new(label.into()),
-            width: Cell::new(width),
-            hovered: Cell::new(false),
-            tracking: RefCell::new(None),
-            visible: Cell::new(false),
-        });
-        let button: Retained<ChromeButton> = unsafe {
-            objc2::msg_send![super(allocated), initWithFrame: objc2_foundation::NSRect::ZERO]
-        };
-        unsafe {
-            let _: () = objc2::msg_send![&*button, setTag: tag];
-            let _: () = objc2::msg_send![&*button, setBordered: false];
-            let _: () = objc2::msg_send![&*button, setButtonType: 0usize];
-            let _: () = objc2::msg_send![&*button, setTarget: &*button];
-            let _: () = objc2::msg_send![&*button, setAction: objc2::sel!(pressed:)];
-            let _: () = objc2::msg_send![&*button, setAutoresizingMask: 0usize];
-            let _: () = objc2::msg_send![&*button, setHidden: true];
-            let _: () = objc2::msg_send![stage, addSubview: &*button, positioned: 1isize, relativeTo: std::ptr::null::<AnyObject>()];
-        }
+    let allocated = ChromeButton::alloc(marker).set_ivars(ButtonState {
+        app: app.clone(),
+        label: RefCell::new("Auto-Detect".into()),
+        width: Cell::new(142.0),
+        hovered: Cell::new(false),
+        tracking: RefCell::new(None),
+        visible: Cell::new(false),
+    });
+    let button: Retained<ChromeButton> = unsafe {
+        objc2::msg_send![super(allocated), initWithFrame: objc2_foundation::NSRect::ZERO]
+    };
+    unsafe {
+        let _: () = objc2::msg_send![&*button, setTag: SOURCE_TAG];
+        let _: () = objc2::msg_send![&*button, setBordered: false];
+        let _: () = objc2::msg_send![&*button, setButtonType: 0usize];
+        let _: () = objc2::msg_send![&*button, setTarget: &*button];
+        let _: () = objc2::msg_send![&*button, setAction: objc2::sel!(pressed:)];
+        let _: () = objc2::msg_send![&*button, setAutoresizingMask: 0usize];
+        let _: () = objc2::msg_send![&*button, setHidden: true];
+        let _: () = objc2::msg_send![stage, addSubview: &*button, positioned: 1isize, relativeTo: std::ptr::null::<AnyObject>()];
     }
     Ok(())
 }
@@ -231,70 +180,39 @@ pub(super) fn layout(
     translation_visible: bool,
 ) {
     let translation = frames.translation;
-    let Some(source) = button(stage, SOURCE_TAG) else {
+    let Some(source) = button(stage) else {
         return;
     };
-    let Some(translate) = button(stage, TRANSLATE_TAG) else {
-        return;
-    };
-    let right = translation.x + translation.width;
-    let translate_width = translate.ivars().width.get();
-    for (button, x, y) in [
-        (
-            &source,
-            right - 24.0 - source.ivars().width.get(),
+    let width = source.ivars().width.get();
+    let hidden = !translation_visible || translation.width < 1.0 || !source.ivars().visible.get();
+    let rect = objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(
+            translation.x + translation.width - 24.0 - width,
             height - 40.0,
         ),
-        (&translate, right - 24.0 - translate_width, 0.0),
-    ] {
-        let hidden =
-            !translation_visible || translation.width < 1.0 || !button.ivars().visible.get();
-        unsafe {
-            let rect = objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(x, y),
-                objc2_foundation::NSSize::new(button.ivars().width.get(), 32.0),
-            );
-            let _: () = objc2::msg_send![&**button, setFrame: rect];
-            let _: () = objc2::msg_send![&**button, setHidden: hidden];
-        }
+        objc2_foundation::NSSize::new(width, 32.0),
+    );
+    unsafe {
+        let _: () = objc2::msg_send![&*source, setFrame: rect];
+        let _: () = objc2::msg_send![&*source, setHidden: hidden];
     }
 }
 
-pub fn update(
-    app: &AppHandle,
-    source_label: String,
-    source_width: f64,
-    translate_label: String,
-    can_translate: bool,
-) -> Result<(), String> {
+pub fn update(app: &AppHandle, source_label: String, source_width: f64) -> Result<(), String> {
     let window = app.get_window("translation").ok_or("window_unavailable")?;
     let stage = translation_stage(&window)?;
-    for (tag, label, enabled) in [
-        (SOURCE_TAG, source_label, true),
-        (TRANSLATE_TAG, translate_label, can_translate),
-    ] {
-        let button = button(&stage, tag).ok_or("window_geometry")?;
-        let width = if tag == SOURCE_TAG {
-            source_width.max(unsafe { text_size(&label, 13.0).width.ceil() + 42.0 })
-        } else {
-            unsafe { text_size(&label, 13.0).width.ceil() + 83.0 }
-        };
-        button.ivars().width.set(width);
-        button.ivars().visible.set(true);
-        *button.ivars().label.borrow_mut() = label.clone();
-        unsafe {
-            let title = objc2_foundation::NSString::from_str(&label);
-            let accessible = if tag == SOURCE_TAG {
-                format!("Source language: {label}")
-            } else {
-                label
-            };
-            let accessible = objc2_foundation::NSString::from_str(&accessible);
-            let _: () = objc2::msg_send![&*button, setTitle: &*title];
-            let _: () = objc2::msg_send![&*button, setAccessibilityLabel: &*accessible];
-            let _: () = objc2::msg_send![&*button, setEnabled: enabled];
-            objc2_app_kit::NSView::setNeedsDisplay(&button, true);
-        }
+    let button = button(&stage).ok_or("window_geometry")?;
+    let width = source_width.max(unsafe { text_size(&source_label, 13.0).width.ceil() + 42.0 });
+    button.ivars().width.set(width);
+    button.ivars().visible.set(true);
+    let title = objc2_foundation::NSString::from_str(&source_label);
+    let accessible =
+        objc2_foundation::NSString::from_str(&format!("Source language: {source_label}"));
+    *button.ivars().label.borrow_mut() = source_label;
+    unsafe {
+        let _: () = objc2::msg_send![&*button, setTitle: &*title];
+        let _: () = objc2::msg_send![&*button, setAccessibilityLabel: &*accessible];
+        objc2_app_kit::NSView::setNeedsDisplay(&button, true);
     }
     stage.finish_layout();
     Ok(())

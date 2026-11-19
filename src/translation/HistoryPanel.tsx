@@ -18,7 +18,7 @@ import { RecordFeedback } from '../shared/RecordFeedback';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { translationShortcutEnabled } from '../shared/contracts';
-import { matchesBinding } from '../shared/shortcuts';
+import { editsText, matchesBinding } from '../shared/shortcuts';
 import { ClipboardEditor } from '../clipboard/ClipboardEditor';
 import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable } from '../shared/clipboardShortcuts';
 
@@ -144,7 +144,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 180) void history.loadMore(query, favoritesOnly);
   }
 
-  async function copyRecord(id: string) {
+  async function copyRecord(id: string, part: 'source' | 'primary' | 'secondary' = 'source') {
     if (!native || !snapshot.capabilities.clipboardWrite || !active) return false;
     const version = actionVersion.current;
     const ready = history.whenReady(query, favoritesOnly, id);
@@ -152,7 +152,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const operation = ++copyOperation.current;
     setCopyFailed(false);
     try {
-      await invoke('translation_sample_copy', { sampleId: id, part: 'source' });
+      await invoke('translation_sample_copy', { sampleId: id, part });
       return operation === copyOperation.current && version === actionVersion.current;
     } catch { if (operation === copyOperation.current && version === actionVersion.current) setCopyFailed(true); }
     return false;
@@ -209,10 +209,23 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     return true;
   }
 
+  function copyTranslationKeyDown(key: globalThis.KeyboardEvent, id: string | undefined, preventDefault: () => void) {
+    if (!focusReady || !id || !filtered.some((record) => record.id === id)
+      || !native || !snapshot.capabilities.clipboardWrite || editsText(key)) return false;
+    const preferences = snapshot.translationPreferences;
+    const action = (['copyPrimary', 'copySecondary'] as const).find((candidate) =>
+      translationShortcutEnabled(preferences, candidate) && matchesBinding(preferences.shortcuts[candidate], key));
+    if (!action) return false;
+    preventDefault();
+    if (!key.repeat) void copyRecord(id, action === 'copyPrimary' ? 'primary' : 'secondary');
+    return true;
+  }
+
   const recordShortcutFromBody = useEffectEvent((event: globalThis.KeyboardEvent) => {
     // WebKit can leave focus on the body after a click on the list background.
     if (event.target !== document.body || event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead'
       || editing || menu || panel.current?.querySelector('.history-shortcuts-panel')) return;
+    if (copyTranslationKeyDown(event, keyboardId, () => event.preventDefault())) return;
     const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), event);
     if (action === 'preview') previewKeyDown(event);
     else if (!action || action === 'ocr' || action === 'translate') retranslateKeyDown(event, focusedId, () => event.preventDefault());
@@ -237,6 +250,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const target = event.target as HTMLElement;
     const fromSearch = target === search.current;
     const row = target.closest<HTMLElement>('article[data-record-id]');
+    if ((row || fromSearch || target.closest('.history-toolbar, .history-footer'))
+      && copyTranslationKeyDown(key, row?.dataset.recordId ?? keyboardId, () => event.preventDefault())) return;
     const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), key);
     if (row && (!action || action === 'ocr' || action === 'translate')
       && retranslateKeyDown(key, row.dataset.recordId, () => event.preventDefault())) return;

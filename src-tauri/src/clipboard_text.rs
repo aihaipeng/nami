@@ -235,7 +235,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             database.clipboard_insert(&captured).map(|record| record.id)
         })
         .await?;
-        crate::clipboard_preferences::enforce_history_locked(app, true).await;
+        crate::clipboard_preferences::enforce_history_locked(app).await;
         drop(_write);
         let selected_id = saved_id.clone();
         let follow_result = on_main(app, move |app| {

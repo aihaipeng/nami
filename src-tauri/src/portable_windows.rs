@@ -10,13 +10,7 @@ use tauri::{
 
 pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
-pub fn update_translation_chrome(
-    _: &AppHandle,
-    _: String,
-    _: f64,
-    _: String,
-    _: bool,
-) -> Result<(), String> {
+pub fn update_translation_chrome(_: &AppHandle, _: String, _: f64) -> Result<(), String> {
     Err("platform_unavailable".into())
 }
 

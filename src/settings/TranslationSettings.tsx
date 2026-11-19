@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import type { ViewProps } from '../App';
 import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
-import type { Translate } from '../shared/i18n';
+import { resolveLanguage, type Translate } from '../shared/i18n';
+import { HistoryStorageSettings } from './HistoryStorageSettings';
 import { TranslationProxySettings } from './TranslationProxySettings';
 
 export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewProps, 'activity'>) {
@@ -16,7 +17,9 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
 
   return <div className="settings-sections">
     <section aria-labelledby="translation-languages-heading">
-      <h2 id="translation-languages-heading">{t('settingsLanguages')}</h2>
+      <div className="settings-section-heading">
+        <h2 id="translation-languages-heading">{t('settingsLanguages')}</h2>
+      </div>
       <div className="settings-group">
         <SettingsChoice label={t('settingsService')} value={preferences.engine} open={open === 'engine'} onOpenChange={(value) => setOpen(value ? 'engine' : null)} searchable={false} menuWidth={240}
           items={[{ code: 'edge', name: 'Microsoft Edge Translate' }, { code: 'google', name: 'Google Translate' }]}
@@ -31,6 +34,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
       </div>
     </section>
     <TranslationProxySettings t={t} preferences={preferences} native={native} command={command} />
+    <HistoryStorageSettings t={t} available={native && !snapshot.storageError} view="translation" locale={resolveLanguage(snapshot.locale)} />
   </div>;
 }
 

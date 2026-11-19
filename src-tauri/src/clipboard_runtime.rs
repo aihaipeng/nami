@@ -272,7 +272,7 @@ pub(crate) fn start(app: &AppHandle) {
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|result| result);
             if matches!(result, Ok(true)) {
-                crate::clipboard_preferences::enforce_history_locked(&app, true).await;
+                crate::clipboard_preferences::enforce_history_locked(&app).await;
             }
             drop(_write);
             match result {

@@ -1,4 +1,5 @@
 mod clipboard;
+mod retention;
 
 use crate::model::HistoryRecord;
 use rusqlite::{params, Connection, ErrorCode, Row, Transaction, TransactionBehavior};
@@ -478,6 +479,110 @@ mod tests {
             ),
         }
     }
+    #[test]
+    fn translation_retention_defaults_to_500_and_prunes_only_on_successful_insert() {
+        use crate::model::RecordView;
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        assert_eq!(
+            db.records_history_policy(RecordView::Translation)
+                .unwrap()
+                .limit,
+            500
+        );
+        let mut old = record("old-translation");
+        old.date = "2001-01-01T00:00:00Z".into();
+        old.text = "unique historical search".into();
+        db.insert(&old, "edge", || true).unwrap();
+        for index in 0..499 {
+            db.insert(&record(&format!("ordinary-{index}")), "edge", || true)
+                .unwrap();
+        }
+        let mut protected = old.clone();
+        protected.id = "favorite".into();
+        protected.is_favorite = true;
+        db.insert(&protected, "edge", || true).unwrap();
+        protected.id = "pinned".into();
+        protected.is_favorite = false;
+        protected.is_pinned = true;
+        db.insert(&protected, "edge", || true).unwrap();
+        assert_eq!(
+            db.insert_retained(&record("cancelled"), "edge", || false)
+                .unwrap_err(),
+            "cancelled"
+        );
+        assert!(db.record(&old.id).unwrap().is_some());
+        assert!(db.record("cancelled").unwrap().is_none());
+        assert_eq!(
+            db.insert_retained(&record("new"), "edge", || true).unwrap(),
+            vec![old.id.clone()]
+        );
+        assert!(db.record(&old.id).unwrap().is_none());
+        assert!(db.record("favorite").unwrap().is_some());
+        assert!(db.record("pinned").unwrap().is_some());
+        assert_eq!(
+            db.page(&HistoryQuery::default(), None, PAGE_SIZE)
+                .unwrap()
+                .total_records,
+            502
+        );
+        let query = HistoryQuery {
+            text: "unique historical search".into(),
+            favorites_only: false,
+        };
+        assert_eq!(db.page(&query, None, PAGE_SIZE).unwrap().total_records, 2);
+    }
+
+    #[test]
+    fn translation_cleanup_is_scoped_and_protects_records_until_explicit_confirmation() {
+        use crate::{clipboard::HistoryPolicy, model::RecordView};
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let clip = RecordView::Clipboard;
+        let translation = RecordView::Translation;
+        db.connection
+            .execute(
+                "INSERT INTO preferences(key,value) VALUES('clipboard_history_policy',?1)",
+                [r#"{"days":7,"limit":137}"#],
+            )
+            .unwrap();
+        assert_eq!(db.records_history_policy(clip).unwrap().limit, 137);
+        db.connection
+            .execute(
+                "UPDATE preferences SET value=?1 WHERE key='clipboard_history_policy'",
+                [r#"{"days":7,"limit":null}"#],
+            )
+            .unwrap();
+        assert_eq!(db.records_history_policy(clip).unwrap().limit, 500);
+        assert_eq!(db.translation_storage_bytes().unwrap(), 0);
+        db.insert(&record("normal"), "edge", || true).unwrap();
+        let mut both = record("both");
+        both.is_favorite = true;
+        both.is_pinned = true;
+        db.insert(&both, "edge", || true).unwrap();
+        let before = db.translation_storage_bytes().unwrap();
+        let preview = db.records_cleanup_preview(translation, None).unwrap();
+        assert_eq!(preview.categories, Some([1, 1, 1]));
+        assert_eq!(
+            db.clipboard_cleanup(None, 2, Some(&preview.token))
+                .unwrap_err(),
+            "clipboard_cleanup_changed"
+        );
+        assert_eq!(
+            db.translation_cleanup(None, 4, &preview.token).unwrap(),
+            vec![both.id]
+        );
+        assert!(db.record("normal").unwrap().is_some());
+        assert!(db.translation_storage_bytes().unwrap() < before);
+        let policy = Some(HistoryPolicy { limit: 71 });
+        let preview = db.records_cleanup_preview(translation, policy).unwrap();
+        assert_eq!(preview.count, 0);
+        assert!(db
+            .translation_cleanup(policy, 0, &preview.token)
+            .unwrap()
+            .is_empty());
+        assert_eq!(db.records_history_policy(translation).unwrap().limit, 71);
+        assert_eq!(db.records_history_policy(clip).unwrap().limit, 500);
+    }
+
     #[test]
     fn translation_note_updates_only_the_title_and_survives_reopen() {
         let path = Fixture::new();

@@ -1,6 +1,7 @@
 use crate::{
     clipboard_runtime::{changed, database, image_root},
     commands::{authorize, on_main},
+    model::RecordView,
     platform, AppState,
 };
 use nami::{
@@ -8,7 +9,7 @@ use nami::{
     database::HistoryDatabase,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::atomic::Ordering, time::Duration};
+use std::{path::Path, sync::atomic::Ordering};
 use tauri::{AppHandle, Emitter, Manager, Webview};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,11 +79,7 @@ impl ClipboardOptions {
         {
             options.excluded_apps = apps;
         }
-        options.history_policy = db
-            .preference("clipboard_history_policy")?
-            .and_then(|value| serde_json::from_str::<HistoryPolicy>(&value).ok())
-            .filter(|policy| policy.valid())
-            .unwrap_or_default();
+        options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
         options.activation = db
             .preference("clipboard_activation")?
             .and_then(|value| serde_json::from_str(&value).ok())
@@ -336,7 +333,7 @@ pub async fn records_open_focus_set(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorageInfo {
     bytes: u64,
-    unprotected_count: usize,
+    limit: u32,
 }
 
 // Size of the image store, including files left behind by a failed cleanup. No external file paths.
@@ -372,26 +369,32 @@ fn image_bytes(root: &Path) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub async fn clipboard_storage_info(
+pub async fn records_storage_info(
     window: Webview,
     app: AppHandle,
+    view: RecordView,
 ) -> Result<StorageInfo, String> {
     authorize(&window, &["settings"])?;
-    // This estimate doesn't need to hold up capture or copy while it enumerates images.
-    let root = image_root(&app)?;
-    let (data, unprotected_count) = database(&app, |db| {
-        Ok((
-            db.clipboard_storage_bytes()?,
-            db.clipboard_unprotected_count()?,
-        ))
+    let (data, limit) = database(&app, move |db| {
+        let data = match view {
+            RecordView::Clipboard => db.clipboard_storage_bytes()?,
+            RecordView::Translation => db.translation_storage_bytes()?,
+        };
+        Ok((data, db.records_history_policy(view)?.limit))
     })
     .await?;
-    let media = tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
-        .await
-        .map_err(|_| "storage_worker")??;
+    let media = if view == RecordView::Clipboard {
+        // Enumerate images without holding up capture or copy.
+        let root = image_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
+            .await
+            .map_err(|_| "storage_worker")??
+    } else {
+        0
+    };
     Ok(StorageInfo {
         bytes: data.saturating_add(media),
-        unprotected_count,
+        limit,
     })
 }
 
@@ -403,42 +406,41 @@ pub(crate) struct CleanupResult {
 }
 
 #[tauri::command]
-pub async fn clipboard_cleanup_preview(
+pub async fn records_cleanup_preview(
     window: Webview,
     app: AppHandle,
+    view: RecordView,
     policy: Option<HistoryPolicy>,
 ) -> Result<CleanupPreview, String> {
     authorize(&window, &["settings"])?;
-    validate_policy(policy)?;
-    database(&app, move |db| {
-        db.clipboard_cleanup_preview(policy, chrono::Utc::now().timestamp_millis())
-    })
-    .await
-}
-
-fn validate_policy(policy: Option<HistoryPolicy>) -> Result<(), String> {
-    if policy.is_some_and(|policy| !policy.valid()) {
-        return Err("invalid_argument".into());
-    }
-    Ok(())
+    database(&app, move |db| db.records_cleanup_preview(view, policy)).await
 }
 
 #[tauri::command]
-pub async fn clipboard_cleanup_apply(
+pub async fn records_cleanup_apply(
     window: Webview,
     app: AppHandle,
+    view: RecordView,
     policy: Option<HistoryPolicy>,
     categories: Option<u8>,
     token: String,
 ) -> Result<CleanupResult, String> {
     authorize(&window, &["settings"])?;
-    validate_policy(policy)?;
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid_argument".into());
     }
+    let categories = categories.unwrap_or(0);
+    if view == RecordView::Translation {
+        let removed =
+            crate::history_runtime::cleanup_translations(&app, policy, categories, token).await?;
+        return Ok(CleanupResult {
+            removed,
+            media_cleanup_failed: false,
+        });
+    }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    let result = cleanup_locked(&app, policy, categories.unwrap_or(0), Some(token), true).await?;
+    let result = cleanup_locked(&app, policy, categories, Some(token), true).await?;
     if let Some(policy) = policy {
         state.clipboard_options.lock().unwrap().history_policy = policy;
     }
@@ -454,12 +456,7 @@ async fn cleanup_locked(
 ) -> Result<CleanupResult, String> {
     let root = image_root(app)?;
     let (removed, images) = database(app, move |db| {
-        db.clipboard_cleanup(
-            policy,
-            categories,
-            chrono::Utc::now().timestamp_millis(),
-            token.as_deref(),
-        )
+        db.clipboard_cleanup(policy, categories, token.as_deref())
     })
     .await?;
     // The transaction is committed. Notify records even if the filesystem is temporarily inaccessible.
@@ -485,37 +482,20 @@ async fn cleanup_locked(
     })
 }
 
-pub(crate) async fn enforce_history_locked(app: &AppHandle, on_capture: bool) {
+pub(crate) async fn enforce_history_locked(app: &AppHandle) {
     let policy = app
         .state::<AppState>()
         .clipboard_options
         .lock()
         .unwrap()
         .history_policy;
-    if policy == HistoryPolicy::default() || (on_capture && policy.limit.is_none()) {
-        return;
-    }
-    match cleanup_locked(app, Some(policy), 0, None, !on_capture).await {
+    match cleanup_locked(app, Some(policy), 0, None, false).await {
         Ok(result) if result.media_cleanup_failed => {
             eprintln!("Nami clipboard maintenance: clipboard_cleanup_failed")
         }
         Err(error) => eprintln!("Nami clipboard maintenance: {error}"),
         _ => (),
     }
-}
-
-pub(crate) fn start_maintenance(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            {
-                let state = app.state::<AppState>();
-                let _write = state.clipboard_writes.lock().await;
-                enforce_history_locked(&app, false).await;
-            }
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-        }
-    });
 }
 
 pub(crate) fn recording_menu_item(

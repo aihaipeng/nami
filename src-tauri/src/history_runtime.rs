@@ -158,6 +158,66 @@ pub(crate) async fn update_record(
     .await?
 }
 
+fn cleanup_page(
+    state: &AppState,
+    database: &crate::database::HistoryDatabase,
+    removed: &[String],
+) -> Result<Option<crate::database::HistoryPage>, String> {
+    if removed.is_empty() {
+        return Ok(None);
+    }
+    let paging = state.history_page.lock().unwrap();
+    database
+        .page_prefix(&paging.query, paging.cache.loaded_count(&paging.query))
+        .map(Some)
+}
+
+fn apply_cleanup_page(app: &AppHandle, page: crate::database::HistoryPage, removed: &[String]) {
+    let state = app.state::<AppState>();
+    {
+        let mut paging = state.history_page.lock().unwrap();
+        let query = paging.query.clone();
+        paging.cursor = page.cursor.clone();
+        paging.cache.clear();
+        paging.cache.insert(query, page.clone());
+    }
+    let removed_detail = state
+        .history
+        .lock()
+        .unwrap()
+        .apply_cleanup_page(page, removed);
+    if let (Some(id), Some(view)) = (removed_detail, app.get_webview("translation")) {
+        let _ = view.emit("history_detail_removed", id);
+    }
+}
+
+pub(crate) async fn cleanup_translations(
+    app: &AppHandle,
+    policy: Option<nami::clipboard::HistoryPolicy>,
+    categories: u8,
+    token: String,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let _write = state.history_writes.lock().await;
+    let worker = app.clone();
+    let (removed, page) = crate::clipboard_runtime::database(app, move |database| {
+        let removed = database.translation_cleanup(policy, categories, &token)?;
+        let page = cleanup_page(&worker.state::<AppState>(), database, &removed)?;
+        Ok((removed, page))
+    })
+    .await
+    .map_err(|error| storage_failure(app, error))?;
+    let count = removed.len();
+    if let Some(page) = page {
+        crate::commands::on_main(app, move |app| {
+            apply_cleanup_page(&app, page, &removed);
+            publish_history(&app)
+        })
+        .await??;
+    }
+    Ok(count)
+}
+
 pub(crate) async fn commit_translation(
     app: &AppHandle,
     record: HistoryRecord,
@@ -172,7 +232,7 @@ pub(crate) async fn commit_translation(
     }
     let worker = app.clone();
     let saved = record.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let (removed, replacement) = tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<AppState>();
         let current = || {
             state
@@ -184,9 +244,11 @@ pub(crate) async fn commit_translation(
             return Err("cancelled".into());
         }
         if let Some(database) = state.database.lock().unwrap().as_mut() {
-            database.insert(&saved, &engine, current)?;
+            let removed = database.insert_retained(&saved, &engine, current)?;
+            let replacement = cleanup_page(&state, database, &removed)?;
+            return Ok((removed, replacement));
         }
-        Ok::<_, String>(())
+        Ok::<_, String>((vec![], None))
     })
     .await
     .map_err(|_| "storage_worker")?
@@ -221,6 +283,9 @@ pub(crate) async fn commit_translation(
             history.add_completed(record.clone(), current && (!browsing || refocus), &query)?;
             refocus
         };
+        if let Some(page) = replacement {
+            apply_cleanup_page(&app, page, &removed);
+        }
         publish_history(&app)?;
         if refocus {
             let view = ["clipboard", "history", "translation"]

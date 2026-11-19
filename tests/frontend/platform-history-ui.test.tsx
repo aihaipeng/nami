@@ -56,14 +56,14 @@ describe('shared history and platform capabilities', () => {
     expect(clip.hidden).toBe(false);
   });
 
-  it('uses Control shortcuts and key labels without treating Super as Control', async () => {
+  it('uses Control shortcuts without treating Super as Control', async () => {
     portable(); await mount();
     fireEvent.change(source(), { target: { value: 'Portable synthetic text' } });
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
     expect(calls('translation_run')).toHaveLength(0);
     fireEvent.keyDown(source(), { key: 'Enter', ctrlKey: true });
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(screen.getByRole('button', { name: /^Translate/ }).textContent).toContain('Ctrl');
+    expect(screen.queryByRole('button', { name: 'Translate' })).toBeNull();
     fireEvent.keyDown(source(), { key: '/', code: 'Slash', metaKey: true });
     expect(calls('history_toggle')).toHaveLength(0);
     fireEvent.keyDown(source(), { key: '/', code: 'Slash', ctrlKey: true });

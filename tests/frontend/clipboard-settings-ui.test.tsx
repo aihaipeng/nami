@@ -125,7 +125,7 @@ describe('clipboard recording settings', () => {
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(0);
   });
 
-  it('leaves list focus unbound by default and hides the unused secondary copy shortcut', async () => {
+  it('leaves list focus unbound by default and keeps the secondary copy shortcut when the second language is off', async () => {
     const prefs = bridge.snapshot.translationPreferences;
     const saved = { code: 'KeyU', modifiers: ['meta'] as const };
     prefs.shortcuts.copySecondary = { ...saved, modifiers: [...saved.modifiers] };
@@ -133,7 +133,7 @@ describe('clipboard recording settings', () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     expect(screen.getByRole('button', { name: 'Focus Record List shortcut' }).textContent).toBe('Add Hotkey');
-    expect(screen.queryByRole('button', { name: 'Copy Secondary Translation shortcut' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Copy Secondary Translation shortcut' }).textContent).toBe('⌘U');
     await emit('translation_preferences_changed', { ...prefs, secondaryLanguage: 'fr' });
     expect(screen.getByRole('button', { name: 'Copy Secondary Translation shortcut' }).textContent).toBe('⌘U');
   });
@@ -361,13 +361,13 @@ describe('clipboard privacy, retention and behavior', () => {
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'clipboard_options_get') return {
         excludedApps: apps,
-        historyPolicy: { days: null, limit: null }, activation: 'paste',
+        activation: 'paste',
       };
       if (name === 'clipboard_excluded_app_pick') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }, { bundleId: 'com.example.synthetic', name: 'Synthetic App' }];
       if (name === 'clipboard_excluded_app_remove') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }];
-      if (name === 'clipboard_storage_info') return { bytes: 4000, unprotectedCount: 4 };
-      if (name === 'clipboard_cleanup_preview') return { count: 4, token: 'preview-token', ...(!(args as { policy: unknown }).policy && { categories: [1, 2, 2] }) };
-      if (name === 'clipboard_cleanup_apply') return { removed: (args as { categories?: number }).categories === 6 ? 3 : 4, mediaCleanupFailed: false };
+      if (name === 'records_storage_info') return { bytes: 4000, limit: 500 };
+      if (name === 'records_cleanup_preview') return { count: 4, token: 'preview-token', ...(!(args as { policy: unknown }).policy && { categories: [1, 2, 2] }) };
+      if (name === 'records_cleanup_apply') return { removed: (args as { categories?: number }).categories === 6 ? 3 : 4, mediaCleanupFailed: false };
       return invoke(name, args);
     });
     await mount('settings');
@@ -451,45 +451,58 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.queryByText('com.apple.keychainaccess')).toBeNull();
   });
 
-  it('moves retention help to the control and preserves the deletion warning at confirmation', async () => {
+  it('defaults to 500, has no age rule, and confirms a lower custom count before removing items', async () => {
     await openSettings();
-    const control = () => screen.getByRole('button', { name: /^Keep History For:/ });
-    expect(screen.getByText('Estimated Storage')).toBeTruthy();
-    expect(screen.queryByText('Based on when an item was last copied or reused.')).toBeNull();
-    expect(control().getAttribute('aria-description')).toBe('Based on when an item was last copied or reused.');
-    fireEvent.click(control());
-    fireEvent.click(screen.getByRole('option', { name: '7 days' }));
+    const limit = screen.getByRole<HTMLInputElement>('textbox', { name: 'History Limit' });
+    expect(limit.value).toBe('500');
+    expect(screen.queryByText('Keep History For')).toBeNull();
+    expect(limit.getAttribute('aria-description')).toBe('Maximum number of unprotected items to keep.');
+    for (const value of ['0', '5.5', '1000001']) {
+      fireEvent.change(limit, { target: { value } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    }
+    fireEvent.change(limit, { target: { value: '137' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     const dialog = await screen.findByRole('alertdialog');
-    expect(dialog.textContent).toContain('permanently removes 4 unprotected clipboard items');
-    expect(dialog.textContent).toContain('Favorites, pinned items, and the system clipboard are unaffected.');
-    expect(document.activeElement?.textContent).toBe('Cancel');
-    expect(calls('clipboard_cleanup_preview')[0][1]).toEqual({ policy: { days: 7, limit: null } });
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(control().textContent).toBe('Forever');
-    expect(document.activeElement).toBe(control());
-    expect(calls('clipboard_cleanup_apply')).toHaveLength(0);
+    expect(dialog.textContent).toContain('permanently removes 4 unprotected items');
+    expect(calls('records_cleanup_preview')[0][1]).toEqual({ view: 'clipboard', policy: { limit: 137 } });
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBe(document.activeElement);
+    expect(cancel.textContent).toBe('CancelEsc');
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    expect(limit.value).toBe('500');
+    expect(calls('records_cleanup_apply')).toHaveLength(0);
   });
 
-  it('saves a retention policy without confirmation when the preview affects no items', async () => {
+  it('saves a translation limit independently when the preview affects no items', async () => {
     await openSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
+    let translationLimit = 500;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_cleanup_preview') return { count: 0, token: 'empty-preview' };
-      if (name === 'clipboard_cleanup_apply') return { removed: 0, mediaCleanupFailed: false };
+      const request = args as { view?: string; policy?: { limit: number } };
+      if (request?.view === 'translation') {
+        if (name === 'records_storage_info') return { bytes: 1900, limit: translationLimit };
+        if (name === 'records_cleanup_preview') return { count: 0, token: 'empty-preview' };
+        if (name === 'records_cleanup_apply') { translationLimit = request.policy!.limit; return { removed: 0, mediaCleanupFailed: false }; }
+      }
       return invoke(name, args);
     });
-    fireEvent.click(screen.getByRole('button', { name: 'History Limit: Unlimited' }));
-    fireEvent.click(screen.getByRole('option', { name: '500' }));
-    await screen.findByRole('button', { name: 'History Limit: 500' });
+    fireEvent.click(screen.getByRole('button', { name: 'Translation' }));
+    await screen.findByText('1.9 kB');
+    fireEvent.change(screen.getByRole('textbox', { name: 'History Limit' }), { target: { value: '713' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('records_cleanup_apply')[0][1]).toEqual({ view: 'translation', policy: { limit: 713 }, token: 'empty-preview' }));
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(calls('clipboard_cleanup_apply')[0][1]).toEqual({ policy: { days: null, limit: 500 }, token: 'empty-preview' });
+    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'History Limit' })).value).toBe('500');
   });
 
-  it('opens cleanup from the heading and clears selected categories and refreshes size without a deletion count', async () => {
+  it.each(['clipboard', 'translation'])('clears only the selected %s categories by keyboard and refreshes its size', async (view) => {
     await openSettings();
+    if (view === 'translation') fireEvent.click(screen.getByRole('button', { name: 'Translation' }));
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_storage_info') return { bytes: 2000 };
+      if (name === 'records_storage_info') return { bytes: 2000, limit: 500 };
       return invoke(name, args);
     });
     const trigger = screen.getByRole('button', { name: 'Clear Records' });
@@ -504,24 +517,31 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(dialog.querySelector('p')).toBeNull();
     expect(dialog.hasAttribute('aria-describedby')).toBe(false);
     expect(confirm.disabled).toBe(true);
+    expect(confirm.textContent).toBe('Clear Records↵');
+    fireEvent.keyDown(within(dialog).getByRole('button', { name: 'Cancel' }), { key: 'Enter' });
+    expect(calls('records_cleanup_apply')).toHaveLength(0);
     fireEvent.click(checkbox(/^Favorites/));
     fireEvent.click(checkbox(/^Pinned/));
     expect(confirm.disabled).toBe(false);
-    expect(calls('clipboard_cleanup_apply')).toHaveLength(0);
-    fireEvent.click(confirm);
+    expect(calls('records_cleanup_apply')).toHaveLength(0);
+    // WebKit can focus the modal itself when clicking its contents.
+    dialog.tabIndex = -1;
+    dialog.focus();
+    expect(document.activeElement).toBe(dialog);
+    fireEvent.keyDown(dialog, { key: 'Enter' });
     await screen.findByText('2 kB');
     expect(screen.queryByText('4 kB')).toBeNull();
     expect(within(screen.getByRole('region', { name: 'History & Storage' })).queryByRole('status')).toBeNull();
-    expect(calls('clipboard_cleanup_apply')[0][1]).toEqual({ policy: null, categories: 6, token: 'preview-token' });
-    expect(calls('clipboard_storage_info')).toHaveLength(2);
+    expect(calls('records_cleanup_apply')[0][1]).toEqual({ view, policy: null, categories: 6, token: 'preview-token' });
+    expect(calls('records_storage_info').at(-1)?.[1]).toEqual({ view });
   });
 
   it('refreshes storage and reports an image cleanup failure after records were removed', async () => {
     await openSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_cleanup_apply') return { removed: 1, mediaCleanupFailed: true };
-      if (name === 'clipboard_storage_info') return { bytes: 2000 };
+      if (name === 'records_cleanup_apply') return { removed: 1, mediaCleanupFailed: true };
+      if (name === 'records_storage_info') return { bytes: 2000, limit: 500 };
       return invoke(name, args);
     });
     fireEvent.click(screen.getByRole('button', { name: 'Clear Records' }));
@@ -541,24 +561,24 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(within(dialog).getAllByRole('checkbox').every((item) => (item as HTMLInputElement).disabled)).toBe(true);
     expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Clear Records' }).disabled).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(calls('clipboard_cleanup_apply')).toHaveLength(0);
+    expect(calls('records_cleanup_apply')).toHaveLength(0);
   });
 
   it('requires another preview if the history changed and never retries deletion on its own', async () => {
     await openSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_cleanup_apply') throw 'clipboard_cleanup_changed';
+      if (name === 'records_cleanup_apply') throw 'clipboard_cleanup_changed';
       return invoke(name, args);
     });
     fireEvent.click(screen.getByRole('button', { name: 'Clear Records' }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /^Ordinary/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Clear Records' }));
-    await screen.findByText(/Clipboard history changed/);
+    await screen.findByText(/History changed/);
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(calls('clipboard_cleanup_preview')).toHaveLength(1);
-    expect(calls('clipboard_cleanup_apply')).toHaveLength(1);
+    expect(calls('records_cleanup_preview')).toHaveLength(1);
+    expect(calls('records_cleanup_apply')).toHaveLength(1);
   });
 
   it('saves Copy Only as the row activation behavior', async () => {

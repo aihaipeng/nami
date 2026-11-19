@@ -173,6 +173,30 @@ describe('clipboard type filters', () => {
     expect(document.querySelector('.history-record-count')?.textContent).toBe('3 records');
   });
 
+  it('shows shared and relevant shortcuts for each record view', () => {
+    const props = { t: translator('en'), snapshot: bridge.snapshot, command: vi.fn(), native: true, active: true, search: { current: null }, total: 1 };
+    const view = render(<HistoryFooter {...props} clipboard activation="paste" />);
+    const helpButton = screen.getByRole('button', { name: 'HotKey' });
+    expect(helpButton.title).toBe('HotKey');
+    fireEvent.click(helpButton);
+    expect(within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('HotKey')).toBeTruthy();
+    const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
+      (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
+    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Up': '↑', 'Open Clipboard History': '⌃ `', 'Extract Text': '⇧ ⌘ O', Translate: '⇧ ⌘ T' });
+    expect(entries()).not.toHaveProperty('Open Translation');
+    expect(entries()).not.toHaveProperty('Copy Primary Translation');
+
+    view.rerender(<HistoryFooter {...props} />);
+    expect(entries()).toMatchObject({ 'Open selection': '↵', 'Navigate Up': '↑', 'Open Translation': '⌘ T', 'Autofill Input': '⌘ T', Translate: '⌘ ↵', 'Open Translation History': '⌘ /', 'Copy Primary Translation': '⌘ 1' });
+    expect(entries()).not.toHaveProperty('Open Clipboard History');
+    expect(entries()).not.toHaveProperty('Extract Text');
+
+    const preferences = { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'none', disabledShortcuts: ['translate'] as const };
+    view.rerender(<HistoryFooter {...props} snapshot={{ ...props.snapshot, translationPreferences: { ...preferences, disabledShortcuts: [...preferences.disabledShortcuts] } }} />);
+    expect(entries()).not.toHaveProperty('Translate');
+    expect(entries()).toHaveProperty('Copy Secondary Translation', '⌘ 2');
+  });
+
   it('places mutually exclusive, cancellable type buttons after Favorites without changing translation controls', () => {
     const onKindChange = vi.fn();
     const props = { t: translator('en'), snapshot: bridge.snapshot, command: vi.fn(), native: true, active: true, search: { current: null } };
@@ -879,7 +903,7 @@ describe('database clipboard history', () => {
     expect((await screen.findByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('');
     await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Keyboard shortcuts' }));
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     await windowState({ recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
     await windowState({ recordsFocus: (bridge.snapshot.window.recordsFocus ?? 0) + 1 });
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -1304,8 +1328,8 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(target, { key: 'j', code: 'KeyJ', altKey: true });
     await waitFor(() => expect(row('first').classList.contains('pinned')).toBe(true));
     expect(document.activeElement).toBe(row('first').querySelector('.history-row-select'));
-    fireEvent.click(screen.getByRole('button', { name: 'Keyboard shortcuts' }));
-    const help = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    const help = screen.getByRole('dialog', { name: 'HotKey' });
     expect(help.textContent).toContain('Copy selection');
     expect(help.textContent).toContain('Pin/Unpin⌥ J');
     expect(help.textContent).not.toContain('Favorite');
@@ -1328,9 +1352,9 @@ describe('database clipboard history', () => {
 
   it('toggles shortcut help, closes it before hiding the card, and dismisses outside', async () => {
     const user = userEvent.setup(); await mount('clipboard');
-    const keyboard = screen.getByRole('button', { name: 'Keyboard shortcuts' });
+    const keyboard = screen.getByRole('button', { name: 'HotKey' });
     await user.click(keyboard);
-    expect(screen.getByRole('dialog', { name: 'Keyboard shortcuts' }).textContent).toContain('Paste selection');
+    expect(screen.getByRole('dialog', { name: 'HotKey' }).textContent).toContain('Paste selection');
     expect(keyboard.querySelector('[data-symbol="keyboard"]')).toBeTruthy();
     fireEvent.keyDown(keyboard, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();

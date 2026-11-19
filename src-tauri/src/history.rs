@@ -305,6 +305,23 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub fn apply_cleanup_page(
+        &mut self,
+        page: crate::database::HistoryPage,
+        removed: &[String],
+    ) -> Option<String> {
+        self.apply_page(page, true);
+        if self
+            .selected_record
+            .as_ref()
+            .is_some_and(|record| removed.contains(&record.id))
+        {
+            self.clear_visual_selection();
+            return self.selected_record.take().map(|record| record.id);
+        }
+        None
+    }
+
     pub fn apply_page(&mut self, page: crate::database::HistoryPage, reset: bool) {
         if reset {
             self.selected_record = self
@@ -494,6 +511,30 @@ mod tests {
             is_pinned: false,
             source_app: None,
         }
+    }
+
+    #[test]
+    fn cleanup_reports_a_deleted_detail_even_when_filtered_out() {
+        use crate::database::HistoryPage;
+        let removed = record("removed");
+        let keep = record("keep");
+        let mut store = HistoryStore::new(vec![removed.clone(), keep.clone()]);
+        store.select(Some(&removed.id)).unwrap();
+        store.clear_visual_selection();
+        let page = HistoryPage {
+            records: vec![keep.clone()],
+            cursor: None,
+            has_more: false,
+            total_records: 1,
+        };
+        assert_eq!(
+            store.apply_cleanup_page(page.clone(), std::slice::from_ref(&removed.id)),
+            Some(removed.id.clone())
+        );
+        assert!(store.record(&removed.id).is_none());
+        store.select(Some(&keep.id)).unwrap();
+        assert_eq!(store.apply_cleanup_page(page, &[removed.id]), None);
+        assert_eq!(store.selected_id(), Some("keep"));
     }
 
     #[test]

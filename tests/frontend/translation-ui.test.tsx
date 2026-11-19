@@ -241,32 +241,35 @@ describe('translation input and shortcuts', () => {
     expect(screen.getByRole('button', { name: 'Source language: French' })).toBeTruthy();
   });
 
-  it('keeps DOM controls available until native installation is acknowledged, then routes native actions', async () => {
+  it('keeps the DOM source picker until native installation is acknowledged, with translation available by shortcut only', async () => {
+    let installed!: (ready: boolean) => void;
+    const ready = new Promise<boolean>((resolve) => { installed = resolve; });
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_chrome_update' ? ready : invoke(name, args));
     await mount();
     expect(screen.getByRole('button', { name: 'Source language: Auto-Detect' })).toBeTruthy();
-    expect(calls('translation_chrome_update').at(-1)?.[1]).toEqual({ state: {
-      sourceLabel: 'Auto-Detect', sourceWidth: 140, translateLabel: 'Translate', canTranslate: false,
-    } });
-    const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'translation_chrome_update' ? true : invoke(name, args));
-    fireEvent.change(source(), { target: { value: 'Native control test' } });
+    expect(calls('translation_chrome_update').at(-1)?.[1]).toEqual({ state: { sourceLabel: 'Auto-Detect', sourceWidth: 140 } });
+    installed(true);
     await waitFor(() => expect(document.querySelector('.translation-panel')?.getAttribute('data-native-chrome')).toBe('true'));
     expect(screen.queryByRole('button', { name: 'Source language: Auto-Detect' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Actions/ })).toBeNull();
+    fireEvent.change(source(), { target: { value: 'Native control test' } });
+    expect(screen.queryByRole('button', { name: 'Translate' })).toBeNull();
+    await emit('translation_chrome_action', 'translate');
+    expect(calls('translation_run')).toHaveLength(0);
     await emit('translation_chrome_action', 'source');
     expect(screen.getByRole('dialog', { name: 'Source language' })).toBeTruthy();
-    await emit('translation_chrome_action', 'translate');
-    expect(screen.queryByRole('dialog', { name: 'Source language' })).toBeNull();
+    fireEvent.keyDown(source(), { key: 'Escape' });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
     expect(source().value).toBe('Native control test');
-    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.canTranslate).toBe(true);
   });
 
   it('starts empty without preset text or placeholder and cannot submit an empty draft', async () => {
     await mount();
     expect(source().value).toBe('');
     expect(source().hasAttribute('placeholder')).toBe(false);
-    expect((screen.getByRole('button', { name: /^Translate/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Translate' })).toBeNull();
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.queryByRole('complementary', { name: 'Translation history' })).toBeNull();
@@ -575,6 +578,26 @@ describe('selection across native webviews', () => {
       ['translation_sample_copy', { sampleId: sample.id, part: 'primary' }],
       ['translation_sample_copy', { sampleId: sample.id, part: 'secondary' }],
     ]);
+  });
+
+  it('copies the primary result with the secondary shortcut for a one-target detail', async () => {
+    await mount(); await select('sample-07');
+    fireEvent.keyDown(source(), { key: '2', code: 'Digit2', metaKey: true });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'sample-07', part: 'primary' });
+    expect(screen.queryByText(/translation copied/)).toBeNull();
+  });
+
+  it('clears a detail removed by history cleanup but preserves a newer draft', async () => {
+    await mount(); await select();
+    await emit('history_detail_removed', 'another-record');
+    expect(source().value).toBe(sample.text);
+    await emit('history_detail_removed', sample.id);
+    expect(source().value).toBe('');
+    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
+    await select();
+    fireEvent.change(source(), { target: { value: 'New draft' } });
+    await emit('history_detail_removed', sample.id);
+    expect(source().value).toBe('New draft');
   });
 
   it('editing source clears selection and cached results in both webviews', async () => {

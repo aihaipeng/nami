@@ -1,7 +1,7 @@
-import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useId, useLayoutEffect, useRef, type KeyboardEventHandler, type ReactNode } from 'react';
 
-export function SettingsDialog({ title, description, onClose, children, role = 'alertdialog' }: {
-  role?: 'dialog' | 'alertdialog'; title: string; description?: string; onClose: () => void; children: ReactNode;
+export function SettingsDialog({ title, description, onClose, onKeyDown, children, className, role = 'alertdialog' }: {
+  className?: string; role?: 'dialog' | 'alertdialog'; title: string; description?: string; onClose: () => void; onKeyDown?: KeyboardEventHandler<HTMLDialogElement>; children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const id = useId();
@@ -15,9 +15,9 @@ export function SettingsDialog({ title, description, onClose, children, role = '
       if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
     };
   }, []);
-  return <dialog ref={dialog} className="settings-dialog" role={role}
+  return <dialog ref={dialog} className={className ? `settings-dialog ${className}` : 'settings-dialog'} role={role}
     aria-labelledby={`${id}-title`} aria-describedby={description ? `${id}-description` : undefined}
-    onCancel={(event) => { event.preventDefault(); onClose(); }}>
+    onKeyDown={onKeyDown} onCancel={(event) => { event.preventDefault(); onClose(); }}>
     <h3 id={`${id}-title`}>{title}</h3>
     {description && <p id={`${id}-description`}>{description}</p>}
     {children}

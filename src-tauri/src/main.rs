@@ -383,9 +383,9 @@ fn main() {
             clipboard_preferences::clipboard_behavior_set,
             clipboard_preferences::records_open_focus_set,
             clipboard_preferences::clipboard_record_shortcut_set,
-            clipboard_preferences::clipboard_storage_info,
-            clipboard_preferences::clipboard_cleanup_preview,
-            clipboard_preferences::clipboard_cleanup_apply,
+            clipboard_preferences::records_storage_info,
+            clipboard_preferences::records_cleanup_preview,
+            clipboard_preferences::records_cleanup_apply,
             commands::clipboard_shortcut_set,
             commands::clipboard_image,
             commands::clipboard_files,
@@ -576,7 +576,6 @@ fn main() {
             }
             sync_global_shortcuts(app.handle());
             clipboard_runtime::start(app.handle());
-            clipboard_preferences::start_maintenance(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

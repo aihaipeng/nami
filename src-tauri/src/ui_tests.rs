@@ -970,11 +970,17 @@ fn native_chrome_sample(app: &AppHandle) -> Result<serde_json::Value, String> {
     let window_frame = native_translation_frame(&window)?;
     let bounds: objc2_foundation::NSRect = unsafe { objc2::msg_send![&*stage, bounds] };
     let mut buttons = Vec::new();
-    let retired: *mut AnyObject = unsafe { objc2::msg_send![&*stage, viewWithTag: 103isize] };
-    if !retired.is_null() {
-        return Err("retired Actions control is still installed".into());
+    for retired_tag in [102isize, 103] {
+        let retired: *mut AnyObject =
+            unsafe { objc2::msg_send![&*stage, viewWithTag: retired_tag] };
+        if !retired.is_null() {
+            return Err(format!(
+                "retired native control {retired_tag} is still installed"
+            ));
+        }
     }
-    for tag in [101isize, 102] {
+    let tag = 101isize;
+    {
         unsafe {
             let button: *mut AnyObject = objc2::msg_send![&*stage, viewWithTag: tag];
             if button.is_null() {
@@ -1047,7 +1053,6 @@ fn click_native_chrome(app: &AppHandle, tag: isize) -> Result<(), String> {
     result?;
     let expected = match tag {
         101 => "source",
-        102 => "translate",
         _ => return Err("invalid chrome test tag".into()),
     };
     let payload = receive
@@ -1084,26 +1089,15 @@ fn assert_chrome_anchors(value: &serde_json::Value) -> Result<(), String> {
         .ok_or("missing chrome buttons")?;
     let right = number(value, "windowRight")?;
     let source = &buttons[0];
-    let translate = &buttons[1];
     equal(
         right - number(source, "screenRight")?,
         24.0,
         "native source right inset",
     )?;
     equal(
-        right - number(translate, "screenRight")?,
-        24.0,
-        "native translate right inset",
-    )?;
-    equal(
         number(value, "height")? - number(source, "y")?,
         40.0,
         "native source top inset",
-    )?;
-    equal(
-        number(translate, "y")?,
-        0.0,
-        "native translate bottom inset",
     )?;
     for button in buttons {
         equal(number(button, "height")?, 32.0, "native control height")?;
@@ -1321,40 +1315,31 @@ return {languagePickerOutline:outline};
         expect_state(false, false, false)?;
         samples.push(serde_json::json!({"historyShortcut":"hidden host"}));
         on_main(app, |app| show(app, "translation"))?;
-        let mut blank = serde_json::Value::Null;
-        for _ in 0..40 {
-            blank = on_main(app, native_chrome_sample)?;
-            if blank["buttons"][1]["enabled"] == false {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if blank["buttons"][1]["enabled"] != false {
-            return Err("native Translate enabled for empty source".into());
+        evaluate_dom(app, "const input=document.querySelector('.source-input');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
+        wait_dom(
+            app,
+            "return {ready:document.querySelector('.source-input').value===''};",
+        )?;
+        evaluate_dom(app, "const input=document.querySelector('.source-input');input.focus();input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',metaKey:true,bubbles:true,cancelable:true}));return true;")?;
+        let blank = evaluate_dom(app, "return {empty:document.querySelector('.source-input').value==='',status:!!document.querySelector('.translation-status')};")?;
+        if blank["empty"] != true || blank["status"] != false {
+            return Err(format!(
+                "empty source submitted through the translation shortcut: {blank}"
+            ));
         }
         evaluate_dom(app, "const input = document.querySelector('.source-input'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'x'.repeat(5001)); input.dispatchEvent(new Event('input', {bubbles:true})); return true;")?;
-        let mut enabled = false;
-        for _ in 0..40 {
-            if on_main(app, native_chrome_sample)?["buttons"][1]["enabled"] == true {
-                enabled = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !enabled {
-            return Err("native Translate did not enable after source input".into());
-        }
-        click_native_chrome(app, 102)?;
+        evaluate_dom(app, "const input=document.querySelector('.source-input');input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',metaKey:true,bubbles:true,cancelable:true}));return true;")?;
         samples.push(wait_dom(app, "const status = document.querySelector('.translation-status'); return { ready: !!status, translatedNotice: status?.textContent }; ")?);
         if !samples.last().unwrap()["translatedNotice"]
             .as_str()
             .unwrap_or_default()
             .contains("Input limit:")
         {
-            return Err("native Translate did not invoke validated submit behavior".into());
+            return Err("translation shortcut did not invoke validated submit behavior".into());
         }
         samples.push(on_main(app, native_chrome_sample)?);
         samples.extend(check_retranslation_shortcut(app)?);
+        samples.extend(check_translation_copy_shortcuts(app)?);
         Ok::<(), String>(())
     })();
     DomCase {
@@ -1364,6 +1349,80 @@ return {languagePickerOutline:outline};
         error: result.err(),
         samples,
     }
+}
+
+fn check_translation_copy_shortcuts(app: &AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let id = "sample-07";
+    let record = app
+        .state::<AppState>()
+        .history
+        .lock()
+        .unwrap()
+        .record(id)
+        .ok_or("missing single-target fixture")?;
+    if record.translations.len() != 1 {
+        return Err("copy fixture must have one translation".into());
+    }
+    evaluate_view_dom(
+        app,
+        "clipboard",
+        "window.__TAURI_INTERNALS__.invoke('records_details_toggle');return true;",
+    )?;
+    wait_records(app, "const row=document.querySelector('[data-record-id=sample-07] .history-row-select');if(!row||document.querySelector('.translation-history .records-details[aria-expanded=true]'))return {ready:false};row.focus();return {ready:document.hasFocus()&&document.activeElement===row&&document.querySelector('#translation-history .records-details')?.getAttribute('aria-expanded')==='false'};")?;
+    let mut samples = Vec::new();
+    for (index, (code, flags, key, text)) in [
+        (18, 1 << 20, "1", record.translations[0].as_str()),
+        (19, 1 << 20, "2", record.translations[0].as_str()),
+        (8, (1 << 20) | (1 << 17), "C", record.text.as_str()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        post_records_key(app, code, flags, key, key, false)?;
+        let mut copied = false;
+        for _ in 0..80 {
+            let state = app.state::<AppState>();
+            let page = state
+                .database
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or("missing_test_database")?
+                .clipboard_page("", false, None, 100)?;
+            if page.total_records == index + 1 {
+                let id = &page.records.first().ok_or("missing clipboard copy")?.id;
+                let saved = state
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("missing_test_database")?
+                    .clipboard_record(id)?;
+                let clipboard = on_main(app, |_| {
+                    crate::platform::read_clipboard(|_| false).map_err(str::to_owned)
+                })?;
+                copied = saved.text == text && clipboard.is_some_and(|capture| matches!(capture.payload, crate::platform::ClipboardPayload::Text(value) if value == text));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !copied
+            || app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .translation_visible
+        {
+            return Err(format!(
+                "translation copy key {key} did not save full text without opening details"
+            ));
+        }
+        samples.push(
+            serde_json::json!({"copyKey":key,"clipboardRecords":index+1,"detailsOpen":false}),
+        );
+    }
+    Ok(samples)
 }
 
 fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value>, String> {
@@ -1452,77 +1511,44 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
     let script = format!(
         r#"
         const source = document.querySelector('.source-bar > .language-picker');
-        const actions = document.querySelector('.translation-actions');
         const input = document.querySelector('.source-input');
-        const s = source.getBoundingClientRect(), a = actions.getBoundingClientRect(), i = input.getBoundingClientRect();
-        const pickers = [...document.querySelectorAll('.translation-footer .language-slot:not(.secondary-off) .language-picker')].map(p => p.getBoundingClientRect().toJSON());
+        const s = source.getBoundingClientRect(), i = input.getBoundingClientRect();
+        const footer = document.querySelector('.translation-footer');
+        const pickers = [...footer.querySelectorAll('.language-slot:not(.secondary-off) .language-picker')].map(p => p.getBoundingClientRect().toJSON());
         return {{ pickers, ready: Math.abs(innerWidth - {width}) < .01 && i.right <= s.left - 1,
             width: innerWidth, native: document.documentElement.dataset.native,
-            sourcePosition: getComputedStyle(source).position, actionsPosition: getComputedStyle(actions).position,
-            sourceVisibility: getComputedStyle(source).visibility, actionsVisibility: getComputedStyle(actions).visibility,
-            sourceAriaHidden: source.getAttribute('aria-hidden'), actionsAriaHidden: actions.getAttribute('aria-hidden'),
+            sourcePosition: getComputedStyle(source).position, sourceVisibility: getComputedStyle(source).visibility,
+            sourceAriaHidden: source.getAttribute('aria-hidden'),
             nativeChrome: document.querySelector('.translation-panel').dataset.nativeChrome,
             sourceRightInset: innerWidth - s.right, sourceTopInset: s.top,
-            actionsRightInset: innerWidth - a.right, actionsBottomInset: innerHeight - a.bottom, actionsTop: a.top,
+            footerHeight: footer.getBoundingClientRect().height, footerButtons: footer.querySelectorAll('button').length,
             inputPickerGap: s.left - i.right, sourceLabel: source.textContent }};
     "#
     );
     let value = wait_dom(app, &script)?;
-    for key in ["sourcePosition", "actionsPosition"] {
-        if value[key] != "fixed" {
-            return Err(format!("{key} is not fixed: {}", value[key]));
-        }
-    }
-    if value["nativeChrome"] != "true"
+    if value["sourcePosition"] != "fixed"
+        || value["nativeChrome"] != "true"
         || value["sourceVisibility"] != "hidden"
-        || value["actionsVisibility"] != "hidden"
         || value["sourceAriaHidden"] != "true"
-        || value["actionsAriaHidden"] != "true"
     {
-        return Err(
-            "web controls remained visible or accessible after native chrome activation".into(),
-        );
+        return Err(format!(
+            "web source control remained visible or accessible: {value}"
+        ));
+    }
+    if value["footerButtons"] != 2 || value["footerHeight"] != 28.0 {
+        return Err(format!(
+            "translation footer must only contain language pickers in one row: {value}"
+        ));
     }
     let native = on_main(app, native_chrome_sample)?;
     assert_chrome_anchors(&native)?;
     if native["buttons"][0]["title"] != value["sourceLabel"] {
         return Err("native source label did not follow React selection".into());
     }
-    if native["buttons"][1]["hidden"] != false {
-        return Err(format!(
-            "native footer actions hidden at {width}pt: {native}"
-        ));
-    }
-    let actions_left = width
-        - 24.0
-        - native["buttons"][1]["width"]
-            .as_f64()
-            .ok_or("missing Translate width")?;
-    for picker in value["pickers"]
-        .as_array()
-        .ok_or("missing language pickers")?
-    {
-        if picker["right"].as_f64().ok_or("missing picker right")? > actions_left
-            && picker["bottom"].as_f64().ok_or("missing picker bottom")?
-                > value["actionsTop"].as_f64().ok_or("missing footer top")?
-        {
-            return Err(format!(
-                "native footer overlaps language picker at {width}pt: {value}"
-            ));
-        }
-    }
-    if native["buttons"][1]["title"] != "Translate" {
-        return Err("native action labels did not follow interface language".into());
-    }
     if value["native"] != "true" {
         return Err("DOM test did not load the native stylesheet".into());
     }
-    for (key, expected) in [
-        ("sourceRightInset", 24.0),
-        ("sourceTopInset", 8.0),
-        ("actionsRightInset", 20.0),
-        ("actionsBottomInset", 0.0),
-    ] {
+    for (key, expected) in [("sourceRightInset", 24.0), ("sourceTopInset", 8.0)] {
         equal(
             value[key].as_f64().ok_or("missing DOM inset")?,
             expected,
@@ -1719,23 +1745,49 @@ fn run_translation_settings(app: &AppHandle) -> DomCase {
             "settings",
             r#"const nav=document.querySelector('button[aria-label="Translation"]');if(!nav)return {ready:false};if(!nav.hasAttribute('aria-current'))nav.click();return {ready:!!document.querySelector('#translation-proxy-url')};"#,
         )?;
+        on_main(app, |app| {
+            create(app, "settings")?
+                .set_size(tauri::LogicalSize::new(460.0, 640.0))
+                .map_err(|_| "window_size".to_owned())
+        })?;
+        samples.push(wait_view_dom(app, "settings", r#"
+if(!matchMedia('(max-width: 480px)').matches)return {ready:false};
+const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled');
+const row=toggle.parentElement, page=document.querySelector('.settings-content');
+const box=node=>node.getBoundingClientRect(), address=box(field), checkbox=box(toggle);
+if(Math.abs(address.left+address.width/2-box(row).left-box(row).width/2)>.5||box(row.querySelector('label')).bottom>address.top||Math.abs(checkbox.top+checkbox.height/2-address.top-address.height/2)>.1||address.width<170||address.width>240||page.scrollWidth!==page.clientWidth)throw Error('narrow proxy layout crowds the address or spills outside its page');
+return {ready:true,narrowAddressWidth:address.width};
+"#)?);
+        on_main(app, |app| {
+            create(app, "settings")?
+                .set_size(tauri::LogicalSize::new(760.0, 640.0))
+                .map_err(|_| "window_size".to_owned())
+        })?;
+        wait_view_dom(app, "settings", "return {ready:innerWidth>700};")?;
         evaluate_view_dom(
             app,
             "settings",
-            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+            r#"document.querySelector('#translation-proxy-enabled').click();return true;"#,
         )?;
-        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('[aria-label="Use HTTP Proxy"]'), page=document.querySelector('.settings-content');return {ready:field.getAttribute('aria-invalid')==='true'&&!toggle.checked&&page.scrollWidth===page.clientWidth,rejectedEmpty:!toggle.checked,horizontalOverflow:page.scrollWidth-page.clientWidth};"#)?);
+        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled'), page=document.querySelector('.settings-content');return {ready:field.getAttribute('aria-invalid')==='true'&&!toggle.checked&&page.scrollWidth===page.clientWidth,rejectedEmpty:!toggle.checked,horizontalOverflow:page.scrollWidth-page.clientWidth};"#)?);
         evaluate_view_dom(
             app,
             "settings",
             r#"const field=document.querySelector('#translation-proxy-url');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,'http://proxy.example.test:8080');field.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
         )?;
+        samples.push(evaluate_view_dom(app, "settings", r#"
+const field=document.querySelector('#translation-proxy-url'), row=field.parentElement;
+const address=field.getBoundingClientRect(), bounds=row.getBoundingClientRect();
+const save=row.querySelector('button[type=submit]'), checkbox=row.querySelector('input[type=checkbox]');
+if(!save||Math.abs(address.left+address.width/2-bounds.left-bounds.width/2)>.5||save.getBoundingClientRect().right>checkbox.getBoundingClientRect().left)throw Error('showing Save must not shift the input or overlap the checkbox');
+return {centeredWhileEditing:true};
+"#)?);
         evaluate_view_dom(
             app,
             "settings",
-            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+            r#"document.querySelector('#translation-proxy-enabled').click();return true;"#,
         )?;
-        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('[aria-label="Use HTTP Proxy"]');return {ready:toggle.checked&&!field.readOnly&&field.getAttribute('aria-invalid')==='false',enabled:toggle.checked};"#)?);
+        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled');return {ready:toggle.checked&&!field.readOnly&&field.getAttribute('aria-invalid')==='false',enabled:toggle.checked};"#)?);
         let state = app.state::<AppState>();
         if state.translation_preferences.lock().unwrap().proxy_url
             != "http://proxy.example.test:8080"
@@ -1745,12 +1797,12 @@ fn run_translation_settings(app: &AppHandle) -> DomCase {
         evaluate_view_dom(
             app,
             "settings",
-            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+            r#"document.querySelector('#translation-proxy-enabled').click();return true;"#,
         )?;
         wait_view_dom(
             app,
             "settings",
-            r#"return {ready:!document.querySelector('[aria-label="Use HTTP Proxy"]').checked&&!document.querySelector('#translation-proxy-url').readOnly};"#,
+            r#"return {ready:!document.querySelector('#translation-proxy-enabled').checked&&!document.querySelector('#translation-proxy-url').readOnly};"#,
         )?;
         let styles = evaluate_view_dom(
             app,
@@ -1767,19 +1819,30 @@ const groups=[...document.querySelectorAll('.settings-group')];
 if(groups.some(group=>getComputedStyle(group).borderTopWidth!=='0px'||getComputedStyle(group).backgroundColor===transparent))throw Error('settings groups must use fill without an enclosing line');
 const divider=getComputedStyle(document.querySelector('.settings-field + .settings-field')).borderTopWidth;
 if(divider!=='1px')throw Error('row separators were removed');
-const proxy=document.querySelector('#translation-proxy-url');
+const proxy=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled');
+const row=toggle.closest('.settings-field'), label=row.querySelector('label');
+const box=node=>node.getBoundingClientRect(), checkbox=box(toggle), address=box(proxy);
+if(row!==proxy.closest('.settings-field')||toggle.checked||proxy.readOnly||getComputedStyle(row).opacity!=='1')throw Error('the disabled proxy should retain an editable address in the same row');
+if(checkbox.width!==16||checkbox.height!==16||Math.abs(checkbox.right-box(row).right)>.1||box(label).right>=address.left||address.right>=checkbox.left||Math.abs(checkbox.top+checkbox.height/2-address.top-address.height/2)>.1)throw Error('proxy label, address and checkbox do not align in one row');
+if(address.width>240||address.width<200||Math.abs(address.left+address.width/2-box(row).left-box(row).width/2)>.5||getComputedStyle(proxy).textAlign!=='center')throw Error('proxy input and its text must be centered in the row');
+const sectionHeadings=[...document.querySelectorAll('.settings-section-heading')];
+if(sectionHeadings.length!==2||sectionHeadings.some(heading=>box(heading).height!==28))throw Error('translation must use the shared settings section heading');
+proxy.blur();
+const idleProxyBackground=getComputedStyle(proxy).backgroundColor;
 proxy.focus({preventScroll:true});
+const proxyStyle=getComputedStyle(proxy), proxyFocused=proxy.matches(':focus');
+if(document.activeElement!==proxy||proxyStyle.outlineStyle!=='none'||(proxyFocused&&proxyStyle.backgroundColor===idleProxyBackground))throw Error('proxy focus must use a tinted background without an outer outline');
 const control=controls.find(item=>!item.matches(':hover'));
 control.focus({preventScroll:true});
 const focus=getComputedStyle(control);
 const focusVisible=control.matches(':focus-visible');
 if(document.activeElement!==control||focus.outlineStyle!=='none'||focus.borderTopColor!==transparent||focus.textDecorationLine!=='none'||(focusVisible&&focus.backgroundColor===transparent))throw Error('keyboard focus must use background without a frame or underline');
-return {title,headings,cards:groups.length,divider,focusVisible,focusBackground:focus.backgroundColor};
+return {title,headings,cards:groups.length,divider,proxyFocused,focusVisible,focusBackground:focus.backgroundColor};
 "#,
         )?;
-        if visible && styles["focusVisible"] != true {
+        if visible && (styles["proxyFocused"] != true || styles["focusVisible"] != true) {
             return Err(format!(
-                "visible dropdown did not show keyboard focus: {styles}"
+                "visible proxy input or dropdown did not show focus: {styles}"
             ));
         }
         samples.push(styles);
@@ -2067,14 +2130,14 @@ return {{ready:paused!=={enabled}&&!image.checked&&!image.matches(':disabled'),p
         }
         let mut picker = serde_json::Value::Null;
         for _ in 0..80 {
-            picker = evaluate_view_dom(app, "settings", "const button=document.querySelector('button[aria-label=\"Keep History For: Forever\"]');if(!button)return {ready:false};if(button.getAttribute('aria-expanded')==='false')button.click();return {ready:!!document.querySelector('.settings-popover')};")?;
+            picker = evaluate_view_dom(app, "settings", "const button=document.querySelector('button[aria-label=\"When Activating an Item: Paste into Previous App\"]');if(!button)return {ready:false};if(button.getAttribute('aria-expanded')==='false')button.click();return {ready:!!document.querySelector('.settings-popover')};")?;
             if picker["ready"] == true {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
         if picker["ready"] != true {
-            return Err("settings retention dropdown did not open".into());
+            return Err("settings behavior dropdown did not open".into());
         }
         let scrolled = evaluate_view_dom(app, "settings", "document.querySelector('.settings-content').dispatchEvent(new Event('scroll'));return true;")?;
         if scrolled != true {
@@ -2082,7 +2145,7 @@ return {{ready:paused!=={enabled}&&!image.checked&&!image.matches(':disabled'),p
         }
         let mut dismissed = false;
         for _ in 0..80 {
-            if evaluate_view_dom(app, "settings", "return !document.querySelector('.settings-popover') && document.querySelector('button[aria-label=\"Keep History For: Forever\"]').getAttribute('aria-expanded')==='false';")? == true {
+            if evaluate_view_dom(app, "settings", "return !document.querySelector('.settings-popover') && document.querySelector('button[aria-label=\"When Activating an Item: Paste into Previous App\"]').getAttribute('aria-expanded')==='false';")? == true {
                 dismissed = true;
                 break;
             }
@@ -2121,10 +2184,10 @@ return {ready:true};
             std::thread::sleep(Duration::from_millis(25));
         }
         if confirmation["open"] != true
-            || confirmation["initialFocus"] != "Cancel"
+            || confirmation["initialFocus"] != "CancelEsc"
             || confirmation["outline"] != "none"
             || confirmation["decoration"] != "none"
-            || (!confirmation["active"].is_null() && confirmation["active"] != "Cancel")
+            || (!confirmation["active"].is_null() && confirmation["active"] != "CancelEsc")
         {
             return Err(format!(
                 "cleanup confirmation must start on Cancel: {confirmation}"
@@ -2133,7 +2196,7 @@ return {ready:true};
         evaluate_view_dom(
             app,
             "settings",
-            "document.querySelector('dialog [data-initial-focus]').click();return true;",
+            "document.querySelector('dialog [data-initial-focus]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));return true;",
         )?;
         samples.push(confirmation);
         evaluate_view_dom(
@@ -2148,6 +2211,7 @@ return {ready:true};
 const dialog=document.querySelector('dialog[open]');if(!dialog)return {ready:false};
 const options=[...dialog.querySelectorAll('input[type=checkbox]')], confirm=dialog.querySelector('.clipboard-confirm-action');
 if(options.length!==3||options.some(option=>option.checked)||!confirm.disabled||dialog.querySelector('p'))throw Error('cleanup must show just three unselected categories and actions');
+if(dialog.getBoundingClientRect().width>330||dialog.getBoundingClientRect().height>185||confirm.querySelector('kbd')?.textContent!=='↵')throw Error('cleanup dialog should be compact and show Enter');
 const counts=[...dialog.querySelectorAll('.clipboard-cleanup-count')].map(node=>Number(node.textContent));
 if(counts.join(',')!=='1,2,2')throw Error('favorite and pinned rows must count in both categories');
 options[2].click();return {ready:true};
@@ -2161,8 +2225,14 @@ options[2].click();return {ready:true};
         evaluate_view_dom(
             app,
             "settings",
-            "document.querySelector('dialog[open] .clipboard-confirm-action').click();return true;",
+            "const dialog=document.querySelector('dialog[open]');dialog.tabIndex=-1;dialog.focus();if(document.activeElement!==dialog)throw Error('cleanup dialog did not receive focus');return true;",
         )?;
+        if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
+            wait_view_dom(app, "settings", "return {ready:document.hasFocus()};")?;
+            post_window_key(app, "settings", 36, 0, "\r", "\r", false)?;
+        } else {
+            evaluate_view_dom(app, "settings", "document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));return true;")?;
+        }
         samples.push(wait_view_dom(app, "settings", r#"
 const section=document.querySelector('[aria-labelledby=clipboard-storage-heading]');
 const before=window.__storageBeforeCleanup, after=section.querySelector('.clipboard-storage-value [aria-live]').textContent;
@@ -2254,25 +2324,32 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   }
   window.clipboardSettingsProbe.stage='options';
   const defaults=await invoke('clipboard_options_get');
-  if(defaults.activation!=='paste'||defaults.historyPolicy.days!==null||defaults.historyPolicy.limit!==null||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
+  if(defaults.activation!=='paste'||defaults.historyPolicy.limit!==500||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
   await invoke('clipboard_behavior_set',{activation:'copy'});
   if((await invoke('clipboard_options_get')).activation!=='copy')throw Error('copy preference did not update');
   const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
   if(excluded.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('exclusion was not removed');
   window.clipboardSettingsProbe.stage='storage';
-  const storage=await invoke('clipboard_storage_info');
-  const policy={days:7,limit:200};
+  const view='clipboard', storage=await invoke('records_storage_info',{view});
+  const policy={limit:1};
   window.clipboardSettingsProbe.stage='preview';
-  const preview=await invoke('clipboard_cleanup_preview',{policy});
-  if(preview.count<1||storage.unprotectedCount<1||storage.bytes<1)throw Error('synthetic rows are missing');
+  const preview=await invoke('records_cleanup_preview',{view,policy});
+  if(preview.count!==0||storage.limit!==500||storage.bytes<1)throw Error('clipboard count-only default or old row is missing');
   let stale;
-  try {await invoke('clipboard_cleanup_apply',{policy,token:'0'.repeat(64)});} catch(error) {stale=String(error);}
+  try {await invoke('records_cleanup_apply',{view,policy,token:'0'.repeat(64)});} catch(error) {stale=String(error);}
   if(stale!=='clipboard_cleanup_changed')throw Error('cleanup accepted a mismatched preview');
   window.clipboardSettingsProbe.stage='apply';
-  const result=await invoke('clipboard_cleanup_apply',{policy,token:preview.token});
+  const result=await invoke('records_cleanup_apply',{view,policy,token:preview.token});
   if(result.removed!==preview.count||result.mediaCleanupFailed)throw Error('cleanup did not match the preview');
   const saved=await invoke('clipboard_options_get');
-  if(saved.historyPolicy.days!==7||saved.historyPolicy.limit!==200)throw Error('confirmed retention was not saved');
+  if(saved.historyPolicy.limit!==1)throw Error('confirmed count was not saved');
+  const translation={view:'translation',policy:{limit:3}};
+  const before=await invoke('records_storage_info',{view:translation.view});
+  const translationPreview=await invoke('records_cleanup_preview',translation);
+  if(before.limit!==500||before.bytes===0||translationPreview.count<1)throw Error('translation history is missing');
+  const translationResult=await invoke('records_cleanup_apply',{...translation,token:translationPreview.token});
+  const after=await invoke('records_storage_info',{view:translation.view});
+  if(translationResult.removed!==translationPreview.count||after.limit!==3||after.bytes>=before.bytes||(await invoke('records_storage_info',{view})).limit!==1)throw Error('translation cleanup or scope is incorrect');
   window.clipboardSettingsProbe={done:true,conflict,afterConflict:snapshot.clipboardBinding,removed:result.removed};
 })().catch(error=>window.clipboardSettingsProbe={done:true,error:String(error)});
 return {paused:true};
@@ -2385,7 +2462,7 @@ return {ready:true,editedWhileUnchecked:true};
         {
             let database = state.database.lock().unwrap();
             let database = database.as_ref().ok_or("missing_test_database")?;
-            if database.clipboard_record("settings-regular").is_ok()
+            if database.clipboard_record("settings-regular").is_err()
                 || database.clipboard_record("settings-both").is_ok()
                 || !database.clipboard_record("settings-favorite")?.is_favorite
                 || database.clipboard_record("settings-pinned").is_ok()
@@ -3510,9 +3587,7 @@ return document.activeElement===document.body;
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
-                if native["buttons"][0]["title"] != "Multiple languages"
-                    || native["buttons"][1]["enabled"] != true
-                {
+                if native["buttons"][0]["title"] != "Multiple languages" {
                     return Err(format!("{engine} native chrome lost auto mode: {native}"));
                 }
                 case.samples.push(serde_json::json!({"engine":engine,"restored":restored,"nativeSource":native["buttons"][0]}));
@@ -5052,7 +5127,7 @@ return true;
 "#,
         )?;
         press(40, CMD, "k", "k")?;
-        samples.push(check("Show Shortcuts", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Input')&&keys.at(-1)?.trusted")?);
+        samples.push(check("Show Shortcuts", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Input')&&panel.querySelector('.history-shortcuts-panel').textContent.includes('↵')&&!panel.querySelector('.history-shortcuts-panel').textContent.includes('Open Translation')&&keys.at(-1)?.trusted")?);
         press(3, CMD, "f", "f")?;
         samples.push(check("Focus Input", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
         for pinned in [true, false] {
@@ -5861,7 +5936,7 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
         }
         let native = on_main(app, native_chrome_sample)?;
         if native["buttons"].as_array().is_none_or(|buttons| {
-            buttons.len() != 3 || buttons.iter().any(|button| button["hidden"] != true)
+            buttons.len() != 1 || buttons.iter().any(|button| button["hidden"] != true)
         }) {
             return Err(format!(
                 "translation controls overlap clipboard details: {native}"

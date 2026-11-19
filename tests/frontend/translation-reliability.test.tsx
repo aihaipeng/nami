@@ -26,25 +26,23 @@ describe('translation reliability', () => {
     expect(calls('translation_run')).toHaveLength(1);
   });
 
-  it('confirms copying a result locally and ignores completion after the draft changes', async () => {
+  it('copies without a success message and only reports failures for the current draft', async () => {
     await mount(); submit('Text for copy');
     await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      await act(async () => { fireEvent.keyDown(source(), { key: '1', metaKey: true }); });
-      expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-test', part: 'primary' });
-      expect(screen.getByText('Primary translation copied').getAttribute('role')).toBe('status');
-      expect(screen.queryByRole('progressbar')).toBeNull();
-      act(() => vi.advanceTimersByTime(1000));
-      expect(screen.queryByText(/translation copied/)).toBeNull();
-      const invoke = bridge.invoke.getMockImplementation()!;
-      let finish!: () => void;
-      bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
-      fireEvent.keyDown(source(), { key: '2', metaKey: true });
-      fireEvent.change(source(), { target: { value: 'Different draft' } });
-      await act(async () => finish());
-      expect(screen.queryByText(/translation copied/)).toBeNull();
-    } finally { vi.useRealTimers(); }
+    await act(async () => { fireEvent.keyDown(source(), { key: '1', metaKey: true }); });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-test', part: 'primary' });
+    expect(screen.queryByText(/translation copied/)).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    bridge.invoke.mockRejectedValueOnce('clipboard_write');
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    await screen.findByText('Content was not copied. Try again.');
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let fail!: (reason: string) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((_, reject) => { fail = reject; }) : invoke(name, args));
+    fireEvent.keyDown(source(), { key: '2', metaKey: true });
+    fireEvent.change(source(), { target: { value: 'Different draft' } });
+    await act(async () => fail('clipboard_write'));
+    expect(screen.queryByText('Content was not copied. Try again.')).toBeNull();
   });
 
   it('keeps an active translation running while browsing history and does not replace the browsed record on completion', async () => {
@@ -95,9 +93,6 @@ describe('translation reliability', () => {
     bridge.snapshot.storageError = 'storage_version';
     await mount(); submit('Do not send when storage is unavailable');
     expect(screen.getByRole('alert').textContent).toContain('Existing files are preserved');
-    expect((screen.getByRole('button', { name: /^Translate/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(calls('translation_run')).toHaveLength(0);
-    await emit('translation_chrome_action', 'translate');
     expect(calls('translation_run')).toHaveLength(0);
   });
 
@@ -142,7 +137,7 @@ describe('translation reliability', () => {
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
   });
 
-  it('preserves unsupported selections on an engine switch and blocks both DOM and native submission', async () => {
+  it('preserves unsupported selections on an engine switch and blocks shortcut submission', async () => {
     bridge.snapshot.translationEngine = 'google';
     bridge.snapshot.translationPreferences.engine = 'google';
     bridge.snapshot.translationPreferences.primaryLanguage = 'eo';
@@ -152,12 +147,9 @@ describe('translation reliability', () => {
     await emit('translation_engine_changed', 'edge');
     expect(screen.getByRole('button', { name: 'Primary language: Esperanto (unavailable)' })).toBeTruthy();
     expect(screen.getByRole('status').textContent).toContain('not supported');
-    expect(screen.getByRole('button', { name: /^Translate/ })).toHaveProperty('disabled', true);
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await emit('translation_chrome_action', 'translate');
     expect(calls('translation_run')).toHaveLength(0);
     expect(calls('translation_preferences_set')).toHaveLength(0);
-    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.canTranslate).toBe(false);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Primary language: Esperanto (unavailable)' }));
     await user.click(screen.getByRole('option', { name: 'German' }));

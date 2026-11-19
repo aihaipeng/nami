@@ -52,7 +52,7 @@ describe('unified records workspace', () => {
     for (const kind of ['clipboard', 'translation'] as const) {
       if (kind === 'translation') await switchView(kind);
       const toolbar = within(panel(kind).querySelector<HTMLElement>('.history-toolbar')!);
-      const help = () => within(panel(kind)).queryByRole('dialog', { name: 'Keyboard shortcuts' });
+      const help = () => within(panel(kind)).queryByRole('dialog', { name: 'HotKey' });
       const key = (code: string, key: string, shiftKey = false, repeat = false) => fireEvent.keyDown(document.activeElement!, { code, key, metaKey: true, shiftKey, repeat });
       toolbar.getByRole('button', { name: 'Pin records' }).focus();
       key('KeyP', 'P', true);
@@ -63,7 +63,7 @@ describe('unified records workspace', () => {
       await windowState({ historyPinned: false });
       key('KeyK', 'k');
       expect(help()?.textContent).toContain('Focus Input');
-      expect(screen.getAllByRole('dialog', { name: 'Keyboard shortcuts' })).toHaveLength(1);
+      expect(screen.getAllByRole('dialog', { name: 'HotKey' })).toHaveLength(1);
       key('KeyK', 'k', false, true);
       expect(help()).toBeTruthy();
       key('KeyK', 'k');
@@ -93,7 +93,7 @@ describe('unified records workspace', () => {
         expect(document.activeElement).toBe(search(kind));
       }
       fireEvent.keyDown(search(kind), { key: 'W', code: 'KeyW', metaKey: true, shiftKey: true });
-      expect(within(panel(kind)).getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeTruthy();
+      expect(within(panel(kind)).getByRole('dialog', { name: 'HotKey' })).toBeTruthy();
       expect(calls('window_hide')).toHaveLength(0);
     }
   });
@@ -103,7 +103,7 @@ describe('unified records workspace', () => {
     preferences.shortcuts.focusSearch = { code: 'KeyJ', modifiers: ['alt'] };
     preferences.disabledShortcuts = ['showShortcuts'];
     await mount('clipboard');
-    const button = within(panel('clipboard')).getByRole('button', { name: 'Keyboard shortcuts' });
+    const button = within(panel('clipboard')).getByRole('button', { name: 'HotKey' });
     button.focus();
     fireEvent.keyDown(button, { key: 'k', code: 'KeyK', metaKey: true });
     expect(button.getAttribute('aria-expanded')).toBe('false');

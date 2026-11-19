@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { ViewProps } from '../App';
 import { clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardShortcutLabels, sharedRecordActions } from './clipboardShortcuts';
 import { translationShortcutEnabled } from './contracts';
-import { editsText, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles } from './shortcuts';
+import { editsText, globalTranslationActions, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles, translationWindowActions } from './shortcuts';
 import type { ClipboardKind } from '../clipboard/useClipboard';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
@@ -32,6 +32,15 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     return binding && translationShortcutEnabled(preferences, action) && !localShortcuts.some((local) => local.binding && sameBinding(local.binding, binding))
       ? [{ action, binding }] : [];
   });
+  const contextualShortcuts = clipboard
+    ? snapshot.clipboardShortcutEnabled && snapshot.clipboardBinding && capabilities.selection && native && !snapshot.storageError
+      ? [{ label: 'clipboardOpenHistory' as const, binding: snapshot.clipboardBinding }] : []
+    : [...(capabilities.selection ? globalTranslationActions : []), ...translationWindowActions].flatMap((action) => {
+      const binding = preferences.shortcuts[action];
+      return binding && translationShortcutEnabled(preferences, action)
+        ? [{ label: shortcutTitles[action], binding }] : [];
+    });
+  const keyLabel = (binding: Parameters<typeof keycapLabels>[0]) => keycapLabels(binding, capabilities.platform === 'macos', t).join(' ');
   useEffect(() => {
     if (!active) return;
     const keydown = (event: KeyboardEvent) => {
@@ -67,12 +76,13 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
       {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
     </div>
-    <button ref={button} type="button" className="icon-button history-shortcuts" aria-label="Keyboard shortcuts" title="Keyboard shortcuts" aria-expanded={open} onClick={() => setOpen(!open)}><HistoryIcon name="keyboard" /></button>
-    {open && <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label="Keyboard shortcuts">
-      <strong>Keyboard shortcuts</strong>
-      <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>Return</span></div>
-      {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keycapLabels(binding, capabilities.platform === 'macos', t).join(' ')}</span></div>)}
-      {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keycapLabels(binding, capabilities.platform === 'macos', t).join(' ')}</span></div>)}
+    <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} title={t('hotKey')} aria-expanded={open} onClick={() => setOpen(!open)}><HistoryIcon name="keyboard" /></button>
+    {open && <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label={t('hotKey')}>
+      <strong>{t('hotKey')}</strong>
+      <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
+      {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
+      {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
+      {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><span>{keyLabel(binding)}</span></div>)}
       <div><span>Hide window</span><span>Esc / {capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W</span></div>
       {!clipboard && <small>Select a record to navigate</small>}
     </div>}

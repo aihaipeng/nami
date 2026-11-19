@@ -45,11 +45,16 @@ impl RecordingTypes {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryPolicy {
-    pub days: Option<u32>,
-    pub limit: Option<u32>,
+    pub limit: u32,
+}
+
+impl Default for HistoryPolicy {
+    fn default() -> Self {
+        Self { limit: 500 }
+    }
 }
 
 #[derive(Serialize)]
@@ -62,8 +67,20 @@ pub struct CleanupPreview {
 
 impl HistoryPolicy {
     pub fn valid(self) -> bool {
-        matches!(self.days, None | Some(7 | 30 | 90))
-            && matches!(self.limit, None | Some(200 | 500 | 1000))
+        (1..=1_000_000).contains(&self.limit)
+    }
+
+    pub fn from_store(value: Option<String>) -> Self {
+        #[derive(Deserialize)]
+        struct Saved {
+            limit: Option<u32>,
+        }
+        value
+            .and_then(|value| serde_json::from_str::<Saved>(&value).ok())
+            .and_then(|value| value.limit)
+            .map(|limit| Self { limit })
+            .filter(|policy| policy.valid())
+            .unwrap_or_default()
     }
 }
 

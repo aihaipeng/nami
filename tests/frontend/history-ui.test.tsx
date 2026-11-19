@@ -40,6 +40,22 @@ describe('history list and session actions', () => {
     expect(record).toEqual({ ...original, title: '' });
   });
 
+  it('copies selected translations from the list without opening details', async () => {
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'none';
+    await mount('history');
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    const target = within(row('sample-07')).getByRole('button', { name: /^Translation:/ });
+    act(() => target.focus());
+    fireEvent.keyDown(target, { code: 'Digit1', key: '1', metaKey: true });
+    fireEvent.keyDown(document.body, { code: 'Digit2', key: '2', metaKey: true });
+    fireEvent.keyDown(target, { code: 'Digit2', key: '2', metaKey: true, repeat: true });
+    await waitFor(() => expect(calls('translation_sample_copy').map((call) => call[1])).toEqual([
+      { sampleId: 'sample-07', part: 'primary' }, { sampleId: 'sample-07', part: 'secondary' },
+    ]));
+    expect(calls('history_sample_select')).toHaveLength(0);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+  });
+
   it('runs shared copy, mark and direct delete shortcuts without bypassing protection', async () => {
     await mount('history');
     const id = 'sample-03';
@@ -398,11 +414,11 @@ describe('history list and session actions', () => {
 
   it('dismisses the record menu and shortcuts when history hides without changing records', async () => {
     await mount('history');
-    fireEvent.click(screen.getByRole('button', { name: 'Keyboard shortcuts' }));
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     fireEvent.contextMenu(row('sample-03'));
     await windowState({ historyVisible: false, historyExtent: 0 });
     expect(screen.queryByRole('menu')).toBeNull();
-    expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'HotKey' })).toBeNull();
     await windowState({ historyVisible: true, historyExtent: 360 });
     expect(records()).toHaveLength(20);
   });
