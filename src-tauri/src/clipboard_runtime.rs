@@ -1,6 +1,6 @@
 use crate::{commands::on_main, platform, AppState};
 use nami::{
-    clipboard::{self, ClipboardFileRepresentation, ClipboardRecord},
+    clipboard::{self, ClipboardFileRepresentation, ClipboardRecord, RecordingTypes},
     database::HistoryDatabase,
 };
 use std::path::{Path, PathBuf};
@@ -205,7 +205,15 @@ pub(crate) fn start(app: &AppHandle) {
                     &state.clipboard_version,
                     platform::clipboard_version(),
                     state.selection_copy_busy.load(Ordering::SeqCst),
-                    platform::read_clipboard,
+                    || {
+                        if state.clipboard_recording_types.lock().unwrap().any() {
+                            platform::read_clipboard(|bundle_id| {
+                                state.clipboard_options.lock().unwrap().excludes(bundle_id)
+                            })
+                        } else {
+                            Ok(None)
+                        }
+                    },
                 )
                 .map_err(str::to_owned)
             })
@@ -220,7 +228,21 @@ pub(crate) fn start(app: &AppHandle) {
             };
             let state = app.state::<AppState>();
             let _write = state.clipboard_writes.lock().await;
-            if !state.clipboard_enabled.load(Ordering::SeqCst) {
+            if !state.clipboard_enabled.load(Ordering::SeqCst)
+                || state.clipboard_version.load(Ordering::SeqCst) != baseline
+            {
+                continue;
+            }
+            if capture
+                .source_app
+                .as_ref()
+                .and_then(|source| source.get("bundleId"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|bundle_id| {
+                    state.clipboard_options.lock().unwrap().excludes(bundle_id)
+                })
+            {
+                acknowledge(&state.clipboard_version, baseline, capture.version);
                 continue;
             }
             let root = match image_root(&app) {
@@ -232,9 +254,10 @@ pub(crate) fn start(app: &AppHandle) {
                 }
             };
             let captured_version = capture.version;
+            let types = *state.clipboard_recording_types.lock().unwrap();
             let worker = app.clone();
             let result = tauri::async_runtime::spawn_blocking(move || {
-                persist_capture_with(&root, capture, |record, representation| {
+                persist_capture_with(&root, capture, types, |record, representation| {
                     let state = worker.state::<AppState>();
                     if let Some(error) = state.storage_error.lock().unwrap().clone() {
                         return Err(error);
@@ -250,12 +273,17 @@ pub(crate) fn start(app: &AppHandle) {
             .await
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|result| result);
+            if matches!(result, Ok(true)) {
+                crate::clipboard_preferences::enforce_history_locked(&app, true).await;
+            }
             drop(_write);
             match result {
-                Ok(()) => {
+                Ok(saved) => {
                     acknowledge(&state.clipboard_version, baseline, captured_version);
                     failure = None;
-                    let _ = changed(&app);
+                    if saved {
+                        let _ = changed(&app);
+                    }
                 }
                 Err(error) => {
                     if !retryable(&error) {
@@ -294,11 +322,17 @@ pub(crate) fn persist_capture(
     root: &Path,
     capture: platform::ClipboardCapture,
 ) -> Result<(), String> {
-    persist_capture_with(root, capture, |record, representation| {
-        database
-            .clipboard_insert_with_file_representation(record, representation)
-            .map(|_| ())
-    })
+    persist_capture_with(
+        root,
+        capture,
+        RecordingTypes::default(),
+        |record, representation| {
+            database
+                .clipboard_insert_with_file_representation(record, representation)
+                .map(|_| ())
+        },
+    )
+    .map(|_| ())
 }
 
 fn image_file(path: &Path) -> Option<(Vec<u8>, String)> {
@@ -353,17 +387,24 @@ fn image_file(path: &Path) -> Option<(Vec<u8>, String)> {
 fn persist_capture_with(
     root: &Path,
     capture: platform::ClipboardCapture,
+    types: RecordingTypes,
     insert: impl FnOnce(&ClipboardRecord, Option<&ClipboardFileRepresentation>) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let mut created_image = None;
     let mut representation = None;
     let (kind, text, image_path, fingerprint) = match capture.payload {
         platform::ClipboardPayload::Text(text) => {
+            if !types.text {
+                return Ok(false);
+            }
             let fingerprint = clipboard::fingerprint("text", text.as_bytes());
             ("text", text, None, fingerprint)
         }
         payload @ (platform::ClipboardPayload::Files(_)
         | platform::ClipboardPayload::FilesImage { .. }) => {
+            if !types.files && !types.image {
+                return Ok(false);
+            }
             let (paths, image) = match payload {
                 platform::ClipboardPayload::Files(paths) => (paths, None),
                 platform::ClipboardPayload::FilesImage {
@@ -381,8 +422,17 @@ fn persist_capture_with(
                 None
             };
             let is_image = content.is_some();
-            let image = content
-                .or_else(|| image.filter(|(bytes, _)| platform::image_dimensions(bytes).is_ok()));
+            if (is_image && !types.image) || (!is_image && !types.files) {
+                return Ok(false);
+            }
+            // A file record can carry an image representation independently of its kind.
+            let image = if types.image {
+                content.or_else(|| {
+                    image.filter(|(bytes, _)| platform::image_dimensions(bytes).is_ok())
+                })
+            } else {
+                None
+            };
             if let Some((bytes, extension)) = image {
                 let (path, created) = clipboard::store_image_with_status(root, &bytes, &extension)?;
                 if created {
@@ -407,6 +457,9 @@ fn persist_capture_with(
             }
         }
         platform::ClipboardPayload::Image { bytes, extension } => {
+            if !types.image {
+                return Ok(false);
+            }
             let fingerprint = clipboard::fingerprint("image", &bytes);
             let (path, created) = clipboard::store_image_with_status(root, &bytes, &extension)?;
             if created {
@@ -432,12 +485,116 @@ fn persist_capture_with(
             clipboard::remove_image(root, &path)?;
         }
     }
-    saved
+    saved.map(|_| true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_types_skip_unselected_items_before_saving() {
+        let root = Path::new("no-media-write-expected");
+        let cases = [
+            (
+                platform::ClipboardPayload::Text("synthetic text".into()),
+                RecordingTypes {
+                    text: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                platform::ClipboardPayload::Image {
+                    bytes: vec![1, 2, 3],
+                    extension: "png".into(),
+                },
+                RecordingTypes {
+                    image: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                platform::ClipboardPayload::Files(vec!["/nami-synthetic.txt".into()]),
+                RecordingTypes {
+                    files: false,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (payload, types) in cases {
+            let capture = platform::ClipboardCapture {
+                version: 1,
+                payload,
+                source_app: None,
+            };
+            assert!(!persist_capture_with(root, capture, types, |_, _| panic!(
+                "filtered copy was saved"
+            ))
+            .unwrap());
+        }
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
+    fn recording_types_classify_single_image_files_and_drop_file_attachments() {
+        let root =
+            std::env::temp_dir().join(format!("nami-recording-kinds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bytes = include_bytes!("../../tests/fixtures/clipboard-wide.png");
+        let picture = root.join("picture.png");
+        std::fs::write(&picture, bytes).unwrap();
+        let picture = picture.to_string_lossy().into_owned();
+        let capture = |paths| platform::ClipboardCapture {
+            version: 1,
+            source_app: None,
+            payload: platform::ClipboardPayload::FilesImage {
+                paths,
+                bytes: bytes.to_vec(),
+                extension: "png".into(),
+                image_fallback: false,
+            },
+        };
+        let files_only = RecordingTypes {
+            image: false,
+            ..Default::default()
+        };
+        let images_only = RecordingTypes {
+            files: false,
+            ..Default::default()
+        };
+        let store = root.join("images");
+        assert!(!persist_capture_with(
+            &store,
+            capture(vec![picture.clone()]),
+            files_only,
+            |_, _| panic!("single image was saved as a file")
+        )
+        .unwrap());
+        assert!(persist_capture_with(
+            &store,
+            capture(vec![picture.clone(), "/other".into()]),
+            files_only,
+            |record, representation| {
+                assert_eq!(record.kind, "files");
+                assert!(representation.is_none());
+                Ok(())
+            }
+        )
+        .unwrap());
+        assert!(!store.exists(), "disabled image recording wrote a snapshot");
+        assert!(persist_capture_with(
+            &store,
+            capture(vec![picture]),
+            images_only,
+            |record, representation| {
+                assert_eq!(record.kind, "image");
+                assert!(representation.is_some());
+                Ok(())
+            }
+        )
+        .unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
@@ -762,6 +919,7 @@ mod tests {
                     .into_owned()]),
                 source_app: None,
             },
+            RecordingTypes::default(),
             |record, representation| {
                 let _guard = database
                     .try_lock()
@@ -989,15 +1147,20 @@ mod tests {
         let hash = clipboard::fingerprint("image", &bytes);
         let relative = format!("origin/{}/{}.png", &hash[..2], hash);
         let saved = std::cell::RefCell::new(None);
-        persist_capture_with(&root, capture(), |record, representation| {
-            assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
-            let mut guard = database
-                .try_lock()
-                .expect("preparation must not hold the SQL lock");
-            *saved.borrow_mut() =
-                Some(guard.clipboard_insert_with_file_representation(record, representation)?);
-            Ok(())
-        })
+        persist_capture_with(
+            &root,
+            capture(),
+            RecordingTypes::default(),
+            |record, representation| {
+                assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
+                let mut guard = database
+                    .try_lock()
+                    .expect("preparation must not hold the SQL lock");
+                *saved.borrow_mut() =
+                    Some(guard.clipboard_insert_with_file_representation(record, representation)?);
+                Ok(())
+            },
+        )
         .unwrap();
         let record = saved.into_inner().unwrap();
         let guard = database.lock().unwrap();
@@ -1022,6 +1185,7 @@ mod tests {
                 },
                 source_app: None,
             },
+            RecordingTypes::default(),
             |record, _representation| {
                 let guard = database
                     .try_lock()

@@ -1394,13 +1394,13 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_query')).toHaveLength(initial+1);
   });
 
-  it('uses record IDs for full copy and paste and persists favorite, pin, and delete actions', async () => {
+  it('uses record IDs for explicit copy and configured activation and persists record actions', async () => {
     const user = userEvent.setup(); await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     await user.click(within(row('first')).getByRole('button', { name: 'Copy' }));
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
     await user.click(within(row('first')).getByRole('button', { name: 'Clipboard: Saved text' }));
-    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'paste' });
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activate' });
     await user.click(within(row('first')).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(row('first')).queryByRole('button', { name: 'Delete clipboard record' })).toBeNull());
     await user.click(within(row('first')).getByRole('button', { name: 'Remove favorite' }));

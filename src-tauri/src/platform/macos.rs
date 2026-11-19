@@ -1,5 +1,5 @@
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-use objc2_foundation::{ns_string, NSString};
+use objc2_foundation::{ns_string, NSArray, NSString};
 use std::ffi::c_void;
 
 #[derive(Clone, Copy, Debug)]
@@ -9,6 +9,9 @@ pub struct Target {
 }
 
 #[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
+
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
 unsafe extern "C" {}
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -320,6 +323,64 @@ pub fn selected_text(target: Target) -> Result<String, &'static str> {
             let value = AXValue(value);
             (status == 0).then(|| ax_string(&value)).flatten()
         })
+    }
+}
+
+pub(super) fn target_bundle_id(target: Target) -> Option<String> {
+    unsafe {
+        let application = running(target)?;
+        let bundle: Option<Retained<NSString>> = msg_send![&*application, bundleIdentifier];
+        bundle.map(|id| id.to_string())
+    }
+}
+
+pub(crate) fn pick_excluded_app(
+) -> Result<Option<crate::clipboard_preferences::ExcludedApp>, String> {
+    unsafe {
+        let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
+        let applications: Retained<AnyObject> =
+            msg_send![class!(NSURL), fileURLWithPath: ns_string!("/Applications")];
+        let _: () = msg_send![&*panel, setDirectoryURL: &*applications];
+        let _: () = msg_send![&*panel, setCanChooseFiles: true];
+        let _: () = msg_send![&*panel, setCanChooseDirectories: false];
+        let app_type: Retained<AnyObject> = msg_send![class!(UTType), typeWithIdentifier: ns_string!("com.apple.application-bundle")];
+        let types = NSArray::from_retained_slice(&[app_type]);
+        let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        let _: () = msg_send![&*panel, setAllowsMultipleSelection: false];
+        let _: () = msg_send![&*panel, setTreatsFilePackagesAsDirectories: false];
+        let _: () = msg_send![&*panel, setMessage: ns_string!("Choose an application to exclude from clipboard recording.")];
+        let _: () = msg_send![&*panel, setPrompt: ns_string!("Exclude")];
+        let result: isize = msg_send![&*panel, runModal];
+        if result != 1 {
+            return Ok(None);
+        }
+        let selected: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
+        let selected = selected.ok_or("clipboard_invalid_app")?;
+        let extension: Option<Retained<NSString>> = msg_send![&*selected, pathExtension];
+        if !extension.is_some_and(|value| value.to_string().eq_ignore_ascii_case("app")) {
+            return Err("clipboard_invalid_app".into());
+        }
+        let bundle: Option<Retained<AnyObject>> =
+            msg_send![class!(NSBundle), bundleWithURL: &*selected];
+        let bundle = bundle.ok_or("clipboard_invalid_app")?;
+        let identifier: Option<Retained<NSString>> = msg_send![&*bundle, bundleIdentifier];
+        let bundle_id = identifier.ok_or("clipboard_invalid_app")?.to_string();
+        // Select by Bundle ID; retain no app path and launch no selected app.
+        let key = ns_string!("CFBundleDisplayName");
+        let display_name: Option<Retained<AnyObject>> =
+            msg_send![&*bundle, objectForInfoDictionaryKey: key];
+        let name = display_name
+            .and_then(|value| value.downcast::<NSString>().ok())
+            .map(|value| value.to_string())
+            .or_else(|| {
+                let filename: Option<Retained<NSString>> = msg_send![&*selected, lastPathComponent];
+                filename.map(|value| value.to_string().trim_end_matches(".app").to_owned())
+            })
+            .unwrap_or_else(|| bundle_id.clone());
+        Ok(Some(crate::clipboard_preferences::ExcludedApp {
+            bundle_id,
+            name,
+        }))
     }
 }
 

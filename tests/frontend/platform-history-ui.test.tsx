@@ -144,7 +144,7 @@ describe('shared history and platform capabilities', () => {
     const user = userEvent.setup(); portable('linux'); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'Privacy & data' }));
     expect(screen.queryByRole('button', { name: 'Request permission' })).toBeNull();
-    expect(screen.getByText(/Selected text capture and automatic paste are not available/)).toBeTruthy();
+    expect(screen.getByText(/Selected text capture and automatic paste aren’t available/)).toBeTruthy();
     expect(calls('permission_request')).toHaveLength(0);
   });
 

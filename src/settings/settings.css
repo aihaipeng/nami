@@ -1,123 +1,122 @@
 .settings-shell {
-  --settings-sidebar: 243 243 243;
+  --settings-sidebar: 243 243 245;
   --settings-page: 255 255 255;
-  --settings-card: 249 249 249;
+  --settings-card: 247 247 249;
+  --settings-stroke: hsl(var(--foreground) / .09);
+  --settings-secondary: hsl(var(--foreground) / .72);
   display: flex;
   height: 100%;
   color: hsl(var(--foreground));
-  font-size: 12.9px;
-  letter-spacing: .1px;
+  font-size: 13px;
+  line-height: 1.45;
 }
-.settings-shell .settings-sidebar { width: 232px; flex: 0 0 232px; display: flex; flex-direction: column; padding: 28px 10px 16px; border-right: 1px solid hsl(var(--foreground) / .05); background: rgb(var(--settings-sidebar) / .85); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
-.settings-shell .settings-brand { padding: 4px 8px 30px; font-size: 19px; font-weight: 500; letter-spacing: -.17px; }
-.settings-shell .settings-brand small { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; letter-spacing: .1px; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-sidebar nav { display: flex; flex-direction: column; gap: 2px; }
-.settings-shell .settings-sidebar nav button { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; font: inherit; font-weight: 400; }
-.settings-shell .settings-sidebar nav button[aria-current=page] { background: hsl(var(--foreground) / .1); color: inherit; font-weight: 400; }
-.settings-shell .settings-sidebar nav button:not([aria-current]):hover { background: hsl(var(--foreground) / .045); }
-.settings-shell .settings-sidebar nav svg { width: 16px; height: 16px; }
-.settings-shell .settings-stage { display: flex; margin-top: auto; padding: 12px 8px 0; color: hsl(var(--foreground) / .6); font-size: 10px; }
-.settings-shell .settings-content { flex: 1; min-width: 0; overflow: auto; padding: 34px 24px 24px; background: rgb(var(--settings-page) / .7); }
-.settings-shell .settings-page-heading { margin-bottom: 28px; }
-.settings-shell .settings-content h1 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.17px; }
-.settings-shell .settings-intro { margin: 6px 0 0; font-size: 12.9px; line-height: 1.6; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-content h2 { display: flex; align-items: center; min-height: 32px; margin: 0; padding: 0 12px; font-size: 12.9px; font-weight: 400; color: inherit; }
-.settings-shell .settings-group { padding: 0 12px; border: 0; border-radius: 12px; background: rgb(var(--settings-card) / .7); box-shadow: none; }
-.settings-shell .settings-rows { padding: 0; }
-.settings-shell .settings-row { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 12px; }
-.settings-shell .settings-row > span:first-child { flex: 1; min-width: 0; }
-.settings-shell .settings-row + .settings-row { box-shadow: inset 0 1px 0 hsl(var(--foreground) / .05); }
-.settings-shell .settings-row .language-picker { max-width: none; }
-.settings-shell .settings-proxy { width: min(260px, 42%); }
-.settings-shell .settings-proxy input { width: 100%; height: 28px; border: 0; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; font-style: italic; text-align: center; }
-.settings-shell .settings-proxy input:focus { outline: none; color: hsl(var(--foreground)); font-style: normal; }
-.settings-shell .settings-shortcut-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 34px; margin: 16px 4px 8px; }
-.settings-shell .settings-shortcut-heading h2 { min-height: 0; margin: 0; padding: 0; font-size: 20px; font-weight: 600; letter-spacing: -.17px; }
-.settings-shell .settings-recorder-wrap { display: inline-flex; align-items: center; gap: 4px; }
-.settings-shell .settings-recorder { display: inline-flex; align-items: center; min-height: 28px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; }
-.settings-shell .settings-recorder em { color: hsl(var(--foreground) / .6); font-style: italic; }
-.settings-shell .settings-recorder[data-recording], .settings-shell .settings-recorder:hover { background: hsl(var(--foreground) / .1); }
-.settings-shell .settings-clear { width: 20px; height: 20px; border: 0; border-radius: 7px; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; line-height: 1; }
-.settings-shell .settings-field { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 12px 0; }
-.settings-shell .settings-field-content { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
-.settings-shell .settings-field [data-slot=field-label] { font-size: 12.9px; line-height: 18px; font-weight: 400; }
-.settings-shell .settings-field-content p { margin: 0; font-size: 11px; line-height: 1.6; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-separator { margin: 0; height: 1px; border: 0; background: hsl(var(--foreground) / .05); }
-.settings-shell .settings-badge, .settings-shell .settings-badge.outline { display: inline-flex; align-items: center; justify-content: flex-end; flex-shrink: 0; gap: 5px; max-width: 45%; padding: 0; border: 0; border-radius: 0; background: transparent; color: hsl(var(--foreground) / .6); font-size: 11px; line-height: 1.6; text-align: right; }
-.settings-shell .settings-badge > svg { width: 12px; height: 12px; }
-.settings-shell .language-picker { max-width: 48%; flex-shrink: 0; font-weight: 400; }
-.settings-shell .settings-switch { appearance: none; position: relative; width: 32px; height: 18px; margin: 0; flex-shrink: 0; border: 0; border-radius: 9px; background: hsl(var(--foreground) / .18); opacity: 1; cursor: pointer; }
-.settings-shell .settings-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: rgb(var(--settings-page)); box-shadow: 0 1px 3px hsl(var(--foreground) / .15); }
-.settings-shell .settings-switch:checked { background: hsl(var(--primary)); }
-.settings-shell .settings-switch:checked::after { transform: translateX(14px); }
-.settings-shell .settings-switch:disabled { opacity: .45; cursor: default; }
-.settings-shell .permission-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
-.settings-shell .settings-action { display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 0 14px; border: 0; border-radius: 14px; background: hsl(var(--foreground) / .045); color: inherit; font: inherit; white-space: nowrap; }
-.settings-shell .settings-action:not(:disabled):hover { background: hsl(var(--foreground) / .1); }
-.settings-shell .settings-action:not(:disabled):active { background: hsl(var(--foreground) / .14); }
-.settings-shell .settings-action:disabled { opacity: .45; cursor: default; }
-.settings-shell button:focus-visible { outline: 2px solid hsl(var(--foreground) / .55); outline-offset: 2px; }
-.settings-shell .settings-callout { display: flex; align-items: flex-start; gap: 8px; margin-top: 18px; padding: 0 12px; border: 0; border-radius: 0; background: transparent; font-size: 11px; line-height: 1.65; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-callout > svg { flex-shrink: 0; width: 14px; height: 14px; margin-top: 2px; }
-.settings-shell .settings-callout h5, .settings-shell .settings-callout p { margin: 0; font-size: inherit; color: inherit; }
-.settings-shell .settings-callout h5 { margin-bottom: 3px; font-weight: 500; }
-.settings-shell .settings-error { color: hsl(var(--destructive)); }
-.settings-shell .settings-footnote { display: flex; align-items: flex-start; gap: 6px; margin: 22px 12px 0; font-size: 10px; line-height: 1.7; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-footnote > svg { width: 12px; height: 12px; margin-top: 2px; }
-.settings-shell .version-row { display: flex; justify-content: space-between; margin: 20px 12px 0; font-size: 11px; color: hsl(var(--foreground) / .6); }
-.settings-shell .settings-content-translation { padding: 12px 16px 16px; }
-.settings-shell .finder-intro { height: 186px; text-align: center; }
-.settings-shell .finder-emblem { display: grid; place-items: center; width: 54px; height: 54px; margin: 16px auto 0; border-radius: 12px; background: AccentColor; color: white; }
-.settings-shell .finder-emblem svg { width: 32px; height: 32px; }
-.settings-shell .finder-intro h1 { margin: 14px 12px 0; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.17px; }
-.settings-shell .finder-intro p { margin: 6px 12px 0; font-size: 12.9px; line-height: 1.4; letter-spacing: .1px; color: hsl(var(--foreground) / .6); }
-.settings-shell .finder-card { border-radius: 12px; background: rgb(var(--settings-card) / .7); }
-.settings-shell .finder-card + .finder-shortcut-heading { margin-top: 16px; }
-.settings-shell .finder-row { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 7px 0 12px; }
-.settings-shell .finder-row > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-shell .finder-row + .finder-row { position: relative; }
-.settings-shell .finder-row + .finder-row::before { content: ''; position: absolute; top: 0; left: 12px; right: 12px; height: 1px; background: hsl(var(--foreground) / .05); }
-.settings-shell .finder-proxy-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
-.settings-shell .finder-proxy-slot { display: flex; justify-content: center; min-width: 0; padding: 0 12px; }
-.settings-shell .finder-proxy { position: relative; display: inline-flex; align-items: center; max-width: 260px; height: 28px; }
-.settings-shell .finder-proxy > span { visibility: hidden; max-width: 234px; overflow: hidden; white-space: pre; font-style: italic; }
-.settings-shell .finder-proxy input { position: absolute; inset: 0; width: 100%; border: 0; border-radius: 14px; background: transparent; color: hsl(var(--foreground) / .6); font: inherit; text-align: center; }
-.settings-shell .finder-proxy input::placeholder { color: hsl(var(--foreground) / .6); font-style: italic; }
-.settings-shell .finder-proxy input:focus { outline: none; color: hsl(var(--foreground)); }
-.settings-shell button.settings-dropdown { height: 28px; max-width: none; width: max-content; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; font-size: 13px; font-weight: 400; }
-.settings-shell button.settings-dropdown[aria-expanded=true] { background: hsl(var(--foreground) / .06); }
-.settings-shell button.settings-dropdown > svg { width: 10px; height: 10px; color: hsl(var(--foreground) / .6); transition: transform .12s linear; }
-.settings-shell button.settings-dropdown[aria-expanded=true] > svg { transform: rotate(180deg); }
-.settings-shell .finder-switch { appearance: none; position: relative; width: 36px; height: 22px; margin: 0; flex-shrink: 0; border: 0; border-radius: 11px; background: hsl(var(--foreground) / .18); cursor: pointer; }
-.settings-shell .finder-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: white; box-shadow: 0 1px 2px hsl(var(--foreground) / .25); }
-.settings-shell .finder-switch:checked { background: AccentColor; }
-.settings-shell .finder-switch:checked::after { transform: translateX(14px); }
-.settings-shell .finder-switch:disabled { opacity: .45; cursor: default; }
-.settings-shell .finder-shortcut-heading { display: flex; align-items: center; height: 34px; }
-.settings-shell .finder-shortcut-heading h2 { flex: 1; min-height: 0; margin: 0 12px 0 4px; padding: 0; font-size: 20px; font-weight: 600; letter-spacing: -.17px; }
-.settings-shell .finder-shortcut-heading + .finder-card { margin-top: 8px; }
-.settings-shell .finder-restore { height: 28px; padding: 0 12px; border: 0; border-radius: 12px; background: rgb(29, 29, 29); color: white; font: inherit; font-size: 12.9px; white-space: nowrap; }
-.settings-shell .finder-restore:hover { background: rgb(46, 46, 46); }
-.settings-shell .finder-restore:active { background: rgb(20, 20, 20); }
-.settings-shell .finder-recorder { display: inline-flex; align-items: center; height: 28px; border-radius: 8px; }
-.settings-shell .finder-recorder[data-empty] { min-width: 112px; }
-.settings-shell .finder-recorder:hover, .settings-shell .finder-recorder[data-recording] { background: hsl(var(--foreground) / .1); }
-.settings-shell .finder-clear { display: grid; place-items: center; width: 20px; height: 20px; margin-left: 6px; border: 0; border-radius: 7px; background: transparent; color: hsl(var(--foreground) / .6); opacity: 0; pointer-events: none; }
-.settings-shell .finder-clear svg { width: 9px; height: 9px; }
-.settings-shell .finder-recorder:hover .finder-clear, .settings-shell .finder-recorder[data-recording] .finder-clear { opacity: 1; pointer-events: auto; }
-.settings-shell .finder-recorder-hit { display: inline-flex; align-items: center; height: 28px; padding: 0 6px; border: 0; background: transparent; color: inherit; font: inherit; }
-.settings-shell .finder-recorder[data-empty] .finder-recorder-hit { flex: 1; justify-content: center; padding: 0 13px; }
-.settings-shell .finder-recorder-hit em { color: hsl(var(--foreground) / .6); font-style: italic; }
-.settings-shell .finder-alert-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: hsl(var(--foreground) / .2); }
-.settings-shell .finder-alert { width: min(320px, calc(100% - 48px)); padding: 16px 16px 12px; border-radius: 12px; background: rgb(var(--settings-page)); box-shadow: 0 16px 40px hsl(var(--foreground) / .18); }
-.settings-shell .finder-alert h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
-.settings-shell .finder-alert p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: hsl(var(--foreground) / .8); }
-.settings-shell .finder-alert button { display: block; min-width: 64px; height: 28px; margin-left: auto; padding: 0 14px; border: 0; border-radius: 8px; background: AccentColor; color: white; font: inherit; }
+.settings-sidebar { flex: 0 0 176px; display: flex; flex-direction: column; padding: 26px 10px 16px; border-right: 1px solid var(--settings-stroke); background: rgb(var(--settings-sidebar) / .85); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
+.settings-brand { padding: 3px 10px 16px; font-size: 16px; font-weight: 650; }
+.settings-sidebar nav { display: grid; gap: 3px; }
+.settings-sidebar nav button { display: flex; align-items: center; gap: 9px; min-height: 35px; padding: 5px 10px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: start; font: inherit; }
+.settings-sidebar nav button[aria-current=page] { background: hsl(var(--primary) / .14); font-weight: 600; }
+.settings-sidebar nav button[aria-current=page] svg { color: hsl(var(--primary)); }
+.settings-sidebar nav button:not([aria-current]):hover { background: hsl(var(--foreground) / .055); }
+.settings-sidebar nav svg { width: 16px; height: 16px; }
+.settings-content { flex: 1; min-width: 0; overflow: auto; scrollbar-gutter: stable; padding: 24px 26px; background: rgb(var(--settings-page) / .86); }
+.settings-page { max-width: 640px; margin-inline: auto; }
+.settings-page-heading { margin-bottom: 20px; }
+.settings-page-heading h1 { margin: 0; font-size: 24px; line-height: 30px; font-weight: 650; letter-spacing: -.35px; }
+.settings-sections, .clipboard-settings { display: grid; gap: 16px; }
+.settings-page h2 { display: flex; align-items: center; gap: 6px; margin: 0 0 7px; padding-inline: 2px; font-size: 13px; font-weight: 650; }
+.settings-page h2 svg { width: 14px; height: 14px; color: var(--settings-secondary); }
+.settings-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 7px; }
+.settings-section-heading h2 { margin: 0; }
+.settings-group { min-width: 0; padding: 0 12px; border: 1px solid var(--settings-stroke); border-radius: 11px; background: rgb(var(--settings-card)); }
+.settings-field { display: flex; align-items: center; gap: 12px; min-height: 40px; padding-block: 6px; }
+.settings-field + .settings-field { border-top: 1px solid var(--settings-stroke); }
+.settings-field-content { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.settings-field-content p { margin: 3px 0 0; color: var(--settings-secondary); font-size: 12px; }
+.settings-field-note, .settings-callout { margin: 8px 2px 0; color: var(--settings-secondary); font-size: 12px; }
+.settings-group > .settings-field-note { margin: 0 0 8px; }
+.settings-error, .settings-field-note[role=alert], .clipboard-setting-note[role=alert] { color: hsl(var(--destructive)); }
+.settings-permission-actions { justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.settings-badge { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; max-width: 45%; color: var(--settings-secondary); font-size: 12px; text-align: end; }
+.settings-badge > svg { width: 13px; height: 13px; }
+.version-row { display: flex; justify-content: space-between; gap: 10px; padding-inline: 2px; font-size: 12px; color: var(--settings-secondary); }
+
+.settings-shell :is(.settings-action, .settings-dropdown, .settings-text-input, .settings-recorder, .settings-clear) { min-height: 28px; border: 1px solid var(--settings-stroke); border-radius: 7px; background: hsl(var(--foreground) / .032); color: inherit; font: inherit; }
+.settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder, .settings-clear) { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 3px 9px; }
+.settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder, .settings-clear):not(:disabled, [aria-disabled=true]):hover { background: hsl(var(--foreground) / .075); }
+.settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder, .settings-clear):not(:disabled, [aria-disabled=true]):active { background: hsl(var(--foreground) / .12); }
+.settings-shell :is(.settings-dropdown[aria-expanded=true], .settings-recorder[aria-pressed=true]) { background: hsl(var(--primary) / .10); border-color: hsl(var(--primary) / .32); }
+.settings-shell :is(button, input):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.settings-shell :is(.settings-action, .settings-recorder)[aria-disabled=true] { opacity: .55; }
+.settings-shell .settings-dropdown { width: max-content; max-width: 58%; flex-shrink: 0; justify-content: space-between; gap: 8px; }
+.settings-dropdown > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-dropdown > svg { width: 11px; height: 11px; color: var(--settings-secondary); }
+.settings-text-input { width: min(260px, 58%); min-width: 0; padding-inline: 8px; text-align: end; }
+.settings-recorder-wrap { display: inline-flex; justify-content: flex-end; align-items: center; gap: 4px; }
+.settings-recorder { white-space: nowrap; }
+.settings-recorder em { color: var(--settings-secondary); font-style: normal; }
+.settings-shell .settings-clear { width: 28px; padding: 0; opacity: 0; }
+.settings-recorder-wrap:hover .settings-clear, .settings-recorder-wrap:focus-within .settings-clear { opacity: 1; }
+.settings-clear svg { width: 12px; height: 12px; }
+.settings-switch { appearance: none; position: relative; flex: none; width: 34px; height: 20px; margin: 0; border: 0; border-radius: 10px; background: hsl(var(--foreground) / .23); cursor: pointer; }
+.settings-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgb(0 0 0 / .24); transform: translateX(0); }
+.settings-switch:checked { background: hsl(var(--primary)); }
+.settings-switch:checked::after { transform: translateX(14px); }
+.settings-switch:disabled { opacity: .45; cursor: default; }
+.settings-field:has(> .settings-switch:not(:disabled)) { cursor: pointer; }
+
+.clipboard-setting-icon { width: 14px; height: 14px; flex: none; color: var(--settings-secondary); }
+.clipboard-recording-types { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
+.clipboard-recording-types .settings-field, .clipboard-recording-types + .settings-field { border-top: 1px solid var(--settings-stroke); }
+.clipboard-recording-types .settings-field { min-height: 34px; }
+.clipboard-recording-types:disabled .settings-field-content { color: var(--settings-secondary); }
+.clipboard-setting-note { margin: 0; padding: 7px 0; color: var(--settings-secondary); font-size: 12px; }
+.clipboard-picker { max-width: 58%; }
+.settings-shell .clipboard-picker .settings-dropdown { max-width: 100%; }
+.clipboard-picker[data-pending=true] { opacity: .55; }
+.clipboard-storage-value { display: flex; flex: none; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.settings-shell .clipboard-icon-button { min-width: 28px; padding: 0; }
+.clipboard-icon-button svg { width: 13px; height: 13px; }
+.clipboard-cleanup-row { display: flex; align-items: center; justify-content: flex-end; min-height: 40px; padding-block: 6px; border-top: 1px solid var(--settings-stroke); }
+.settings-shell .clipboard-destructive-action { color: hsl(var(--destructive)); }
+.clipboard-load-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid var(--settings-stroke); border-radius: 8px; color: hsl(var(--destructive)); }
+.clipboard-excluded-list { margin: 0 0 8px; padding: 0 8px; list-style: none; border: 1px solid var(--settings-stroke); border-radius: 8px; }
+.clipboard-excluded-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding-block: 3px; }
+.clipboard-excluded-list li + li { border-top: 1px solid var(--settings-stroke); }
+.clipboard-excluded-list li > span { min-width: 0; overflow-wrap: anywhere; }
+.clipboard-excluded-list strong { font-weight: 550; }
+.clipboard-excluded-list small { display: block; color: var(--settings-secondary); font-size: 12px; }
+.clipboard-excluded-list .clipboard-icon-button { flex: none; border-color: transparent; background: transparent; }
+
+.settings-dialog { box-sizing: border-box; width: min(410px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 20px; border: 1px solid var(--settings-stroke); border-radius: 12px; background: rgb(var(--settings-page)); color: hsl(var(--foreground)); box-shadow: 0 18px 50px rgb(0 0 0 / .25); }
+.settings-dialog::backdrop { background: rgb(0 0 0 / .32); }
+.settings-dialog h3 { margin: 0 0 6px; font-size: 16px; font-weight: 650; }
+.settings-dialog p { margin: 0; color: var(--settings-secondary); }
+.settings-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.settings-shell .clipboard-confirm-action { background: hsl(0 68% 45%); color: white; }
+.settings-shell .clipboard-confirm-action:not(:disabled, [aria-disabled=true]):hover { background: hsl(0 71% 39%); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .settings-switch::after { transition: transform 140ms cubic-bezier(.2, .75, .3, 1); }
+  .settings-popover, .settings-dialog[open] { animation: settings-appear 110ms ease-out; }
+  @keyframes settings-appear { from { opacity: .68; } }
+}
 @media (prefers-color-scheme: dark) {
-  .settings-shell { --settings-sidebar: 30 24 27; --settings-page: 20 18 19; --settings-card: 26 24 25; }
+  .settings-shell { --settings-sidebar: 30 26 29; --settings-page: 20 18 19; --settings-card: 27 25 27; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .settings-shell .settings-sidebar, .settings-shell .settings-content, .settings-shell .settings-group { background: rgb(var(--settings-page)); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .settings-shell .settings-sidebar { background: rgb(var(--settings-sidebar)); }
-  .settings-shell .settings-group { background: rgb(var(--settings-card)); }
+  .settings-sidebar, .settings-content { background: rgb(var(--settings-page)); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .settings-sidebar { background: rgb(var(--settings-sidebar)); }
+}
+@media (max-width: 700px) {
+  .settings-sidebar { flex-basis: 146px; padding-inline: 9px; }
+  .settings-content { padding: 20px 15px; }
+  .settings-recorder-wrap { flex-wrap: wrap; }
+}
+@media (max-width: 480px) {
+  .settings-sidebar { flex-basis: 44px; padding-inline: 4px; }
+  .settings-brand { visibility: hidden; }
+  .settings-sidebar nav button { justify-content: center; padding-inline: 0; }
+  .settings-sidebar nav button span { display: none; }
+  .settings-field { gap: 8px; }
+  .settings-recorder-wrap { max-width: 58%; }
 }

@@ -13,9 +13,9 @@ export function panelHorizontalPosition(anchorLeft: number, width: number, visib
   return { left: Math.max(visibleLeft + 8, Math.min(anchorLeft, visibleLeft + visibleWidth - maxWidth - 8)), maxWidth };
 }
 
-export function FloatingPanel({ anchor, onClose, label, role, width, side, children, className = '' }: {
+export function FloatingPanel({ anchor, onClose, label, role, width, side, children, className = '', dismissOnSettingsScroll = false }: {
   anchor: RefObject<HTMLElement | null>; onClose: () => void; label: string;
-  role: 'dialog' | 'menu'; width: number; side: 'top' | 'bottom'; children: ReactNode; className?: string;
+  role: 'dialog' | 'menu'; width: number; side: 'top' | 'bottom'; children: ReactNode; className?: string; dismissOnSettingsScroll?: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -50,18 +50,26 @@ export function FloatingPanel({ anchor, onClose, label, role, width, side, child
       }
     };
     const dismiss = () => close.current();
+    const settingsScroll = dismissOnSettingsScroll ? trigger.closest('.settings-content') : null;
+    const dismissForScroll = () => {
+      const ownedFocus = element.contains(document.activeElement);
+      dismiss();
+      if (ownedFocus) restorePanelFocus(trigger);
+    };
+    settingsScroll?.addEventListener('scroll', dismissForScroll, { passive: true });
     document.addEventListener('pointerdown', outside, true);
     window.addEventListener('blur', dismiss);
     window.addEventListener('resize', dismiss);
     window.addEventListener('nami:window-moved', dismiss);
     return () => {
       observer.disconnect();
+      settingsScroll?.removeEventListener('scroll', dismissForScroll);
       document.removeEventListener('pointerdown', outside, true);
       window.removeEventListener('blur', dismiss);
       window.removeEventListener('resize', dismiss);
       window.removeEventListener('nami:window-moved', dismiss);
     };
-  }, [anchor, side, width]);
+  }, [anchor, side, width, dismissOnSettingsScroll]);
 
   function restoreFocus() {
     close.current();
@@ -72,6 +80,9 @@ export function FloatingPanel({ anchor, onClose, label, role, width, side, child
     style={{ ...position, width }} onKeyDown={(event) => {
       if (event.nativeEvent.isComposing) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); restoreFocus(); }
-      if (event.key === 'Tab') { event.preventDefault(); restoreFocus(); }
+      if (event.key === 'Tab') {
+        if (!dismissOnSettingsScroll) event.preventDefault();
+        restoreFocus();
+      }
     }}>{children}</div>, document.body);
 }

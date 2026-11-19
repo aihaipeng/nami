@@ -136,8 +136,18 @@ unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>,
 }
 
 // Main-thread callers own change-count suppression for app writes and selection restoration.
-pub fn read_clipboard() -> Result<Option<ClipboardCapture>, &'static str> {
+pub fn read_clipboard(
+    excluded: impl FnOnce(&str) -> bool,
+) -> Result<Option<ClipboardCapture>, &'static str> {
     if super::secure_input() {
+        return Ok(None);
+    }
+    let source = super::capture_target();
+    if source
+        .and_then(super::macos::target_bundle_id)
+        .as_deref()
+        .is_some_and(excluded)
+    {
         return Ok(None);
     }
     unsafe {
@@ -146,7 +156,7 @@ pub fn read_clipboard() -> Result<Option<ClipboardCapture>, &'static str> {
         Ok(captured.map(|(version, payload)| ClipboardCapture {
             version,
             payload,
-            source_app: super::capture_target().and_then(super::target_app_info),
+            source_app: source.and_then(super::target_app_info),
         }))
     }
 }

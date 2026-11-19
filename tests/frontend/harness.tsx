@@ -2,7 +2,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import type { HistorySnapshot } from '../../src/translation/history';
 import { initialSnapshot, type AppSnapshot, type TranslationPreferences, type WindowState } from '../../src/shared/contracts';
-import { defaultTranslationShortcuts, normalizeBinding, shortcutError, type ShortcutAction, type TranslationShortcuts } from '../../src/shared/shortcuts';
+import { defaultTranslationShortcuts, normalizeBinding, shortcutError, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from '../../src/shared/shortcuts';
 
 const bridge = vi.hoisted(() => ({
   label: 'translation',
@@ -47,6 +47,12 @@ export const releasePointerCapture = vi.fn();
 export let reducedMotion = false;
 
 beforeAll(() => {
+  if (!HTMLDialogElement.prototype.showModal) {
+    Object.defineProperties(HTMLDialogElement.prototype, {
+      showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
+      close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; } },
+    });
+  }
   window.scrollTo = vi.fn();
   Object.defineProperty(document, 'fonts', { configurable: true, value: { ready: Promise.resolve() } });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({
@@ -158,7 +164,7 @@ beforeEach(() => {
     }
     if (name === 'translation_shortcut_set') {
       const { action, binding } = args as { action: ShortcutAction; binding: TranslationShortcuts[ShortcutAction] };
-      const error = shortcutError(action, binding, bridge.snapshot.translationPreferences.shortcuts);
+      const error = shortcutError(action, binding, bridge.snapshot.translationPreferences.shortcuts, bridge.snapshot.clipboardBinding);
       if (error) throw new Error(error);
       const shortcuts = { ...bridge.snapshot.translationPreferences.shortcuts, [action]: binding ? normalizeBinding(binding) : null };
       bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts };
@@ -169,6 +175,20 @@ beforeEach(() => {
       bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts: defaultTranslationShortcuts(bridge.snapshot.capabilities.primaryModifier) };
       deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
       return;
+    }
+    if (name === 'clipboard_recording_type_set') {
+      const { kind, enabled } = args as { kind: keyof AppSnapshot['clipboardRecordingTypes']; enabled: boolean };
+      bridge.snapshot.clipboardRecordingTypes = { ...bridge.snapshot.clipboardRecordingTypes, [kind]: enabled };
+      deliver('clipboard_recording_types_changed', structuredClone(bridge.snapshot.clipboardRecordingTypes));
+      return structuredClone(bridge.snapshot.clipboardRecordingTypes);
+    }
+    if (name === 'clipboard_shortcut_set') {
+      const { binding } = args as { binding: KeyBinding | null };
+      const error = shortcutError('clipboard', binding, bridge.snapshot.translationPreferences.shortcuts, null);
+      if (error) throw new Error(error);
+      bridge.snapshot.clipboardBinding = binding ? normalizeBinding(binding) : null;
+      deliver('clipboard_binding_changed', { binding: bridge.snapshot.clipboardBinding, shortcutErrors: bridge.snapshot.shortcutErrors });
+      return bridge.snapshot.clipboardBinding;
     }
     if (name === 'translation_shortcut_capture') return;
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);

@@ -13,6 +13,8 @@ import { Waves } from 'lucide-react';
 import { cn } from './lib/utils';
 import { ActivityBeam } from './shared/ActivityBeam';
 
+type ClipboardBindingChange = { binding: AppSnapshot['clipboardBinding']; shortcutErrors: string[] };
+
 export const native = isTauri();
 document.documentElement.dataset.native = String(native);
 
@@ -40,6 +42,8 @@ export default function App() {
     let latestEngine: AppSnapshot['translationEngine'] | undefined;
     let latestPreferences: TranslationPreferences | undefined;
     let latestCapture: boolean | undefined;
+    let latestRecordingTypes: AppSnapshot['clipboardRecordingTypes'] | undefined;
+    let latestClipboardBinding: ClipboardBindingChange | undefined;
     async function connect() {
       for (const subscribe of [
         () => getCurrentWindow().onMoved(() => window.dispatchEvent(new Event('nami:window-moved'))),
@@ -53,6 +57,16 @@ export default function App() {
           if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload.engine, translationPreferences: payload }));
         }),
         () => listen<boolean>('clipboard_capture_changed', ({ payload }) => { latestCapture = payload; if (!disposed) setSnapshot((current) => ({ ...current, clipboardCaptureEnabled: payload })); }),
+        ...(getCurrentWebview().label === 'settings' ? [
+          () => listen<AppSnapshot['clipboardRecordingTypes']>('clipboard_recording_types_changed', ({ payload }) => {
+            latestRecordingTypes = payload;
+            if (!disposed) setSnapshot((current) => ({ ...current, clipboardRecordingTypes: payload }));
+          }),
+          () => listen<ClipboardBindingChange>('clipboard_binding_changed', ({ payload }) => {
+            latestClipboardBinding = payload;
+            if (!disposed) setSnapshot((current) => ({ ...current, clipboardBinding: payload.binding, shortcutErrors: payload.shortcutErrors }));
+          }),
+        ] : []),
         () => listen<string>('storage_error', ({ payload }) => { if (!disposed) setSnapshot((current) => ({ ...current, storageError: payload })); }),
         () => listen('layout_error', () => { if (!disposed) setError(true); }),
         () => listen<WindowState>('window_state', ({ payload }) => {
@@ -72,7 +86,7 @@ export default function App() {
       if (!disposed) {
         document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
         document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
-        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
+        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, clipboardRecordingTypes: latestRecordingTypes ?? data.clipboardRecordingTypes, clipboardBinding: latestClipboardBinding ? latestClipboardBinding.binding : data.clipboardBinding, shortcutErrors: latestClipboardBinding?.shortcutErrors ?? data.shortcutErrors, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
         setConnected(true);
       }
     }

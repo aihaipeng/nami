@@ -218,7 +218,7 @@ describe('translation engine settings', () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     expect(screen.getByRole('heading', { name: 'Translation' })).toBeTruthy();
-    expect(screen.getByText('Configure translation languages and service.')).toBeTruthy();
+    for (const name of ['Languages', 'Connection', 'Keyboard Shortcuts']) expect(screen.getByRole('region', { name })).toBeTruthy();
     fireEvent.click(screen.getByRole('switch', { name: 'Translate Selected Text' }));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ selectionEnabled: false });
     fireEvent.change(screen.getByRole('textbox', { name: 'HTTP Proxy URL' }), { target: { value: 'http://user:pass@127.0.0.1:7890' } });
@@ -233,7 +233,9 @@ describe('translation engine settings', () => {
     await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'actions', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
     fireEvent.click(screen.getByRole('button', { name: 'Translate shortcut' }));
     fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true });
-    expect((await screen.findByRole('alert')).textContent).toContain('Already assigned to Open Clipboard.');
+    expect((await screen.findByRole('alertdialog')).textContent).toContain('Already assigned to Open Clipboard.');
+    expect(document.activeElement?.textContent).toBe('OK');
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     fireEvent.click(screen.getByRole('button', { name: 'Restore Default' }));
     await waitFor(() => expect(calls('translation_shortcuts_restore')).toHaveLength(1));
   });

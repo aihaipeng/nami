@@ -58,8 +58,14 @@ pub fn paste_keys_down(_: Target, _: i64) -> Result<(), &'static str> {
 pub fn paste_keys_up() -> Result<(), &'static str> {
     Err(UNAVAILABLE)
 }
-pub fn read_clipboard() -> Result<Option<super::ClipboardCapture>, &'static str> {
+pub fn read_clipboard(
+    _: impl FnOnce(&str) -> bool,
+) -> Result<Option<super::ClipboardCapture>, &'static str> {
     Err(UNAVAILABLE)
+}
+pub(crate) fn pick_excluded_app(
+) -> Result<Option<crate::clipboard_preferences::ExcludedApp>, String> {
+    Err(UNAVAILABLE.into())
 }
 pub fn write_clipboard(_: &super::ClipboardPayload) -> Result<i64, (&'static str, Option<i64>)> {
     Err((UNAVAILABLE, None))

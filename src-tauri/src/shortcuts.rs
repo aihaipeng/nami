@@ -132,35 +132,61 @@ pub fn normalize_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
     Ok(KeyBinding { code, modifiers })
 }
 
+const TRANSLATION_ACTIONS: [ShortcutAction; 6] = [
+    ShortcutAction::Selection,
+    ShortcutAction::Translate,
+    ShortcutAction::CopyPrimary,
+    ShortcutAction::CopySecondary,
+    ShortcutAction::Pin,
+    ShortcutAction::Actions,
+];
+
+fn checked_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
+    let binding = normalize_binding(binding)?;
+    if reserved(&binding) {
+        return Err("shortcut_reserved".into());
+    }
+    Ok(binding)
+}
+
+fn translation_conflict(
+    shortcuts: &TranslationShortcuts,
+    except: Option<ShortcutAction>,
+    binding: &KeyBinding,
+) -> Result<(), String> {
+    for action in TRANSLATION_ACTIONS {
+        if Some(action) != except
+            && shortcuts
+                .get(action)
+                .is_some_and(|current| same_binding(current, binding))
+        {
+            return Err(format!("shortcut_conflict:{}", action.as_str()));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_clipboard_binding(
+    binding: KeyBinding,
+    shortcuts: &TranslationShortcuts,
+) -> Result<KeyBinding, String> {
+    let binding = checked_binding(binding)?;
+    translation_conflict(shortcuts, None, &binding)?;
+    Ok(binding)
+}
+
 pub fn assign_shortcut(
     shortcuts: &TranslationShortcuts,
     action: ShortcutAction,
     binding: Option<KeyBinding>,
+    clipboard: Option<&KeyBinding>,
 ) -> Result<TranslationShortcuts, String> {
-    let binding = binding.map(normalize_binding).transpose()?;
+    let binding = binding.map(checked_binding).transpose()?;
     if let Some(binding) = &binding {
-        if reserved(binding) {
-            return Err("shortcut_reserved".into());
-        }
-        if same_binding(binding, &clipboard_binding()) {
+        if clipboard.is_some_and(|clipboard| same_binding(binding, clipboard)) {
             return Err("shortcut_clipboard".into());
         }
-        for other in [
-            ShortcutAction::Selection,
-            ShortcutAction::Translate,
-            ShortcutAction::CopyPrimary,
-            ShortcutAction::CopySecondary,
-            ShortcutAction::Pin,
-            ShortcutAction::Actions,
-        ] {
-            if other != action
-                && shortcuts
-                    .get(other)
-                    .is_some_and(|current| same_binding(current, binding))
-            {
-                return Err(format!("shortcut_conflict:{}", other.as_str()));
-            }
-        }
+        translation_conflict(shortcuts, Some(action), binding)?;
     }
     let mut next = shortcuts.clone();
     next.set(action, binding);
@@ -252,13 +278,44 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_and_translation_respect_each_others_current_bindings() {
+        let translations = TranslationShortcuts::defaults("meta");
+        let new_clipboard = KeyBinding::new("KeyJ", &["control"]);
+        assert_eq!(
+            validate_clipboard_binding(KeyBinding::new("KeyT", &["meta"]), &translations),
+            Err("shortcut_conflict:selection".into())
+        );
+        assert_eq!(
+            validate_clipboard_binding(new_clipboard.clone(), &translations),
+            Ok(new_clipboard.clone())
+        );
+        assert_eq!(
+            assign_shortcut(
+                &translations,
+                ShortcutAction::Selection,
+                Some(new_clipboard.clone()),
+                Some(&new_clipboard)
+            ),
+            Err("shortcut_clipboard".into())
+        );
+        assert!(assign_shortcut(
+            &translations,
+            ShortcutAction::Selection,
+            Some(clipboard_binding()),
+            Some(&new_clipboard)
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn rejects_reserved_clipboard_and_duplicate_shortcuts() {
         let shortcuts = TranslationShortcuts::defaults("meta");
         assert_eq!(
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyW", &["meta"]))
+                Some(KeyBinding::new("KeyW", &["meta"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_reserved"
@@ -267,7 +324,8 @@ mod tests {
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyZ", &["control", "shift"]))
+                Some(KeyBinding::new("KeyZ", &["control", "shift"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_reserved"
@@ -276,7 +334,8 @@ mod tests {
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyZ", &["meta", "shift"]))
+                Some(KeyBinding::new("KeyZ", &["meta", "shift"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_reserved"
@@ -285,7 +344,8 @@ mod tests {
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Actions,
-                Some(KeyBinding::new("Backquote", &["control"]))
+                Some(KeyBinding::new("Backquote", &["control"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_clipboard"
@@ -294,7 +354,8 @@ mod tests {
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Pin,
-                Some(KeyBinding::new("Enter", &["meta"]))
+                Some(KeyBinding::new("Enter", &["meta"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_conflict:translate"
@@ -303,17 +364,25 @@ mod tests {
             assign_shortcut(
                 &shortcuts,
                 ShortcutAction::Translate,
-                Some(KeyBinding::new("KeyP", &["shift"]))
+                Some(KeyBinding::new("KeyP", &["shift"])),
+                Some(&clipboard_binding())
             )
             .unwrap_err(),
             "shortcut_modifier"
         );
-        let cleared = assign_shortcut(&shortcuts, ShortcutAction::Actions, None).unwrap();
+        let cleared = assign_shortcut(
+            &shortcuts,
+            ShortcutAction::Actions,
+            None,
+            Some(&clipboard_binding()),
+        )
+        .unwrap();
         assert_eq!(cleared.actions, None);
         let rebound = assign_shortcut(
             &shortcuts,
             ShortcutAction::Selection,
             Some(KeyBinding::new("KeyJ", &["alt", "meta"])),
+            Some(&clipboard_binding()),
         )
         .unwrap();
         assert_eq!(

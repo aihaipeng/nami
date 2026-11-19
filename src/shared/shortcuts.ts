@@ -9,6 +9,8 @@ export interface KeyBinding {
 
 export type TranslationShortcuts = Record<ShortcutAction, KeyBinding | null>;
 
+export const defaultClipboardBinding: KeyBinding = { code: 'Backquote', modifiers: ['control'] };
+
 const modifierOrder: ShortcutModifier[] = ['control', 'alt', 'shift', 'meta'];
 
 export function defaultTranslationShortcuts(primary: 'meta' | 'control'): TranslationShortcuts {
@@ -37,12 +39,12 @@ export function sameBinding(left: KeyBinding, right: KeyBinding) {
   return Boolean(a && b && a.code === b.code && a.modifiers.join('+') === b.modifiers.join('+'));
 }
 
-export function shortcutError(action: ShortcutAction, binding: KeyBinding | null, current: TranslationShortcuts) {
+export function shortcutError(action: ShortcutAction | 'clipboard', binding: KeyBinding | null, current: TranslationShortcuts, clipboard: KeyBinding | null = defaultClipboardBinding) {
   if (!binding) return null;
   const value = normalizeBinding(binding);
   if (!value) return binding.modifiers.some((modifier) => modifier === 'meta' || modifier === 'control' || modifier === 'alt') ? 'shortcut_key' : 'shortcut_modifier';
   if (reserved(value)) return 'shortcut_reserved';
-  if (sameBinding(value, { code: 'Backquote', modifiers: ['control'] })) return 'shortcut_clipboard';
+  if (clipboard && sameBinding(value, clipboard)) return 'shortcut_clipboard';
   const conflict = shortcutActions.find((other) => other !== action && current[other] && sameBinding(current[other], value));
   return conflict ? `shortcut_conflict:${conflict}` : null;
 }

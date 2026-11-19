@@ -1548,7 +1548,14 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
         on_main(app, |app| {
-            create(app, "settings")?;
+            crate::clipboard_preferences::recording_menu_item(app)
+                .map_err(|err| err.to_string())?;
+            create(app, "translation")?;
+            let window = create(app, "settings")?;
+            if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
+                window.show().map_err(|_| "window_show")?;
+                window.set_focus().map_err(|_| "window_focus")?;
+            }
             Ok(())
         })?;
         let mut ready = false;
@@ -1562,6 +1569,28 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
         }
         if !ready {
             return Err("settings clipboard navigation did not connect".into());
+        }
+        let state = app.state::<AppState>();
+        {
+            let mut database = state.database.lock().unwrap();
+            let database = database.as_mut().ok_or("missing_test_database")?;
+            for (id, is_favorite, is_pinned) in [
+                ("settings-regular", false, false),
+                ("settings-favorite", true, false),
+                ("settings-pinned", false, true),
+            ] {
+                database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: id.into(),
+                    kind: "text".into(),
+                    text: format!("Synthetic {id}"),
+                    date: "2020-01-01T00:00:00Z".into(),
+                    is_favorite,
+                    is_pinned,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: id.into(),
+                })?;
+            }
         }
         let mut previous_background = None;
         for enabled in [true, false] {
@@ -1580,7 +1609,7 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
             }
             let mut value = serde_json::Value::Null;
             for _ in 0..80 {
-                value = evaluate_view_dom(app, "settings", &format!("const input=document.querySelector('#clipboard-capture');const style=getComputedStyle(input);const thumb=getComputedStyle(input,'::after');return {{ready:input.checked==={enabled},checked:input.checked,disabled:input.disabled,background:style.backgroundColor,opacity:style.opacity,transform:thumb.transform}};"))?;
+                value = evaluate_view_dom(app, "settings", &format!("const input=document.querySelector('#clipboard-capture');const style=getComputedStyle(input);const thumb=getComputedStyle(input,'::after');const offset=thumb.transform==='none'?0:new DOMMatrixReadOnly(thumb.transform).m41;const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;const duration=parseFloat(thumb.transitionDuration);const sampled=document.visibilityState==='visible';return {{ready:input.checked==={enabled}&&(!sampled||Math.abs(offset-({enabled}?14:0))<.1),sampled,checked:input.checked,disabled:input.disabled,background:style.backgroundColor,opacity:style.opacity,offset,reduced,duration}};"))?;
                 if value["ready"] == true {
                     break;
                 }
@@ -1605,19 +1634,224 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
             {
                 return Err("capture switch did not persist through IPC".into());
             }
-            if enabled && value["transform"] == "none" {
-                return Err("capture switch thumb did not move".into());
+            let menu = state
+                .clipboard_recording_menu
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or("missing recording menu")?;
+            if menu.text().map_err(|error| error.to_string())?
+                != crate::clipboard_preferences::recording_menu_label(enabled)
+            {
+                return Err("recording menu and settings switch diverged".into());
+            }
+            let duration = value["duration"].as_f64().unwrap_or(-1.0);
+            if (value["reduced"] == true && duration != 0.0)
+                || (value["reduced"] == false && !(0.1..=0.2).contains(&duration))
+            {
+                return Err(format!("unexpected settings switch motion: {value}"));
             }
             if previous_background.as_ref() == Some(&value["background"]) {
                 return Err("capture switch states look identical".into());
             }
             previous_background = Some(value["background"].clone());
             samples.push(value);
+            if enabled {
+                evaluate_view_dom(app, "settings", "const image=document.querySelector('#clipboard-type-image');if(image.matches(':disabled')||!image.checked)throw Error('images must be enabled by default');image.click();return true;")?;
+                let mut saved = false;
+                for _ in 0..80 {
+                    if evaluate_view_dom(
+                        app,
+                        "settings",
+                        "return !document.querySelector('#clipboard-type-image').checked;",
+                    )? == true
+                    {
+                        saved = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                let stored = state
+                    .database
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("missing_test_database")?
+                    .preference("clipboard_recording_types")?
+                    .ok_or("missing_types")?;
+                if !saved
+                    || serde_json::from_str::<serde_json::Value>(&stored)
+                        .map_err(|error| error.to_string())?["image"]
+                        != false
+                {
+                    return Err("image setting did not persist through IPC".into());
+                }
+            }
         }
+        let mut picker = serde_json::Value::Null;
+        for _ in 0..80 {
+            picker = evaluate_view_dom(app, "settings", "const button=document.querySelector('button[aria-label=\"Keep History For: Forever\"]');if(!button)return {ready:false};if(button.getAttribute('aria-expanded')==='false')button.click();return {ready:!!document.querySelector('.settings-popover')};")?;
+            if picker["ready"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if picker["ready"] != true {
+            return Err("settings retention dropdown did not open".into());
+        }
+        let scrolled = evaluate_view_dom(app, "settings", "document.querySelector('.settings-content').dispatchEvent(new Event('scroll'));return true;")?;
+        if scrolled != true {
+            return Err("settings scroll did not dispatch".into());
+        }
+        let mut dismissed = false;
+        for _ in 0..80 {
+            if evaluate_view_dom(app, "settings", "return !document.querySelector('.settings-popover') && document.querySelector('button[aria-label=\"Keep History For: Forever\"]').getAttribute('aria-expanded')==='false';")? == true {
+                dismissed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !dismissed {
+            return Err("settings dropdown stayed open after scrolling".into());
+        }
+        samples.push(serde_json::json!({"settingsScrollDismissedPicker": dismissed}));
+        evaluate_view_dom(
+            app,
+            "settings",
+            "document.querySelector('.clipboard-cleanup-row button').click();return true;",
+        )?;
+        let mut confirmation = serde_json::Value::Null;
+        for _ in 0..80 {
+            confirmation = evaluate_view_dom(app, "settings", "const dialog=document.querySelector('dialog[open]');return {open:!!dialog,initialFocus:dialog?.querySelector('[data-initial-focus]')?.textContent,active:document.hasFocus()?document.activeElement?.textContent:null};")?;
+            if confirmation["open"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if confirmation["open"] != true
+            || confirmation["initialFocus"] != "Cancel"
+            || (!confirmation["active"].is_null() && confirmation["active"] != "Cancel")
+        {
+            return Err(format!(
+                "cleanup confirmation must start on Cancel: {confirmation}"
+            ));
+        }
+        evaluate_view_dom(
+            app,
+            "settings",
+            "document.querySelector('dialog [data-initial-focus]').click();return true;",
+        )?;
+        samples.push(confirmation);
+        samples.push(evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+const image=document.querySelector('#clipboard-type-image');
+if(!image.matches(':disabled')||image.checked)throw Error('pause must retain the image preference');
+const button=document.querySelector('.clipboard-settings .settings-recorder');
+if(button.disabled)throw Error('shortcut must remain available when capture is off');
+window.clipboardSettingsProbe={done:false,stage:"shortcut"};
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke;
+  const binding={code:'KeyJ',modifiers:['control','alt','shift']};
+  const set=binding=>invoke('clipboard_shortcut_set',{binding});
+  await set(binding);
+  let conflict;
+  try {await set({code:'KeyT',modifiers:['meta']});} catch(error) {conflict=String(error);}
+  const snapshot=await invoke('app_snapshot');
+  window.clipboardSettingsProbe.stage='options';
+  const defaults=await invoke('clipboard_options_get');
+  if(defaults.activation!=='paste'||defaults.historyPolicy.days!==null||defaults.historyPolicy.limit!==null||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
+  await invoke('clipboard_behavior_set',{activation:'copy'});
+  if((await invoke('clipboard_options_get')).activation!=='copy')throw Error('copy preference did not update');
+  const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
+  if(excluded.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('exclusion was not removed');
+  window.clipboardSettingsProbe.stage='storage';
+  const storage=await invoke('clipboard_storage_info');
+  const policy={days:7,limit:200};
+  window.clipboardSettingsProbe.stage='preview';
+  const preview=await invoke('clipboard_cleanup_preview',{policy});
+  if(preview.count<1||storage.unprotectedCount<1||storage.bytes<1)throw Error('synthetic rows are missing');
+  let stale;
+  try {await invoke('clipboard_cleanup_apply',{policy,token:'0'.repeat(64)});} catch(error) {stale=String(error);}
+  if(stale!=='clipboard_cleanup_changed')throw Error('cleanup accepted a mismatched preview');
+  window.clipboardSettingsProbe.stage='apply';
+  const result=await invoke('clipboard_cleanup_apply',{policy,token:preview.token});
+  if(result.removed!==preview.count||result.mediaCleanupFailed)throw Error('cleanup did not match the preview');
+  const saved=await invoke('clipboard_options_get');
+  if(saved.historyPolicy.days!==7||saved.historyPolicy.limit!==200)throw Error('confirmed retention was not saved');
+  window.clipboardSettingsProbe={done:true,conflict,afterConflict:snapshot.clipboardBinding,removed:result.removed};
+})().catch(error=>window.clipboardSettingsProbe={done:true,error:String(error)});
+return {paused:true};
+"#,
+        )?);
+        let mut probe = serde_json::Value::Null;
+        for _ in 0..80 {
+            probe = evaluate_view_dom(app, "settings", "return window.clipboardSettingsProbe;")?;
+            if probe["done"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if probe["conflict"] != "shortcut_conflict:selection"
+            || probe["afterConflict"]["code"] != "KeyJ"
+        {
+            return Err(format!("settings IPC or shortcut probe failed: {probe}"));
+        }
+        on_main(app, |app| {
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            let expected = crate::binding_shortcut(&nami::shortcuts::KeyBinding::new(
+                "KeyJ",
+                &["control", "alt", "shift"],
+            ))?;
+            if !app.global_shortcut().is_registered(expected)
+                || app.global_shortcut().is_registered(crate::binding_shortcut(
+                    &nami::shortcuts::clipboard_binding(),
+                )?)
+            {
+                return Err("the native registry did not replace the previous shortcut".into());
+            }
+            Ok(())
+        })?;
+        {
+            let database = state.database.lock().unwrap();
+            let database = database.as_ref().ok_or("missing_test_database")?;
+            if database.clipboard_record("settings-regular").is_ok()
+                || !database.clipboard_record("settings-favorite")?.is_favorite
+                || !database.clipboard_record("settings-pinned")?.is_pinned
+                || database.preference("clipboard_activation")?.as_deref() != Some("\"copy\"")
+            {
+                return Err("cleanup or activation violated durable clipboard state".into());
+            }
+        }
+        evaluate_dom(
+            app,
+            r#"
+window.clipboardActivationProbe=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{recordId:'settings-favorite',action:'activate'}).then(
+  result=>window.clipboardActivationProbe=result,
+  error=>window.clipboardActivationProbe={error:String(error)}
+);
+return true;
+"#,
+        )?;
+        let mut activation = serde_json::Value::Null;
+        for _ in 0..80 {
+            activation = evaluate_dom(app, "return window.clipboardActivationProbe;")?;
+            if !activation.is_null() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if activation["status"] != "copied" || activation["copyStatus"] != "current" {
+            return Err(format!("Copy Only activated the paste path: {activation}"));
+        }
+        samples.push(activation);
+        samples.push(probe);
         Ok::<(), String>(())
     })();
     DomCase {
-        name: "clipboard capture setting: clickable WebView switch, visible state and durable IPC",
+        name: "clipboard settings: recording, shortcuts, storage and protected cleanup through real WebView IPC",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -5107,6 +5341,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
         if ![
             "clipboard-actions",
+            "clipboard-settings",
             "clipboard-editor",
             "clipboard-media",
             "clipboard-kind-text",
@@ -5146,6 +5381,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_right_control_dom(&app)
             } else if case == "translation-actions" {
                 run_translation_action_timing(&app)
+            } else if case == "clipboard-settings" {
+                run_clipboard_capture_setting(&app)
             } else if case == "clipboard-actions" {
                 run_clipboard_action_timing(&app)
             } else if case == "clipboard-media" {

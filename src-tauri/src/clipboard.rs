@@ -6,6 +6,59 @@ pub const MAX_FILE_COUNT: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordingKind {
+    Text,
+    Image,
+    Files,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RecordingTypes {
+    pub text: bool,
+    pub image: bool,
+    pub files: bool,
+}
+
+impl Default for RecordingTypes {
+    fn default() -> Self {
+        Self {
+            text: true,
+            image: true,
+            files: true,
+        }
+    }
+}
+
+impl RecordingTypes {
+    pub fn set(&mut self, kind: RecordingKind, enabled: bool) {
+        *match kind {
+            RecordingKind::Text => &mut self.text,
+            RecordingKind::Image => &mut self.image,
+            RecordingKind::Files => &mut self.files,
+        } = enabled;
+    }
+
+    pub fn any(self) -> bool {
+        self.text || self.image || self.files
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryPolicy {
+    pub days: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+impl HistoryPolicy {
+    pub fn valid(self) -> bool {
+        matches!(self.days, None | Some(7 | 30 | 90))
+            && matches!(self.limit, None | Some(200 | 500 | 1000))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipboardFileRepresentation {
     pub paths: Vec<String>,

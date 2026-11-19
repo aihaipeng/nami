@@ -1,4 +1,4 @@
-import { defaultTranslationShortcuts, type TranslationShortcuts } from './shortcuts';
+import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, type TranslationShortcuts } from './shortcuts';
 
 export type Locale = 'system' | 'zh-CN' | 'en';
 export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
@@ -54,6 +54,8 @@ export interface AppSnapshot {
   translationPreferences: TranslationPreferences;
   storageError: string | null;
   clipboardCaptureEnabled: boolean;
+  clipboardRecordingTypes: { text: boolean; image: boolean; files: boolean };
+  clipboardBinding: KeyBinding | null;
   accessibility: boolean;
   shortcutErrors: string[];
   window: WindowState;
@@ -81,6 +83,8 @@ export const initialSnapshot: AppSnapshot = {
   },
   storageError: null,
   clipboardCaptureEnabled: false,
+  clipboardRecordingTypes: { text: true, image: true, files: true },
+  clipboardBinding: defaultClipboardBinding,
   accessibility: false,
   shortcutErrors: [],
   window: {

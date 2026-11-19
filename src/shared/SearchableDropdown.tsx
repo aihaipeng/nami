@@ -38,7 +38,7 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
       title={description} aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
       <span>{selected}</span><ChevronDown aria-hidden="true" />
     </button>
-    {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className="language-popover">
+    {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className={settings ? 'language-popover settings-popover' : 'language-popover'} dismissOnSettingsScroll={settings}>
       {searchable && <label className="language-search"><Search aria-hidden="true" /><input role="combobox" aria-label={t('searchLanguage')}
         aria-expanded="true" aria-controls={id} aria-activedescendant={current >= 0 ? `${id}-${current}` : undefined}
         placeholder="Search..." value={query} onChange={(event) => {

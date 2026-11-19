@@ -151,8 +151,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     await command('records_details_toggle');
   }
 
-  async function useRecord(recordId: string, action: 'copy' | 'paste') {
-    if (!native || (action === 'copy' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return false;
+  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'activate') {
+    if (!native || (action === 'paste' ? !snapshot.capabilities.autoPaste : !snapshot.capabilities.clipboardWrite)) return false;
     const current = ++operation.current;
     setSelected(recordId); setFeedback(null);
     try {
@@ -164,7 +164,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       setFeedback(clipboardUseFeedback(result));
       return result.copyStatus === 'current' && result.status === 'copied';
     } catch (error) {
-      if (mounted.current && operation.current === current) setFeedback(clipboardUseError(error, action));
+      if (mounted.current && operation.current === current) setFeedback(clipboardUseError(error, action === 'activate' ? 'paste' : action));
     }
     return false;
   }
@@ -206,7 +206,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const kind = record.kind === 'image' ? t('clipboardImage') : record.kind === 'files' ? t('clipboardFiles') : t('text');
     const index = ordered.findIndex(({ id }) => id === record.id);
     return <article data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseMove={() => previewRecord(record.id)} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${(canDelete ? 124 : 99) + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
-      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-pressed={selection === record.id} onFocus={() => { setSelected(record.id); previewRecord(record.id); }} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'paste'); }} onKeyDown={(event) => {
+      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-pressed={selection === record.id} onFocus={() => { setSelected(record.id); previewRecord(record.id); }} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }} onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'ArrowDown' && ordered[index + 1]) { event.preventDefault(); focusRow(ordered[index + 1].id); previewRecord(ordered[index + 1].id, true); }
         else if (event.key === 'ArrowUp') { event.preventDefault(); if (ordered[index - 1]) { focusRow(ordered[index - 1].id); previewRecord(ordered[index - 1].id, true); } else search.current?.focus(); }

@@ -1,4 +1,5 @@
 mod clipboard_detail;
+mod clipboard_preferences;
 mod clipboard_runtime;
 mod clipboard_text;
 mod commands;
@@ -6,6 +7,7 @@ mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
 use nami::{
+    clipboard::RecordingTypes,
     database, history, model,
     shortcuts::{self, KeyBinding},
     translation,
@@ -38,6 +40,10 @@ pub struct AppState {
     records_dirty: AtomicBool,
     records_navigation: Mutex<Option<String>>,
     clipboard_enabled: AtomicBool,
+    clipboard_options: Mutex<clipboard_preferences::ClipboardOptions>,
+    clipboard_recording_menu: Mutex<Option<MenuItem<tauri::Wry>>>,
+    clipboard_recording_types: Mutex<RecordingTypes>,
+    clipboard_binding: Mutex<Option<KeyBinding>>,
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
     clipboard_writes: tokio::sync::Mutex<()>,
@@ -60,6 +66,7 @@ pub struct AppState {
     translation_engine: Mutex<String>,
     translation_preferences: Mutex<translation::Preferences>,
     shortcuts_suspended: AtomicBool,
+    shortcut_writes: tokio::sync::Mutex<()>,
     registered_shortcuts: Mutex<Vec<Shortcut>>,
     selection: Mutex<Option<selection::SelectionContext>>,
     selection_presentation: Mutex<Option<u64>>,
@@ -81,6 +88,10 @@ impl Default for AppState {
             records_dirty: AtomicBool::new(false),
             records_navigation: Mutex::new(None),
             clipboard_enabled: AtomicBool::new(false),
+            clipboard_options: Mutex::new(clipboard_preferences::ClipboardOptions::default()),
+            clipboard_recording_menu: Mutex::new(None),
+            clipboard_recording_types: Mutex::new(RecordingTypes::default()),
+            clipboard_binding: Mutex::new(Some(shortcuts::clipboard_binding())),
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
             clipboard_writes: tokio::sync::Mutex::new(()),
@@ -105,6 +116,7 @@ impl Default for AppState {
                 platform::capabilities().primary_modifier,
             )),
             shortcuts_suspended: AtomicBool::new(false),
+            shortcut_writes: tokio::sync::Mutex::new(()),
             registered_shortcuts: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             selection_presentation: Mutex::new(None),
@@ -143,8 +155,13 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
     }
 }
 
-fn clipboard_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::CONTROL), Code::Backquote)
+fn clipboard_shortcut(state: &AppState) -> Option<Shortcut> {
+    state
+        .clipboard_binding
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|binding| binding_shortcut(binding).ok())
 }
 
 fn binding_shortcut(binding: &KeyBinding) -> Result<Shortcut, String> {
@@ -160,6 +177,16 @@ fn binding_shortcut(binding: &KeyBinding) -> Result<Shortcut, String> {
         };
     }
     Ok(Shortcut::new(Some(modifiers), code))
+}
+
+fn load_clipboard_binding(
+    stored: Option<&str>,
+    translation: &shortcuts::TranslationShortcuts,
+) -> Option<KeyBinding> {
+    let binding = stored
+        .and_then(|value| serde_json::from_str::<Option<KeyBinding>>(value).ok())
+        .unwrap_or_else(|| Some(shortcuts::clipboard_binding()));
+    binding.and_then(|binding| shortcuts::validate_clipboard_binding(binding, translation).ok())
 }
 
 fn same_shortcut(left: &Shortcut, right: &Shortcut) -> bool {
@@ -184,7 +211,7 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
     let previous = state.registered_shortcuts.lock().unwrap().clone();
     let mut desired = Vec::new();
     if !suspended {
-        desired.push(clipboard_shortcut());
+        desired.extend(clipboard_shortcut(&state));
         if selection_enabled {
             if let Some(binding) = selection {
                 if let Ok(shortcut) = binding_shortcut(&binding) {
@@ -208,10 +235,7 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
     }
     let mut failures = Vec::new();
     for shortcut in &desired {
-        if previous
-            .iter()
-            .any(|current| same_shortcut(current, shortcut))
-        {
+        if app.global_shortcut().is_registered(*shortcut) {
             continue;
         }
         if app.global_shortcut().register(*shortcut).is_err() {
@@ -246,18 +270,24 @@ fn main() {
                     let owned = app.clone();
                     let _ = app.run_on_main_thread(move || {
                         let state = owned.state::<AppState>();
-                        let selection = state
-                            .translation_preferences
-                            .lock()
-                            .unwrap()
-                            .shortcuts
-                            .selection
-                            .clone()
-                            .and_then(|binding| binding_shortcut(&binding).ok());
+                        if state
+                            .shortcuts_suspended
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        let selection = {
+                            let prefs = state.translation_preferences.lock().unwrap();
+                            prefs
+                                .selection_enabled
+                                .then_some(prefs.shortcuts.selection.as_ref())
+                                .flatten()
+                                .and_then(|binding| binding_shortcut(binding).ok())
+                        };
                         let matches = |candidate: &Shortcut| {
                             candidate.key == key && candidate.mods == modifiers
                         };
-                        let result = if matches(&clipboard_shortcut()) {
+                        let result = if clipboard_shortcut(&state).as_ref().is_some_and(matches) {
                             if pressed {
                                 windows::show(&owned, "clipboard")
                             } else {
@@ -323,6 +353,15 @@ fn main() {
             commands::clipboard_translation_take,
             commands::clipboard_record_update,
             commands::clipboard_capture_set,
+            commands::clipboard_recording_type_set,
+            clipboard_preferences::clipboard_options_get,
+            clipboard_preferences::clipboard_excluded_app_pick,
+            clipboard_preferences::clipboard_excluded_app_remove,
+            clipboard_preferences::clipboard_behavior_set,
+            clipboard_preferences::clipboard_storage_info,
+            clipboard_preferences::clipboard_cleanup_preview,
+            clipboard_preferences::clipboard_cleanup_apply,
+            commands::clipboard_shortcut_set,
             commands::clipboard_image,
             commands::clipboard_files,
             commands::locale_set,
@@ -389,13 +428,44 @@ fn main() {
                     database.preference_set("translation_proxy_url", "")?;
                     database.preference_set("translation_proxy_enabled", "false")?;
                 }
-                Ok((database, page, capture, preferences))
+                let recording_types = database
+                    .preference("clipboard_recording_types")?
+                    .and_then(|value| serde_json::from_str::<RecordingTypes>(&value).ok())
+                    .unwrap_or_default();
+                let clipboard_options = clipboard_preferences::ClipboardOptions::load(&database)?;
+                let clipboard_binding = load_clipboard_binding(
+                    database.preference("clipboard_shortcut")?.as_deref(),
+                    &preferences.shortcuts,
+                );
+                Ok((
+                    database,
+                    page,
+                    capture,
+                    preferences,
+                    recording_types,
+                    clipboard_binding,
+                    clipboard_options,
+                ))
             })
             .join()
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|loaded| loaded);
             match loaded {
-                Ok((database, page, capture, preferences)) => {
+                Ok((
+                    database,
+                    page,
+                    capture,
+                    preferences,
+                    recording_types,
+                    clipboard_binding,
+                    clipboard_options,
+                )) => {
+                    *app.state::<AppState>().clipboard_options.lock().unwrap() = clipboard_options;
+                    *app.state::<AppState>()
+                        .clipboard_recording_types
+                        .lock()
+                        .unwrap() = recording_types;
+                    *app.state::<AppState>().clipboard_binding.lock().unwrap() = clipboard_binding;
                     *app.state::<AppState>().translation_engine.lock().unwrap() =
                         preferences.engine.clone();
                     *app.state::<AppState>()
@@ -430,7 +500,11 @@ fn main() {
             let clipboard = MenuItem::with_id(app, "clipboard", "Clipboard", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Nami", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&translation, &clipboard, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&translation, &clipboard])?;
+            if platform::capabilities().clipboard_write {
+                menu.append(&clipboard_preferences::recording_menu_item(app.handle())?)?;
+            }
+            menu.append_items(&[&settings, &quit])?;
             let tray = TrayIconBuilder::new()
                 .tooltip("Nami")
                 .menu(&menu)
@@ -439,6 +513,15 @@ fn main() {
                     if id == "quit" {
                         record_lifecycle(app, "tray_quit", Some(0));
                         app.exit(0)
+                    } else if id == "clipboard_recording" {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) =
+                                clipboard_preferences::set_recording(&app, None).await
+                            {
+                                eprintln!("Nami clipboard recording: {error}");
+                            }
+                        });
                     } else if let Err(code) = windows::show(app, id) {
                         app.state::<AppState>()
                             .shortcut_errors
@@ -461,6 +544,7 @@ fn main() {
             }
             sync_global_shortcuts(app.handle());
             clipboard_runtime::start(app.handle());
+            clipboard_preferences::start_maintenance(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -480,8 +564,87 @@ mod shortcut_tests {
     use super::*;
 
     #[test]
+    fn clipboard_shortcut_persists_default_rebind_and_explicit_clear() {
+        let directory = std::env::temp_dir().join(format!(
+            "nami-clipboard-preferences-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.sqlite3");
+        let translations = shortcuts::TranslationShortcuts::defaults("meta");
+        let binding = Some(KeyBinding::new("KeyJ", &["control", "shift"]));
+        let types = RecordingTypes {
+            image: false,
+            ..Default::default()
+        };
+        let mut database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            load_clipboard_binding(
+                database
+                    .preference("clipboard_shortcut")
+                    .unwrap()
+                    .as_deref(),
+                &translations
+            ),
+            Some(shortcuts::clipboard_binding())
+        );
+        database
+            .preference_set(
+                "clipboard_recording_types",
+                &serde_json::to_string(&types).unwrap(),
+            )
+            .unwrap();
+        database
+            .preference_set(
+                "clipboard_shortcut",
+                &serde_json::to_string(&binding).unwrap(),
+            )
+            .unwrap();
+        drop(database);
+        let mut database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            load_clipboard_binding(
+                database
+                    .preference("clipboard_shortcut")
+                    .unwrap()
+                    .as_deref(),
+                &translations
+            ),
+            binding
+        );
+        assert_eq!(
+            serde_json::from_str::<RecordingTypes>(
+                &database
+                    .preference("clipboard_recording_types")
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            types
+        );
+        database
+            .preference_set("clipboard_shortcut", "null")
+            .unwrap();
+        drop(database);
+        let database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            load_clipboard_binding(
+                database
+                    .preference("clipboard_shortcut")
+                    .unwrap()
+                    .as_deref(),
+                &translations
+            ),
+            None
+        );
+        assert!(!database.clipboard_capture_enabled().unwrap());
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn clipboard_history_uses_control_backquote() {
-        let clipboard = clipboard_shortcut();
+        let clipboard = binding_shortcut(&shortcuts::clipboard_binding()).unwrap();
         assert_eq!(clipboard.key, Code::Backquote);
         assert_eq!(clipboard.mods, Modifiers::CONTROL);
         let selection = binding_shortcut(&KeyBinding::new("KeyT", &["meta"])).unwrap();

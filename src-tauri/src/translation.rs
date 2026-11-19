@@ -237,9 +237,10 @@ impl Preferences {
         &mut self,
         action: &str,
         binding: Option<KeyBinding>,
+        clipboard: Option<&KeyBinding>,
     ) -> Result<(), String> {
         let action = shortcuts::ShortcutAction::parse(action)?;
-        self.shortcuts = shortcuts::assign_shortcut(&self.shortcuts, action, binding)?;
+        self.shortcuts = shortcuts::assign_shortcut(&self.shortcuts, action, binding, clipboard)?;
         Ok(())
     }
 
@@ -720,12 +721,13 @@ mod tests {
             })
             .is_err());
         assert_eq!(corrupt.engine, "google");
-        corrupt.set_shortcut("translate", None).unwrap();
+        corrupt.set_shortcut("translate", None, None).unwrap();
         assert_eq!(corrupt.shortcuts.translate, None);
         assert!(corrupt
             .set_shortcut(
                 "translate",
-                Some(crate::shortcuts::KeyBinding::new("KeyT", &["meta"]))
+                Some(crate::shortcuts::KeyBinding::new("KeyT", &["meta"])),
+                None,
             )
             .is_err());
         assert!(corrupt
