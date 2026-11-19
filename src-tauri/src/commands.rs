@@ -383,7 +383,6 @@ pub struct TranslationChromeState {
     source_label: String,
     source_width: f64,
     translate_label: String,
-    actions_label: String,
     can_translate: bool,
 }
 
@@ -396,15 +395,11 @@ pub fn translation_chrome_update(
     authorize(&window, &["translation"])?;
     if !state.source_width.is_finite()
         || !(32.0..=360.0).contains(&state.source_width)
-        || [
-            &state.source_label,
-            &state.translate_label,
-            &state.actions_label,
-        ]
-        .iter()
-        .any(|label| {
-            label.is_empty() || label.chars().count() > 100 || label.contains(['\n', '\r'])
-        })
+        || [&state.source_label, &state.translate_label]
+            .iter()
+            .any(|label| {
+                label.is_empty() || label.chars().count() > 100 || label.contains(['\n', '\r'])
+            })
     {
         return Err("invalid_argument".into());
     }
@@ -416,7 +411,6 @@ pub fn translation_chrome_update(
         state.source_label,
         state.source_width,
         state.translate_label,
-        state.actions_label,
         state.can_translate,
     )?;
     Ok(true)

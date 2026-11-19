@@ -13,8 +13,8 @@ export function panelHorizontalPosition(anchorLeft: number, width: number, visib
   return { left: Math.max(visibleLeft + 8, Math.min(anchorLeft, visibleLeft + visibleWidth - maxWidth - 8)), maxWidth };
 }
 
-export function FloatingPanel({ anchor, onClose, id, label, role, width, side, children, className = '', dismissOnSettingsScroll = false }: {
-  anchor: RefObject<HTMLElement | null>; onClose: () => void; id?: string; label?: string;
+export function FloatingPanel({ anchor, returnFocus = anchor, onClose, id, label, role, width, side, children, className = '', dismissOnSettingsScroll = false }: {
+  anchor: RefObject<HTMLElement | null>; returnFocus?: RefObject<HTMLElement | null>; onClose: () => void; id?: string; label?: string;
   role: 'dialog' | 'menu' | 'tooltip'; width: number; side: 'top' | 'bottom'; children: ReactNode; className?: string; dismissOnSettingsScroll?: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
@@ -73,7 +73,7 @@ export function FloatingPanel({ anchor, onClose, id, label, role, width, side, c
 
   function restoreFocus() {
     close.current();
-    restorePanelFocus(anchor.current);
+    restorePanelFocus(returnFocus.current);
   }
 
   return createPortal(<div ref={panel} id={id} role={role} aria-label={label} className={`floating-panel ${className}`}

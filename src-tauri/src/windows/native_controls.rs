@@ -3,7 +3,6 @@ use std::cell::RefCell;
 
 const SOURCE_TAG: isize = 101;
 const TRANSLATE_TAG: isize = 102;
-const ACTIONS_TAG: isize = 103;
 
 struct ButtonState {
     app: AppHandle,
@@ -164,11 +163,7 @@ unsafe fn draw_button(button: &ChromeButton) {
         let _: () = objc2::msg_send![path, stroke];
     } else {
         draw_text(&label, 14.0, (32.0 - text_height) / 2.0, 13.0, alpha);
-        let keys = if button.ivars().action == "translate" {
-            ["⌘", "↵"]
-        } else {
-            ["⌘", "K"]
-        };
+        let keys = ["⌘", "↵"];
         let start = bounds.size.width - 14.0 - 43.0;
         for (index, key) in keys.into_iter().enumerate() {
             let x = start + index as f64 * 23.0;
@@ -202,7 +197,6 @@ pub(super) fn install(app: &AppHandle, stage: &TranslationStage) -> Result<(), S
     for (tag, action, label, width) in [
         (SOURCE_TAG, "source", "Auto-Detect", 142.0),
         (TRANSLATE_TAG, "translate", "Translate", 140.0),
-        (ACTIONS_TAG, "actions", "Actions", 130.0),
     ] {
         let allocated = ChromeButton::alloc(marker).set_ivars(ButtonState {
             app: app.clone(),
@@ -243,11 +237,7 @@ pub(super) fn layout(
     let Some(translate) = button(stage, TRANSLATE_TAG) else {
         return;
     };
-    let Some(actions) = button(stage, ACTIONS_TAG) else {
-        return;
-    };
     let right = translation.x + translation.width;
-    let actions_width = actions.ivars().width.get();
     let translate_width = translate.ivars().width.get();
     for (button, x, y) in [
         (
@@ -255,12 +245,7 @@ pub(super) fn layout(
             right - 24.0 - source.ivars().width.get(),
             height - 40.0,
         ),
-        (
-            &translate,
-            right - 24.0 - actions_width - 8.0 - translate_width,
-            0.0,
-        ),
-        (&actions, right - 24.0 - actions_width, 0.0),
+        (&translate, right - 24.0 - translate_width, 0.0),
     ] {
         let hidden =
             !translation_visible || translation.width < 1.0 || !button.ivars().visible.get();
@@ -280,7 +265,6 @@ pub fn update(
     source_label: String,
     source_width: f64,
     translate_label: String,
-    actions_label: String,
     can_translate: bool,
 ) -> Result<(), String> {
     let window = app.get_window("translation").ok_or("window_unavailable")?;
@@ -288,7 +272,6 @@ pub fn update(
     for (tag, label, enabled) in [
         (SOURCE_TAG, source_label, true),
         (TRANSLATE_TAG, translate_label, can_translate),
-        (ACTIONS_TAG, actions_label, true),
     ] {
         let button = button(&stage, tag).ok_or("window_geometry")?;
         let width = if tag == SOURCE_TAG {

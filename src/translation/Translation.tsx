@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { languageName, languages, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
-import { FloatingPanel, restorePanelFocus } from '../shared/FloatingPanel';
+import { FloatingPanel } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { keycapLabels, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
@@ -60,7 +60,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const footer = useRef<HTMLElement>(null);
   const sourceBar = useRef<HTMLElement>(null);
   const actionGroup = useRef<HTMLDivElement>(null);
-  const actionButton = useRef<HTMLButtonElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const normalizedCaret = useRef<number | null>(null);
@@ -103,7 +102,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, {
     sourceLabel,
     sourceWidth,
-    translateLabel: t('translation'), actionsLabel: t('actions'),
+    translateLabel: t('translation'),
     canTranslate: Boolean(draft.trim()) && !snapshot.storageError && languagesAvailable,
   }, (action) => {
     if (action === 'translate') submit();
@@ -368,7 +367,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   function copyTranslation(index: number) {
     const recordId = completedRecord.current?.id ?? selectedId;
     if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
-    if (popup === 'actions') restorePanelFocus(actionButton.current);
+    if (popup === 'actions') input.current?.focus({ preventScroll: true });
     setPopup(null); setCopyFeedback(null); window.clearTimeout(copyFeedbackTimer.current);
     const operation = ++copyOperation.current;
     copying.current.set(index, operation);
@@ -491,10 +490,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
         </div>
         <div ref={actionGroup} className="translation-actions" aria-hidden={nativeChrome || undefined} inert={nativeChrome}>
           <button className="translation-action" disabled={!draft.trim() || Boolean(snapshot.storageError) || !languagesAvailable} onMouseDown={(event) => event.preventDefault()} onClick={submit}>{t('translation')}<Keycaps keys={shortcutKeys('translate')} /></button>
-          <button ref={actionButton} className="translation-action" aria-haspopup="menu" aria-expanded={popup === 'actions'} onClick={() => setPopup((value) => value === 'actions' ? null : 'actions')}>{t('actions')}<Keycaps keys={shortcutKeys('actions')} /></button>
         </div>
       </footer>
-      {popup === 'actions' && <FloatingPanel anchor={actionButton} onClose={() => setPopup(null)} label={t('actions')} role="menu" width={310} side="top" className="action-menu">
+      {popup === 'actions' && <FloatingPanel anchor={actionGroup} returnFocus={input} onClose={() => setPopup(null)} label={t('actions')} role="menu" width={310} side="top" className="action-menu">
         <div role="group" onKeyDown={(event) => {
           if (event.nativeEvent.isComposing || primaryPressed(event)) return;
           const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];

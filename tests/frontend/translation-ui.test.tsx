@@ -70,7 +70,7 @@ describe('translation input and shortcuts', () => {
   it('dismisses transient actions on hide and preserves the translation draft', async () => {
     await mount();
     fireEvent.change(source(), { target: { value: 'Preserved draft' } });
-    fireEvent.click(screen.getByRole('button', { name: /^Actions/ }));
+    fireEvent.keyDown(source(), { key: 'k', code: 'KeyK', metaKey: true });
     expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
     await windowState({ translationVisible: false, translationExtent: 0 });
     expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
@@ -227,7 +227,7 @@ describe('translation input and shortcuts', () => {
     await mount();
     expect(screen.getByRole('button', { name: 'Source language: Auto-Detect' })).toBeTruthy();
     expect(calls('translation_chrome_update').at(-1)?.[1]).toEqual({ state: {
-      sourceLabel: 'Auto-Detect', sourceWidth: 140, translateLabel: 'Translate', actionsLabel: 'Actions', canTranslate: false,
+      sourceLabel: 'Auto-Detect', sourceWidth: 140, translateLabel: 'Translate', canTranslate: false,
     } });
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'translation_chrome_update' ? true : invoke(name, args));
@@ -238,6 +238,8 @@ describe('translation input and shortcuts', () => {
     await emit('translation_chrome_action', 'source');
     expect(screen.getByRole('dialog', { name: 'Source language' })).toBeTruthy();
     await emit('translation_chrome_action', 'actions');
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.keyDown(source(), { key: 'k', code: 'KeyK', metaKey: true });
     expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
     await emit('translation_chrome_action', 'translate');
     expect(screen.queryByRole('menu')).toBeNull();
@@ -317,7 +319,7 @@ describe('translation input and shortcuts', () => {
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Actions/ }));
+    expect(document.activeElement).toBe(source());
     fireEvent.keyDown(source(), { key: 'Escape' });
     expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation' }]);
   });
@@ -634,6 +636,7 @@ describe('language dropdown and menu keyboard behavior', () => {
 
   it('moves through Actions and dismisses it with Tab without trapping focus', async () => {
     await mount(); await select();
+    expect(screen.queryByRole('button', { name: /^Actions/ })).toBeNull();
     fireEvent.keyDown(source(), { key: 'k', metaKey: true });
     fireEvent.keyDown(document.activeElement!, { key: 'End' });
     expect(document.activeElement).toBe(screen.getByRole('menuitemcheckbox'));
@@ -641,6 +644,6 @@ describe('language dropdown and menu keyboard behavior', () => {
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /^Copy Primary Translation/ }));
     fireEvent.keyDown(document.activeElement!, { key: 'Tab' });
     expect(screen.queryByRole('menu')).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Actions/ }));
+    expect(document.activeElement).toBe(source());
   });
 });

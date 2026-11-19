@@ -970,7 +970,11 @@ fn native_chrome_sample(app: &AppHandle) -> Result<serde_json::Value, String> {
     let window_frame = native_translation_frame(&window)?;
     let bounds: objc2_foundation::NSRect = unsafe { objc2::msg_send![&*stage, bounds] };
     let mut buttons = Vec::new();
-    for tag in [101isize, 102, 103] {
+    let retired: *mut AnyObject = unsafe { objc2::msg_send![&*stage, viewWithTag: 103isize] };
+    if !retired.is_null() {
+        return Err("retired Actions control is still installed".into());
+    }
+    for tag in [101isize, 102] {
         unsafe {
             let button: *mut AnyObject = objc2::msg_send![&*stage, viewWithTag: tag];
             if button.is_null() {
@@ -1044,7 +1048,6 @@ fn click_native_chrome(app: &AppHandle, tag: isize) -> Result<(), String> {
     let expected = match tag {
         101 => "source",
         102 => "translate",
-        103 => "actions",
         _ => return Err("invalid chrome test tag".into()),
     };
     let payload = receive
@@ -1082,32 +1085,25 @@ fn assert_chrome_anchors(value: &serde_json::Value) -> Result<(), String> {
     let right = number(value, "windowRight")?;
     let source = &buttons[0];
     let translate = &buttons[1];
-    let actions = &buttons[2];
     equal(
         right - number(source, "screenRight")?,
         24.0,
         "native source right inset",
     )?;
     equal(
-        right - number(actions, "screenRight")?,
+        right - number(translate, "screenRight")?,
         24.0,
-        "native actions right inset",
+        "native translate right inset",
     )?;
     equal(
         number(value, "height")? - number(source, "y")?,
         40.0,
         "native source top inset",
     )?;
-    equal(number(actions, "y")?, 0.0, "native actions bottom inset")?;
     equal(
         number(translate, "y")?,
         0.0,
         "native translate bottom inset",
-    )?;
-    equal(
-        number(actions, "x")? - number(translate, "x")? - number(translate, "width")?,
-        8.0,
-        "native footer button gap",
     )?;
     for button in buttons {
         equal(number(button, "height")?, 32.0, "native control height")?;
@@ -1242,16 +1238,16 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
             app,
             "return { ready: !document.querySelector('.language-popover') };",
         )?;
-        click_native_chrome(app, 103)?;
+        evaluate_dom(
+            app,
+            r#"const input = document.querySelector('.source-input'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown', { key:'k', code:'KeyK', metaKey:true, bubbles:true, cancelable:true })); return true;"#,
+        )?;
         samples.push(wait_dom(app, "const panel = document.querySelector('.action-menu'); const rect = panel?.getBoundingClientRect(); return { ready: !!panel, actionMenuInsideViewport: !!rect && rect.left >= 7 && rect.right <= innerWidth - 7 }; ")?);
         if samples.last().unwrap()["actionMenuInsideViewport"] != true {
-            return Err("actions menu extends outside the narrow viewport".into());
+            return Err("keyboard actions menu extends outside the narrow viewport".into());
         }
-        evaluate_dom(app, "document.querySelector('.action-menu').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true;")?;
-        wait_dom(
-            app,
-            "return { ready: !document.querySelector('.action-menu') };",
-        )?;
+        evaluate_dom(app, "document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true;")?;
+        wait_dom(app, "return { ready: !document.querySelector('.action-menu') && document.activeElement === document.querySelector('.source-input') };")?;
         let mut blank = serde_json::Value::Null;
         for _ in 0..40 {
             blank = on_main(app, native_chrome_sample)?;
@@ -1336,17 +1332,13 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
     if native["buttons"][0]["title"] != value["sourceLabel"] {
         return Err("native source label did not follow React selection".into());
     }
-    if native["buttons"][1]["hidden"] != false || native["buttons"][2]["hidden"] != false {
+    if native["buttons"][1]["hidden"] != false {
         return Err(format!(
             "native footer actions hidden at {width}pt: {native}"
         ));
     }
     let actions_left = width
         - 24.0
-        - native["buttons"][2]["width"]
-            .as_f64()
-            .ok_or("missing Actions width")?
-        - 8.0
         - native["buttons"][1]["width"]
             .as_f64()
             .ok_or("missing Translate width")?;
@@ -1363,7 +1355,7 @@ fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Va
             ));
         }
     }
-    if native["buttons"][1]["title"] != "Translate" || native["buttons"][2]["title"] != "Actions" {
+    if native["buttons"][1]["title"] != "Translate" {
         return Err("native action labels did not follow interface language".into());
     }
     if value["native"] != "true" {
