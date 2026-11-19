@@ -13,7 +13,7 @@ import { Waves } from 'lucide-react';
 import { cn } from './lib/utils';
 import { ActivityBeam } from './shared/ActivityBeam';
 
-type ClipboardBindingChange = { binding: AppSnapshot['clipboardBinding']; shortcutErrors: string[] };
+type ClipboardBindingChange = { binding: AppSnapshot['clipboardBinding']; enabled: boolean; shortcutErrors: string[] };
 
 export const native = isTauri();
 document.documentElement.dataset.native = String(native);
@@ -43,6 +43,7 @@ export default function App() {
     let latestPreferences: TranslationPreferences | undefined;
     let latestCapture: boolean | undefined;
     let latestRecordingTypes: AppSnapshot['clipboardRecordingTypes'] | undefined;
+    let latestClipboardControls: AppSnapshot['clipboardControls'] | undefined;
     let latestClipboardBinding: ClipboardBindingChange | undefined;
     async function connect() {
       for (const subscribe of [
@@ -62,11 +63,15 @@ export default function App() {
             latestRecordingTypes = payload;
             if (!disposed) setSnapshot((current) => ({ ...current, clipboardRecordingTypes: payload }));
           }),
-          () => listen<ClipboardBindingChange>('clipboard_binding_changed', ({ payload }) => {
-            latestClipboardBinding = payload;
-            if (!disposed) setSnapshot((current) => ({ ...current, clipboardBinding: payload.binding, shortcutErrors: payload.shortcutErrors }));
-          }),
         ] : []),
+        () => listen<ClipboardBindingChange>('clipboard_binding_changed', ({ payload }) => {
+          latestClipboardBinding = payload;
+          if (!disposed) setSnapshot((current) => ({ ...current, clipboardBinding: payload.binding, clipboardShortcutEnabled: payload.enabled, shortcutErrors: payload.shortcutErrors }));
+        }),
+        () => listen<AppSnapshot['clipboardControls']>('clipboard_controls_changed', ({ payload }) => {
+          latestClipboardControls = payload;
+          if (!disposed) setSnapshot((current) => ({ ...current, clipboardControls: payload }));
+        }),
         () => listen<string>('storage_error', ({ payload }) => { if (!disposed) setSnapshot((current) => ({ ...current, storageError: payload })); }),
         () => listen('layout_error', () => { if (!disposed) setError(true); }),
         () => listen<WindowState>('window_state', ({ payload }) => {
@@ -86,7 +91,7 @@ export default function App() {
       if (!disposed) {
         document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
         document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
-        setSnapshot({ ...data, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, clipboardRecordingTypes: latestRecordingTypes ?? data.clipboardRecordingTypes, clipboardBinding: latestClipboardBinding ? latestClipboardBinding.binding : data.clipboardBinding, shortcutErrors: latestClipboardBinding?.shortcutErrors ?? data.shortcutErrors, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
+        setSnapshot({ ...data, clipboardControls: latestClipboardControls ?? data.clipboardControls, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, clipboardRecordingTypes: latestRecordingTypes ?? data.clipboardRecordingTypes, clipboardBinding: latestClipboardBinding ? latestClipboardBinding.binding : data.clipboardBinding, clipboardShortcutEnabled: latestClipboardBinding?.enabled ?? data.clipboardShortcutEnabled, shortcutErrors: latestClipboardBinding?.shortcutErrors ?? data.shortcutErrors, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
         setConnected(true);
       }
     }
@@ -114,7 +119,11 @@ export default function App() {
         return { ...value, window: { ...value.window, recordView: args?.view as 'clipboard' | 'translation', historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: keep && value.window.translationVisible, translationExtent: keep ? value.window.translationExtent : 0, clipboardDetailId: keep ? value.window.clipboardDetailId : null } };
       });
       if (name === 'clipboard_details_select') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardDetailId: String(args?.recordId) } }));
-      if (name === 'records_details_toggle') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: !value.window.translationVisible, translationExtent: value.window.translationVisible ? 0 : value.window.translationWidth } }));
+      if (name === 'records_details_toggle') setSnapshot((value) => {
+        const recordId = args?.recordId as string | undefined;
+        const visible = !value.window.translationVisible || Boolean(recordId && value.window.clipboardDetailId !== recordId);
+        return { ...value, window: { ...value.window, translationVisible: visible, translationExtent: visible ? value.window.translationWidth : 0, ...(recordId ? { clipboardDetailId: recordId, recordsBrowsing: false } : {}) } };
+      });
       if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {
         const visible = name === 'history_toggle' ? value.window.recordView !== 'translation' || !value.window.historyVisible : Boolean(args?.visible);
         return { ...value, window: { ...value.window, recordView: 'translation', translationVisible: true, translationExtent: value.window.translationWidth, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };

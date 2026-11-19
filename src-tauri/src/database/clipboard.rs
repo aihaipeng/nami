@@ -1,7 +1,7 @@
 use super::{storage_error, HistoryDatabase};
 use crate::clipboard::{
-    valid_image_name, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage, ClipboardRecord,
-    HistoryPolicy, MAX_FILE_COUNT, MAX_TEXT_BYTES,
+    valid_image_name, CleanupPreview, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage,
+    ClipboardRecord, HistoryPolicy, MAX_FILE_COUNT, MAX_TEXT_BYTES,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -210,7 +210,7 @@ const COLUMNS: &str =
     "r.sequence,r.id,r.kind,c.text,r.date,r.is_favorite,r.is_pinned,a.payload,r.image_path,r.fingerprint";
 
 const CLEANUP_CANDIDATES: &str = "WITH cleanup(sequence) AS (
-    SELECT sequence FROM clipboard_records WHERE is_favorite=0 AND is_pinned=0 AND ?3
+    SELECT sequence FROM clipboard_records WHERE ?3 != 0 AND (?3 & CASE WHEN is_favorite=0 AND is_pinned=0 THEN 1 ELSE 2 * is_favorite + 4 * is_pinned END) != 0
     UNION
     SELECT sequence FROM clipboard_records WHERE is_favorite=0 AND is_pinned=0 AND created_at<?1
     UNION
@@ -221,47 +221,70 @@ const CLEANUP_CANDIDATES: &str = "WITH cleanup(sequence) AS (
 )";
 
 fn cleanup_parameters(
-    policy: HistoryPolicy,
-    clear: bool,
+    policy: Option<HistoryPolicy>,
+    categories: u8,
     now_ms: i64,
-) -> (Option<i64>, Option<u32>, bool) {
-    if clear {
-        (None, None, true)
-    } else {
-        (
-            policy
-                .days
-                .map(|days| now_ms.saturating_sub(i64::from(days) * 86_400_000)),
-            policy.limit,
-            false,
-        )
-    }
+) -> (Option<i64>, Option<u32>, u8) {
+    let policy = policy.unwrap_or_default();
+    (
+        policy
+            .days
+            .map(|days| now_ms.saturating_sub(i64::from(days) * 86_400_000)),
+        policy.limit,
+        categories,
+    )
 }
 
 fn cleanup_preview(
     connection: &Connection,
-    policy: HistoryPolicy,
-    clear: bool,
+    policy: Option<HistoryPolicy>,
     now_ms: i64,
-) -> Result<(usize, String), String> {
-    let mut query = connection
-        .prepare_cached(&format!(
-            "{CLEANUP_CANDIDATES} SELECT sequence FROM cleanup ORDER BY sequence"
+) -> Result<CleanupPreview, String> {
+    let mut query = if policy.is_some() {
+        connection.prepare_cached(&format!(
+            "{CLEANUP_CANDIDATES} SELECT sequence, 0 FROM cleanup ORDER BY sequence"
         ))
-        .map_err(storage_error)?;
-    let mut rows = query
-        .query(cleanup_parameters(policy, clear, now_ms))
-        .map_err(storage_error)?;
+    } else {
+        connection.prepare_cached(
+            "SELECT sequence, is_favorite + 2 * is_pinned FROM clipboard_records ORDER BY sequence",
+        )
+    }
+    .map_err(storage_error)?;
+    let mut rows = if policy.is_some() {
+        query.query(cleanup_parameters(policy, 0, now_ms))
+    } else {
+        query.query([])
+    }
+    .map_err(storage_error)?;
     let mut hash = Sha256::new();
-    hash.update([u8::from(clear)]);
-    hash.update(policy.days.unwrap_or_default().to_le_bytes());
-    hash.update(policy.limit.unwrap_or_default().to_le_bytes());
+    hash.update([u8::from(policy.is_none())]);
+    let limits = policy.unwrap_or_default();
+    hash.update(limits.days.unwrap_or_default().to_le_bytes());
+    hash.update(limits.limit.unwrap_or_default().to_le_bytes());
+    let mut counts = [0; 3];
     let mut count = 0;
+    // Manual confirmation covers the entire displayed snapshot, including each row's category.
     while let Some(row) = rows.next().map_err(storage_error)? {
+        let category = row.get::<_, u8>(1).map_err(storage_error)?;
         hash.update(row.get::<_, i64>(0).map_err(storage_error)?.to_le_bytes());
+        hash.update([category]);
+        match category {
+            0 => counts[0] += 1,
+            1 => counts[1] += 1,
+            2 => counts[2] += 1,
+            3 => {
+                counts[1] += 1;
+                counts[2] += 1;
+            }
+            _ => return Err("storage_corrupt".into()),
+        }
         count += 1;
     }
-    Ok((count, format!("{:x}", hash.finalize())))
+    Ok(CleanupPreview {
+        count,
+        token: format!("{:x}", hash.finalize()),
+        categories: policy.is_none().then_some(counts),
+    })
 }
 
 fn image_referenced(connection: &Connection, path: &str) -> Result<bool, String> {
@@ -708,11 +731,11 @@ impl HistoryDatabase {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        let (favorite, pinned): (bool, bool) = transaction
+        let pinned: bool = transaction
             .query_row(
-                "SELECT is_favorite,is_pinned FROM clipboard_records WHERE id=?1",
+                "SELECT is_pinned FROM clipboard_records WHERE id=?1",
                 [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()
             .map_err(storage_error)?
@@ -738,7 +761,6 @@ impl HistoryDatabase {
                 transaction.commit().map_err(storage_error)?;
                 return Ok(());
             }
-            "delete" if favorite || pinned => return Err("clipboard_protected".into()),
             "delete" => "DELETE FROM clipboard_records WHERE id=?1",
             _ => return Err("invalid_argument".into()),
         };
@@ -769,27 +791,25 @@ impl HistoryDatabase {
 
     pub fn clipboard_cleanup_preview(
         &self,
-        policy: HistoryPolicy,
-        clear: bool,
+        policy: Option<HistoryPolicy>,
         now_ms: i64,
-    ) -> Result<(usize, String), String> {
-        if !policy.valid() {
+    ) -> Result<CleanupPreview, String> {
+        if policy.is_some_and(|value| !value.valid()) {
             return Err("invalid_argument".into());
         }
-        cleanup_preview(&self.connection, policy, clear, now_ms)
+        cleanup_preview(&self.connection, policy, now_ms)
     }
 
     pub fn clipboard_cleanup(
         &mut self,
-        policy: HistoryPolicy,
-        clear: bool,
+        policy: Option<HistoryPolicy>,
+        categories: u8,
         now_ms: i64,
         expected: Option<&str>,
-        save_policy: bool,
     ) -> Result<(usize, Vec<String>), String> {
-        if !policy.valid()
-            || (clear && save_policy)
-            || ((clear || save_policy) && expected.is_none())
+        if policy.is_some_and(|value| !value.valid())
+            || (policy.is_some() && categories != 0)
+            || (policy.is_none() && (!(1..=7).contains(&categories) || expected.is_none()))
         {
             return Err("invalid_argument".into());
         }
@@ -798,12 +818,11 @@ impl HistoryDatabase {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         if let Some(expected) = expected {
-            let (_, token) = cleanup_preview(&transaction, policy, clear, now_ms)?;
-            if token != expected {
+            if cleanup_preview(&transaction, policy, now_ms)?.token != expected {
                 return Err("clipboard_cleanup_changed".into());
             }
         }
-        let parameters = cleanup_parameters(policy, clear, now_ms);
+        let parameters = cleanup_parameters(policy, categories, now_ms);
         let images = {
             let mut query = transaction.prepare_cached(&format!("{CLEANUP_CANDIDATES}
                 SELECT r.image_path FROM cleanup JOIN clipboard_records r USING(sequence) WHERE r.image_path IS NOT NULL
@@ -815,8 +834,8 @@ impl HistoryDatabase {
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(storage_error)?
         };
-        let removed = transaction.prepare_cached(&format!("{CLEANUP_CANDIDATES} DELETE FROM clipboard_records WHERE sequence IN (SELECT sequence FROM cleanup) AND is_favorite=0 AND is_pinned=0")).map_err(storage_error)?.execute(parameters).map_err(storage_error)?;
-        if save_policy {
+        let removed = transaction.prepare_cached(&format!("{CLEANUP_CANDIDATES} DELETE FROM clipboard_records WHERE sequence IN (SELECT sequence FROM cleanup)")).map_err(storage_error)?.execute(parameters).map_err(storage_error)?;
+        if let (Some(policy), Some(_)) = (policy, expected) {
             let value = serde_json::to_string(&policy).map_err(|_| "storage_record")?;
             transaction.execute("INSERT INTO preferences(key,value) VALUES('clipboard_history_policy',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [value]).map_err(storage_error)?;
         }
@@ -888,10 +907,26 @@ impl HistoryDatabase {
             .map_err(storage_error)
     }
 
+    pub fn reset_clipboard_shortcuts(
+        &mut self,
+        binding: &str,
+        records: &str,
+    ) -> Result<(), String> {
+        self.connection.execute(
+            "INSERT INTO preferences(key,value) VALUES
+              ('clipboard_shortcut', ?1), ('clipboard_shortcut_enabled', 'true'), ('clipboard_record_shortcuts', ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![binding, records],
+        ).map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn preference_set(&mut self, key: &str, value: &str) -> Result<(), String> {
         const KEYS: &[&str] = &[
             "clipboard_recording_types",
             "clipboard_shortcut",
+            "clipboard_shortcut_enabled",
+            "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
             "clipboard_activation",
             "translation_engine",
@@ -902,6 +937,7 @@ impl HistoryDatabase {
             "translation_proxy_enabled",
             "translation_selection_enabled",
             "translation_shortcuts",
+            "translation_disabled_shortcuts",
         ];
         if !KEYS.contains(&key) {
             return Err("invalid_argument".into());
@@ -978,10 +1014,10 @@ mod tests {
             db.clipboard_insert(&old).unwrap();
             db.clipboard_update(flag, flag).unwrap();
         }
-        let (count, token) = db.clipboard_cleanup_preview(policy, false, now).unwrap();
-        assert_eq!(count, 2);
+        let preview = db.clipboard_cleanup_preview(Some(policy), now).unwrap();
+        assert_eq!(preview.count, 2);
         assert_eq!(
-            db.clipboard_cleanup(policy, false, now, Some(&token), true)
+            db.clipboard_cleanup(Some(policy), 0, now, Some(&preview.token))
                 .unwrap(),
             (2, vec![])
         );
@@ -1023,21 +1059,23 @@ mod tests {
         };
         db.clipboard_insert(&record("first", "first")).unwrap();
         assert_eq!(
-            db.clipboard_cleanup_preview(policy, false, now).unwrap().0,
+            db.clipboard_cleanup_preview(Some(policy), now)
+                .unwrap()
+                .count,
             0
         );
-        let (_, original) = db
-            .clipboard_cleanup_preview(policy, false, now + 1)
-            .unwrap();
+        let original = db
+            .clipboard_cleanup_preview(Some(policy), now + 1)
+            .unwrap()
+            .token;
         db.clipboard_update("first", "favorite").unwrap();
         db.clipboard_insert(&record("second", "second")).unwrap();
-        let (count, replacement) = db
-            .clipboard_cleanup_preview(policy, false, now + 1)
-            .unwrap();
-        assert_eq!(count, 1);
+        let preview = db.clipboard_cleanup_preview(Some(policy), now + 1).unwrap();
+        assert_eq!(preview.count, 1);
+        let replacement = preview.token;
         assert_ne!(original, replacement);
         assert_eq!(
-            db.clipboard_cleanup(policy, false, now + 1, Some(&original), true)
+            db.clipboard_cleanup(Some(policy), 0, now + 1, Some(&original))
                 .unwrap_err(),
             "clipboard_cleanup_changed"
         );
@@ -1046,7 +1084,7 @@ mod tests {
 
         db.connection.execute_batch("CREATE TRIGGER refuse_history_policy BEFORE INSERT ON preferences WHEN new.key='clipboard_history_policy' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
         assert!(db
-            .clipboard_cleanup(policy, false, now + 1, Some(&replacement), true)
+            .clipboard_cleanup(Some(policy), 0, now + 1, Some(&replacement))
             .is_err());
         assert!(db.clipboard_record("second").is_ok());
         assert_eq!(
@@ -1055,6 +1093,73 @@ mod tests {
                 .total_records,
             2
         );
+    }
+
+    #[test]
+    fn clipboard_clear_applies_only_the_selected_category_mask() {
+        let labels = ["ordinary", "favorite", "pinned", "both"];
+        for mask in 1..=7 {
+            let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+            for (category, label) in labels.iter().enumerate() {
+                let mut item = record(label, label);
+                item.is_favorite = category & 1 != 0;
+                item.is_pinned = category & 2 != 0;
+                db.clipboard_insert(&item).unwrap();
+            }
+            let preview = db.clipboard_cleanup_preview(None, 0).unwrap();
+            assert_eq!(preview.categories, Some([1, 2, 2]));
+            assert_eq!(preview.count, 4);
+            let selected = [1, 2, 4, 6].map(|flags| mask & flags != 0);
+            assert_eq!(
+                db.clipboard_cleanup(None, mask, 0, Some(&preview.token))
+                    .unwrap()
+                    .0,
+                selected.iter().filter(|&&item| item).count()
+            );
+            for (label, remove) in labels.iter().zip(selected) {
+                assert_eq!(db.clipboard_record(label).is_err(), remove);
+            }
+            assert_eq!(db.preference("clipboard_history_policy").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn clipboard_clear_rejects_missing_selection_or_a_changed_snapshot() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        db.clipboard_insert(&record("first", "first")).unwrap();
+        db.clipboard_insert(&record("second", "second")).unwrap();
+        db.clipboard_update("first", "favorite").unwrap();
+        let preview = db.clipboard_cleanup_preview(None, 0).unwrap();
+        let token = Some(preview.token.as_str());
+        assert_eq!(
+            db.clipboard_cleanup(None, 0, 0, token).unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_cleanup(None, 8, 0, token).unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_cleanup(None, 1, 0, None).unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_cleanup(Some(HistoryPolicy::default()), 1, 0, token)
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        db.clipboard_update("first", "favorite").unwrap();
+        db.clipboard_update("second", "favorite").unwrap();
+        assert_eq!(
+            db.clipboard_cleanup_preview(None, 0).unwrap().categories,
+            preview.categories
+        );
+        assert_eq!(
+            db.clipboard_cleanup(None, 2, 0, token).unwrap_err(),
+            "clipboard_cleanup_changed"
+        );
+        assert!(db.clipboard_record("first").is_ok());
+        assert!(db.clipboard_record("second").is_ok());
     }
 
     #[test]
@@ -1072,22 +1177,18 @@ mod tests {
             .unwrap();
         let before = db.clipboard_storage_bytes().unwrap();
         assert!(before > 0);
-        let policy = HistoryPolicy::default();
-        let (_, token) = db.clipboard_cleanup_preview(policy, true, 0).unwrap();
+        let token = db.clipboard_cleanup_preview(None, 0).unwrap().token;
         assert_eq!(
-            db.clipboard_cleanup(policy, true, 0, Some(&token), false)
-                .unwrap(),
+            db.clipboard_cleanup(None, 1, 0, Some(&token)).unwrap(),
             (1, vec![])
         );
         assert!(db.clipboard_storage_bytes().unwrap() < before);
         assert!(db
             .clipboard_image_referenced(&attachment.image_path)
             .unwrap());
-        db.clipboard_update("files", "favorite").unwrap();
-        let (_, token) = db.clipboard_cleanup_preview(policy, true, 0).unwrap();
+        let token = db.clipboard_cleanup_preview(None, 0).unwrap().token;
         assert_eq!(
-            db.clipboard_cleanup(policy, true, 0, Some(&token), false)
-                .unwrap(),
+            db.clipboard_cleanup(None, 2, 0, Some(&token)).unwrap(),
             (1, vec![attachment.image_path])
         );
         assert_eq!(db.clipboard_storage_bytes().unwrap(), 0);
@@ -2248,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_persistence_deduplication_and_protection() {
+    fn clipboard_persistence_deduplication_and_explicit_delete() {
         let directory =
             std::env::temp_dir().join(format!("nami-clipboard-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -2269,31 +2370,29 @@ mod tests {
         assert_eq!(saved.id, "first");
         assert!(saved.is_favorite);
         assert_eq!(saved.date, duplicate.date);
-        assert_eq!(
-            database.clipboard_update("first", "delete").unwrap_err(),
-            "clipboard_protected"
-        );
         database.clipboard_capture_set(true).unwrap();
         drop(database);
         let mut database = HistoryDatabase::open(&path).unwrap();
         assert!(database.clipboard_capture_enabled().unwrap());
         assert_eq!(database.clipboard_record("first").unwrap().text, item.text);
-        database.clipboard_update("first", "favorite").unwrap();
-        database.clipboard_update("first", "pin").unwrap();
-        assert!(database.clipboard_update("first", "delete").is_err());
-        database.clipboard_update("first", "pin").unwrap();
+        for (favorite, pinned) in [(true, false), (false, true), (true, true), (false, false)] {
+            let mut item = item.clone();
+            item.is_favorite = favorite;
+            item.is_pinned = pinned;
+            database.clipboard_update("first", "delete").unwrap();
+            database.clipboard_insert(&item).unwrap();
+            let stored = database.clipboard_record("first").unwrap();
+            assert_eq!((stored.is_favorite, stored.is_pinned), (favorite, pinned));
+        }
         database.clipboard_update("first", "delete").unwrap();
         assert_eq!(database.clipboard_record("first").unwrap_err(), "not_found");
-        database.clipboard_insert(&item).unwrap();
-        database.clipboard_update("first", "favorite").unwrap();
-        database.clipboard_update("first", "pin").unwrap();
         assert_eq!(
-            database.clipboard_update("first", "delete").unwrap_err(),
-            "clipboard_protected"
+            database
+                .clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            0
         );
-        let protected = database.clipboard_record("first").unwrap();
-        assert!(protected.is_favorite && protected.is_pinned);
-        assert_eq!(protected.text, item.text);
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }

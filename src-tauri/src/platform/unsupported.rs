@@ -79,6 +79,10 @@ pub fn clipboard_image_preview(_: &[u8], _: u32) -> Result<Vec<u8>, &'static str
     Err(UNAVAILABLE)
 }
 
+pub(crate) fn application_presentation(_: &str) -> Option<(Option<String>, Option<String>)> {
+    None
+}
+
 pub fn file_icon_data_url(_: &str) -> Option<String> {
     None
 }

@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Check, ClipboardList, Languages, Settings2, ShieldCheck } from 'lucide-react';
+import { Check, ClipboardList, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
 import type { ViewProps } from '../App';
 import type { Locale } from '../shared/contracts';
 import './settings.css';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
+import { HotKeySettings } from './HotKeySettings';
 import { ClipboardSettings } from './ClipboardSettings';
 import { TranslationSettings } from './TranslationSettings';
 
 const pages = [
   { value: 'general', icon: Settings2 },
-  { value: 'translation', icon: Languages },
+  { value: 'translationPage', icon: Languages },
   { value: 'clipboard', icon: ClipboardList },
+  { value: 'hotKey', icon: Keyboard },
   { value: 'privacy', icon: ShieldCheck },
 ] as const;
 
@@ -23,14 +25,14 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
       <div className="settings-brand" data-tauri-drag-region>{t('settings')}</div>
       <nav aria-label={t('settings')}>
         {pages.map(({ value, icon: Icon }) => {
-          const label = t(value === 'translation' ? 'translationPage' : value);
+          const label = t(value);
           return <button type="button" key={value} aria-label={label} title={label} aria-current={page === value ? 'page' : undefined} onClick={() => setPage(value)}><Icon aria-hidden="true" /><span>{label}</span></button>;
         })}
       </nav>
     </aside>
     <section key={page} className="settings-content" aria-labelledby="settings-page-title">
       <div className="settings-page">
-        <header className="settings-page-heading"><h1 id="settings-page-title">{t(page === 'translation' ? 'translationPage' : page)}</h1></header>
+        <header className="settings-page-heading"><h1 id="settings-page-title">{t(page)}</h1></header>
         {page === 'general' && <section aria-labelledby="settings-personalization">
           <h2 id="settings-personalization">{t('personalization')}</h2>
           <div className="settings-group">
@@ -43,8 +45,9 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
             <div className="settings-field"><span className="settings-field-content">{t('appearance')}</span><span className="settings-badge">{t('followSystem')}</span></div>
           </div>
         </section>}
-        {page === 'translation' && <TranslationSettings t={t} snapshot={snapshot} command={command} native={native} />}
+        {page === 'translationPage' && <TranslationSettings t={t} snapshot={snapshot} command={command} native={native} />}
         {page === 'clipboard' && <ClipboardSettings t={t} snapshot={snapshot} native={native} />}
+        {page === 'hotKey' && <HotKeySettings t={t} snapshot={snapshot} native={native} />}
         {page === 'privacy' && <div className="settings-sections">
           <section aria-labelledby="settings-permission">
             <h2 id="settings-permission">{t('systemPermission')}</h2>
@@ -61,7 +64,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
           </section>
           <div className="version-row"><span>{t('version')}</span><span>0.1.0 · P0</span></div>
         </div>}
-        {(page === 'translation' || page === 'clipboard') && snapshot.shortcutErrors.length > 0 && <p className="settings-callout settings-error" role="alert">{t('shortcutFailed')}</p>}
+        {page === 'hotKey' && snapshot.shortcutErrors.length > 0 && <p className="settings-callout settings-error" role="alert">{t('shortcutFailed')}</p>}
       </div>
     </section>
   </div>;

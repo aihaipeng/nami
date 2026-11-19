@@ -6,11 +6,11 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/
 import { DeleteButton } from './DeleteButton';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
-export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false, recordId }: Pick<ViewProps, 't' | 'native'> & {
-  favorite: boolean; pinned: boolean; canCopy: boolean;
-  copyLabel: string; deleteLabel: string;
-  onCopy: () => void | boolean | Promise<boolean>; onUpdate: (action: 'favorite' | 'pin' | 'delete') => void;
-  onTranslate?: () => void; onOcr?: () => void; onNote?: () => void; busy?: boolean; retainDelete?: boolean; recordId?: string;
+export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false, allowMarkedDelete = false, recordId }: Pick<ViewProps, 't' | 'native'> & {
+  favorite: boolean; pinned: boolean; canCopy?: boolean;
+  copyLabel?: string; deleteLabel: string;
+  onCopy?: () => void | boolean | Promise<boolean>; onUpdate: (action: 'favorite' | 'pin' | 'delete') => void;
+  onTranslate?: () => void; onOcr?: () => void; onNote?: () => void; busy?: boolean; retainDelete?: boolean; allowMarkedDelete?: boolean; recordId?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -25,16 +25,16 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
     copying.current = true;
     const generation = copyGeneration.current;
     try {
-      if (await onCopy() === true && generation === copyGeneration.current) {
+      if (await onCopy?.() === true && generation === copyGeneration.current) {
         setCopied(true);
         copyTimer.current = setTimeout(() => setCopied(false), 1000);
       }
     } finally { if (generation === copyGeneration.current) copying.current = false; }
   }
   const reduceMotion = useReducedMotion();
-  const protectedRecord = favorite || pinned;
+  const protectedRecord = !allowMarkedDelete && (favorite || pinned);
   const actions = [
-    { id: 'copy', label: copyLabel, icon: 'doc.on.doc' as const, disabled: !canCopy, onClick: () => { void copy(); } },
+    ...(onCopy ? [{ id: 'copy', label: copyLabel ?? t('copy'), icon: 'doc.on.doc' as const, disabled: !canCopy, onClick: () => { void copy(); } }] : []),
     ...(onTranslate ? [{ id: 'translate', label: 'Translate', icon: 'languages' as const, disabled: busy, onClick: onTranslate }] : []),
     ...(onOcr ? [{ id: 'ocr', label: 'Extract text', icon: 'ocr' as const, disabled: busy, onClick: onOcr }] : []),
     ...(onNote ? [{ id: 'note', label: 'Note', icon: 'note' as const, onClick: onNote }] : []),

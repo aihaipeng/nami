@@ -32,7 +32,6 @@ beforeEach(() => {
     }
     if (name === 'clipboard_record_detail') return fetchDetail ? fetchDetail(id!) : structuredClone(records.find((record) => record.id === id)!);
     if (name === 'clipboard_record_has_text') return id === 'image-text';
-    if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
     if (name === 'clipboard_record_update') {
       const record = records.find((record) => record.id === id)!;
       const action = (args as { action: string }).action;
@@ -96,60 +95,7 @@ describe('clipboard details', () => {
     expect(row('first').querySelector('button')?.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it.each([
-    ['clipboard_file_missing', 'not_written', 'The original file was moved or deleted and cannot be restored'],
-    ['clipboard_image_missing', 'not_written', 'The saved image is unavailable and cannot be restored'],
-    [null, 'superseded', 'Clipboard content changed. Copy the record again.'],
-  ] as const)('preserves actionable copy feedback for %s / %s', async (code, copyStatus, message) => {
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_record_use' ? {status: 'failed', copyStatus, code} : original(name,args));
-    direct();
-    fireEvent.click(await within(pane()).findByRole('button', {name:'Copy'}));
-    expect(await within(pane()).findByText(message)).toBeTruthy();
-    expect(pane().querySelector('.copy-success')).toBeNull();
-    expect(document.querySelector('.global-error')).toBeNull();
-  });
-
-  it.each([
-    ['clipboard_file_missing', 'The original file was moved or deleted and cannot be restored'],
-    ['clipboard_image_missing', 'The saved image is unavailable and cannot be restored'],
-    ['clipboard_write', 'Content was not copied. Try again.'],
-  ])('maps a rejected detail copy %s through the same feedback as the list', async (code, message) => {
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name,args)=> { if (name === 'clipboard_record_use') throw new Error(code); return original(name,args); });
-    direct();
-    fireEvent.click(await within(pane()).findByRole('button',{name:'Copy'}));
-    expect(await within(pane()).findByText(message)).toBeTruthy();
-    expect(pane().querySelector('.copy-success')).toBeNull();
-  });
-
-  it('drops late copy failures after the detail identity changes', async () => {
-    let reject!: (error: Error) => void;
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name,args)=> name === 'clipboard_record_use' ? new Promise((_,fail)=>{reject=fail;}) : original(name,args));
-    await open();
-    fireEvent.click(within(pane()).getByRole('button',{name:'Copy'}));
-    fireEvent.mouseMove(row('second'));
-    await waitFor(()=>expect(within(pane()).getByText('Second text')).toBeTruthy());
-    await act(async()=>reject(new Error('clipboard_file_missing')));
-    expect(pane().querySelector('.record-feedback')).toBeNull();
-    expect(pane().querySelector('.copy-success')).toBeNull();
-  });
-
-  it('keeps a newer copy result when an older processing task fails', async () => {
-    let reject!: (error: Error) => void;
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name,args)=> name === 'clipboard_record_process' ? new Promise((_,fail)=>{reject=fail;}) : original(name,args));
-    direct();
-    fireEvent.click(await within(pane()).findByRole('button',{name:'Translate'}));
-    await act(async()=>fireEvent.click(within(pane()).getByRole('button',{name:'Copy'})));
-    await act(async()=>reject(new Error('old_failure')));
-    expect(pane().querySelector('.record-feedback')).toBeNull();
-    expect(within(pane()).getByRole('button',{name:'Translate'})).toHaveProperty('disabled',false);
-    expect(pane().querySelector('.copy-success')).toBeTruthy();
-  });
-
-  it('keeps marks and copy available during processing without releasing its processing guard', async () => {
+  it('keeps marks available during processing without releasing its processing guard', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     let finish!: () => void;
     bridge.invoke.mockImplementation((name,args) => name === 'clipboard_record_process' ? new Promise<void>((resolve)=>{finish=resolve;}) : original(name,args));
@@ -161,7 +107,7 @@ describe('clipboard details', () => {
     const favorite = within(pane()).getByRole('button',{name:'Favorite'});
     expect(favorite).toHaveProperty('disabled',false);
     expect(within(pane()).getByRole('button',{name:'Note'})).toHaveProperty('disabled',false);
-    await act(async()=>fireEvent.click(within(pane()).getByRole('button',{name:'Copy'})));
+    await act(async()=>fireEvent.click(favorite));
     expect(translate).toHaveProperty('disabled',true);
     fireEvent.click(translate);
     expect(calls('clipboard_record_process')).toHaveLength(1);
@@ -169,19 +115,11 @@ describe('clipboard details', () => {
     expect(translate).toHaveProperty('disabled',false);
   });
 
-  it('confirms detail copy inline without lighting the page', async () => {
-    await mount('translation');
-    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
-    const detail = await screen.findByRole('region', { name: 'Clipboard details' });
-    await waitFor(() => expect(within(detail).getByRole('button', { name: 'Copy' })).toBeTruthy());
-    const original = bridge.invoke.getMockImplementation()!;
-    let finish!: (value: unknown) => void;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'clipboard_record_use' ? new Promise((resolve) => { finish = resolve; }) : original(name, args));
-    const button = within(detail).getByRole('button', { name: 'Copy' });
-    fireEvent.click(button);
-    expect(within(detail).queryByRole('progressbar')).toBeNull();
-    await act(async () => finish({ status: 'copied', copyStatus: 'current', code: null }));
-    expect(button.querySelector('.copy-success')).toBeTruthy();
+  it('offers no standalone record copy in the detail toolbar', async () => {
+    direct();
+    await within(pane()).findByRole('button', { name: 'Translate' });
+    expect(within(pane()).queryByRole('button', { name: 'Copy' })).toBeNull();
+    expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
   it('expands the first unpinned record, keeps full text and source name, and adds Note after text actions', async () => {
@@ -194,12 +132,12 @@ describe('clipboard details', () => {
     expect(within(pane()).getByText('1,200')).toBeTruthy();
     expect(within(pane()).queryByText('Dimensions')).toBeNull();
     expect(within(pane()).queryByText('Size')).toBeNull();
-    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['copy', 'translate', 'note', 'favorite', 'pin', 'delete']);
+    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['translate', 'note', 'favorite', 'pin', 'delete']);
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
     expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')?.getAttribute('style')).toBe(row('first').querySelector('[data-action=note] .history-symbol')?.getAttribute('style'));
   });
 
-  it('follows hover and keyboard focus without pasting, keeps preview on leave, and resets to first on reopen', async () => {
+  it('follows hover and keyboard focus without pasting, keeps preview on leave, and preserves the keyboard target on details reopen', async () => {
     await open();
     fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
@@ -212,7 +150,7 @@ describe('clipboard details', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
-    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('first'));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('pinned'));
   });
 
   it('drops conditional detail actions immediately while sliding between records', async () => {
@@ -223,7 +161,7 @@ describe('clipboard details', () => {
     await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
     expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
     expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
-    expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
+    expect(pane().querySelectorAll('.history-action')).toHaveLength(4);
   });
 
   it('disables every retained detail action while a new record loads and delays the shared activity beam', async () => {
@@ -246,7 +184,7 @@ describe('clipboard details', () => {
     await act(async () => resolve(structuredClone(records.find((record) => record.id === 'second')!)));
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
     expect(within(pane()).queryByRole('progressbar')).toBeNull();
-    expect(within(pane()).getByRole('button', { name: 'Copy' })).toHaveProperty('disabled', false);
+    expect(within(pane()).getByRole('button', { name: 'Note' })).toHaveProperty('disabled', false);
   });
 
   it('ignores an old detail response after moving to another record or hiding', async () => {
@@ -269,12 +207,12 @@ describe('clipboard details', () => {
     fireEvent.click(within(pane()).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
     expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toBe(remove);
-    expect(remove).toHaveProperty('disabled', true);
+    expect(remove).toHaveProperty('disabled', false);
     fireEvent.click(remove);
     expect(calls('clipboard_record_update').filter(([,args]) => (args as {action:string}).action === 'delete')).toHaveLength(0);
     fireEvent.mouseMove(row('pinned'));
     await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
-    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toHaveProperty('disabled', true);
+    expect(within(pane()).getByRole('button', { name: 'Delete clipboard record' })).toHaveProperty('disabled', false);
     fireEvent.click(within(pane()).getByRole('button', { name: 'Note' }));
     expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
     await waitFor(() => expect(pane().hasAttribute('inert')).toBe(true));
@@ -320,7 +258,6 @@ describe('clipboard details', () => {
   });
 
   it.each([
-    ['Copy', 'clipboard_record_use', { recordId: 'first', action: 'copy' }],
     ['Translate', 'clipboard_record_process', { recordId: 'first', action: 'translate' }],
     ['Pin record', 'clipboard_record_update', { recordId: 'first', action: 'pin' }],
     ['Delete clipboard record', 'clipboard_record_update', { recordId: 'first', action: 'delete' }],
@@ -333,15 +270,6 @@ describe('clipboard details', () => {
       fireEvent.click(button);
     }
     await waitFor(() => expect(calls(name).at(-1)?.[1]).toEqual(args));
-  });
-
-  it('reports a failed copy and restores the action buttons', async () => {
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_record_use' ? { status: 'failed', copyStatus: 'not_written', code: 'clipboard_write' } : original(name, args));
-    direct();
-    fireEvent.click(await within(pane()).findByRole('button', { name: 'Copy' }));
-    expect(await within(pane()).findByText('Content was not copied. Try again.')).toBeTruthy();
-    expect(within(pane()).getByRole('button', { name: 'Copy' })).toHaveProperty('disabled', false);
   });
 
   it('shows the detail scrollbar on keyboard focus or scroll, then hides after idle', async () => {

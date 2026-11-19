@@ -942,9 +942,17 @@ fn evaluate_view_dom(
 }
 
 fn wait_dom(app: &AppHandle, script: &str) -> Result<serde_json::Value, String> {
+    wait_view_dom(app, "translation", script)
+}
+
+fn wait_view_dom(
+    app: &AppHandle,
+    label: &'static str,
+    script: &str,
+) -> Result<serde_json::Value, String> {
     let mut last = serde_json::Value::Null;
     for _ in 0..40 {
-        let value = evaluate_dom(app, script)?;
+        let value = evaluate_view_dom(app, label, script)?;
         if value["ready"] == true {
             return Ok(value);
         }
@@ -1544,6 +1552,196 @@ fn run_source_editing(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_translation_settings(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let visible = std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1");
+    let result = (|| {
+        on_main(app, move |app| {
+            let window = create(app, "settings")?;
+            window
+                .set_size(tauri::LogicalSize::new(760.0, 640.0))
+                .map_err(|_| "window_size")?;
+            if visible {
+                show(app, "settings")?;
+            }
+            Ok(())
+        })?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"const nav=document.querySelector('button[aria-label="Translation"]');if(!nav)return {ready:false};if(!nav.hasAttribute('aria-current'))nav.click();return {ready:!!document.querySelector('#translation-proxy-url')};"#,
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+        )?;
+        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('[aria-label="Use HTTP Proxy"]'), page=document.querySelector('.settings-content');return {ready:field.getAttribute('aria-invalid')==='true'&&!toggle.checked&&page.scrollWidth===page.clientWidth,rejectedEmpty:!toggle.checked,horizontalOverflow:page.scrollWidth-page.clientWidth};"#)?);
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"const field=document.querySelector('#translation-proxy-url');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,'http://proxy.example.test:8080');field.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+        )?;
+        samples.push(wait_view_dom(app, "settings", r#"const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('[aria-label="Use HTTP Proxy"]');return {ready:toggle.checked&&!field.readOnly&&field.getAttribute('aria-invalid')==='false',enabled:toggle.checked};"#)?);
+        let state = app.state::<AppState>();
+        if state.translation_preferences.lock().unwrap().proxy_url
+            != "http://proxy.example.test:8080"
+        {
+            return Err("proxy was enabled without the submitted address".into());
+        }
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"document.querySelector('[aria-label="Use HTTP Proxy"]').click();return true;"#,
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"return {ready:!document.querySelector('[aria-label="Use HTTP Proxy"]').checked&&!document.querySelector('#translation-proxy-url').readOnly};"#,
+        )?;
+        let styles = evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+const controls=[...document.querySelectorAll('.settings-dropdown')];
+if(document.querySelector('.settings-recorder'))throw Error('translation preferences still contain shortcut recorders');
+const transparent='rgba(0, 0, 0, 0)', idle=controls.filter(control=>!control.matches(':hover, :focus-visible'));
+if(!idle.length||idle.some(control=>getComputedStyle(control).backgroundColor!==transparent||getComputedStyle(control).borderTopColor!==transparent))throw Error('idle controls still draw a surface or boundary');
+const title=parseFloat(getComputedStyle(document.querySelector('.settings-page h1')).fontSize);
+const headings=[...document.querySelectorAll('.settings-page h2')].map(h=>parseFloat(getComputedStyle(h).fontSize));
+if(title!==22||headings.some(size=>size!==16)||document.querySelector('.settings-page :is(h1,h2) svg'))throw Error('settings titles must use a compact, text-only hierarchy');
+const groups=[...document.querySelectorAll('.settings-group')];
+if(groups.some(group=>getComputedStyle(group).borderTopWidth!=='0px'||getComputedStyle(group).backgroundColor===transparent))throw Error('settings groups must use fill without an enclosing line');
+const divider=getComputedStyle(document.querySelector('.settings-field + .settings-field')).borderTopWidth;
+if(divider!=='1px')throw Error('row separators were removed');
+const proxy=document.querySelector('#translation-proxy-url');
+proxy.focus({preventScroll:true});
+const control=controls.find(item=>!item.matches(':hover'));
+control.focus({preventScroll:true});
+const focus=getComputedStyle(control);
+const focusVisible=control.matches(':focus-visible');
+if(document.activeElement!==control||focus.outlineStyle!=='none'||focus.borderTopColor!==transparent||focus.textDecorationLine!=='none'||(focusVisible&&focus.backgroundColor===transparent))throw Error('keyboard focus must use background without a frame or underline');
+return {title,headings,cards:groups.length,divider,focusVisible,focusBackground:focus.backgroundColor};
+"#,
+        )?;
+        if visible && styles["focusVisible"] != true {
+            return Err(format!(
+                "visible dropdown did not show keyboard focus: {styles}"
+            ));
+        }
+        samples.push(styles);
+        evaluate_view_dom(
+            app,
+            "settings",
+            "document.querySelector('.settings-dropdown').click();return true;",
+        )?;
+        samples.push(wait_view_dom(app, "settings", r#"
+const popup=document.querySelector('.settings-popover');if(!popup)return {ready:false};
+const option=popup.querySelector('button[data-active=true]');if(!option)return {ready:false};
+if(getComputedStyle(popup).borderTopWidth!=='0px'||getComputedStyle(option).outlineStyle!=='none')throw Error('settings picker still draws an enclosing or focus line');
+option.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+return {ready:true,framelessPicker:true};
+"#)?);
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const nav=document.querySelector('button[aria-label="HotKey"]');if(!nav)return {ready:false};
+if(!nav.hasAttribute('aria-current'))nav.click();
+return {ready:!!document.querySelector('#translation-shortcuts-heading')};
+"#,
+        )?;
+        if visible {
+            wait_view_dom(app, "settings", "return {ready:document.hasFocus()};")?;
+        }
+        let clear_style = evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+const recorder=document.querySelector('[aria-label="Open Translation Shortcut"]'), row=recorder.parentElement;
+const restore=document.querySelector('#translation-shortcuts-heading + button'), transparent='rgba(0, 0, 0, 0)';
+for(const control of [recorder,restore].filter(node=>!node.matches(':hover, :focus-visible'))) {
+  const style=getComputedStyle(control);
+  if(style.backgroundColor!==transparent||style.borderTopColor!==transparent)throw Error('idle shortcut controls still draw a surface or boundary');
+}
+const clear=row.querySelector('.settings-clear');
+if(!row.matches(':hover')&&getComputedStyle(clear).opacity!=='0')throw Error('clear action is visible on an idle recorder');
+clear.focus({preventScroll:true});
+const clearFocus=getComputedStyle(clear);
+const focusVisible=clear.matches(':focus-visible');
+if(document.activeElement!==clear||clearFocus.backgroundColor!==transparent||clearFocus.borderTopColor!==transparent||(focusVisible&&(clearFocus.opacity!=='1'||clearFocus.outlineStyle==='none')))throw Error('clear action must keep a keyboard focus indicator without a button surface');
+const long=document.querySelector('[aria-label="Pin / Unpin Window shortcut"]');
+const bounds=button=>button.getBoundingClientRect(), keyWidth=button=>bounds(button.querySelector('.keycaps')).width;
+const shortWidth=bounds(recorder).width, longWidth=bounds(long).width;
+if(shortWidth-keyWidth(recorder)>34||Math.abs((longWidth-shortWidth)-(keyWidth(long)-keyWidth(recorder)))>.1||longWidth<=shortWidth)throw Error('shortcut controls do not fit their keycaps');
+const layout=bounds(row.closest('.settings-shortcut-row')), label=bounds(row.previousElementSibling), checkbox=bounds(row.nextElementSibling);
+if(Math.abs(label.left-layout.left)>.1||label.right>bounds(recorder).left||checkbox.width!==16||Math.abs(checkbox.right-layout.right)>.1)throw Error('shortcut row is not laid out as name, recorder, checkbox: '+JSON.stringify({layout,label,recorder:bounds(recorder),checkbox}));
+window.__shortcutRect=bounds(recorder).toJSON();
+recorder.click();
+return {focusVisible};
+"#,
+        )?;
+        if visible && clear_style["focusVisible"] != true {
+            return Err("visible clear button did not show keyboard focus".into());
+        }
+        let suspended = || {
+            state
+                .shortcuts_suspended
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        for _ in 0..40 {
+            if suspended() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !suspended() {
+            return Err("recording did not suspend global shortcuts".into());
+        }
+        samples.push(wait_view_dom(app, "settings", r#"
+const recorder=document.querySelector('[aria-label="Open Translation Shortcut"]'), prompt=recorder.querySelector('.settings-recorder-prompt');
+if(!prompt)return {ready:false};
+const before=window.__shortcutRect, after=recorder.getBoundingClientRect();
+const anchored=Math.abs(before.left-after.left)<.1&&['y','height'].every(key=>Math.abs(before[key]-after[key])<.1);
+const clear=getComputedStyle(recorder.parentElement.querySelector('.settings-clear'));
+if(clear.backgroundColor!=='rgba(0, 0, 0, 0)'||clear.borderTopColor!=='rgba(0, 0, 0, 0)')throw Error('clear action draws a surface during recording');
+if(!anchored||after.width-prompt.getBoundingClientRect().width>34||clear.opacity!=='1'||recorder.querySelector('.keycaps')||prompt.textContent!=='Press shortcut')throw Error('shortcut recording loses alignment or fails to fit the prompt');
+return {ready:true,anchored,idleWidth:before.width,recordingWidth:after.width};
+"#)?);
+        if visible {
+            on_main(app, |app| hide(app, "settings"))?;
+        } else {
+            evaluate_view_dom(
+                app,
+                "settings",
+                "window.dispatchEvent(new FocusEvent('blur'));return true;",
+            )?;
+        }
+        for _ in 0..40 {
+            if !suspended() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if suspended() {
+            return Err("settings deactivation left global shortcuts suspended".into());
+        }
+        samples.push(serde_json::json!({"nativeWindowDeactivation": visible, "recordingEnded": !suspended()}));
+        Ok::<(), String>(())
+    })();
+    DomCase {
+        name: "translation settings: proxy validation and shortcut capture in WKWebView",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -1570,6 +1768,37 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
         if !ready {
             return Err("settings clipboard navigation did not connect".into());
         }
+        samples.push(wait_view_dom(app, "settings", r#"
+const capture=document.querySelector('#clipboard-capture-heading'), excluded=document.querySelector('#clipboard-excluded-heading');
+const row=document.querySelector('.clipboard-recording-types .settings-field');
+const button=document.querySelector('[aria-label="About Excluded Apps"]'), list=document.querySelector('.clipboard-excluded-list');
+if(!row||!button||!list)return {ready:false};
+const rowSize=parseFloat(getComputedStyle(row).fontSize), sizes=[capture,excluded].map(heading=>parseFloat(getComputedStyle(heading).fontSize));
+const clean=!excluded.closest('section').textContent.includes('Checks the active app only.');
+const sizesOfIcons=[...list.querySelectorAll('img.clipboard-excluded-icon')].filter(img=>img.naturalWidth).map(img=>[img.naturalWidth,img.naturalHeight]);
+if(!sizesOfIcons.length)return {ready:false,iconCount:list.querySelectorAll('img').length};
+if(sizesOfIcons.some(size=>Math.max(...size)>40))throw Error('excluded app icon exceeds the thumbnail size');
+if(capture.parentElement.querySelector('[role=switch]')||sizes.some(size=>size<=rowSize)||!clean)throw Error('clipboard section hierarchy or disclosure is incorrect');
+if(document.querySelector('.settings-recorder'))throw Error('clipboard preferences still contain shortcut recorders');
+const icons=[...document.querySelectorAll('.clipboard-settings .clipboard-icon-button')];
+const iconColor=getComputedStyle(icons[0]).color;
+if(icons.length<2||iconColor===getComputedStyle(row).color||icons.some(icon=>getComputedStyle(icon).color!==iconColor))throw Error('app remove and storage refresh must share a muted icon color');
+window.__clipboardMutedIcon=iconColor;
+button.click();
+return {ready:true,sizes,rowSize,clean,sizesOfIcons,iconColor};
+"#)?);
+        samples.push(wait_view_dom(app, "settings", r#"
+const panel=document.querySelector('.clipboard-tip-panel');if(!panel)return {ready:false};
+const height=panel.getBoundingClientRect().height;
+if(panel.textContent!=='Checks the active app only.'||panel.querySelector('button')||height>40)throw Error('excluded app tip is not compact');
+document.querySelector('[aria-label="About Excluded Apps"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+return {ready:true,helpVisible:true,height};
+"#)?);
+        wait_view_dom(
+            app,
+            "settings",
+            r#"return {ready:!document.querySelector('.clipboard-tip-panel')&&document.querySelector('[aria-label="About Excluded Apps"]').getAttribute('aria-expanded')==='false'};"#,
+        )?;
         let state = app.state::<AppState>();
         {
             let mut database = state.database.lock().unwrap();
@@ -1578,6 +1807,7 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
                 ("settings-regular", false, false),
                 ("settings-favorite", true, false),
                 ("settings-pinned", false, true),
+                ("settings-both", true, true),
             ] {
                 database.clipboard_insert(&nami::clipboard::ClipboardRecord {
                     id: id.into(),
@@ -1592,33 +1822,63 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
                 })?;
             }
         }
-        let mut previous_background = None;
+        let set_recording = |enabled| {
+            tauri::async_runtime::block_on(crate::clipboard_preferences::set_recording(
+                app,
+                Some(enabled),
+            ))
+        };
+        set_recording(false)?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+const image=document.querySelector('#clipboard-type-image'), row=image.closest('label'), bounds=image.getBoundingClientRect();
+if(image.matches(':disabled')||!image.checked)throw Error('image capture must be configurable while paused');
+const box=getComputedStyle(image), check=getComputedStyle(image,'::after');
+const centered=check.left===check.right&&check.top===check.bottom&&check.marginLeft===check.marginRight&&check.marginTop===check.marginBottom;
+const dimmed=color=>Number(color.split(',').at(-1).replace(')',''))<.6;
+if(image.type!=='checkbox'||image.hasAttribute('role')||bounds.width!==16||bounds.height!==16||check.clipPath==='none'||!centered||!dimmed(box.borderTopColor)||!dimmed(check.backgroundColor)||getComputedStyle(row).opacity!=='1')throw Error('content type must use a muted checkbox with a centered check');
+row.querySelector('.settings-field-content').click();return true;
+"#,
+        )?;
+        samples.push(wait_view_dom(app, "settings", r#"
+const image=document.querySelector('#clipboard-type-image');
+if(image.checked||image.getAttribute('aria-disabled'))return {ready:false};
+const opacity=Number(getComputedStyle(image.closest('label')).opacity), adjacentOpacity=getComputedStyle(document.querySelector('#clipboard-type-text').closest('label')).opacity;
+if(!(opacity>0&&opacity<1)||adjacentOpacity!=='1'||image.matches(':disabled')||getComputedStyle(image,'::after').content!=='none')throw Error('unchecked row must dim without disabling it or affecting its neighbors');
+return {ready:true,editableWhilePaused:!image.matches(':disabled'),opacity};
+"#)?);
+        let stored = state
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("missing_test_database")?
+            .preference("clipboard_recording_types")?
+            .ok_or("missing_types")?;
+        if serde_json::from_str::<serde_json::Value>(&stored).map_err(|error| error.to_string())?
+            ["image"]
+            != false
+        {
+            return Err("image setting did not persist through IPC".into());
+        }
         for enabled in [true, false] {
-            let script = format!("const input=document.querySelector('#clipboard-capture');if(!input)return {{ready:false}};if(input.disabled)throw Error('capture switch is disabled');if(input.checked!=={enabled})input.click();return {{ready:true}};");
-            let mut sent = false;
-            for _ in 0..80 {
-                let value = evaluate_view_dom(app, "settings", &script)?;
-                if value["ready"] == true {
-                    sent = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            if !sent {
-                return Err("missing capture switch".into());
-            }
-            let mut value = serde_json::Value::Null;
-            for _ in 0..80 {
-                value = evaluate_view_dom(app, "settings", &format!("const input=document.querySelector('#clipboard-capture');const style=getComputedStyle(input);const thumb=getComputedStyle(input,'::after');const offset=thumb.transform==='none'?0:new DOMMatrixReadOnly(thumb.transform).m41;const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;const duration=parseFloat(thumb.transitionDuration);const sampled=document.visibilityState==='visible';return {{ready:input.checked==={enabled}&&(!sampled||Math.abs(offset-({enabled}?14:0))<.1),sampled,checked:input.checked,disabled:input.disabled,background:style.backgroundColor,opacity:style.opacity,offset,reduced,duration}};"))?;
-                if value["ready"] == true {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            if value["ready"] != true || value["disabled"] != false || value["opacity"] != "1" {
-                return Err(format!("capture switch failed to change: {value}"));
-            }
-            let state = app.state::<AppState>();
+            set_recording(enabled)?;
+            let script = format!(
+                r#"
+const capture=document.querySelector('#clipboard-capture-heading').closest('section');
+const image=capture.querySelector('#clipboard-type-image'), paused=!!capture.querySelector('[role=status]');
+return {{ready:paused!=={enabled}&&!image.checked&&!image.matches(':disabled'),paused,imageEnabled:image.checked}};
+"#
+            );
+            samples.push(wait_view_dom(app, "settings", &script)?);
+            let menu = state
+                .clipboard_recording_menu
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or("missing recording menu")?;
             if state
                 .clipboard_enabled
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -1631,61 +1891,10 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
                     .ok_or("missing_test_database")?
                     .clipboard_capture_enabled()?
                     != enabled
+                || menu.text().map_err(|error| error.to_string())?
+                    != crate::clipboard_preferences::recording_menu_label(enabled)
             {
-                return Err("capture switch did not persist through IPC".into());
-            }
-            let menu = state
-                .clipboard_recording_menu
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or("missing recording menu")?;
-            if menu.text().map_err(|error| error.to_string())?
-                != crate::clipboard_preferences::recording_menu_label(enabled)
-            {
-                return Err("recording menu and settings switch diverged".into());
-            }
-            let duration = value["duration"].as_f64().unwrap_or(-1.0);
-            if (value["reduced"] == true && duration != 0.0)
-                || (value["reduced"] == false && !(0.1..=0.2).contains(&duration))
-            {
-                return Err(format!("unexpected settings switch motion: {value}"));
-            }
-            if previous_background.as_ref() == Some(&value["background"]) {
-                return Err("capture switch states look identical".into());
-            }
-            previous_background = Some(value["background"].clone());
-            samples.push(value);
-            if enabled {
-                evaluate_view_dom(app, "settings", "const image=document.querySelector('#clipboard-type-image');if(image.matches(':disabled')||!image.checked)throw Error('images must be enabled by default');image.click();return true;")?;
-                let mut saved = false;
-                for _ in 0..80 {
-                    if evaluate_view_dom(
-                        app,
-                        "settings",
-                        "return !document.querySelector('#clipboard-type-image').checked;",
-                    )? == true
-                    {
-                        saved = true;
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                let stored = state
-                    .database
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .ok_or("missing_test_database")?
-                    .preference("clipboard_recording_types")?
-                    .ok_or("missing_types")?;
-                if !saved
-                    || serde_json::from_str::<serde_json::Value>(&stored)
-                        .map_err(|error| error.to_string())?["image"]
-                        != false
-                {
-                    return Err("image setting did not persist through IPC".into());
-                }
+                return Err("recording menu, runtime state and stored preference diverged".into());
             }
         }
         let mut picker = serde_json::Value::Null;
@@ -1718,11 +1927,26 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
         evaluate_view_dom(
             app,
             "settings",
-            "document.querySelector('.clipboard-cleanup-row button').click();return true;",
+            "document.querySelector('.clipboard-storage-value button').click();return true;",
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const storage=document.querySelector('.clipboard-storage-value [aria-live]');
+if(!storage||!(parseFloat(storage.textContent)>0))return {ready:false};
+window.__storageBeforeCleanup=storage.textContent;
+return {ready:true};
+"#,
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            "const trigger=document.querySelector('.clipboard-clear-records');if(!trigger.parentElement.contains(document.querySelector('#clipboard-storage-heading')))throw Error('clear action is outside the title row');trigger.click();return true;",
         )?;
         let mut confirmation = serde_json::Value::Null;
         for _ in 0..80 {
-            confirmation = evaluate_view_dom(app, "settings", "const dialog=document.querySelector('dialog[open]');return {open:!!dialog,initialFocus:dialog?.querySelector('[data-initial-focus]')?.textContent,active:document.hasFocus()?document.activeElement?.textContent:null};")?;
+            confirmation = evaluate_view_dom(app, "settings", "const dialog=document.querySelector('dialog[open]'), cancel=dialog?.querySelector('[data-initial-focus]');return {open:!!dialog,initialFocus:cancel?.textContent,active:document.hasFocus()?document.activeElement?.textContent:null,outline:cancel&&getComputedStyle(cancel).outlineStyle,decoration:cancel&&getComputedStyle(cancel).textDecorationLine};")?;
             if confirmation["open"] == true {
                 break;
             }
@@ -1730,6 +1954,8 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
         }
         if confirmation["open"] != true
             || confirmation["initialFocus"] != "Cancel"
+            || confirmation["outline"] != "none"
+            || confirmation["decoration"] != "none"
             || (!confirmation["active"].is_null() && confirmation["active"] != "Cancel")
         {
             return Err(format!(
@@ -1742,14 +1968,70 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
             "document.querySelector('dialog [data-initial-focus]').click();return true;",
         )?;
         samples.push(confirmation);
-        samples.push(evaluate_view_dom(
+        evaluate_view_dom(
+            app,
+            "settings",
+            "const trigger=document.querySelector('.clipboard-clear-records');trigger.focus();const style=getComputedStyle(trigger);if(style.outlineStyle!=='none'||style.textDecorationLine!=='none')throw Error('clear action still draws a border or underline');trigger.click();return true;",
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const dialog=document.querySelector('dialog[open]');if(!dialog)return {ready:false};
+const options=[...dialog.querySelectorAll('input[type=checkbox]')], confirm=dialog.querySelector('.clipboard-confirm-action');
+if(options.length!==3||options.some(option=>option.checked)||!confirm.disabled||dialog.querySelector('p'))throw Error('cleanup must show just three unselected categories and actions');
+const counts=[...dialog.querySelectorAll('.clipboard-cleanup-count')].map(node=>Number(node.textContent));
+if(counts.join(',')!=='1,2,2')throw Error('favorite and pinned rows must count in both categories');
+options[2].click();return {ready:true};
+"#,
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"const confirm=document.querySelector('dialog[open] .clipboard-confirm-action');return {ready:!!confirm&&!confirm.disabled};"#,
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            "document.querySelector('dialog[open] .clipboard-confirm-action').click();return true;",
+        )?;
+        samples.push(wait_view_dom(app, "settings", r#"
+const section=document.querySelector('[aria-labelledby=clipboard-storage-heading]');
+const before=window.__storageBeforeCleanup, after=section.querySelector('.clipboard-storage-value [aria-live]').textContent;
+return {ready:!document.querySelector('dialog[open]')&&before!==after&&parseFloat(after)>=0&&!section.querySelector('[role=status], [role=alert]'),before,after};
+"#)?);
+        evaluate_view_dom(
             app,
             "settings",
             r#"
 const image=document.querySelector('#clipboard-type-image');
-if(!image.matches(':disabled')||image.checked)throw Error('pause must retain the image preference');
-const button=document.querySelector('.clipboard-settings .settings-recorder');
-if(button.disabled)throw Error('shortcut must remain available when capture is off');
+if(image.matches(':disabled')||image.checked)throw Error('pause must retain the editable image preference');
+document.querySelector('button[aria-label="HotKey"]').click();return true;
+"#,
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const groups=[...document.querySelectorAll('.hotkey-group')];
+if(!groups.length)return {ready:false};
+if(groups.map(group=>group.children.length).join()!=='5,7,4')throw Error('shortcut groups must contain the general and panel actions');
+const rows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
+if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
+for(const selector of ['.settings-recorder','.keycaps kbd','input']) {
+  const starts=rows.map(row=>row.querySelector(selector).getBoundingClientRect().left);
+  if(Math.max(...starts)-Math.min(...starts)>.1)throw Error('shortcut column is not left aligned: '+selector+' '+starts);
+}
+if(getComputedStyle(document.querySelector('.hotkey-group .settings-clear')).color!==window.__clipboardMutedIcon)throw Error('shortcut clear must share the muted icon color');
+const button=document.querySelector('[aria-label="Open Clipboard History shortcut"]');
+if(!groups[0].contains(button)||button.disabled)throw Error('the global shortcut must remain in General and available when capture is off');
+return {ready:true};
+"#,
+        )?;
+        samples.push(evaluate_view_dom(
+            app,
+            "settings",
+            r#"
 window.clipboardSettingsProbe={done:false,stage:"shortcut"};
 (async()=>{
   const invoke=window.__TAURI_INTERNALS__.invoke;
@@ -1759,6 +2041,30 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   let conflict;
   try {await set({code:'KeyT',modifiers:['meta']});} catch(error) {conflict=String(error);}
   const snapshot=await invoke('app_snapshot');
+  const local=(action,binding,enabled)=>invoke('clipboard_record_shortcut_set',{action,binding,enabled});
+  let localConflict;
+  try {await local('pin',{code:'KeyF',modifiers:['alt']});} catch(error) {localConflict=String(error);}
+  if(localConflict!=='shortcut_clipboard_panel')throw Error('local shortcut accepted a duplicate favorite binding');
+  await local('pin',null,false);
+  await local('pin',{code:'KeyG',modifiers:['alt']});
+  for (const action of ['copy','paste']) {
+    let accepted=false;
+    try {await local(action,null,false);accepted=true;} catch (_) {}
+    if(accepted)throw Error('retired shortcut is writable: '+action);
+  }
+  const controls=(await invoke('app_snapshot')).clipboardControls;
+  if(controls.shortcuts.pin.enabled||controls.shortcuts.pin.binding.code!=='KeyG')throw Error('local shortcut edit unexpectedly enabled or lost the binding');
+  for (const code of ['Space','F6']) {
+    let failure;
+    try {await local('preview',{code,modifiers:[]});} catch(error) {failure=String(error);}
+    if(failure!=='shortcut_modifier')throw Error('recorder accepted a bare '+code);
+  }
+  for (const [action,code] of [['preview','F6'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM']]) {
+    await local(action,null,false);
+    await local(action,{code,modifiers:['alt']});
+    const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts[action];
+    if(saved.enabled||saved.binding.code!==code)throw Error('settings failed to save '+action+' while disabled');
+  }
   window.clipboardSettingsProbe.stage='options';
   const defaults=await invoke('clipboard_options_get');
   if(defaults.activation!=='paste'||defaults.historyPolicy.days!==null||defaults.historyPolicy.limit!==null||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
@@ -1813,15 +2119,135 @@ return {paused:true};
             }
             Ok(())
         })?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+const row=document.querySelector('[aria-label="Open Clipboard History shortcut"]').closest('.settings-shortcut-row');
+window.__shortcutGeometry=()=>[...row.querySelectorAll('.settings-recorder, kbd, .settings-clear svg, input')].map(node=>{
+  const {x,y,width,height}=node.getBoundingClientRect(); return [x,y,width,height];
+});
+window.__shortcutGeometryBefore=window.__shortcutGeometry();
+return true;
+"#,
+        )?;
+        for enabled in [false, true] {
+            let key = if enabled { "K" } else { "J" };
+            evaluate_view_dom(app, "settings", "document.querySelector('[aria-label=\"Open Clipboard History shortcut\"]').closest('.settings-shortcut-row').querySelector('input[type=checkbox]').click();return true;")?;
+            let script = format!(
+                r#"
+const box=document.querySelector('[aria-label="Open Clipboard History shortcut"]').closest('.settings-shortcut-row').querySelector('input[type=checkbox]');
+const row=box.closest('.settings-shortcut-row'), recorder=row.querySelector('.settings-recorder');
+if(box.checked!=={enabled}||box.getAttribute('aria-disabled'))return {{ready:false}};
+const before=window.__shortcutGeometryBefore, after=window.__shortcutGeometry();
+const stable=after.length===before.length&&after.every((rect,i)=>rect.every((n,j)=>Math.abs(n-before[i][j])<.1));
+if(!stable||recorder.disabled||!recorder.querySelector('.keycaps')?.textContent.endsWith('{key}'))throw Error('changing enabled state moved the shortcut or disabled its recorder');
+return {{ready:true,stable,opacity:Number(getComputedStyle(row).opacity)}};
+"#
+            );
+            let sample = wait_view_dom(app, "settings", &script)?;
+            if (sample["opacity"] == 1) != enabled {
+                return Err("only disabled shortcut rows should be dimmed".into());
+            }
+            let stored = state
+                .database
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or("missing_test_database")?
+                .preference("clipboard_shortcut_enabled")?;
+            if stored.as_deref() != Some(if enabled { "true" } else { "false" }) {
+                return Err("clipboard shortcut enabled state did not persist".into());
+            }
+            if !enabled {
+                evaluate_view_dom(app, "settings", "document.querySelector('[aria-label=\"Open Clipboard History shortcut\"]').click();return true;")?;
+                wait_view_dom(
+                    app,
+                    "settings",
+                    r#"
+const prompt=document.querySelector('[aria-label="Open Clipboard History shortcut"] .settings-recorder-prompt');
+if(!prompt)return {ready:false};
+prompt.dispatchEvent(new KeyboardEvent('keydown',{key:'K',code:'KeyK',ctrlKey:true,altKey:true,shiftKey:true,bubbles:true}));
+return {ready:true};
+"#,
+                )?;
+                samples.push(wait_view_dom(app, "settings", r#"
+const row=document.querySelector('[aria-label="Open Clipboard History shortcut"]').closest('.settings-shortcut-row');
+if(!row.querySelector('.keycaps')?.textContent.endsWith('K'))return {ready:false};
+if(row.querySelector('input').checked)throw Error('editing unexpectedly enabled the shortcut');
+window.__shortcutGeometryBefore=window.__shortcutGeometry();
+return {ready:true,editedWhileUnchecked:true};
+"#)?);
+            }
+            on_main(app, move |app| {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let registered = |code| -> Result<bool, String> {
+                    let binding =
+                        nami::shortcuts::KeyBinding::new(code, &["control", "alt", "shift"]);
+                    Ok(app
+                        .global_shortcut()
+                        .is_registered(crate::binding_shortcut(&binding)?))
+                };
+                if registered("KeyJ")? || registered("KeyK")? != enabled {
+                    return Err("checkbox and edited global shortcut registry diverged".into());
+                }
+                Ok(())
+            })?;
+            samples.push(sample);
+        }
         {
             let database = state.database.lock().unwrap();
             let database = database.as_ref().ok_or("missing_test_database")?;
             if database.clipboard_record("settings-regular").is_ok()
+                || database.clipboard_record("settings-both").is_ok()
                 || !database.clipboard_record("settings-favorite")?.is_favorite
-                || !database.clipboard_record("settings-pinned")?.is_pinned
+                || database.clipboard_record("settings-pinned").is_ok()
+                || database
+                    .preference("clipboard_excluded_apps")?
+                    .is_none_or(|stored| stored.contains("iconDataUrl"))
+                || !database
+                    .preference("clipboard_record_shortcuts")?
+                    .is_some_and(|value| value.contains("KeyG"))
                 || database.preference("clipboard_activation")?.as_deref() != Some("\"copy\"")
             {
-                return Err("cleanup or activation violated durable clipboard state".into());
+                return Err(
+                    "cleanup, exclusion or activation violated durable clipboard state".into(),
+                );
+            }
+        }
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+document.querySelector('#clipboard-shortcut-heading').parentElement.querySelector('button').click();return true;
+"#,
+        )?;
+        samples.push(wait_view_dom(
+            app,
+            "settings",
+            r#"
+const global=document.querySelector('[aria-label="Open Clipboard History shortcut"]');
+const group=document.querySelector('[role=group][aria-labelledby=clipboard-shortcut-heading]');
+const bindings=[global,...group.querySelectorAll('.settings-recorder')].map(button=>button.textContent);
+const enabled=[global.closest('.settings-shortcut-row').querySelector('input'),...group.querySelectorAll('input[type=checkbox]')].every(input=>input.checked);
+return {ready:enabled&&bindings.join()===['⌃`','⌘Y','⇧⌘N','⇧⌘O','⇧⌘T','⌥F','⌥P','⌘⌫'].join(),bindings};
+"#,
+        )?);
+        {
+            let database = state.database.lock().unwrap();
+            let database = database.as_ref().ok_or("missing_test_database")?;
+            if database
+                .preference("clipboard_shortcut_enabled")?
+                .as_deref()
+                != Some("true")
+                || database
+                    .preference("clipboard_shortcut")?
+                    .is_none_or(|stored| !stored.contains("Backquote"))
+                || database
+                    .preference("clipboard_record_shortcuts")?
+                    .is_none_or(|stored| !stored.contains("Backspace") || stored.contains("KeyG"))
+            {
+                return Err("clipboard shortcut defaults were not saved".into());
             }
         }
         evaluate_dom(
@@ -1947,6 +2373,13 @@ fn verify_clipboard_action_feedback(
         app,
         "return {ready:!!document.querySelector('[data-record-id=action-feedback]')};",
     )?;
+    samples.push(wait_records(app, r#"
+const search=document.querySelector('.clipboard-panel input[type=search]'), row=document.querySelector('[data-record-id=action-feedback][data-keyboard-current]');
+if(document.activeElement!==search||!row)return {ready:false};
+if(getComputedStyle(row).boxShadow==='none')throw Error('keyboard target not highlighted');
+if(!search.dispatchEvent(new KeyboardEvent('keydown',{key:' ',code:'Space',bubbles:true,cancelable:true})))throw Error('search cannot type a space');
+return {ready:true,keyboardTarget:row.dataset.recordId};
+"#)?);
     on_main(app, |app| {
         app.state::<AppState>()
             .windows
@@ -1955,36 +2388,13 @@ fn verify_clipboard_action_feedback(
             .history_pinned = false;
         apply_translation(app)
     })?;
-    evaluate_view_dom(app, "clipboard", "window.__copyButton=document.querySelector('[data-record-id=action-feedback] [data-action=copy] button');window.__copyBefore=window.__copyButton.querySelector('.history-symbol').getBoundingClientRect().width;window.__copyButton.click();return true;")?;
-    let copied = wait_records(
+    samples.push(wait_records(
         app,
         r#"
-const button=window.__copyButton,icon=button.querySelector('.copy-success'),r=icon?.getBoundingClientRect(),color=icon&&getComputedStyle(icon).color,green=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(73, 170, 25)':'rgb(40, 125, 22)';
-return {ready:!!icon&&color===green,width:r?.width,height:r?.height,before:window.__copyBefore,color,beams:document.querySelectorAll('[role=progressbar]').length};
+const row=document.querySelector('[data-record-id=action-feedback]');
+return {ready:!!row&&!row.querySelector('[data-action=copy]'),standaloneCopy:false};
 "#,
-    )?;
-    if copied["width"] != 14
-        || copied["height"] != 14
-        || copied["before"] != 14
-        || copied["beams"] != 0
-    {
-        return Err(format!("copy feedback dimensions or activity: {copied}"));
-    }
-    if !app
-        .state::<AppState>()
-        .windows
-        .lock()
-        .unwrap()
-        .history_visible
-    {
-        return Err("copy closed the unpinned records page".into());
-    }
-    samples.push(copied);
-    let restored = wait_records_attempts(app, "const button=window.__copyButton;return {ready:!!button.querySelector('[data-symbol=\"doc.on.doc\"]'),same:button===document.querySelector('[data-record-id=action-feedback] [data-action=copy] button')};", 80)?;
-    if restored["same"] != true {
-        return Err("copy feedback remounted the button".into());
-    }
-    samples.push(restored);
+    )?);
     verify_record_beam_motion(app, samples)?;
     for (label, active) in [("Favorite", true), ("Remove favorite", false)] {
         evaluate_view_dom(app, "clipboard", &format!("window.__star=document.querySelector('[data-record-id=action-feedback] [data-action=favorite] .history-symbol');document.querySelector('[data-record-id=action-feedback] [aria-label=\"{label}\"]').click();return true;"))?;
@@ -2024,6 +2434,22 @@ return {ready:!!icon&&color===green,width:r?.width,height:r?.height,before:windo
             evaluate_view_dom(app,"clipboard","document.querySelector('[role=menu]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));document.querySelector('.clipboard-panel .history-favorites').click();return true;")?;
             wait_records(app,"return {ready:!document.querySelector('[role=menu]')&&!!document.querySelector('[data-record-id=action-feedback]')&&document.querySelector('.clipboard-panel .history-favorites').getAttribute('aria-pressed')==='false'};")?;
         }
+    }
+    for active in [true, false] {
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('[data-record-id=action-feedback] .history-row-select');
+row.focus();
+row.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyF',key:'ƒ',altKey:true,bubbles:true,cancelable:true}));
+return true;
+"#,
+        )?;
+        samples.push(wait_records(app, &format!(r#"
+const button=document.querySelector('[data-record-id=action-feedback] [data-action=favorite] button');
+return {{ready:button?.getAttribute('aria-pressed')==='{active}',keyboardFavorite:{active}}};
+"#))?);
     }
     verify_delete_confirmation(app, "clipboard", samples)?;
     Ok(())
@@ -3242,7 +3668,18 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             .collect::<Vec<_>>();
         let translation_actions = translation["actions"]
             .as_array()
-            .ok_or("translation actions")?;
+            .ok_or("translation actions")?
+            .iter()
+            .filter(|action| action["symbol"] != "doc.on.doc")
+            .collect::<Vec<_>>();
+        if clipboard["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["symbol"] == "doc.on.doc")
+        {
+            return Err("clipboard still exposes record copy".into());
+        }
         if clipboard_actions.len() != translation_actions.len()
             || !clipboard["actions"]
                 .as_array()
@@ -3339,12 +3776,12 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             }
             if mode == "clipboard"
                 && menu["labels"].as_array().is_none_or(|labels| {
-                    !labels.iter().any(|label| label == "Copy")
+                    labels.iter().any(|label| label == "Copy")
                         || !labels.iter().any(|label| label == "Translate")
                 })
             {
                 return Err(format!(
-                    "clipboard menu omits existing content actions: {menu}"
+                    "clipboard menu must offer Translate without Copy: {menu}"
                 ));
             }
             samples.push(
@@ -3964,6 +4401,469 @@ return {{ready:probe.presented&&rows.length===100&&p?.querySelector('.history-re
     Ok(sample)
 }
 
+fn post_records_key(
+    app: &AppHandle,
+    code: u16,
+    flags: usize,
+    characters: &'static str,
+    unmodified: &'static str,
+    repeat: bool,
+) -> Result<(), String> {
+    on_main(app, move |app| {
+        let window = app
+            .get_window("translation")
+            .ok_or("records host missing")?;
+        let native = window
+            .ns_window()
+            .map_err(|_| "records native host")?
+            .cast::<AnyObject>();
+        unsafe {
+            let application: *mut AnyObject =
+                objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+            let number: isize = objc2::msg_send![native, windowNumber];
+            let is_key: bool = objc2::msg_send![native, isKeyWindow];
+            if !is_key {
+                return Err("records window is not key".into());
+            }
+            let character = objc2_foundation::NSString::from_str(characters);
+            let unmodified = objc2_foundation::NSString::from_str(unmodified);
+            for kind in [10usize, 11] {
+                let event: *mut AnyObject = objc2::msg_send![objc2::class!(NSEvent), keyEventWithType: kind, location: objc2_foundation::NSPoint::new(0.0, 0.0), modifierFlags: flags, timestamp: 0.0f64, windowNumber: number, context: std::ptr::null::<AnyObject>(), characters: &*character, charactersIgnoringModifiers: &*unmodified, isARepeat: repeat && kind == 10, keyCode: code];
+                if event.is_null() {
+                    return Err("cannot create native key event".into());
+                }
+                let _: () = objc2::msg_send![application, postEvent: event, atStart: false];
+            }
+        }
+        Ok(())
+    })
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn GetApplicationEventTarget() -> *mut std::ffi::c_void;
+    fn CreateEvent(
+        allocator: *const std::ffi::c_void,
+        class: u32,
+        kind: u32,
+        time: f64,
+        attributes: u32,
+        event: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    fn SetEventParameter(
+        event: *mut std::ffi::c_void,
+        name: u32,
+        kind: u32,
+        size: u32,
+        data: *const std::ffi::c_void,
+    ) -> i32;
+    fn SendEventToEventTarget(event: *mut std::ffi::c_void, target: *mut std::ffi::c_void) -> i32;
+    fn ReleaseEvent(event: *mut std::ffi::c_void);
+}
+
+fn summon_with_clipboard_hotkey(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    on_main(app, |app| {
+        let shortcut = crate::binding_shortcut(&nami::shortcuts::clipboard_binding())?;
+        app.global_shortcut()
+            .register(shortcut)
+            .map_err(|error| error.to_string())?;
+        // Deliver at the registered Carbon handler without posting to the global input stream.
+        let hotkey = [u32::from_be_bytes(*b"htrs"), shortcut.id()];
+        let mut event = std::ptr::null_mut();
+        unsafe {
+            let created = CreateEvent(
+                std::ptr::null(),
+                u32::from_be_bytes(*b"keyb"),
+                5,
+                0.0,
+                0,
+                &mut event,
+            );
+            if created != 0 || event.is_null() {
+                return Err(format!("create clipboard global hotkey event: {created}"));
+            }
+            let param = SetEventParameter(
+                event,
+                u32::from_be_bytes(*b"----"),
+                u32::from_be_bytes(*b"hkid"),
+                8,
+                hotkey.as_ptr().cast(),
+            );
+            let result = if param == 0 {
+                SendEventToEventTarget(event, GetApplicationEventTarget())
+            } else {
+                param
+            };
+            ReleaseEvent(event);
+            if result != 0 {
+                return Err(format!("dispatch clipboard global hotkey event: {result}"));
+            }
+        }
+        *app.state::<AppState>().target.lock().unwrap() = None;
+        Ok(())
+    })
+}
+
+fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let mut owned_image = None;
+    let result = (|| {
+        const CMD: usize = 1 << 20;
+        const OPT: usize = 1 << 19;
+        const SHIFT: usize = 1 << 17;
+        let press = |code, flags, chars, unmodified| {
+            post_records_key(app, code, flags, chars, unmodified, false)
+        };
+        let check = |action: &str, predicate: &str| {
+            wait_records(
+                app,
+                &format!(
+                    r#"
+const panel=document.querySelector('.clipboard-panel'),search=panel?.querySelector('input[type=search]'),row=panel?.querySelector('[data-keyboard-current]'),
+    marked=(name)=>row?.querySelector(`[data-action=${{name}}] button`)?.getAttribute('aria-pressed')==='true',
+    focused=document.activeElement===search,keys=window.__smokeKeys,count=panel?.querySelector('.history-record-count')?.textContent;
+return {{ready:({predicate}),action:{action:?},record:row?.dataset.recordId,focused,keys:keys?.slice(-2),count}};
+"#
+                ),
+            )
+        };
+        {
+            let state = app.state::<AppState>();
+            let mut db = state.database.lock().unwrap();
+            let db = db.as_mut().ok_or("isolated test database")?;
+            for (id, text) in [
+                ("smoke-keep", "Synthetic shortcut smoke keep"),
+                ("smoke-normal", "Synthetic shortcut smoke normal"),
+                ("smoke-first", "Synthetic shortcut smoke first"),
+                ("smoke-second", "Synthetic shortcut smoke second"),
+            ] {
+                db.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: id.into(),
+                    kind: "text".into(),
+                    text: text.into(),
+                    date: "2099-01-01T00:00:00Z".into(),
+                    is_favorite: false,
+                    is_pinned: false,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: id.into(),
+                })?;
+            }
+            state.clipboard_options.lock().unwrap().activation =
+                crate::clipboard_preferences::Activation::Copy;
+        }
+        summon_with_clipboard_hotkey(app)?;
+        samples.push(check("Open Clipboard History", "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-second'&&count==='4 records'")?);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+window.__smokeKeys=[];
+document.addEventListener('keydown',event=>window.__smokeKeys.push({key:event.key,code:event.code,trusted:event.isTrusted,repeat:event.repeat}),true);
+document.addEventListener('copy',event=>window.__smokeKeys.push({key:'Copy',trusted:event.isTrusted}),true);
+return true;
+"#,
+        )?;
+        press(44, CMD, "/", "/")?;
+        samples.push(check("Show Shortcuts", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Search')&&keys.at(-1)?.trusted")?);
+        press(3, CMD, "f", "f")?;
+        samples.push(check("Focus Search", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
+        for pinned in [true, false] {
+            press(35, CMD | SHIFT, "P", "P")?;
+            samples.push(check("Pin / Unpin Window", &format!("panel?.querySelector('.history-pin')?.getAttribute('aria-pressed')==='{pinned}'&&keys.at(-1)?.trusted"))?);
+        }
+        press(44, CMD, "/", "/")?;
+        check(
+            "Keep the running record view open",
+            "!!panel?.querySelector('.history-shortcuts-panel')&&!focused",
+        )?;
+        on_main(app, |app| {
+            create(app, "settings")?;
+            Ok(())
+        })?;
+        wait_view_dom(
+            app,
+            "settings",
+            "return {ready:!!document.querySelector('.settings-sidebar')};",
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+window.__focusShortcutSaved=false;
+window.__TAURI_INTERNALS__.invoke('translation_shortcut_set', {action:'focusSearch',binding:{code:'KeyF',modifiers:['meta','shift']}}).then(
+  ()=>{window.__focusShortcutSaved=true;},error=>{window.__focusShortcutSaved=String(error);}
+);
+return true;
+"#,
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+if(typeof window.__focusShortcutSaved==='string')throw Error(window.__focusShortcutSaved);
+return {ready:window.__focusShortcutSaved===true};
+"#,
+        )?;
+        check("Receive changed hotkey in the open record view", "panel?.querySelector('.history-shortcuts-panel')?.textContent.includes('Focus Search⇧ ⌘ F')")?;
+        press(3, CMD | SHIFT, "F", "F")?;
+        samples.push(check("Focus Search after remapping", "focused&&!panel?.querySelector('.history-shortcuts-panel')&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted")?);
+        press(125, 0, "\u{f701}", "\u{f701}")?;
+        samples.push(check(
+            "Down",
+            "focused&&row?.dataset.recordId==='smoke-first'&&keys.at(-1)?.trusted",
+        )?);
+        press(126, 0, "\u{f700}", "\u{f700}")?;
+        samples.push(check(
+            "Up",
+            "focused&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted",
+        )?);
+        press(45, CMD | SHIFT, "N", "N")?;
+        samples.push(check("Note", "keys.at(-1)?.trusted&&document.querySelector('.clipboard-editor textarea')?.value==='Synthetic shortcut smoke second'")?);
+        press(53, 0, "\u{1b}", "\u{1b}")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const input=document.querySelector('.clipboard-panel input[type=search]');
+const refocus=()=>{if(!document.querySelector('.clipboard-editor'))input.focus();else requestAnimationFrame(refocus);};requestAnimationFrame(refocus);return true;
+"#,
+        )?;
+        check(
+            "Close note",
+            "focused&&!document.querySelector('.clipboard-editor')",
+        )?;
+        press(16, CMD, "y", "y")?;
+        samples.push(check("Preview", "panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='true'&&keys.at(-1)?.trusted")?);
+        press(16, CMD, "y", "y")?;
+        check("Close Preview", "focused&&panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='false'")?;
+        let activate = |action| -> Result<serde_json::Value, String> {
+            let before = on_main(app, |_| {
+                let version = crate::platform::write_text("Synthetic smoke sentinel")
+                    .map_err(|(code, _)| code.to_owned())?;
+                Ok(version)
+            })?;
+            press(36, 0, "\r", "\r")?;
+            let mut outcome = None;
+            for _ in 0..60 {
+                let result = on_main(app, |_| {
+                    let payload =
+                        crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload);
+                    Ok((crate::platform::clipboard_version(), payload))
+                })?;
+                if result.0 != before
+                    && result.1
+                        == Some(crate::platform::ClipboardPayload::Text(
+                            "Synthetic shortcut smoke second".into(),
+                        ))
+                {
+                    outcome = Some(result.0);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if outcome.is_none() {
+                let input = evaluate_view_dom(app, "clipboard", "const i=document.activeElement;return {focused:document.hasFocus(),target:i?.tagName,selected:i?.selectionStart!==i?.selectionEnd,docSelection:document.getSelection()?.isCollapsed,keys:window.__smokeKeys.slice(-4)};")?;
+                return Err(format!(
+                    "{action} did not write the intended synthetic record: {input}"
+                ));
+            }
+            check(action, "keys.at(-1)?.trusted&&panel?.getClientRects().length>0&&row?.dataset.recordId==='smoke-second'")
+        };
+        samples.push(activate("Return (Copy Only)")?);
+        let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        press(8, CMD, "c", "c")?;
+        check(
+            "Old Copy disabled",
+            "keys.at(-1)?.key==='Copy'&&keys.at(-1)?.trusted",
+        )?;
+        press(36, OPT, "\r", "\r")?;
+        samples.push(check("Old Copy and Paste disabled", "keys.at(-1)?.code==='Enter'&&keys.at(-1)?.trusted&&!panel?.querySelector('[data-action=copy]')")?);
+        if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version {
+            return Err("retired shortcut used a record".into());
+        }
+        // Without a previous application, exercise Paste up to its explicit target check.
+        let (send, receive) = mpsc::sync_channel(1);
+        let view = app.get_webview("clipboard").ok_or("clipboard view")?;
+        let listener = view.listen("clipboard_use_failed", move |event| {
+            let _ = send.try_send(event.payload().to_owned());
+        });
+        *app.state::<AppState>().target.lock().unwrap() = None;
+        let state = app.state::<AppState>();
+        state.clipboard_options.lock().unwrap().activation =
+            crate::clipboard_preferences::Activation::Paste;
+        let controls = state.clipboard_options.lock().unwrap().controls();
+        view.emit("clipboard_controls_changed", controls)
+            .map_err(|error| error.to_string())?;
+        samples.push(activate("Return (Paste into Previous App)")?);
+        let failure = receive
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Paste did not attempt the previous-app path")?;
+        view.unlisten(listener);
+        let failure: serde_json::Value =
+            serde_json::from_str(&failure).map_err(|error| error.to_string())?;
+        if failure["code"] != "target_unavailable" || failure["copyStatus"] != "current" {
+            return Err(format!(
+                "Paste did not reach the expected safety boundary: {failure}"
+            ));
+        }
+        press(3, OPT, "ƒ", "f")?;
+        samples.push(check(
+            "Favorite",
+            "marked('favorite')&&keys.at(-1)?.trusted",
+        )?);
+        let search_for = |query: &str| {
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                &format!(
+                    r#"
+const search=document.querySelector('.clipboard-panel input[type=search]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(search,{query:?});search.dispatchEvent(new Event('input',{{bubbles:true}}));return true;
+"#
+                ),
+            )
+        };
+        search_for("smoke first")?;
+        check(
+            "Find record to pin",
+            "focused&&row?.dataset.recordId==='smoke-first'&&count==='1 record'",
+        )?;
+        press(35, OPT, "π", "p")?;
+        samples.push(check("Pin", "marked('pin')&&keys.at(-1)?.trusted")?);
+        for (kind, label) in [
+            ("normal", "regular"),
+            ("second", "favorite"),
+            ("first", "pinned"),
+        ] {
+            let query = format!("smoke {kind}");
+            let id = format!("smoke-{kind}");
+            search_for(&query)?;
+            let marked = match kind {
+                "second" => "&&marked('favorite')",
+                "first" => "&&marked('pin')",
+                _ => "",
+            };
+            check(
+                "Search loaded",
+                &format!("focused&&row?.dataset.recordId==={id:?}&&count==='1 record'{marked}"),
+            )?;
+            press(51, CMD, "\u{7f}", "\u{7f}")?;
+            let armed = "row?.querySelector('.delete-armed')===document.activeElement&&count==='1 record'&&keys.at(-1)?.trusted";
+            samples.push(check(&format!("Delete armed: {label}"), armed)?);
+            if kind == "normal" {
+                post_records_key(app, 51, CMD, "\u{7f}", "\u{7f}", true)?;
+                check("Delete repeat ignored", "keys.at(-1)?.repeat&&!!row?.querySelector('.delete-armed')&&count==='1 record'")?;
+                press(53, 0, "\u{1b}", "\u{1b}")?;
+                samples.push(check(
+                    "Escape cancels delete",
+                    "focused&&!row?.querySelector('.delete-armed')&&count==='1 record'",
+                )?);
+                press(51, CMD, "\u{7f}", "\u{7f}")?;
+                check("Re-arm delete", armed)?;
+            }
+            press(51, CMD, "\u{7f}", "\u{7f}")?;
+            samples.push(check(
+                &format!("Delete confirmed: {label}"),
+                &format!(
+                    "focused&&count==='0 records'&&search?.value==={query:?}&&keys.at(-1)?.trusted"
+                ),
+            )?);
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            let db = database.as_ref().ok_or("isolated test database")?;
+            if db.clipboard_record(&id).is_ok() || db.clipboard_record("smoke-keep").is_err() {
+                return Err(format!("Delete changed the wrong stored records: {id}"));
+            }
+        }
+        press(53, 0, "\u{1b}", "\u{1b}")?;
+        samples.push(check(
+            "Escape hides history",
+            "!panel?.getClientRects().length||panel.closest('[inert]')!==null",
+        )?);
+        let image = on_main(app, |_| clipboard_text_fixture(true))?;
+        let root = crate::clipboard_runtime::image_root(app)?;
+        let (path, created) = nami::clipboard::store_image_with_status(&root, &image, "png")?;
+        if created {
+            owned_image = Some(root.join(&path));
+        }
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated test database")?
+            .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: "smoke-ocr".into(),
+                kind: "image".into(),
+                text: "Synthetic shortcut image".into(),
+                date: "2099-01-02T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: Some(path),
+                fingerprint: "smoke-ocr".into(),
+            })?;
+        crate::clipboard_runtime::changed(app)?;
+        on_main(app, |app| resume_navigation(app, "clipboard"))?;
+        check("OCR image ready", "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-ocr'&&!!row.querySelector('[data-action=ocr]')")?;
+        press(31, CMD | SHIFT, "O", "O")?;
+        let ocr = check(
+            "Extract Text",
+            "focused&&count==='3 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
+        )?;
+        let text = on_main(app, |_| {
+            let capture = crate::platform::read_clipboard(|_| false)?
+                .ok_or("OCR did not populate the isolated pasteboard")?;
+            match capture.payload {
+                crate::platform::ClipboardPayload::Text(text)
+                    if text.to_uppercase().contains("HELLO NAMI") =>
+                {
+                    Ok(text)
+                }
+                _ => Err("OCR copied unexpected content".into()),
+            }
+        })?;
+        {
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            let page = database
+                .as_ref()
+                .ok_or("isolated test database")?
+                .clipboard_page("HELLO NAMI", false, None, 10)?;
+            if page.records.is_empty() {
+                return Err("OCR did not save the recognized text".into());
+            }
+        }
+        samples.push(ocr);
+        search_for("smoke keep")?;
+        check(
+            "Translate text ready",
+            "focused&&row?.dataset.recordId==='smoke-keep'&&count==='1 record'",
+        )?;
+        press(17, CMD | SHIFT, "T", "T")?;
+        samples.push(wait_dom(app, r#"
+const input=document.querySelector('.source-input');return {ready:input?.value==='Synthetic shortcut smoke keep',action:'Translate'};
+"#)?);
+        if on_main(app, |_| {
+            Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+        })? != Some(crate::platform::ClipboardPayload::Text(text))
+        {
+            return Err("Translate unexpectedly changed the isolated pasteboard".into());
+        }
+        Ok(())
+    })();
+    if let Some(path) = owned_image {
+        let _ = std::fs::remove_file(path);
+    }
+    DomCase {
+        name: "clipboard shortcut smoke through macOS and WebView",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_records_open(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let mut original_database = None;
@@ -4323,9 +5223,9 @@ return {{ready:text==={expected}&&!!scrollbar&&actions.includes('note'),length:t
             || first["completeApplication"] != true
             || first["metadata"] != serde_json::json!(["Application", "Characters"])
             || first["actions"]
-                != serde_json::json!(["copy", "translate", "note", "favorite", "pin", "delete"])
+                != serde_json::json!(["translate", "note", "favorite", "pin", "delete"])
             || first["icons"].as_array().is_none_or(|icons| {
-                icons.len() != 6
+                icons.len() != 5
                     || icons
                         .iter()
                         .any(|icon| icon["width"] != 14 || icon["height"] != 14)
@@ -4337,21 +5237,16 @@ return {{ready:text==={expected}&&!!scrollbar&&actions.includes('note'),length:t
 
         for (action, pressed) in [("favorite", "Remove favorite"), ("pin", "Unpin record")] {
             evaluate_dom(app, &format!("document.querySelector('.clipboard-detail [data-action={action}] button').click();return true;"))?;
-            let protected = wait_dom(
+            samples.push(wait_dom(app, &format!(r#"
+const detail=document.querySelector('.clipboard-detail'), mark=detail?.querySelector('[data-action={action}] button'), button=detail?.querySelector('[data-action=delete] button');
+if(mark?.getAttribute('aria-label')!=='{pressed}')return {{ready:false}};
+if(!button||button.disabled)throw Error('marked records must allow explicit deletion');
+button.click();return {{ready:true,deleteAvailableWith:{action:?}}};
+"#))?);
+            wait_dom(
                 app,
-                &format!(
-                    r#"
-const p=document.querySelector('.clipboard-detail'),mark=p?.querySelector('[data-action={action}] button'),del=p?.querySelector('[data-action=delete] button');
-return {{ready:mark?.getAttribute('aria-label')==='{pressed}',protectedAction:'{action}',disabled:del?.disabled,retained:!!del}};
-"#
-                ),
+                "return {ready:!!document.querySelector('.clipboard-detail .delete-armed')};",
             )?;
-            if protected["disabled"] != true || protected["retained"] != true {
-                return Err(format!(
-                    "detail delete bypasses {action} protection: {protected}"
-                ));
-            }
-            evaluate_dom(app, "document.querySelector('.clipboard-detail [data-action=delete] button').click();return true;")?;
             if app
                 .state::<AppState>()
                 .database
@@ -4362,34 +5257,10 @@ return {{ready:mark?.getAttribute('aria-label')==='{pressed}',protectedAction:'{
                 .clipboard_detail("detail-first")
                 .is_err()
             {
-                return Err(format!("disabled detail Delete removed {action} record"));
+                return Err(format!("arming Delete removed {action} record"));
             }
-            evaluate_dom(
-                app,
-                r#"window.__protectedDelete={done:false};window.__TAURI_INTERNALS__.invoke('clipboard_record_update',{recordId:'detail-first',action:'delete',allowProtected:true}).then(()=>window.__protectedDelete={done:true,rejected:false},error=>window.__protectedDelete={done:true,rejected:error==='clipboard_protected',error:String(error)});return true;"#,
-            )?;
-            let rejected = wait_dom(
-                app,
-                "return {ready:window.__protectedDelete?.done,...window.__protectedDelete};",
-            )?;
-            if rejected["rejected"] != true
-                || app
-                    .state::<AppState>()
-                    .database
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .ok_or("database")?
-                    .clipboard_detail("detail-first")
-                    .is_err()
-            {
-                return Err(format!(
-                    "detail delete IPC bypasses {action} protection: {rejected}"
-                ));
-            }
-            samples.extend([protected, rejected]);
             evaluate_dom(app, &format!("document.querySelector('.clipboard-detail [data-action={action}] button').click();return true;"))?;
-            wait_dom(app, &format!("return {{ready:document.querySelector('.clipboard-detail [data-action={action}] button')?.getAttribute('aria-pressed')==='false'&&!document.querySelector('.clipboard-detail [data-action=delete] button')?.disabled}};"))?;
+            wait_dom(app, &format!("return {{ready:document.querySelector('.clipboard-detail [data-action={action}] button')?.getAttribute('aria-pressed')==='false'&&!document.querySelector('.clipboard-detail .delete-armed')}};"))?;
         }
         let native = on_main(app, native_chrome_sample)?;
         if native["buttons"].as_array().is_none_or(|buttons| {
@@ -4808,13 +5679,16 @@ return {ready:rows.length===5&&image.includes('ocr'),text,image,blank,files,icon
             1500,
         )?;
         for (key, expected) in [
-            ("text", vec!["copy", "translate", "note", "favorite", "pin"]),
+            (
+                "text",
+                vec!["translate", "note", "favorite", "pin", "delete"],
+            ),
             (
                 "image",
-                vec!["copy", "translate", "ocr", "note", "favorite", "pin"],
+                vec!["translate", "ocr", "note", "favorite", "pin", "delete"],
             ),
-            ("blank", vec!["copy", "note", "favorite", "pin"]),
-            ("files", vec!["copy", "note", "favorite", "pin"]),
+            ("blank", vec!["note", "favorite", "pin", "delete"]),
+            ("files", vec!["note", "favorite", "pin", "delete"]),
         ] {
             if actions[key] != serde_json::json!(expected) {
                 return Err(format!("clipboard text actions: {actions}"));
@@ -5036,7 +5910,7 @@ return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.in
 const p=document.querySelector('.clipboard-panel');
 const actions=id=>[...p.querySelectorAll(`[data-record-id="${id}"] .history-row-actions button:not([aria-hidden=true])`)].map(button=>button.getAttribute('aria-label'));
 const image=actions('kind-image-file'),multiple=actions('kind-multiple-files');
-return {ready:image.includes('Translate')&&image.includes('Extract text')&&multiple.includes('Copy')&&!multiple.includes('Translate')&&!multiple.includes('Extract text'),image,multiple};
+return {ready:image.includes('Translate')&&image.includes('Extract text')&&!image.includes('Copy')&&multiple.includes('Note')&&!multiple.includes('Copy')&&!multiple.includes('Translate')&&!multiple.includes('Extract text'),image,multiple};
 "#, 1500)?);
         evaluate_view_dom(
             app,
@@ -5341,6 +6215,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
         if ![
             "clipboard-actions",
+            "clipboard-shortcuts",
             "clipboard-settings",
             "clipboard-editor",
             "clipboard-media",
@@ -5348,6 +6223,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-details",
             "translation-actions",
             "translation-controls",
+            "translation-settings",
             "unified-records",
             "records-geometry",
             "records-pinned",
@@ -5379,10 +6255,14 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_unified_records(&app)
             } else if case == "translation-controls" {
                 run_right_control_dom(&app)
+            } else if case == "translation-settings" {
+                run_translation_settings(&app)
             } else if case == "translation-actions" {
                 run_translation_action_timing(&app)
             } else if case == "clipboard-settings" {
                 run_clipboard_capture_setting(&app)
+            } else if case == "clipboard-shortcuts" {
+                run_clipboard_shortcuts_smoke(&app)
             } else if case == "clipboard-actions" {
                 run_clipboard_action_timing(&app)
             } else if case == "clipboard-media" {
@@ -5431,6 +6311,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         dom_cases.push(run_clipboard_kind_text(&app));
         dom_cases.push(run_clipboard_details(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
+        dom_cases.push(run_translation_settings(&app));
         dom_cases.push(run_records_pinned(&app));
         let clipboard_history = on_main(&app, |_| crate::platform::test_clipboard_history());
         dom_cases.push(DomCase {

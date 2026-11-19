@@ -66,6 +66,8 @@ pub struct Snapshot {
     clipboard_capture_enabled: bool,
     clipboard_recording_types: nami::clipboard::RecordingTypes,
     clipboard_binding: Option<crate::shortcuts::KeyBinding>,
+    clipboard_shortcut_enabled: bool,
+    clipboard_controls: crate::clipboard_preferences::ClipboardControls,
     window: WindowState,
 }
 
@@ -76,6 +78,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         &["translation", "history", "clipboard", "settings"],
     )?;
     let state = app.state::<AppState>();
+    let clipboard_shortcut = state.clipboard_shortcut.lock().unwrap().clone();
     let snapshot = Snapshot {
         capabilities: platform::capabilities(),
         locale: state.locale.lock().unwrap().clone(),
@@ -86,7 +89,9 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         storage_error: state.storage_error.lock().unwrap().clone(),
         clipboard_capture_enabled: state.clipboard_enabled.load(Ordering::SeqCst),
         clipboard_recording_types: *state.clipboard_recording_types.lock().unwrap(),
-        clipboard_binding: state.clipboard_binding.lock().unwrap().clone(),
+        clipboard_binding: clipboard_shortcut.binding,
+        clipboard_shortcut_enabled: clipboard_shortcut.enabled,
+        clipboard_controls: state.clipboard_options.lock().unwrap().controls(),
         window: state.windows.lock().unwrap().clone(),
     };
     Ok(snapshot)
@@ -201,9 +206,19 @@ pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result
 }
 
 #[tauri::command]
-pub fn records_details_toggle(window: Webview, app: AppHandle) -> Result<(), String> {
+pub fn records_details_toggle(
+    window: Webview,
+    app: AppHandle,
+    record_id: Option<String>,
+) -> Result<(), String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
-    windows::toggle_record_details(&app)
+    if record_id
+        .as_ref()
+        .is_some_and(|id| id.is_empty() || id.len() > 160)
+    {
+        return Err("invalid_argument".into());
+    }
+    windows::toggle_record_details(&app, record_id)
 }
 
 #[tauri::command]
@@ -617,7 +632,6 @@ pub async fn clipboard_record_use(
 ) -> Result<OperationResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
     let action = match action.as_str() {
-        "copy" => crate::clipboard_preferences::Activation::Copy,
         "paste" => crate::clipboard_preferences::Activation::Paste,
         "activate" => {
             app.state::<AppState>()
@@ -892,12 +906,14 @@ fn publish_preferences(
     app: &AppHandle,
     preferences: &crate::translation::Preferences,
 ) -> Result<(), String> {
-    for label in ["translation", "settings"] {
+    for label in ["translation", "settings", "clipboard", "history"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("translation_preferences_changed", preferences)
                 .map_err(|_| "event_emit")?;
-            view.emit("translation_engine_changed", &preferences.engine)
-                .map_err(|_| "event_emit")?;
+            if matches!(label, "translation" | "settings") {
+                view.emit("translation_engine_changed", &preferences.engine)
+                    .map_err(|_| "event_emit")?;
+            }
         }
     }
     Ok(())
@@ -959,13 +975,34 @@ pub async fn translation_shortcut_set(
     app: AppHandle,
     action: String,
     binding: Option<crate::shortcuts::KeyBinding>,
+    enabled: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
     let mut preferences = state.translation_preferences.lock().unwrap().clone();
-    let clipboard = state.clipboard_binding.lock().unwrap().clone();
-    preferences.set_shortcut(&action, binding, clipboard.as_ref())?;
+    if let Some(enabled) = enabled {
+        if binding.is_some() {
+            return Err("invalid_argument".into());
+        }
+        preferences.set_shortcut_enabled(&action, enabled)?;
+    } else {
+        if crate::shortcuts::GENERAL_SHORTCUT_ACTIONS
+            .contains(&crate::shortcuts::ShortcutAction::parse(&action)?)
+            && binding.as_ref().is_some_and(|binding| {
+                state
+                    .clipboard_options
+                    .lock()
+                    .unwrap()
+                    .record_shortcuts
+                    .conflicts(binding, None)
+            })
+        {
+            return Err("shortcut_clipboard_panel".into());
+        }
+        let clipboard = state.clipboard_shortcut.lock().unwrap().binding.clone();
+        preferences.set_shortcut(&action, binding, clipboard.as_ref())?;
+    }
     commit_preferences(&app, preferences, false).await
 }
 
@@ -977,7 +1014,17 @@ pub async fn translation_shortcuts_restore(window: Webview, app: AppHandle) -> R
     let mut preferences = state.translation_preferences.lock().unwrap().clone();
     preferences.shortcuts =
         crate::shortcuts::TranslationShortcuts::defaults(platform::capabilities().primary_modifier);
-    if let Some(binding) = state.clipboard_binding.lock().unwrap().clone() {
+    if preferences.shortcuts.general_bindings().any(|binding| {
+        state
+            .clipboard_options
+            .lock()
+            .unwrap()
+            .record_shortcuts
+            .conflicts(binding, None)
+    }) {
+        return Err("shortcut_clipboard_panel".into());
+    }
+    if let Some(binding) = state.clipboard_shortcut.lock().unwrap().binding.clone() {
         if crate::shortcuts::validate_clipboard_binding(binding, &preferences.shortcuts).is_err() {
             return Err("shortcut_clipboard".into());
         }
@@ -1336,16 +1383,6 @@ pub async fn clipboard_record_update(
 }
 
 #[tauri::command]
-pub async fn clipboard_capture_set(
-    window: Webview,
-    app: AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
-    authorize(&window, &["settings"])?;
-    crate::clipboard_preferences::set_recording(&app, Some(enabled)).await
-}
-
-#[tauri::command]
 pub async fn clipboard_recording_type_set(
     window: Webview,
     app: AppHandle,
@@ -1385,7 +1422,12 @@ pub async fn clipboard_shortcut_set(
     window: Webview,
     app: AppHandle,
     binding: Option<crate::shortcuts::KeyBinding>,
+    enabled: Option<bool>,
+    restore: Option<bool>,
 ) -> Result<(), String> {
+    use crate::shortcuts::{
+        clipboard_binding, validate_clipboard_binding, ClipboardRecordShortcuts,
+    };
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     authorize(&window, &["settings"])?;
     if !platform::capabilities().selection {
@@ -1393,16 +1435,63 @@ pub async fn clipboard_shortcut_set(
     }
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
-    let binding = {
+    let mut shortcut = state.clipboard_shortcut.lock().unwrap().clone();
+    let defaults = restore
+        .unwrap_or(false)
+        .then(ClipboardRecordShortcuts::default);
+    if defaults.is_some() && (binding.is_some() || enabled.is_some()) {
+        return Err("invalid_argument".into());
+    }
+    let (key, value) = if let Some(enabled) = enabled {
+        if binding.is_some() {
+            return Err("invalid_argument".into());
+        }
+        shortcut.enabled = enabled;
+        ("clipboard_shortcut_enabled", enabled.to_string())
+    } else {
         let preferences = state.translation_preferences.lock().unwrap();
-        binding
-            .map(|binding| {
-                crate::shortcuts::validate_clipboard_binding(binding, &preferences.shortcuts)
-            })
-            .transpose()?
+        shortcut.binding = defaults
+            .as_ref()
+            .map(|_| clipboard_binding())
+            .or(binding)
+            .map(|binding| validate_clipboard_binding(binding, &preferences.shortcuts))
+            .transpose()?;
+        let options = state.clipboard_options.lock().unwrap();
+        let records = defaults.as_ref().unwrap_or(&options.record_shortcuts);
+        if shortcut
+            .binding
+            .as_ref()
+            .is_some_and(|binding| records.conflicts(binding, None))
+            || defaults.is_some()
+                && preferences
+                    .shortcuts
+                    .general_bindings()
+                    .any(|binding| records.conflicts(binding, None))
+        {
+            return Err("shortcut_clipboard_panel".into());
+        }
+        if defaults.is_some() {
+            shortcut.enabled = true;
+        }
+        (
+            "clipboard_shortcut",
+            serde_json::to_string(&shortcut.binding).map_err(|_| "storage_record")?,
+        )
     };
-    let next = binding.as_ref().map(crate::binding_shortcut).transpose()?;
-    let value = serde_json::to_string(&binding).map_err(|_| "storage_record")?;
+    let next = if shortcut.enabled {
+        shortcut
+            .binding
+            .as_ref()
+            .map(crate::binding_shortcut)
+            .transpose()?
+    } else {
+        None
+    };
+    let defaults_json = defaults
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| "storage_record")?;
     // Reserve the new key before saving it, without releasing the current binding.
     let staged = on_main(&app, move |app| {
         let Some(next) = next else {
@@ -1418,10 +1507,14 @@ pub async fn clipboard_shortcut_set(
     })
     .await??;
     let saved = crate::clipboard_runtime::database(&app, move |database| {
-        database.preference_set("clipboard_shortcut", &value)
+        if let Some(records) = defaults_json {
+            database.reset_clipboard_shortcuts(&value, &records)
+        } else {
+            database.preference_set(key, &value)
+        }
     })
     .await;
-    let result = binding.clone();
+    let result = shortcut.clone();
     on_main(&app, move |app| {
         let state = app.state::<AppState>();
         if let Err(error) = saved {
@@ -1433,16 +1526,20 @@ pub async fn clipboard_shortcut_set(
         if let Some(staged) = staged {
             state.registered_shortcuts.lock().unwrap().push(staged);
         }
-        *state.clipboard_binding.lock().unwrap() = binding;
+        *state.clipboard_shortcut.lock().unwrap() = shortcut;
+        if let Some(defaults) = defaults {
+            state.clipboard_options.lock().unwrap().record_shortcuts = defaults;
+            crate::clipboard_preferences::publish_controls(&app, &state);
+        }
         crate::sync_global_shortcuts(&app);
         Ok(())
     })
     .await??;
-    let _ = window.emit_to(
-        "settings",
+    let _ = app.emit(
         "clipboard_binding_changed",
         serde_json::json!({
-            "binding": result,
+            "binding": result.binding,
+            "enabled": result.enabled,
             "shortcutErrors": state.shortcut_errors.lock().unwrap().clone(),
         }),
     );

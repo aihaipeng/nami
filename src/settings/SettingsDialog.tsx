@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
 
 export function SettingsDialog({ title, description, onClose, children }: {
-  title: string; description: string; onClose: () => void; children: ReactNode;
+  title: string; description?: string; onClose: () => void; children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const id = useId();
@@ -16,10 +16,10 @@ export function SettingsDialog({ title, description, onClose, children }: {
     };
   }, []);
   return <dialog ref={dialog} className="settings-dialog" role="alertdialog"
-    aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`}
+    aria-labelledby={`${id}-title`} aria-describedby={description ? `${id}-description` : undefined}
     onCancel={(event) => { event.preventDefault(); onClose(); }}>
     <h3 id={`${id}-title`}>{title}</h3>
-    <p id={`${id}-description`}>{description}</p>
+    {description && <p id={`${id}-description`}>{description}</p>}
     {children}
   </dialog>;
 }

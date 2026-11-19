@@ -1,4 +1,5 @@
-import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, type TranslationShortcuts } from './shortcuts';
+import { defaultClipboardShortcuts, type ClipboardControls } from './clipboardShortcuts';
+import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from './shortcuts';
 
 export type Locale = 'system' | 'zh-CN' | 'en';
 export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
@@ -44,7 +45,12 @@ export interface TranslationPreferences {
   proxyUrl: string;
   proxyEnabled: boolean;
   selectionEnabled: boolean;
+  disabledShortcuts: ShortcutAction[];
   shortcuts: TranslationShortcuts;
+}
+
+export function translationShortcutEnabled(preferences: TranslationPreferences, action: ShortcutAction) {
+  return action === 'selection' ? preferences.selectionEnabled : !preferences.disabledShortcuts.includes(action);
 }
 
 export interface AppSnapshot {
@@ -56,6 +62,8 @@ export interface AppSnapshot {
   clipboardCaptureEnabled: boolean;
   clipboardRecordingTypes: { text: boolean; image: boolean; files: boolean };
   clipboardBinding: KeyBinding | null;
+  clipboardShortcutEnabled: boolean;
+  clipboardControls: ClipboardControls;
   accessibility: boolean;
   shortcutErrors: string[];
   window: WindowState;
@@ -79,12 +87,15 @@ export const initialSnapshot: AppSnapshot = {
     proxyUrl: '',
     proxyEnabled: false,
     selectionEnabled: true,
+    disabledShortcuts: [],
     shortcuts: defaultTranslationShortcuts('control'),
   },
   storageError: null,
   clipboardCaptureEnabled: false,
   clipboardRecordingTypes: { text: true, image: true, files: true },
   clipboardBinding: defaultClipboardBinding,
+  clipboardShortcutEnabled: true,
+  clipboardControls: { activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
   accessibility: false,
   shortcutErrors: [],
   window: {

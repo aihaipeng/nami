@@ -9,7 +9,7 @@ export function clipboardUseFeedback(result: ClipboardResult): MessageKey | null
   return result.copyStatus === 'current' ? null : 'copyFailed';
 }
 
-export function clipboardUseError(error: unknown, action: 'copy' | 'paste' = 'copy'): MessageKey {
+export function clipboardUseError(error: unknown): MessageKey {
   const code = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
-  return code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : action === 'copy' ? 'copyFailed' : 'nativeError';
+  return code === 'clipboard_file_missing' ? 'clipboardFileUnavailable' : code === 'clipboard_image_missing' ? 'clipboardImageUnavailable' : 'nativeError';
 }

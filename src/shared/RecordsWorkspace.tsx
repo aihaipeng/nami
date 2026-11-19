@@ -3,6 +3,7 @@ import type { ViewProps } from '../App';
 import { Clipboard } from '../clipboard/Clipboard';
 import { HistoryPanel } from '../translation/HistoryPanel';
 import type { HistoryRecord } from '../translation/history';
+import { matchesBinding } from './shortcuts';
 
 export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: ViewProps & {
   selectedId?: string | null;
@@ -15,7 +16,7 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
     if (!visible || view !== 'translation') return;
     const dismiss = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
+      if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [snapshot.capabilities.primaryModifier] }, event)) {
         event.preventDefault(); void command('window_hide', { region: 'translation' });
       }
     };

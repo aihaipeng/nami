@@ -43,7 +43,7 @@ pub struct AppState {
     clipboard_options: Mutex<clipboard_preferences::ClipboardOptions>,
     clipboard_recording_menu: Mutex<Option<MenuItem<tauri::Wry>>>,
     clipboard_recording_types: Mutex<RecordingTypes>,
-    clipboard_binding: Mutex<Option<KeyBinding>>,
+    clipboard_shortcut: Mutex<ClipboardShortcut>,
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
     clipboard_writes: tokio::sync::Mutex<()>,
@@ -91,7 +91,10 @@ impl Default for AppState {
             clipboard_options: Mutex::new(clipboard_preferences::ClipboardOptions::default()),
             clipboard_recording_menu: Mutex::new(None),
             clipboard_recording_types: Mutex::new(RecordingTypes::default()),
-            clipboard_binding: Mutex::new(Some(shortcuts::clipboard_binding())),
+            clipboard_shortcut: Mutex::new(ClipboardShortcut {
+                binding: Some(shortcuts::clipboard_binding()),
+                enabled: true,
+            }),
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
             clipboard_writes: tokio::sync::Mutex::new(()),
@@ -155,11 +158,19 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
     }
 }
 
+#[derive(Clone)]
+struct ClipboardShortcut {
+    binding: Option<KeyBinding>,
+    enabled: bool,
+}
+
 fn clipboard_shortcut(state: &AppState) -> Option<Shortcut> {
-    state
-        .clipboard_binding
-        .lock()
-        .unwrap()
+    let shortcut = state.clipboard_shortcut.lock().unwrap();
+    if !shortcut.enabled {
+        return None;
+    }
+    shortcut
+        .binding
         .as_ref()
         .and_then(|binding| binding_shortcut(binding).ok())
 }
@@ -352,12 +363,12 @@ fn main() {
             commands::clipboard_record_process,
             commands::clipboard_translation_take,
             commands::clipboard_record_update,
-            commands::clipboard_capture_set,
             commands::clipboard_recording_type_set,
             clipboard_preferences::clipboard_options_get,
             clipboard_preferences::clipboard_excluded_app_pick,
             clipboard_preferences::clipboard_excluded_app_remove,
             clipboard_preferences::clipboard_behavior_set,
+            clipboard_preferences::clipboard_record_shortcut_set,
             clipboard_preferences::clipboard_storage_info,
             clipboard_preferences::clipboard_cleanup_preview,
             clipboard_preferences::clipboard_cleanup_apply,
@@ -433,17 +444,23 @@ fn main() {
                     .and_then(|value| serde_json::from_str::<RecordingTypes>(&value).ok())
                     .unwrap_or_default();
                 let clipboard_options = clipboard_preferences::ClipboardOptions::load(&database)?;
-                let clipboard_binding = load_clipboard_binding(
-                    database.preference("clipboard_shortcut")?.as_deref(),
-                    &preferences.shortcuts,
-                );
+                let clipboard_shortcut = ClipboardShortcut {
+                    binding: load_clipboard_binding(
+                        database.preference("clipboard_shortcut")?.as_deref(),
+                        &preferences.shortcuts,
+                    ),
+                    enabled: database
+                        .preference("clipboard_shortcut_enabled")?
+                        .as_deref()
+                        != Some("false"),
+                };
                 Ok((
                     database,
                     page,
                     capture,
                     preferences,
                     recording_types,
-                    clipboard_binding,
+                    clipboard_shortcut,
                     clipboard_options,
                 ))
             })
@@ -457,7 +474,7 @@ fn main() {
                     capture,
                     preferences,
                     recording_types,
-                    clipboard_binding,
+                    clipboard_shortcut,
                     clipboard_options,
                 )) => {
                     *app.state::<AppState>().clipboard_options.lock().unwrap() = clipboard_options;
@@ -465,7 +482,8 @@ fn main() {
                         .clipboard_recording_types
                         .lock()
                         .unwrap() = recording_types;
-                    *app.state::<AppState>().clipboard_binding.lock().unwrap() = clipboard_binding;
+                    *app.state::<AppState>().clipboard_shortcut.lock().unwrap() =
+                        clipboard_shortcut;
                     *app.state::<AppState>().translation_engine.lock().unwrap() =
                         preferences.engine.clone();
                     *app.state::<AppState>()

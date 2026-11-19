@@ -1,18 +1,20 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Database, MousePointer2, RefreshCw, X } from 'lucide-react';
+import { AppWindow, Info, RefreshCw, X } from 'lucide-react';
+import { FloatingPanel } from '../shared/FloatingPanel';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import type { MessageKey, Translate } from '../shared/i18n';
 import { SettingsDialog } from './SettingsDialog';
 import { errorCode } from './ShortcutCapture';
 
 type HistoryPolicy = { days: number | null; limit: number | null };
-type ExcludedApp = { bundleId: string; name: string };
+type ExcludedApp = { bundleId: string; name: string; iconDataUrl?: string };
 type Activation = 'paste' | 'copy';
 type Options = { excludedApps: ExcludedApp[]; historyPolicy: HistoryPolicy; activation: Activation };
 type Storage = { bytes: number };
-type Cleanup = { policy: HistoryPolicy | null; count: number; token: string };
-type CleanupResult = { removed: number; mediaCleanupFailed: boolean };
+type Cleanup = { policy: HistoryPolicy | null; count: number; token: string; categories?: [number, number, number] };
+const cleanupCategoryLabels = ['clipboardCleanupOrdinary', 'clipboardCleanupFavorites', 'clipboardCleanupPinned'] as const;
+type CleanupResult = { mediaCleanupFailed: boolean };
 
 function storageSize(bytes: number, locale: string) {
   let value = bytes;
@@ -22,9 +24,9 @@ function storageSize(bytes: number, locale: string) {
   }
 }
 
-function Setting({ label, help, children }: { label: string; help?: string; children: ReactNode }) {
+function Setting({ label, children }: { label: string; children: ReactNode }) {
   return <div className="settings-field clipboard-option-row">
-    <div className="settings-field-content"><span>{label}</span>{help && <p>{help}</p>}</div>
+    <div className="settings-field-content">{label}</div>
     {children}
   </div>;
 }
@@ -44,7 +46,7 @@ export function useClipboardOptions(available: boolean) {
 
 type OptionsState = ReturnType<typeof useClipboardOptions>;
 
-export function ClipboardExcludedApps({ t, state, available, onPick }: { t: Translate; state: OptionsState; available: boolean; onPick: () => void }) {
+export function ClipboardExcludedApps({ t, state, available }: { t: Translate; state: OptionsState; available: boolean }) {
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState(false);
@@ -71,38 +73,71 @@ export function ClipboardExcludedApps({ t, state, available, onPick }: { t: Tran
     }
   }
 
-  return <>
-    <Setting label={t('clipboardExcludedAppsHeading')} help={t('clipboardExcludedAppsDescription')}>
-      {available ? <button type="button" ref={add} className="settings-action" aria-description={t('clipboardExcludedAppsDescription')} disabled={!apps} aria-disabled={busy || undefined}
-        onClick={() => { onPick(); void change(); }}>{t('clipboardAddApp')}</button>
+  return <section aria-labelledby="clipboard-excluded-heading">
+    <div className="settings-section-heading clipboard-section-heading">
+      <div className="clipboard-section-title">
+        <h2 id="clipboard-excluded-heading">{t('clipboardExcludedAppsHeading')}</h2>
+        <ExclusionTip label={t('clipboardAboutExcludedApps')} text={t('clipboardExcludedAppsDescription')} />
+      </div>
+      {available ? <button type="button" ref={add} className="settings-action" disabled={!apps} aria-disabled={busy || undefined}
+        onClick={() => void change()}>{t('clipboardAddApp')}</button>
         : <span className="settings-badge">{t('platformUnavailable')}</span>}
-    </Setting>
-    {available && apps && (apps.length ? <ul className="clipboard-excluded-list" role="list" aria-label={t('clipboardExcludedAppsHeading')}>
-      {apps.map(({ bundleId, name }) => {
+    </div>
+    {available && !!apps?.length && <ul className="settings-group clipboard-excluded-list" role="list" aria-labelledby="clipboard-excluded-heading">
+      {apps.map(({ bundleId, name, iconDataUrl }) => {
         const duplicate = apps.some((app) => app.bundleId !== bundleId && app.name === name);
-        const remove = t('clipboardRemoveApp').replace('{app}', duplicate ? `${name} (${bundleId})` : name);
+        const identity = duplicate ? `${name} (${bundleId})` : name;
+        const remove = t('clipboardRemoveApp').replace('{app}', identity);
         return <li key={bundleId}>
-          <span><strong title={bundleId}>{name}</strong>{duplicate && <small>{bundleId}</small>}</span>
+          <div className="clipboard-excluded-name">
+            <ExcludedAppIcon url={iconDataUrl} />
+            <strong title={bundleId}>{name}</strong>
+            {duplicate && <ExclusionTip label={t('clipboardAboutExcludedApp').replace('{app}', identity)} text={bundleId} />}
+          </div>
           <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button" title={remove}
             aria-label={remove} onClick={(event) => void change(bundleId, event.currentTarget)}><X aria-hidden="true" /></button>
         </li>;
       })}
-    </ul> : <p className="clipboard-setting-note">{t('clipboardNoExcludedApps')}</p>)}
+    </ul>}
     {error && <p className="clipboard-setting-note" role="alert">{t('clipboardManageAppsFailed')}</p>}
+  </section>;
+}
+
+function ExcludedAppIcon({ url }: { url?: string }) {
+  const [failed, setFailed] = useState<string>();
+  return url && url !== failed
+    ? <img className="clipboard-excluded-icon" src={url} alt="" onError={() => setFailed(url)} />
+    : <AppWindow className="clipboard-excluded-icon clipboard-icon-fallback" aria-hidden="true" />;
+}
+
+function ExclusionTip({ label, text }: { label: string; text: string }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  return <>
+    <button ref={trigger} type="button" className="settings-action clipboard-tip-trigger" aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open}
+      onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setOpen(!open); }} onBlur={() => setOpen(false)}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); }
+      }}><Info aria-hidden="true" /></button>
+    {open && <FloatingPanel anchor={trigger} onClose={() => setOpen(false)} id={id} role="tooltip" width={220} side="bottom" className="settings-popover clipboard-tip-panel" dismissOnSettingsScroll>
+      {text}
+    </FloatingPanel>}
   </>;
 }
 
-export function ClipboardReuseSettings({ t, state, storageAvailable, platformAvailable, locale, onDialogOpen }: {
-  t: Translate; state: OptionsState; storageAvailable: boolean; platformAvailable: boolean; locale: string; onDialogOpen: () => void;
+export function ClipboardReuseSettings({ t, state, storageAvailable, platformAvailable, locale }: {
+  t: Translate; state: OptionsState; storageAvailable: boolean; platformAvailable: boolean; locale: string;
 }) {
   const [storage, setStorage] = useState<Storage>();
   const [storageError, setStorageError] = useState(false);
   const [refresh, refreshStorage] = useState(0);
   const [open, setOpen] = useState<'days' | 'limit' | 'behavior' | null>(null);
   const [cleanup, setCleanup] = useState<Cleanup>();
+  const [selectedCategories, setSelectedCategories] = useState(0);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [behaviorBusy, setBehaviorBusy] = useState(false);
-  const [historyFeedback, setHistoryFeedback] = useState<{ message: MessageKey; count?: number; error?: boolean }>();
+  const [historyFeedback, setHistoryFeedback] = useState<{ message: MessageKey; error?: boolean }>();
   const [behaviorError, setBehaviorError] = useState(false);
   const historyPending = useRef(false);
   const behaviorPending = useRef(false);
@@ -121,12 +156,11 @@ export function ClipboardReuseSettings({ t, state, storageAvailable, platformAva
     return () => { current = false; };
   }, [storageAvailable, refresh]);
 
-  async function apply({ policy, token }: Cleanup) {
-    const result = await invoke<CleanupResult>('clipboard_cleanup_apply', { policy, token });
+  async function apply({ policy, token }: Cleanup, categories?: number) {
+    const result = await invoke<CleanupResult>('clipboard_cleanup_apply', { policy, token, ...(categories === undefined ? {} : { categories }) });
     if (policy) state.setOptions((previous) => previous && { ...previous, historyPolicy: policy });
-    setHistoryFeedback(result.mediaCleanupFailed ? { message: 'clipboardCleanupMediaFailed', error: true }
-      : result.removed ? { message: result.removed === 1 ? 'clipboardCleanupDoneOne' : 'clipboardCleanupDone', count: result.removed }
-      : { message: policy ? 'clipboardRetentionUpdated' : 'clipboardNothingToClear' });
+    if (result.mediaCleanupFailed) setHistoryFeedback({ message: 'clipboardCleanupMediaFailed', error: true });
+    else if (policy) setHistoryFeedback({ message: 'clipboardRetentionUpdated' });
     refreshStorage((value) => value + 1);
   }
 
@@ -146,15 +180,12 @@ export function ClipboardReuseSettings({ t, state, storageAvailable, platformAva
   function preview(next: HistoryPolicy | null) {
     if (cleanup) return;
     void historyAction(async () => {
-      const result = await invoke<Pick<Cleanup, 'count' | 'token'>>('clipboard_cleanup_preview', { policy: next });
+      const result = await invoke<Omit<Cleanup, 'policy'>>('clipboard_cleanup_preview', { policy: next });
       if (!mounted.current) return;
       const candidate = { policy: next, ...result };
-      if (candidate.count) { onDialogOpen(); setCleanup(candidate); }
-      else if (next) await apply(candidate);
-      else {
-        setHistoryFeedback({ message: 'clipboardNothingToClear' });
-        refreshStorage((value) => value + 1);
-      }
+      if (!next || candidate.count) {
+        setSelectedCategories(0); setCleanup(candidate);
+      } else await apply(candidate);
     });
   }
 
@@ -186,7 +217,11 @@ export function ClipboardReuseSettings({ t, state, storageAvailable, platformAva
 
   return <>
     <section aria-labelledby="clipboard-storage-heading">
-      <h2 id="clipboard-storage-heading"><Database aria-hidden="true" />{t('clipboardHistoryStorage')}</h2>
+      <div className="settings-section-heading clipboard-section-heading">
+        <h2 id="clipboard-storage-heading">{t('clipboardHistoryStorage')}</h2>
+        <button type="button" className="settings-action clipboard-clear-records" aria-haspopup="dialog"
+          disabled={!storageAvailable} aria-disabled={historyBusy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearRecords')}</button>
+      </div>
       <div className="settings-group">
         <Setting label={t('clipboardKeepHistory')}>
           {storagePicker('days', t('clipboardKeepHistory'), days)}
@@ -201,16 +236,12 @@ export function ClipboardReuseSettings({ t, state, storageAvailable, platformAva
               aria-label={t('clipboardRefreshStorage')} aria-description={t('clipboardStorageUsedHelp')} onClick={() => refreshStorage((value) => value + 1)}><RefreshCw aria-hidden="true" /></button>}
           </div>
         </Setting>
-        <div className="clipboard-cleanup-row">
-          <button type="button" className="settings-action clipboard-destructive-action" aria-haspopup="dialog"
-            disabled={!storageAvailable} aria-disabled={historyBusy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearUnprotected')}</button>
-        </div>
         {historyFeedback && <p className="clipboard-setting-note" role={historyFeedback.error ? 'alert' : 'status'}>
-          {t(historyFeedback.message).replace('{count}', number.format(historyFeedback.count ?? 0))}</p>}
+          {t(historyFeedback.message)}</p>}
       </div>
     </section>
     <section aria-labelledby="clipboard-behavior-heading">
-      <h2 id="clipboard-behavior-heading"><MousePointer2 aria-hidden="true" />{t('clipboardBehavior')}</h2>
+      <h2 id="clipboard-behavior-heading">{t('clipboardBehavior')}</h2>
       <div className="settings-group">
         <Setting label={t('clipboardActivation')}>
           {platformAvailable && activation ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
@@ -222,15 +253,24 @@ export function ClipboardReuseSettings({ t, state, storageAvailable, platformAva
         {behaviorError && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>
     </section>
-    {cleanup && <SettingsDialog title={t(cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardClearHeading')}
-      description={t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count))}
+    {cleanup && <SettingsDialog title={t(cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardCleanupClear')}
+      description={cleanup.policy ? t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count)) : undefined}
       onClose={() => { if (!historyPending.current) setCleanup(undefined); }}>
+      {cleanup.categories && <fieldset className="clipboard-cleanup-categories" aria-label={t('clipboardCleanupCategories')} disabled={historyBusy}>
+        {cleanup.categories.map((count, index) => <label className="clipboard-cleanup-category" key={cleanupCategoryLabels[index]}>
+          <input type="checkbox" checked={Boolean(selectedCategories & (1 << index))} disabled={!count}
+            onChange={() => setSelectedCategories((current) => current ^ (1 << index))} />
+          <span>{t(cleanupCategoryLabels[index])}</span><span className="clipboard-cleanup-count">{number.format(count)}</span>
+        </label>)}
+      </fieldset>}
       <div className="settings-dialog-actions">
         <button type="button" data-initial-focus className="settings-action" aria-disabled={historyBusy || undefined}
           onClick={() => { if (!historyPending.current) setCleanup(undefined); }}>{t('clipboardCancel')}</button>
-        <button type="button" className="settings-action clipboard-confirm-action" aria-disabled={historyBusy || undefined} onClick={() => void historyAction(async () => {
-          try { await apply(cleanup); } finally { setCleanup(undefined); }
-        })}>{t(cleanup.policy ? 'clipboardCleanupApply' : 'clipboardCleanupClear')}</button>
+        <button type="button" className="settings-action clipboard-confirm-action" disabled={!cleanup.policy && !selectedCategories} aria-disabled={historyBusy || undefined}
+          onClick={() => void historyAction(async () => {
+            if (!cleanup.policy && !selectedCategories) return;
+            try { await apply(cleanup, cleanup.policy ? undefined : selectedCategories); } finally { setCleanup(undefined); }
+          })}>{t(cleanup.policy ? 'clipboardCleanupApply' : 'clipboardCleanupClear')}</button>
       </div>
     </SettingsDialog>}
   </>;

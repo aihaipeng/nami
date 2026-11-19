@@ -127,6 +127,8 @@ pub struct Preferences {
     pub proxy_url: String,
     pub proxy_enabled: bool,
     pub selection_enabled: bool,
+    #[serde(default)]
+    pub disabled_shortcuts: Vec<shortcuts::ShortcutAction>,
     pub shortcuts: TranslationShortcuts,
 }
 
@@ -140,6 +142,7 @@ impl Preferences {
             proxy_url: String::new(),
             proxy_enabled: false,
             selection_enabled: true,
+            disabled_shortcuts: Vec::new(),
             shortcuts: TranslationShortcuts::defaults(primary),
         }
     }
@@ -179,11 +182,12 @@ impl Preferences {
         if let Some(enabled) = read("translation_selection_enabled") {
             preferences.selection_enabled = enabled == "true";
         }
-        if let Some(json) = read("translation_shortcuts") {
-            if let Ok(shortcuts) = serde_json::from_str::<TranslationShortcuts>(&json) {
-                preferences.shortcuts = shortcuts;
-            }
+        if let Some(disabled) = read("translation_disabled_shortcuts")
+            .and_then(|value| serde_json::from_str(&value).ok())
+        {
+            preferences.disabled_shortcuts = disabled;
         }
+        preferences.shortcuts = TranslationShortcuts::from_store(read, primary);
         preferences
     }
 
@@ -214,17 +218,22 @@ impl Preferences {
             }
             self.secondary_language = secondary;
         }
-        if let Some(url) = patch.proxy_url {
-            let url = url.trim();
-            if proxy_contains_credentials(url) {
-                return Err("proxy_credentials".into());
-            }
-            if url.chars().count() > 2_048 {
-                return Err("invalid_argument".into());
+        if patch.proxy_url.is_some() || patch.proxy_enabled.is_some() {
+            let url = patch
+                .proxy_url
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or(&self.proxy_url);
+            let enabled = patch.proxy_enabled.unwrap_or(self.proxy_enabled);
+            if enabled || (patch.proxy_url.is_some() && !url.is_empty()) {
+                if proxy_contains_credentials(url) {
+                    return Err("proxy_credentials".into());
+                }
+                if url.chars().count() > 2_048 || configured_proxy(url, true).is_err() {
+                    return Err("proxy_url".into());
+                }
             }
             self.proxy_url = url.to_string();
-        }
-        if let Some(enabled) = patch.proxy_enabled {
             self.proxy_enabled = enabled;
         }
         if let Some(enabled) = patch.selection_enabled {
@@ -241,6 +250,20 @@ impl Preferences {
     ) -> Result<(), String> {
         let action = shortcuts::ShortcutAction::parse(action)?;
         self.shortcuts = shortcuts::assign_shortcut(&self.shortcuts, action, binding, clipboard)?;
+        Ok(())
+    }
+
+    pub fn set_shortcut_enabled(&mut self, action: &str, enabled: bool) -> Result<(), String> {
+        let action = shortcuts::ShortcutAction::parse(action)?;
+        if action == shortcuts::ShortcutAction::Selection {
+            self.selection_enabled = enabled;
+        } else {
+            self.disabled_shortcuts
+                .retain(|candidate| *candidate != action);
+            if !enabled {
+                self.disabled_shortcuts.push(action);
+            }
+        }
         Ok(())
     }
 
@@ -263,6 +286,10 @@ impl Preferences {
                     "false"
                 }
                 .into(),
+            ),
+            (
+                "translation_disabled_shortcuts",
+                serde_json::to_string(&self.disabled_shortcuts).unwrap_or_else(|_| "[]".into()),
             ),
             (
                 "translation_shortcuts",
@@ -680,6 +707,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_shortcuts_round_trip_without_changing_bindings() {
+        let mut preferences = Preferences::defaults("meta");
+        let bindings = preferences.shortcuts.clone();
+        preferences
+            .set_shortcut_enabled("translate", false)
+            .unwrap();
+        preferences
+            .set_shortcut_enabled("selection", false)
+            .unwrap();
+        let entries = preferences.entries();
+        let mut loaded = Preferences::from_store(
+            |key| {
+                entries
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.clone())
+            },
+            "meta",
+        );
+        assert_eq!(loaded, preferences);
+        assert_eq!(
+            loaded.disabled_shortcuts,
+            vec![shortcuts::ShortcutAction::Translate]
+        );
+        assert!(!loaded.selection_enabled);
+        loaded.set_shortcut_enabled("translate", true).unwrap();
+        assert!(loaded.disabled_shortcuts.is_empty());
+        assert_eq!(loaded.shortcuts, bindings);
+    }
+
+    #[test]
     fn proxy_accepts_http_urls_and_rejects_other_forms() {
         assert!(configured_proxy("http://127.0.0.1:7890", true).is_ok());
         assert!(configured_proxy("https://proxy.example.com:8443", true).is_ok());
@@ -691,6 +749,50 @@ mod tests {
         assert!(configured_proxy("http://proxy.example.com/path", true).is_err());
         assert!(configured_proxy("http://proxy.example.com:8080?x=1", true).is_err());
         assert!(configured_proxy("", true).is_err());
+    }
+
+    #[test]
+    fn proxy_preferences_reject_invalid_changes_before_they_can_replace_active_settings() {
+        let mut preferences = Preferences::defaults("meta");
+        let patch = |url: Option<&str>, enabled| PreferencePatch {
+            proxy_url: url.map(str::to_string),
+            proxy_enabled: enabled,
+            ..PreferencePatch::default()
+        };
+        assert_eq!(
+            preferences.apply(patch(None, Some(true))),
+            Err("proxy_url".into())
+        );
+        assert_eq!(
+            preferences.apply(patch(Some("socks5://127.0.0.1:1080"), None)),
+            Err("proxy_url".into())
+        );
+        assert!(preferences.proxy_url.is_empty());
+        assert!(!preferences.proxy_enabled);
+        preferences
+            .apply(patch(Some(" https://proxy.example.com:8443 "), Some(true)))
+            .unwrap();
+        for url in [
+            "",
+            "http://proxy.example.com/path",
+            "http://proxy.example.com?query",
+        ] {
+            assert_eq!(
+                preferences.apply(patch(Some(url), None)),
+                Err("proxy_url".into())
+            );
+        }
+        assert_eq!(
+            preferences.apply(patch(Some("http://user:pass@127.0.0.1:7890"), None)),
+            Err("proxy_credentials".into())
+        );
+        assert_eq!(preferences.proxy_url, "https://proxy.example.com:8443");
+        assert!(preferences.proxy_enabled);
+        preferences.proxy_url = "legacy-invalid".into();
+        preferences.apply(patch(None, Some(false))).unwrap();
+        preferences.apply(patch(Some(""), None)).unwrap();
+        assert!(!preferences.proxy_enabled);
+        assert!(preferences.proxy_url.is_empty());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
@@ -24,6 +24,17 @@ describe('live translation bridge', () => {
     fireEvent.keyDown(source(), { key: '1', metaKey: true });
     expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-test', part: 'primary' });
     expect(calls('translation_run').at(-1)?.[1]).toEqual({ text: 'Synthetic input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: false });
+  });
+
+  it('stops responding to a disabled translation shortcut and resumes with the same keys', async () => {
+    await mount();
+    const preferences = bridge.snapshot.translationPreferences;
+    await emit('translation_preferences_changed', { ...preferences, disabledShortcuts: ['translate'] });
+    submit('Synthetic input');
+    expect(calls('translation_run')).toHaveLength(0);
+    await emit('translation_preferences_changed', preferences);
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
   });
 
   it('immediately retranslates the changed target and creates a new complete record', async () => {
@@ -214,29 +225,114 @@ describe('translation engine settings', () => {
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'google' });
   });
 
-  it('saves an HTTP proxy and rebinds a shortcut without taking the clipboard shortcut', async () => {
+  it('explains the shared open shortcut and keeps the binding visible when turned off', async () => {
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: 'HotKey' }));
+    const toggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Open Translation' });
+    const recorder = screen.getByRole<HTMLButtonElement>('button', { name: /^Open Translation Shortcut/ });
+    expect(toggle.getAttribute('aria-description')).toBe('Opens the window, or translates selected text.');
+    expect(recorder.textContent).toBe('⌘T');
+    await user.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'selection', enabled: false });
+    expect(recorder.disabled).toBe(false);
+    expect(recorder.textContent).toBe('⌘T');
+    await user.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(true));
+  });
+
+  it('records a local shortcut without turning it on', async () => {
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: 'HotKey' }));
+    const toggle = within(screen.getByRole('group', { name: 'Translation' })).getByRole<HTMLInputElement>('checkbox', { name: 'Translate' });
+    const recorder = within(screen.getByRole('group', { name: 'Translation' })).getByRole<HTMLButtonElement>('button', { name: 'Translate shortcut' });
+    await user.click(toggle);
+    expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'translate', enabled: false });
+    expect(recorder.disabled).toBe(false);
+    expect(recorder.textContent).toBe('⌘↵');
+    await user.click(recorder);
+    expect(recorder.textContent).toBe('Press shortcut');
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
+    await waitFor(() => expect(recorder.textContent).toBe('⌘J'));
+    expect(toggle.checked).toBe(false);
+    await user.click(toggle);
+    expect(toggle.checked).toBe(true);
+    expect(recorder.textContent).toBe('⌘J');
+  });
+
+  it('can tab into an unchecked recorder and ends recording when the settings window loses focus', async () => {
+    bridge.snapshot.translationPreferences.disabledShortcuts = ['copyPrimary'];
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: 'HotKey' }));
+    await user.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Copy Primary Translation shortcut' }).getAttribute('aria-pressed')).toBe('true');
+    expect(calls('translation_shortcut_capture').map(([, args]) => args)).toEqual([{ active: true }]);
+    fireEvent(window, new FocusEvent('blur'));
+    expect(calls('translation_shortcut_capture').map(([, args]) => args)).toEqual([{ active: true }, { active: false }]);
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
+    expect(calls('translation_shortcut_set')).toHaveLength(0);
+  });
+
+  it('validates the proxy on enable or save and keeps rejected drafts out of the active preferences', async () => {
+    const user = userEvent.setup(); await mount('settings');
+    await user.click(screen.getByRole('button', { name: /^Translation$/ }));
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'HTTP Proxy URL' });
+    const toggle = screen.getByRole<HTMLInputElement>('switch', { name: 'Use HTTP Proxy' });
+    fireEvent.change(input, { target: { value: 'http://user:pass@127.0.0.1:7890' } });
+    expect((await screen.findByRole('alert')).textContent).toContain('Proxy URLs cannot include a username or password.');
+    await user.click(toggle);
+    expect(calls('translation_preferences_set')).toHaveLength(0);
+    expect(toggle.checked).toBe(false);
+
+    fireEvent.change(input, { target: { value: 'socks5://127.0.0.1:7890' } });
+    expect(calls('translation_preferences_set')).toHaveLength(0);
+    bridge.invoke.mockRejectedValueOnce('proxy_url');
+    await user.click(toggle);
+    expect((await screen.findByRole('alert')).textContent).toBe('Enter a valid HTTP or HTTPS proxy URL.');
+    expect(toggle.checked).toBe(false);
+    expect(input.value).toBe('socks5://127.0.0.1:7890');
+
+    fireEvent.change(input, { target: { value: 'http://127.0.0.1:7890' } });
+    expect(calls('translation_preferences_set')).toHaveLength(1);
+    await user.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'http://127.0.0.1:7890', proxyEnabled: true });
+    fireEvent.change(input, { target: { value: 'https://example.test:8443' } });
+    input.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://example.test:8443'));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'https://example.test:8443' });
+    expect(document.activeElement).toBe(input);
+
+    fireEvent.change(input, { target: { value: 'https://other.example.test:8443' } });
+    bridge.invoke.mockRejectedValueOnce('storage_io');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not save proxy settings.');
+    expect(toggle.checked).toBe(true);
+    expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://example.test:8443');
+    expect(input.value).toBe('https://other.example.test:8443');
+    await user.keyboard('{Escape}');
+    expect(input.value).toBe('https://example.test:8443');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('rebinds a shortcut without taking the clipboard shortcut', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     expect(screen.getByRole('heading', { name: 'Translation' })).toBeTruthy();
-    for (const name of ['Languages', 'Connection', 'Keyboard Shortcuts']) expect(screen.getByRole('region', { name })).toBeTruthy();
-    fireEvent.click(screen.getByRole('switch', { name: 'Translate Selected Text' }));
-    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ selectionEnabled: false });
-    fireEvent.change(screen.getByRole('textbox', { name: 'HTTP Proxy URL' }), { target: { value: 'http://user:pass@127.0.0.1:7890' } });
-    expect((await screen.findByRole('alert')).textContent).toContain('Proxy URLs cannot include a username or password.');
-    expect(calls('translation_preferences_set').some(([, args]) => String((args as { proxyUrl?: string }).proxyUrl).includes('@'))).toBe(false);
-    fireEvent.change(screen.getByRole('textbox', { name: 'HTTP Proxy URL' }), { target: { value: 'http://127.0.0.1:7890' } });
-    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'http://127.0.0.1:7890' });
-    fireEvent.click(screen.getByRole('switch', { name: 'Use HTTP Proxy' }));
-    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyEnabled: true });
+    for (const name of ['Languages', 'Connection']) expect(screen.getByRole('region', { name })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Actions shortcut' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'HotKey' }));
     fireEvent.click(screen.getByRole('button', { name: 'Actions shortcut' }));
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
     await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'actions', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
-    fireEvent.click(screen.getByRole('button', { name: 'Translate shortcut' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
     fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true });
     expect((await screen.findByRole('alertdialog')).textContent).toContain('Already assigned to Open Clipboard.');
     expect(document.activeElement?.textContent).toBe('OK');
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Restore Default' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Translation Defaults' }));
     await waitFor(() => expect(calls('translation_shortcuts_restore')).toHaveLength(1));
   });
 });

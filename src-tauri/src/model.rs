@@ -203,6 +203,14 @@ impl WindowState {
         self.translation_visible = !self.translation_visible;
     }
 
+    pub fn preview_clipboard_record(&mut self, record_id: String) {
+        if !self.translation_visible || self.clipboard_detail_id.as_ref() == Some(&record_id) {
+            self.toggle_record_details();
+        }
+        self.records_browsing = false;
+        self.clipboard_detail_id = Some(record_id);
+    }
+
     pub fn select_history_record(&mut self, _repeated: bool, _retranslate: bool) {
         self.records_browsing = true;
         self.record_view = RecordView::Translation;
@@ -417,6 +425,19 @@ mod tests {
             assert!(state.translation_visible && state.history_visible);
             assert_eq!(state.record_view, super::RecordView::Translation);
         }
+    }
+
+    #[test]
+    fn keyboard_preview_toggles_the_same_item_and_selects_another_without_closing() {
+        let mut state = WindowState::default();
+        state.set_record_view(RecordView::Clipboard);
+        state.preview_clipboard_record("first".into());
+        assert!(state.translation_visible && !state.records_browsing);
+        state.preview_clipboard_record("second".into());
+        assert!(state.translation_visible && !state.records_browsing);
+        assert_eq!(state.clipboard_detail_id.as_deref(), Some("second"));
+        state.preview_clipboard_record("second".into());
+        assert!(!state.translation_visible);
     }
 
     #[test]

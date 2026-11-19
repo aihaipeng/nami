@@ -8,8 +8,8 @@ import { languageName, languages, providerLanguages, supportsLanguage, supportsT
 import { FloatingPanel, restorePanelFocus } from '../shared/FloatingPanel';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
-import { keycapLabels, matchesBinding } from '../shared/shortcuts';
-import type { TranslationPreferences } from '../shared/contracts';
+import { keycapLabels, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
+import { translationShortcutEnabled, type TranslationPreferences } from '../shared/contracts';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
@@ -32,7 +32,7 @@ function sourcePrefixWidth(field: HTMLTextAreaElement, prefix: string) {
 }
 
 function Keycaps({ keys }: { keys: string[] }) {
-  return <span className="keycaps" aria-hidden="true">{keys.map((key) => <kbd key={key}>{key}</kbd>)}</span>;
+  return keys.length ? <span className="keycaps" aria-hidden="true">{keys.map((key) => <kbd key={key}>{key}</kbd>)}</span> : null;
 }
 
 export function Translation({ t, snapshot, command, native, activity }: ViewProps) {
@@ -90,10 +90,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const languagesAvailable = supportsTranslation(snapshot.translationEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
   const currentWindow = useRef(state);
   currentWindow.current = state;
-  const primaryKey = capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl';
-  const shortcutKeys = (action: 'translate' | 'actions' | 'copyPrimary' | 'copySecondary' | 'pin') => {
-    const binding = snapshot.translationPreferences.shortcuts[action];
-    return binding ? keycapLabels(binding, capabilities.platform === 'macos') : [primaryKey];
+  const shortcutBinding = (action: ShortcutAction) => {
+    const preferences = preferencesRef.current;
+    return translationShortcutEnabled(preferences, action) ? preferences.shortcuts[action] : null;
+  };
+  const shortcutKeys = (action: ShortcutAction) => {
+    const binding = shortcutBinding(action);
+    return binding ? keycapLabels(binding, capabilities.platform === 'macos') : [];
   };
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
   const sourceLabel = `${languageName(source === 'auto' && detectedSource ? detectedSource : source)}${supportsLanguage(snapshot.translationEngine, 'source', source) ? '' : ` (${t('languageUnavailable')})`}`;
@@ -384,20 +387,20 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       event.preventDefault();
       if (popup) { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else void command('window_hide', { region: 'translation' });
-    } else if (primaryPressed(event) && event.key.toLowerCase() === 'w' && !event.altKey && !event.shiftKey) {
+    } else if (matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
       event.preventDefault(); setPopup(null); void command('window_hide', { region: 'translation' });
-    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.translate, event)) {
+    } else if (region === 'translation' && matchesBinding(shortcutBinding('translate'), event)) {
       event.preventDefault(); submit();
-    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.copyPrimary, event)) {
+    } else if (region === 'translation' && matchesBinding(shortcutBinding('copyPrimary'), event)) {
       event.preventDefault(); copyTranslation(0);
-    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.copySecondary, event)) {
+    } else if (region === 'translation' && matchesBinding(shortcutBinding('copySecondary'), event)) {
       event.preventDefault(); copyTranslation(1);
-    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.actions, event)) {
+    } else if (region === 'translation' && matchesBinding(shortcutBinding('actions'), event)) {
       event.preventDefault();
       if (popup === 'actions') { setPopup(null); input.current?.focus({ preventScroll: true }); }
       else setPopup('actions');
-    } else if (region === 'translation' && matchesBinding(preferencesRef.current.shortcuts.pin, event)) {
-      event.preventDefault(); togglePin();
+    } else if (region === 'translation' && matchesBinding(shortcutBinding('pin'), event)) {
+      event.preventDefault(); if (!event.nativeEvent.repeat) togglePin();
     }
   }
 

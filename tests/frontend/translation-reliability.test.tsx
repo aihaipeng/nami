@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
 import { historySamples } from '../../src/translation/history';
 
@@ -28,17 +28,23 @@ describe('translation reliability', () => {
 
   it('confirms copying a result locally and ignores completion after the draft changes', async () => {
     await mount(); submit('Text for copy');
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBeTruthy());
-    fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect((await screen.findByText('Primary translation copied')).getAttribute('role')).toBe('status');
-    expect(screen.queryByRole('progressbar')).toBeNull();
-    const invoke = bridge.invoke.getMockImplementation()!;
-    let finish!: () => void;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
-    fireEvent.keyDown(source(), { key: '2', metaKey: true });
-    fireEvent.change(source(), { target: { value: 'Different draft' } });
-    await act(async () => finish());
-    expect(screen.queryByText(/translation copied/)).toBeNull();
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => { fireEvent.keyDown(source(), { key: '1', metaKey: true }); });
+      expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-test', part: 'primary' });
+      expect(screen.getByText('Primary translation copied').getAttribute('role')).toBe('status');
+      expect(screen.queryByRole('progressbar')).toBeNull();
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.queryByText(/translation copied/)).toBeNull();
+      const invoke = bridge.invoke.getMockImplementation()!;
+      let finish!: () => void;
+      bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_sample_copy' ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
+      fireEvent.keyDown(source(), { key: '2', metaKey: true });
+      fireEvent.change(source(), { target: { value: 'Different draft' } });
+      await act(async () => finish());
+      expect(screen.queryByText(/translation copied/)).toBeNull();
+    } finally { vi.useRealTimers(); }
   });
 
   it('keeps an active translation running while browsing history and does not replace the browsed record on completion', async () => {

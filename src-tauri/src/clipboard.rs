@@ -52,6 +52,14 @@ pub struct HistoryPolicy {
     pub limit: Option<u32>,
 }
 
+#[derive(Serialize)]
+pub struct CleanupPreview {
+    pub count: usize,
+    pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<[usize; 3]>,
+}
+
 impl HistoryPolicy {
     pub fn valid(self) -> bool {
         matches!(self.days, None | Some(7 | 30 | 90))

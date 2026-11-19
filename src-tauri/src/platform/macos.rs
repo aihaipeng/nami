@@ -1,5 +1,9 @@
-use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-use objc2_foundation::{ns_string, NSArray, NSString};
+use objc2::{
+    class, msg_send,
+    rc::{Allocated, Retained},
+    runtime::AnyObject,
+};
+use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSString};
 use std::ffi::c_void;
 
 #[derive(Clone, Copy, Debug)]
@@ -366,12 +370,7 @@ pub(crate) fn pick_excluded_app(
         let identifier: Option<Retained<NSString>> = msg_send![&*bundle, bundleIdentifier];
         let bundle_id = identifier.ok_or("clipboard_invalid_app")?.to_string();
         // Select by Bundle ID; retain no app path and launch no selected app.
-        let key = ns_string!("CFBundleDisplayName");
-        let display_name: Option<Retained<AnyObject>> =
-            msg_send![&*bundle, objectForInfoDictionaryKey: key];
-        let name = display_name
-            .and_then(|value| value.downcast::<NSString>().ok())
-            .map(|value| value.to_string())
+        let name = application_bundle_name(&bundle)
             .or_else(|| {
                 let filename: Option<Retained<NSString>> = msg_send![&*selected, lastPathComponent];
                 filename.map(|value| value.to_string().trim_end_matches(".app").to_owned())
@@ -380,6 +379,7 @@ pub(crate) fn pick_excluded_app(
         Ok(Some(crate::clipboard_preferences::ExcludedApp {
             bundle_id,
             name,
+            icon_data_url: None,
         }))
     }
 }
@@ -580,20 +580,75 @@ unsafe fn release_events(events: &[*mut c_void; 2]) {
 pub fn file_icon_data_url(path: &str) -> Option<String> {
     objc2::rc::autoreleasepool(|_| unsafe {
         let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let icon: Option<Retained<AnyObject>> =
-            msg_send![workspace, iconForFile: &*NSString::from_str(path)];
-        icon.and_then(|icon| {
-            let tiff: Option<Retained<AnyObject>> = msg_send![&*icon, TIFFRepresentation];
-            let bitmap: Option<Retained<AnyObject>> =
-                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff?];
-            let properties: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
-            let png: Option<Retained<AnyObject>> =
-                msg_send![&*bitmap?, representationUsingType: 4usize, properties: properties];
-            let encoded: Retained<NSString> =
-                msg_send![&*png?, base64EncodedStringWithOptions: 0usize];
-            Some(format!("data:image/png;base64,{encoded}"))
-        })
+        let tiff = file_icon_tiff(workspace, &NSString::from_str(path))?;
+        let bitmap: Option<Retained<AnyObject>> =
+            msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff];
+        bitmap_png(&*bitmap?).map(|data| png_data_url(&data))
     })
+}
+
+pub(crate) fn application_presentation(
+    bundle_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let url: Option<Retained<AnyObject>> = msg_send![workspace,
+            URLForApplicationWithBundleIdentifier: &*NSString::from_str(bundle_id)];
+        let url = url?;
+        let bundle: Option<Retained<AnyObject>> = msg_send![class!(NSBundle), bundleWithURL: &*url];
+        let name = bundle
+            .as_deref()
+            .and_then(|bundle| application_bundle_name(bundle));
+        let path: Option<Retained<NSString>> = msg_send![&*url, path];
+        let icon = path.and_then(|path| application_thumbnail(workspace, &path));
+        Some((name, icon))
+    })
+}
+
+unsafe fn application_bundle_name(bundle: &AnyObject) -> Option<String> {
+    [
+        ns_string!("CFBundleDisplayName"),
+        ns_string!("CFBundleName"),
+    ]
+    .into_iter()
+    .find_map(|key| {
+        let value: Option<Retained<AnyObject>> = msg_send![bundle, objectForInfoDictionaryKey: key];
+        let name = value?.downcast::<NSString>().ok()?.to_string();
+        (!name.trim().is_empty() && name.len() <= 512).then_some(name)
+    })
+}
+
+unsafe fn application_thumbnail(workspace: *mut AnyObject, path: &NSString) -> Option<String> {
+    let icon: Option<Retained<AnyObject>> = msg_send![workspace, iconForFile: path];
+    let icon = icon?;
+    let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(40.0, 40.0));
+    // Export a single representation; TIFFRepresentation can expand all sizes beyond 64 MiB.
+    let image: *const c_void = msg_send![&*icon, CGImageForProposedRect: &mut rect as *mut NSRect,
+        context: std::ptr::null::<AnyObject>(), hints: std::ptr::null::<AnyObject>()];
+    if image.is_null() {
+        return None;
+    }
+    let bitmap: Allocated<AnyObject> = msg_send![class!(NSBitmapImageRep), alloc];
+    let bitmap: Option<Retained<AnyObject>> = msg_send![bitmap, initWithCGImage: image];
+    let png = bitmap_png(&*bitmap?)?;
+    let thumb = super::clipboard_image_preview(png.as_bytes_unchecked(), 40).ok()?;
+    Some(png_data_url(&NSData::from_vec(thumb)))
+}
+
+unsafe fn file_icon_tiff(workspace: *mut AnyObject, path: &NSString) -> Option<Retained<NSData>> {
+    let icon: Option<Retained<AnyObject>> = msg_send![workspace, iconForFile: path];
+    msg_send![&*icon?, TIFFRepresentation]
+}
+
+unsafe fn bitmap_png(bitmap: &AnyObject) -> Option<Retained<NSData>> {
+    let properties: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+    msg_send![bitmap, representationUsingType: 4usize, properties: properties]
+}
+
+fn png_data_url(data: &NSData) -> String {
+    let encoded: Retained<NSString> =
+        unsafe { msg_send![data, base64EncodedStringWithOptions: 0usize] };
+    format!("data:image/png;base64,{encoded}")
 }
 
 #[cfg(test)]

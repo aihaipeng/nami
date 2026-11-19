@@ -1301,11 +1301,24 @@ pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn toggle_record_details(app: &AppHandle) -> Result<(), String> {
+pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
     let restore_selection = {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
-        regions.toggle_record_details();
+        if let Some(record_id) = record_id {
+            if regions.record_view != RecordView::Clipboard
+                || !regions.history_visible
+                || regions.records_editor_open
+                || state
+                    .records_dirty
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err("cancelled".into());
+            }
+            regions.preview_clipboard_record(record_id);
+        } else {
+            regions.toggle_record_details();
+        }
         let restore_selection =
             regions.translation_visible && regions.record_view == RecordView::Translation;
         if restore_selection {

@@ -36,6 +36,27 @@ def test_native_mode_sets_environment_and_preserves_failure(tmp_path, monkeypatc
     assert calls[0][1]['env']['NAMI_UI_TEST_VISIBLE'] == visible
 
 
+def test_smoke_runs_only_visible_clipboard_shortcuts(tmp_path, monkeypatch):
+    executable = tmp_path / 'python'
+    executable.touch()
+    monkeypatch.setattr(dev, 'python_path', lambda: executable)
+    monkeypatch.setattr(dev.sys, 'platform', 'darwin')
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs['env']))
+        return SimpleNamespace(returncode=7)
+
+    monkeypatch.setattr(dev.subprocess, 'run', run)
+    with pytest.raises(SystemExit) as exit:
+        dev.main(['smoke'])
+    assert exit.value.code == 7
+    assert len(calls) == 1
+    assert calls[0][0][-1] == 'tests/python/test_native_ui.py::test_native_ui'
+    assert calls[0][1]['NAMI_UI_TEST_CASE'] == 'clipboard-shortcuts'
+    assert calls[0][1]['NAMI_UI_TEST_VISIBLE'] == '1'
+
+
 @pytest.mark.parametrize('platform', ['win32', 'linux'])
 @pytest.mark.parametrize('mode', ['native', 'native-visible', 'signing', 'tools'])
 def test_macos_checks_do_not_succeed_by_skipping_on_other_platforms(monkeypatch, platform, mode):

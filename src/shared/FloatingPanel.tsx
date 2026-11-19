@@ -13,9 +13,9 @@ export function panelHorizontalPosition(anchorLeft: number, width: number, visib
   return { left: Math.max(visibleLeft + 8, Math.min(anchorLeft, visibleLeft + visibleWidth - maxWidth - 8)), maxWidth };
 }
 
-export function FloatingPanel({ anchor, onClose, label, role, width, side, children, className = '', dismissOnSettingsScroll = false }: {
-  anchor: RefObject<HTMLElement | null>; onClose: () => void; label: string;
-  role: 'dialog' | 'menu'; width: number; side: 'top' | 'bottom'; children: ReactNode; className?: string; dismissOnSettingsScroll?: boolean;
+export function FloatingPanel({ anchor, onClose, id, label, role, width, side, children, className = '', dismissOnSettingsScroll = false }: {
+  anchor: RefObject<HTMLElement | null>; onClose: () => void; id?: string; label?: string;
+  role: 'dialog' | 'menu' | 'tooltip'; width: number; side: 'top' | 'bottom'; children: ReactNode; className?: string; dismissOnSettingsScroll?: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -76,8 +76,8 @@ export function FloatingPanel({ anchor, onClose, label, role, width, side, child
     restorePanelFocus(anchor.current);
   }
 
-  return createPortal(<div ref={panel} role={role} aria-label={label} className={`floating-panel ${className}`}
-    style={{ ...position, width }} onKeyDown={(event) => {
+  return createPortal(<div ref={panel} id={id} role={role} aria-label={label} className={`floating-panel ${className}`}
+    style={{ ...position, width: role === 'tooltip' ? 'max-content' : width }} onKeyDown={(event) => {
       if (event.nativeEvent.isComposing) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); restoreFocus(); }
       if (event.key === 'Tab') {

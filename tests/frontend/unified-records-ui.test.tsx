@@ -47,6 +47,73 @@ async function switchView(kind: 'clipboard' | 'translation') {
 }
 
 describe('unified records workspace', () => {
+  it('pins, toggles shortcut help, and focuses search in the active record view', async () => {
+    await mount('translation');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const toolbar = within(panel(kind).querySelector<HTMLElement>('.history-toolbar')!);
+      const help = () => within(panel(kind)).queryByRole('dialog', { name: 'Keyboard shortcuts' });
+      const key = (code: string, key: string, shiftKey = false, repeat = false) => fireEvent.keyDown(document.activeElement!, { code, key, metaKey: true, shiftKey, repeat });
+      toolbar.getByRole('button', { name: 'Pin records' }).focus();
+      key('KeyP', 'P', true);
+      expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'history', pinned: true });
+      await windowState({ historyPinned: true });
+      key('KeyP', 'P', true);
+      expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'history', pinned: false });
+      await windowState({ historyPinned: false });
+      key('Slash', '/');
+      expect(help()?.textContent).toContain('Focus Search');
+      expect(screen.getAllByRole('dialog', { name: 'Keyboard shortcuts' })).toHaveLength(1);
+      key('Slash', '/', false, true);
+      expect(help()).toBeTruthy();
+      key('Slash', '/');
+      expect(help()).toBeNull();
+      key('Slash', '/');
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(help()).toBeNull();
+      expect(calls('window_hide')).toHaveLength(0);
+      key('KeyF', 'f');
+      expect(document.activeElement).toBe(search(kind));
+    }
+  });
+
+  it('honors modified direction and close keys after remapping a shared shortcut', async () => {
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.focusSearch = { code: 'ArrowDown', modifiers: ['meta'] };
+    preferences.shortcuts.showShortcuts = { code: 'KeyW', modifiers: ['shift', 'meta'] };
+    await mount('translation');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const row = panel(kind).querySelector<HTMLButtonElement>('.history-row-select')!;
+      row.focus();
+      fireEvent.keyDown(row, { key: 'ArrowDown', code: 'ArrowDown', metaKey: true });
+      expect(document.activeElement).toBe(search(kind));
+      if (kind === 'translation') {
+        fireEvent.keyDown(search(kind), { key: 'ArrowDown', code: 'ArrowDown', metaKey: true });
+        expect(document.activeElement).toBe(search(kind));
+      }
+      fireEvent.keyDown(search(kind), { key: 'W', code: 'KeyW', metaKey: true, shiftKey: true });
+      expect(within(panel(kind)).getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeTruthy();
+      expect(calls('window_hide')).toHaveLength(0);
+    }
+  });
+
+  it('uses saved shared bindings and ignores disabled or composing shortcuts', async () => {
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.focusSearch = { code: 'KeyJ', modifiers: ['alt'] };
+    preferences.disabledShortcuts = ['showShortcuts'];
+    await mount('clipboard');
+    const button = within(panel('clipboard')).getByRole('button', { name: 'Keyboard shortcuts' });
+    button.focus();
+    fireEvent.keyDown(button, { key: '/', code: 'Slash', metaKey: true });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.keyDown(button, { key: 'f', code: 'KeyF', metaKey: true });
+    fireEvent.keyDown(button, { key: 'j', code: 'KeyJ', altKey: true, isComposing: true });
+    expect(document.activeElement).toBe(button);
+    fireEvent.keyDown(button, { key: 'j', code: 'KeyJ', altKey: true });
+    expect(document.activeElement).toBe(search('clipboard'));
+  });
+
   it('keeps an image translation when the newly revealed history row enters a stationary pointer', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     let pending: { text: string; error: null } | null = null;
@@ -451,7 +518,9 @@ describe('unified records workspace', () => {
     expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
     expect(document.activeElement).toBe(search('translation'));
     const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
-    expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages' && symbol !== 'note'));
+    expect(icons(translationRow).filter(([symbol]) => symbol !== 'doc.on.doc')).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages' && symbol !== 'note'));
+    expect(translationRow.querySelector('[data-action=copy]')).toBeTruthy();
+    expect(clipboardRow.querySelector('[data-action=copy]')).toBeNull();
     expect(clipboardRow.querySelector('[data-action=translate] .history-symbol')?.getAttribute('data-symbol')).toBe('languages');
     expect(translationRow.querySelector('[data-action=translate]')).toBeNull();
     expect(translationRow.querySelector('time')?.textContent).toBe(clipboardRow.querySelector('time')?.textContent);
@@ -690,11 +759,11 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(search('clipboard'));
   });
 
-  it('keeps clipboard text unchanged and preserves click-to-paste', async () => {
+  it('keeps clipboard text unchanged and delegates clicked records to the configured activation', async () => {
     await mount('translation');
     await waitFor(() => expect(within(panel('clipboard')).getByRole('button', { name: 'Clipboard: Saved text' })).toBeTruthy());
     fireEvent.click(within(panel('clipboard')).getByRole('button', { name: 'Clipboard: Saved text' }));
-    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'clip-first', action: 'paste' });
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'clip-first', action: 'activate' });
     expect(calls('translation_run')).toHaveLength(0);
   });
 

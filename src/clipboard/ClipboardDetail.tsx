@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
-import { clipboardUseError, clipboardUseFeedback } from './feedback';
-import type { ClipboardResult } from '../shared/contracts';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
@@ -71,26 +69,18 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const current = shown?.id === id ? shown : null;
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
-  async function action(type: 'copy' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
+  async function action(type: 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
     const process = type === 'translate' || type === 'ocr';
     if (!current || loading || processing.current && (process || type === 'delete')) return false;
-    if (type === 'delete' && (current.isFavorite || current.isPinned)) return false;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     if (process) { processing.current = true; setBusy(true); }
     setFeedback(null);
     try {
-      if (type === 'copy') {
-        const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId: current.id, action: 'copy' });
-        if (operation.current !== revision) return false;
-        const message = clipboardUseFeedback(result);
-        if (feedbackOperation.current === feedbackRevision) setFeedback(message ? t(message) : null);
-        return result.copyStatus === 'current' && result.status === 'copied';
-      }
       if (process) await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type });
     } catch (error) {
-      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') setFeedback(type === 'copy' ? t(clipboardUseError(error)) : process ? type === 'ocr' ? 'Unable to extract and copy text. Try again.' : 'Unable to open this text for translation. Try again.' : t('nativeError'));
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') setFeedback(process ? type === 'ocr' ? 'Unable to extract and copy text. Try again.' : 'Unable to open this text for translation. Try again.' : t('nativeError'));
     } finally {
       if (process && operation.current === revision) { processing.current = false; setBusy(false); }
     }
@@ -111,8 +101,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details" aria-busy={loading}>
     <ActivityBeam label={t('working')} active={active && loading} />
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
-      {shown && <RecordActions recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copy')} deleteLabel={t('deleteClipboard')}
-        onCopy={() => action('copy')} onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
+      {shown && <RecordActions allowMarkedDelete recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} deleteLabel={t('deleteClipboard')}
+        onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
         onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
     </header>
     <HistoryList scrollOnly active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>

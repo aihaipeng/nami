@@ -14,7 +14,7 @@ export function RecordToolbar({ t, snapshot, command, view, query, onQuery, sear
   }}>
     <HistoryWordmark />
     <label className="history-search"><HistoryIcon name="magnifyingglass" /><input ref={search} type="search" aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
-      if (event.key === 'ArrowDown' && !event.nativeEvent.isComposing && event.keyCode !== 229 && onArrowDown) { event.preventDefault(); onArrowDown(); }
+      if (event.key === 'ArrowDown' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229 && onArrowDown) { event.preventDefault(); onArrowDown(); }
     }} />
       <button type="button" hidden={!query} aria-label={t(view === 'clipboard' ? 'clearClipboardSearch' : 'clearHistorySearch')} onClick={() => { onQuery(''); search.current?.focus(); }}><HistoryIcon name="xmark.circle.fill" /></button>
     </label>

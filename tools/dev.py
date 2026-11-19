@@ -10,6 +10,7 @@ MODES = {
     'unit': ['-m', 'not native and not signing and not tools'],
     'native': ['-s', '-m', 'native'],
     'native-visible': ['-s', '-m', 'native'],
+    'smoke': ['-s', 'tests/python/test_native_ui.py::test_native_ui'],
     'signing': ['-s', '-m', 'signing'],
     'tools': ['-s', '-m', 'tools'],
 }
@@ -108,7 +109,9 @@ def main(args=None):
         raise SystemExit('Project Python environment missing. Run npm run setup:python first.')
     if mode in SUITES:
         raise SystemExit(run_suite(mode, python))
-    environment = {**os.environ, 'NAMI_UI_TEST_VISIBLE': '1' if mode == 'native-visible' else '0'}
+    environment = {**os.environ, 'NAMI_UI_TEST_VISIBLE': '1' if mode in {'native-visible', 'smoke'} else '0'}
+    if mode == 'smoke':
+        environment['NAMI_UI_TEST_CASE'] = 'clipboard-shortcuts'
     result = subprocess.run([str(python), '-m', 'pytest', '-q', *MODES[mode]], cwd=ROOT, env=environment)
     raise SystemExit(result.returncode)
 

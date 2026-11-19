@@ -1,4 +1,12 @@
-export const shortcutActions = ['selection', 'translate', 'copyPrimary', 'copySecondary', 'pin', 'actions'] as const;
+export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch'] as const;
+export const generalShortcutActions = ['selection', ...recordWindowActions] as const;
+export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'actions'] as const;
+export const shortcutActions = [...generalShortcutActions, ...translationWindowActions] as const;
+
+export const shortcutTitles = {
+  selection: 'openTranslation', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch',
+  translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary', actions: 'actions',
+} as const;
 export type ShortcutAction = typeof shortcutActions[number];
 export type ShortcutModifier = 'control' | 'alt' | 'shift' | 'meta';
 
@@ -21,6 +29,8 @@ export function defaultTranslationShortcuts(primary: 'meta' | 'control'): Transl
     copyPrimary: key('Digit1'),
     copySecondary: key('Digit2'),
     pin: key('KeyP', 'shift'),
+    showShortcuts: key('Slash'),
+    focusSearch: key('KeyF'),
     actions: key('KeyK'),
   };
 }
@@ -66,7 +76,7 @@ export function keycapLabels(binding: KeyBinding, macos: boolean) {
   const symbols = macos
     ? { control: '⌃', alt: '⌥', shift: '⇧', meta: '⌘' }
     : { control: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Ctrl' };
-  const names: Record<string, string> = { Enter: '↵', Space: 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: '\'', Comma: ',', Period: '.', Slash: '/' };
+  const names: Record<string, string> = { Enter: '↵', Backspace: macos ? '⌫' : 'Backspace', Space: 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: '\'', Comma: ',', Period: '.', Slash: '/' };
   const key = names[binding.code] ?? (binding.code.startsWith('Key') ? binding.code.slice(3) : binding.code.startsWith('Digit') ? binding.code.slice(5) : binding.code);
   return [...normalizeModifiers(binding.modifiers).map((modifier) => symbols[modifier]), key];
 }
@@ -89,7 +99,7 @@ function reserved(binding: KeyBinding) {
 }
 
 function codeFromKey(key: string) {
-  if (key === 'Enter') return 'Enter';
+  if (key === 'Enter' || key === 'Backspace') return key;
   if (key === ' ') return 'Space';
   if (key === '`') return 'Backquote';
   if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;

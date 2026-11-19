@@ -16,6 +16,7 @@
     "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path src-tauri/Cargo.toml --all-features",
     "test:ui": "python tools/dev.py ui",
+    "test:smoke": "python tools/dev.py smoke",
     "test:ui:native": "python tools/dev.py native",
     "verify:ui": "npm run test:all",
     "test:ui:visible": "python tools/dev.py native-visible",
