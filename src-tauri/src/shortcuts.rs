@@ -126,6 +126,11 @@ impl TranslationShortcuts {
         if keys.get("openTranslation").is_none() {
             shortcuts.open_translation = shortcuts.selection.clone();
         }
+        for action in TRANSLATION_ACTIONS {
+            if shortcuts.get(action).is_some_and(is_native_close_binding) {
+                shortcuts.set(action, None);
+            }
+        }
         let clipboard = read("clipboard_shortcut")
             .and_then(|value| serde_json::from_str::<Option<KeyBinding>>(&value).ok())
             .unwrap_or_else(|| Some(clipboard_binding()));
@@ -420,6 +425,7 @@ impl ClipboardRecordShortcuts {
             .as_ref()
             .or_else(|| enabled.filter(|value| *value).and_then(|_| current()))
         {
+            validate_window_reservation(value)?;
             if self.conflicts(value, Some(action))
                 || globals
                     .iter()
@@ -459,6 +465,15 @@ impl ClipboardRecordShortcuts {
             .and_then(|value| {
                 let value: serde_json::Value = serde_json::from_str(&value).ok()?;
                 let mut shortcuts = serde_json::from_value::<Self>(value.clone()).ok()?;
+                let reserved = shortcuts.entries().map(|(action, slot)| {
+                    slot.binding
+                        .as_ref()
+                        .filter(|binding| is_native_close_binding(binding))
+                        .map(|_| action)
+                });
+                for action in reserved.into_iter().flatten() {
+                    let _ = shortcuts.set(action, None, None, &[]);
+                }
                 // Newly added defaults yield to existing assignments on upgrade.
                 for (key, slot) in [
                     ("note", &mut shortcuts.note),
@@ -600,11 +615,23 @@ fn translation_conflict(
     Ok(())
 }
 
+fn is_native_close_binding(binding: &KeyBinding) -> bool {
+    cfg!(target_os = "macos") && binding.code == "KeyW" && binding.modifiers == ["meta"]
+}
+
+fn validate_window_reservation(binding: &KeyBinding) -> Result<(), String> {
+    if is_native_close_binding(binding) {
+        return Err("shortcut_reserved_close_window".into());
+    }
+    Ok(())
+}
+
 pub fn validate_clipboard_binding(
     binding: KeyBinding,
     shortcuts: &TranslationShortcuts,
 ) -> Result<KeyBinding, String> {
     let binding = normalize_binding(binding)?;
+    validate_window_reservation(&binding)?;
     translation_conflict(shortcuts, None, &binding)?;
     Ok(binding)
 }
@@ -617,6 +644,7 @@ pub fn assign_shortcut(
 ) -> Result<TranslationShortcuts, String> {
     let binding = binding.map(normalize_binding).transpose()?;
     if let Some(binding) = &binding {
+        validate_window_reservation(binding)?;
         if clipboard.is_some_and(|clipboard| same_binding(binding, clipboard)) {
             return Err("shortcut_clipboard".into());
         }
@@ -1025,11 +1053,71 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reserves_command_w_for_native_close_across_shortcut_domains() {
+        let translation = TranslationShortcuts::defaults("meta");
+        let mut records = ClipboardRecordShortcuts::default();
+        let close = KeyBinding::new("KeyW", &["meta"]);
+        let before = serde_json::to_value(&records).unwrap();
+        assert_eq!(
+            assign_shortcut(
+                &translation,
+                ShortcutAction::Selection,
+                Some(close.clone()),
+                None
+            ),
+            Err("shortcut_reserved_close_window".into())
+        );
+        assert_eq!(
+            validate_clipboard_binding(close.clone(), &translation),
+            Err("shortcut_reserved_close_window".into())
+        );
+        assert_eq!(
+            records.set(ClipboardRecordAction::Preview, Some(close), None, &[]),
+            Err("shortcut_reserved_close_window".into())
+        );
+        assert_eq!(serde_json::to_value(records).unwrap(), before);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clears_only_reserved_bindings_when_loading_existing_shortcuts() {
+        let close = KeyBinding::new("KeyW", &["meta"]);
+        let mut translation = TranslationShortcuts::defaults("meta");
+        translation.selection = Some(close.clone());
+        translation.translate = Some(close.clone());
+        translation.pin = Some(KeyBinding::new("KeyW", &["meta", "shift"]));
+        let mut stored = serde_json::to_value(&translation).unwrap();
+        stored.as_object_mut().unwrap().remove("openTranslation");
+        let restored = TranslationShortcuts::from_store(
+            |key| (key == "translation_shortcuts").then(|| stored.to_string()),
+            "meta",
+        );
+        translation.selection = None;
+        translation.open_translation = None;
+        translation.translate = None;
+        assert_eq!(restored, translation);
+
+        let mut records = ClipboardRecordShortcuts::default();
+        records.preview.binding = Some(close);
+        records.preview.enabled = false;
+        records.note.binding = Some(KeyBinding::new("KeyJ", &["alt"]));
+        let restored =
+            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&records).unwrap()));
+        records.preview.binding = None;
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(records).unwrap()
+        );
+    }
+
     #[test]
     fn rejects_duplicate_shortcuts_but_allows_local_editing_combinations() {
         let shortcuts = TranslationShortcuts::defaults("meta");
         for (code, modifiers) in [
-            ("KeyW", &["meta"][..]),
+            ("KeyW", &["control"][..]),
+            ("KeyW", &["meta", "shift"][..]),
             ("KeyZ", &["control", "shift"][..]),
             ("KeyZ", &["meta", "shift"][..]),
         ] {

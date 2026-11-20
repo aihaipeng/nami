@@ -133,6 +133,8 @@ pub struct Preferences {
     pub proxy_enabled: bool,
     pub selection_enabled: bool,
     #[serde(default)]
+    pub selection_copy_fallback: bool,
+    #[serde(default)]
     pub disabled_shortcuts: Vec<shortcuts::ShortcutAction>,
     pub shortcuts: TranslationShortcuts,
 }
@@ -147,6 +149,7 @@ impl Preferences {
             proxy_url: String::new(),
             proxy_enabled: false,
             selection_enabled: true,
+            selection_copy_fallback: false,
             disabled_shortcuts: Vec::new(),
             shortcuts: TranslationShortcuts::defaults(primary),
         }
@@ -187,6 +190,8 @@ impl Preferences {
         if let Some(enabled) = read("translation_selection_enabled") {
             preferences.selection_enabled = enabled == "true";
         }
+        preferences.selection_copy_fallback =
+            read("translation_selection_copy_fallback").as_deref() == Some("true");
         if let Some(disabled) = read("translation_disabled_shortcuts")
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
         {
@@ -253,6 +258,9 @@ impl Preferences {
             self.proxy_url = url.to_string();
             self.proxy_enabled = enabled;
         }
+        if let Some(enabled) = patch.selection_copy_fallback {
+            self.selection_copy_fallback = enabled;
+        }
         if let Some(enabled) = patch.selection_enabled {
             self.selection_enabled = enabled;
         }
@@ -316,6 +324,10 @@ impl Preferences {
                 .into(),
             ),
             (
+                "translation_selection_copy_fallback",
+                self.selection_copy_fallback.to_string(),
+            ),
+            (
                 "translation_disabled_shortcuts",
                 serde_json::to_string(&self.disabled_shortcuts).unwrap_or_else(|_| "[]".into()),
             ),
@@ -337,6 +349,7 @@ pub struct PreferencePatch {
     pub proxy_url: Option<String>,
     pub proxy_enabled: Option<bool>,
     pub selection_enabled: Option<bool>,
+    pub selection_copy_fallback: Option<bool>,
 }
 
 pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
@@ -715,13 +728,12 @@ pub async fn translate(
     let client = translation_client(proxy_url, proxy_enabled)?;
     let translate_target = |index: usize| {
         translate_target(
-            &client,
-            engine,
             input,
             source,
-            targets[index].as_str(),
+            (&client, engine, targets[index].as_str()),
             (&units, &prepared, &batch_plan),
             deadline,
+            fetch_batch,
         )
     };
     Ok(translate_targets(source, targets.len(), translate_target).await)
@@ -748,14 +760,14 @@ where
 type TranslatedColumn = (String, Vec<crate::model::LanguageDetection>);
 
 async fn translate_target(
-    client: &Client,
-    engine: &str,
     input: &str,
     source: &str,
-    target: &str,
+    provider: (&Client, &str, &str),
     plan: (&[text::Unit<'_>], &[&str], &[Vec<usize>]),
     deadline: Instant,
+    fetch: impl for<'a> Fn(&'a Client, &'a str, &'a [&'a str], &'a str, &'a str) -> BatchFuture<'a>,
 ) -> Result<TranslatedColumn, String> {
+    let (client, engine, target) = provider;
     let (units, prepared, batch_plan) = plan;
     let mut target_detections = vec![None; units.len()];
     let mut translated_units: Vec<String> =
@@ -763,7 +775,7 @@ async fn translate_target(
     for batch in batch_plan {
         let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
         let translated = with_translation_retries(deadline, TRANSLATION_RETRY_DELAY, || {
-            fetch_batch(client, engine, &active, source, target)
+            fetch(client, engine, &active, source, target)
         })
         .await?;
         for (index, result) in batch.iter().zip(translated) {
@@ -771,29 +783,43 @@ async fn translate_target(
             target_detections[*index] = result.detection;
         }
     }
-    if source == "auto" {
+    'context: {
+        if source != "auto" {
+            break 'context;
+        }
         // Rejoin same-language sentences to retain pronouns and paragraph context.
         let groups = context_groups(input, units, &target_detections);
         let prepared: Vec<&str> = groups
             .iter()
             .map(|(unit, _)| unit.prepared.as_str())
             .collect();
+        // Keep validated first-round results until the whole optional pass succeeds.
+        let mut replacements = Vec::with_capacity(groups.len());
         for batch in batches(&prepared) {
             let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
-            let contextual = with_translation_retries(deadline, TRANSLATION_RETRY_DELAY, || {
-                fetch_batch(client, engine, &active, source, target)
-            })
-            .await?;
+            let Ok(contextual) =
+                with_translation_retries(deadline, TRANSLATION_RETRY_DELAY, || {
+                    fetch(client, engine, &active, source, target)
+                })
+                .await
+            else {
+                break 'context;
+            };
             for (index, result) in batch.iter().zip(contextual) {
                 let (unit, range) = &groups[*index];
-                let restored = unit.restore(&result.text)?;
-                for index in range.clone() {
-                    translated_units[index].clear();
-                    target_detections[index] = None;
-                }
-                translated_units[range.start] = restored;
-                target_detections[range.start] = result.detection;
+                let Ok(restored) = unit.restore(&result.text) else {
+                    break 'context;
+                };
+                replacements.push((range, restored, result.detection));
             }
+        }
+        for (range, restored, detection) in replacements {
+            for index in range.clone() {
+                translated_units[index].clear();
+                target_detections[index] = None;
+            }
+            translated_units[range.start] = restored;
+            target_detections[range.start] = detection;
         }
     }
     Ok((
@@ -845,6 +871,27 @@ fn collect_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_copy_fallback_is_opt_in_and_round_trips_through_sqlite() {
+        let mut db =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        let mut preferences = Preferences::from_store(|key| db.preference(key).unwrap(), "meta");
+        assert!(!preferences.selection_copy_fallback);
+        for enabled in [true, false] {
+            preferences
+                .apply(PreferencePatch {
+                    selection_copy_fallback: Some(enabled),
+                    ..Default::default()
+                })
+                .unwrap();
+            for (key, value) in preferences.entries() {
+                db.preference_set(key, &value).unwrap();
+            }
+            let restored = Preferences::from_store(|key| db.preference(key).unwrap(), "meta");
+            assert_eq!(restored.selection_copy_fallback, enabled);
+        }
+    }
 
     #[test]
     fn legacy_launch_binding_and_disabled_state_survive_separation() {
@@ -1650,6 +1697,76 @@ mod tests {
             detection.score = Some(0.0);
         }
         assert!(context_groups(input, &units, &unknown).is_empty());
+    }
+
+    #[tokio::test]
+    async fn optional_context_keeps_validated_first_round_on_failure() {
+        let input = "First sentence. Second sentence.\nRun `npm run build`. Then continue.";
+        let units = text::units(input, true);
+        let prepared: Vec<_> = units.iter().map(|unit| unit.prepared.as_str()).collect();
+        let plan = batches(&prepared);
+        let client = translation_client("", false).unwrap();
+        assert_eq!(plan.len(), 1);
+        for failure in ["provider", "protected text", "deadline", "none"] {
+            let calls = std::cell::Cell::new(0);
+            let budget = Duration::from_millis(100);
+            let deadline = Instant::now() + budget;
+            let (output, detections) = translate_target(
+                input,
+                "auto",
+                (&client, "edge", "fr"),
+                (&units, &prepared, &plan),
+                deadline,
+                |_, _, active, _, _| {
+                    let round = calls.get();
+                    calls.set(round + 1);
+                    Box::pin(async move {
+                        if round > 0 {
+                            assert_eq!(active.len(), 2);
+                            if failure == "provider" {
+                                return Err(BatchError::permanent("context failed"));
+                            }
+                            if failure == "deadline" {
+                                return std::future::pending().await;
+                            }
+                        }
+                        Ok(active
+                            .iter()
+                            .enumerate()
+                            .map(|(index, text)| SegmentResult {
+                                text: if round > 0 && index == 1 && failure == "protected text" {
+                                    "Missing the protected command".into()
+                                } else {
+                                    text.replace(
+                                        "First",
+                                        if round == 0 { "Initial" } else { "Joined" },
+                                    )
+                                },
+                                detection: Some(crate::model::LanguageDetection {
+                                    raw_language: "en".into(),
+                                    language: "en".into(),
+                                    score: Some(if round == 0 { 1.0 } else { 0.5 }),
+                                }),
+                            })
+                            .collect())
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{failure}: {error}"));
+            assert_eq!(calls.get(), 2, "{failure}");
+            let (replacement, count, score) = if failure == "none" {
+                ("Joined", 2, 0.5)
+            } else {
+                ("Initial", plan[0].len(), 1.0)
+            };
+            assert_eq!(output, input.replace("First", replacement), "{failure}");
+            assert_eq!(detections.len(), count, "{failure}");
+            assert!(detections.iter().all(|value| value.score == Some(score)));
+            if failure == "deadline" {
+                assert!(Instant::now() >= deadline);
+            }
+        }
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ export function shortcutMessage(code: string, t: Translate) {
   if (code === 'shortcut_clipboard_panel') return t('clipboardShortcutConflict');
   if (code === 'shortcut_registration') return t('clipboardShortcutRegistration');
   if (code.startsWith('storage_')) return t('clipboardSettingsSaveFailed');
+  if (code === 'shortcut_reserved_close_window') return t('shortcutReservedCloseWindow');
   if (code === 'shortcut_modifier') return t('shortcutModifier');
   if (code === 'shortcut_clipboard') return t('shortcutClipboard');
   if (code.startsWith('shortcut_conflict:')) {

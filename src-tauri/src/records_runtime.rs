@@ -2,12 +2,29 @@ use crate::{windows, AppState};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
+pub(crate) struct PendingNavigation {
+    action: String,
+    // None leaves the current paste target alone; Some(None) clears it on confirmation.
+    paste_target: Option<Option<crate::platform::Target>>,
+}
+
 pub(crate) fn defer_navigation(app: &AppHandle, target: &str) -> Result<bool, String> {
+    defer_navigation_with_target(app, target, None)
+}
+
+pub(crate) fn defer_navigation_with_target(
+    app: &AppHandle,
+    target: &str,
+    paste_target: Option<Option<crate::platform::Target>>,
+) -> Result<bool, String> {
     let state = app.state::<AppState>();
     if !state.records_dirty.load(Ordering::SeqCst) {
         return Ok(false);
     }
-    *state.records_navigation.lock().unwrap() = Some(target.to_owned());
+    *state.records_navigation.lock().unwrap() = Some(PendingNavigation {
+        action: target.to_owned(),
+        paste_target,
+    });
     let view = app
         .get_webview("clipboard")
         .or_else(|| app.get_webview("translation"))
@@ -91,22 +108,29 @@ pub(crate) fn dismiss_records_window(app: &AppHandle, region: &str) -> Result<()
 pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pending = state.records_navigation.lock().unwrap().take();
+    let action = pending.as_ref().map(|pending| pending.action.as_str());
     if !proceed {
-        if pending.as_deref() == Some("translation") {
+        if action == Some("translation") {
             state.selection.lock().unwrap().take();
             state.selection_presentation.lock().unwrap().take();
             state.selection_source.lock().unwrap().take();
+            state.selection_target.lock().unwrap().take();
         }
         return Ok(());
     }
     state.records_dirty.store(false, Ordering::SeqCst);
-    match pending.as_deref() {
+    let paste_target = pending.as_ref().and_then(|pending| pending.paste_target);
+    if let Some(target) = paste_target {
+        *state.target.lock().unwrap() = target;
+        state.operation.fetch_add(1, Ordering::SeqCst);
+    }
+    match action {
         Some("view:clipboard") => windows::set_record_view(app, "clipboard"),
         Some("view:translation") => windows::set_record_view(app, "translation"),
         Some("close:records") => dismiss_records_window(app, "translation"),
         Some("toggle:history") => toggle_translation_history(app),
         Some(target) => {
-            if target == "translation" {
+            if target == "translation" && paste_target.is_none() {
                 if state.selection.lock().unwrap().is_some() {
                     return crate::selection::dispatch(app);
                 }

@@ -565,7 +565,7 @@ describe('selection across native webviews', () => {
     await mount(); await select('sample-07');
     expect(screen.queryByRole('region', { name: 'Secondary language' })).toBeNull();
     expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: false });
-    await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'zh-CN' });
+    await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'fr' });
     expect(screen.getByRole('region', { name: 'Secondary language' })).toBeTruthy();
     expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: true });
   });

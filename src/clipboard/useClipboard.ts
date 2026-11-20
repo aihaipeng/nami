@@ -109,7 +109,17 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         next = { ...page, records: [...next.records, ...page.records] };
       }
       if (!active.current || current !== request.current) return;
-      const merged = append ? { ...next, records: [...latest.current.records, ...next.records.filter((record) => !latest.current.records.some(({ id }) => id === record.id))] } : next;
+      const merged = { ...next };
+      if (append) {
+        const records = [...latest.current.records];
+        const ids = new Set(records.map(({ id }) => id));
+        for (const record of next.records) {
+          if (ids.has(record.id)) continue;
+          ids.add(record.id);
+          records.push(record);
+        }
+        merged.records = records;
+      }
       if (epochAtStart === copyEpoch.current && copiedMark.current) {
         const applied = retainCopied(merged.records, copiedMark.current);
         merged.records = applied.records;

@@ -23,6 +23,27 @@ function deferred<T = ReturnType<typeof result>>() {
 }
 
 describe('translation reliability', () => {
+  it('keeps history languages on unrelated preference broadcasts and applies only changed defaults', async () => {
+    await mount();
+    const preferences = bridge.snapshot.translationPreferences;
+    const record = { ...historySamples[1], sourceLanguage: 'ja', translation: undefined, targetLanguages: ['de'] };
+    await emit('history_sample_selected', { sampleId: record.id, record, retranslate: false });
+    const cancellations = calls('translation_cancel').length;
+    const next = { ...preferences, disabledShortcuts: ['translate'] };
+    await emit('translation_preferences_changed', next);
+    expect(calls('translation_run')).toHaveLength(0);
+    expect(calls('translation_cancel')).toHaveLength(cancellations);
+    expect(column(0).textContent).toBe(record.translations[0]);
+    expect(screen.queryByRole('region', { name: 'Secondary language' })).toBeNull();
+
+    const changed = { ...next, secondaryLanguage: 'fr' };
+    await emit('translation_preferences_changed', changed);
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    expect(calls('translation_run')[0][1]).toMatchObject({ text: record.text, source: 'ja', targets: ['de', 'fr'] });
+    await emit('translation_preferences_changed', changed);
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
   it('reports one task error for a failed dual-target request', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.reject('Service unavailable') : invoke(name, args));
@@ -138,8 +159,12 @@ describe('translation reliability', () => {
       await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'fr' });
       expect(run.mock.calls[2]).toEqual([{ text: 'Expired input', source: 'auto', targets: ['en', 'fr'], fromSelection: false }]);
     }
-    await waitFor(() => expect(calls('translation_cancel')).toHaveLength(cancellations + 1));
+    if (change !== 'history') await waitFor(() => expect(calls('translation_cancel')).toHaveLength(cancellations + 1));
     await act(async () => pending.resolve(change === 'history' ? result('Stale complete') : partialResult(0, 'stale-ticket')));
+    if (change === 'history') {
+      expect(calls('translation_cancel')).toHaveLength(cancellations);
+      expect(source().value).toBe(historySamples[1].text);
+    }
     expect(screen.queryByRole('button', { name: /Retry/ })).toBeNull();
     expect(column(0).textContent).toBe(change === 'history' ? historySamples[1].translations[0] : change === 'language' ? 'Translated New language result' : '');
     expect(screen.queryByText('Partial second')).toBeNull();

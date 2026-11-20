@@ -8,7 +8,7 @@ thread_local! {
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
 }
 
-// AppKit handles these menu equivalents before WKWebView can emit a keydown.
+// AppKit can consume these command keys before WKWebView emits a keydown.
 pub(crate) fn set_active(app: &AppHandle, active: bool) {
     MONITOR.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -43,6 +43,7 @@ pub(crate) fn set_active(app: &AppHandle, active: bool) {
                 (7, false) => 'X',
                 (8, false) => 'C',
                 (9, false) => 'V',
+                (13, false) => 'W',
                 _ => return event.as_ptr(),
             };
             if !key.isARepeat() {

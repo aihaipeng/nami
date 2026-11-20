@@ -31,6 +31,7 @@ SMOKE_CASES = (
     # This case measures layout and native chrome, not visible presentation frames.
     ('translation-controls', False), ('translation-partial', False), ('record-display-shortcuts', True),
     ('clipboard-settings', False), ('clipboard-kind-text', False), ('clipboard-image-index', False),
+    ('unified-records', False),
 )
 
 
@@ -213,6 +214,8 @@ def test_smoke_builds_once_and_runs_each_case_in_a_separate_report(tmp_path, mon
         ('native-ui-smoke-record-display-shortcuts-report.json', True, 'record-display-shortcuts'),
         ('native-ui-smoke-clipboard-settings-report.json', False, 'clipboard-settings'),
         ('native-ui-smoke-clipboard-kind-text-report.json', False, 'clipboard-kind-text'),
+        ('native-ui-smoke-clipboard-image-index-report.json', False, 'clipboard-image-index'),
+        ('native-ui-smoke-unified-records-report.json', False, 'unified-records'),
     ]
     if include_cross_app:
         expected.append(('native-ui-smoke-cross-app-report.json', True, 'cross-app'))

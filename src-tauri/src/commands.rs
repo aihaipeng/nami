@@ -1018,8 +1018,12 @@ pub async fn translation_preferences_set(
     proxy_url: Option<String>,
     proxy_enabled: Option<bool>,
     selection_enabled: Option<bool>,
+    selection_copy_fallback: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["settings", "translation"])?;
+    if selection_copy_fallback.is_some() {
+        authorize(&window, &["settings"])?;
+    }
     let patch = crate::translation::PreferencePatch {
         engine,
         source_language,
@@ -1028,6 +1032,7 @@ pub async fn translation_preferences_set(
         proxy_url,
         proxy_enabled,
         selection_enabled,
+        selection_copy_fallback,
     };
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
@@ -1852,18 +1857,8 @@ pub async fn clipboard_record_update(
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let root = crate::clipboard_runtime::image_root(&app)?;
-    let images = crate::clipboard_runtime::database(&app, move |database| {
-        let mut images = Vec::new();
-        if action == "delete" {
-            images.extend(database.clipboard_record(&record_id)?.image_path);
-            images.extend(
-                database
-                    .clipboard_file_representation(&record_id)?
-                    .map(|representation| representation.image_path),
-            );
-            images.sort();
-            images.dedup();
-        }
+    let deleting = action == "delete";
+    crate::clipboard_runtime::database(&app, move |database| {
         if action == "edit" {
             database.clipboard_edit(
                 &record_id,
@@ -1876,26 +1871,12 @@ pub async fn clipboard_record_update(
             }
             database.clipboard_update(&record_id, &action)?;
         }
-        let mut unreferenced = Vec::new();
-        for path in images {
-            if !database.clipboard_image_referenced(&path)? {
-                unreferenced.push(path);
-            }
-        }
-        Ok(unreferenced)
+        Ok(())
     })
     .await?;
     crate::clipboard_runtime::changed(&app)?;
-    if !images.is_empty() {
-        tauri::async_runtime::spawn_blocking(move || {
-            for path in images {
-                nami::clipboard::remove_image(&root, &path)?;
-            }
-            Ok::<_, String>(())
-        })
-        .await
-        .map_err(|_| "storage_worker")?
-        .map_err(|_| "clipboard_cleanup_failed")?;
+    if deleting && crate::clipboard_preferences::retry_image_deletions_locked(&app, root).await? {
+        return Err("clipboard_cleanup_failed".into());
     }
     Ok(())
 }

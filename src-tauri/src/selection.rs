@@ -116,6 +116,16 @@ async fn copy_fallback(
     target: platform::Target,
     revision: u64,
 ) -> Result<String, &'static str> {
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    if !state
+        .translation_preferences
+        .lock()
+        .unwrap()
+        .selection_copy_fallback
+    {
+        return Err("selection_copy_disabled");
+    }
     let _guard = CopyGuard::new(app);
     let saved = crate::commands::on_main(app, move |app| {
         if !selection_is_current(&app.state::<AppState>(), revision) {
@@ -219,7 +229,7 @@ pub fn show_blank(app: &AppHandle) -> Result<(), String> {
     )
 }
 
-fn queue_input(
+pub(crate) fn queue_input(
     app: &AppHandle,
     revision: u64,
     target: Option<platform::Target>,
@@ -240,8 +250,7 @@ fn queue_input(
         presentation_id: Some(revision),
     });
     *state.selection_presentation.lock().unwrap() = Some(revision);
-    *state.target.lock().unwrap() = target;
-    state.operation.fetch_add(1, Ordering::SeqCst);
+    *state.selection_target.lock().unwrap() = target;
     dispatch(app)
 }
 
@@ -336,6 +345,8 @@ pub(crate) fn present(app: &AppHandle, presentation_id: u64) -> Result<(), Strin
         return Ok(());
     }
     state.selection_presentation.lock().unwrap().take();
+    *state.target.lock().unwrap() = state.selection_target.lock().unwrap().take();
+    state.operation.fetch_add(1, Ordering::SeqCst);
     windows::resume_navigation(app, "translation")
 }
 

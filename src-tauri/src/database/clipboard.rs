@@ -240,6 +240,18 @@ pub(super) fn migrate_v9(connection: &mut Connection) -> Result<(), String> {
     tx.commit().map_err(storage_error)
 }
 
+pub(super) fn migrate_v10(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_pending_image_deletions (image_path TEXT PRIMARY KEY NOT NULL);
+         PRAGMA user_version=10;",
+    )
+    .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
 fn save_ocr(
     connection: &Connection,
     id: &str,
@@ -315,6 +327,21 @@ fn image_referenced(connection: &Connection, path: &str) -> Result<bool, String>
     connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM clipboard_records WHERE image_path=?1 UNION ALL SELECT 1 FROM clipboard_file_representations WHERE image_path=?1)",
     ).map_err(storage_error)?.query_row([path], |row| row.get(0)).map_err(storage_error)
+}
+
+pub fn unlink_pending_clipboard_images(
+    root: &std::path::Path,
+    pending: Vec<(String, bool)>,
+) -> (Vec<String>, bool) {
+    let count = pending.len();
+    let complete: Vec<_> = pending
+        .into_iter()
+        .filter_map(|(path, referenced)| {
+            (referenced || crate::clipboard::remove_image(root, &path).is_ok()).then_some(path)
+        })
+        .collect();
+    let failed = complete.len() != count;
+    (complete, failed)
 }
 
 pub(super) fn ensure_filter_indexes(connection: &rusqlite::Connection) -> Result<(), String> {
@@ -806,6 +833,44 @@ impl HistoryDatabase {
         image_referenced(&self.connection, path)
     }
 
+    pub fn pending_clipboard_image_deletions(&self) -> Result<Vec<(String, bool)>, String> {
+        let mut query = self
+            .connection
+            .prepare("SELECT image_path FROM clipboard_pending_image_deletions")
+            .map_err(storage_error)?;
+        let rows = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage_error)?;
+        rows.map(|row| {
+            let path = row.map_err(storage_error)?;
+            let referenced = self.clipboard_image_referenced(&path)?;
+            Ok((path, referenced))
+        })
+        .collect()
+    }
+
+    pub fn acknowledge_clipboard_image_deletions(
+        &mut self,
+        paths: &[String],
+    ) -> Result<(), String> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        {
+            let mut delete = tx
+                .prepare("DELETE FROM clipboard_pending_image_deletions WHERE image_path=?1")
+                .map_err(storage_error)?;
+            for path in paths {
+                delete.execute([path]).map_err(storage_error)?;
+            }
+        }
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn clipboard_detail(&self, id: &str) -> Result<crate::clipboard::ClipboardDetail, String> {
         let record = self.clipboard_record(id)?;
         let title = self
@@ -953,7 +1018,16 @@ impl HistoryDatabase {
                 transaction.commit().map_err(storage_error)?;
                 return Ok(());
             }
-            "delete" => "DELETE FROM clipboard_records WHERE id=?1",
+            "delete" => {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO clipboard_pending_image_deletions(image_path)
+                     SELECT image_path FROM clipboard_records WHERE id=?1 AND image_path IS NOT NULL
+                     UNION
+                     SELECT f.image_path FROM clipboard_file_representations f JOIN clipboard_records r USING(sequence) WHERE r.id=?1",
+                    [id],
+                ).map_err(storage_error)?;
+                "DELETE FROM clipboard_records WHERE id=?1"
+            }
             _ => return Err("invalid_argument".into()),
         };
         transaction.execute(sql, [id]).map_err(storage_error)?;
@@ -1016,6 +1090,10 @@ impl HistoryDatabase {
         let mut unreferenced = Vec::new();
         for image in images {
             if !image_referenced(&transaction, &image)? {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO clipboard_pending_image_deletions(image_path) VALUES(?1)",
+                    [&image],
+                ).map_err(storage_error)?;
                 unreferenced.push(image);
             }
         }
@@ -1137,6 +1215,7 @@ impl HistoryDatabase {
             "translation_proxy_url",
             "translation_proxy_enabled",
             "translation_selection_enabled",
+            "translation_selection_copy_fallback",
             "translation_shortcuts",
             "translation_disabled_shortcuts",
         ];
@@ -1670,6 +1749,125 @@ mod tests {
             paths: vec![file_path(file)],
             image_path: image.image_path.clone().unwrap(),
         }
+    }
+
+    fn retry_clipboard_image_deletions(db: &mut HistoryDatabase, root: &Path) -> bool {
+        let (complete, failed) =
+            unlink_pending_clipboard_images(root, db.pending_clipboard_image_deletions().unwrap());
+        db.acknowledge_clipboard_image_deletions(&complete).unwrap();
+        failed
+    }
+
+    #[test]
+    fn committed_clipboard_deletions_retry_after_filesystem_failure_and_restart() {
+        for bulk in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("nami-image-retry-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let database = root.join("history.sqlite3");
+            let mut db = HistoryDatabase::open(&database).unwrap();
+            db.connection
+                .execute_batch(
+                    "DROP TABLE clipboard_pending_image_deletions; PRAGMA user_version=9;",
+                )
+                .unwrap();
+            let image = image_record("image");
+            let id = if bulk {
+                let attachment = representation(&image, "photo.png");
+                let mut files = record("files", &serde_json::to_string(&attachment.paths).unwrap());
+                files.kind = "files".into();
+                db.clipboard_insert_with_file_representation(&files, Some(&attachment))
+                    .unwrap();
+                files.id
+            } else {
+                db.clipboard_insert(&image).unwrap();
+                image.id
+            };
+            drop(db);
+
+            let mut db = HistoryDatabase::open(&database).unwrap();
+            let path = root.join(image.image_path.as_ref().unwrap());
+            // An otherwise valid cache filename occupied by a directory makes unlink fail on all platforms.
+            std::fs::create_dir_all(&path).unwrap();
+            if bulk {
+                let token = db
+                    .records_cleanup_preview(RecordView::Clipboard, None)
+                    .unwrap()
+                    .token;
+                assert_eq!(db.clipboard_cleanup(None, 1, Some(&token)).unwrap().0, 1);
+            } else {
+                db.clipboard_update(&id, "delete").unwrap();
+            }
+            assert_eq!(db.clipboard_record(&id).unwrap_err(), "not_found");
+            assert!(retry_clipboard_image_deletions(&mut db, &root));
+            drop(db);
+
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::write(&path, b"synthetic image").unwrap();
+            let db = HistoryDatabase::open(&database).unwrap();
+            assert_eq!(db.clipboard_record(&id).unwrap_err(), "not_found");
+            let (complete, failed) = unlink_pending_clipboard_images(
+                &root,
+                db.pending_clipboard_image_deletions().unwrap(),
+            );
+            assert_eq!(complete.len(), 1);
+            assert!(!failed);
+            assert!(!path.exists(), "orphan survived restart, bulk={bulk}");
+            // A restart between unlink and acknowledgement must treat the missing file as success.
+            drop(db);
+            let mut db = HistoryDatabase::open(&database).unwrap();
+            assert!(!retry_clipboard_image_deletions(&mut db, &root));
+            std::fs::write(&path, b"synthetic image").unwrap();
+            assert!(!retry_clipboard_image_deletions(&mut db, &root));
+            assert!(path.is_file(), "successful retry did not clear the queue");
+            drop(db);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_clipboard_image_deletion_rechecks_new_shared_references() {
+        let root = std::env::temp_dir().join(format!("nami-image-shared-{}", uuid::Uuid::new_v4()));
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let image = image_record("image");
+        let path = root.join(image.image_path.as_ref().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"synthetic image").unwrap();
+        db.clipboard_insert(&image).unwrap();
+        db.clipboard_update(&image.id, "delete").unwrap();
+
+        let attachment = representation(&image, "photo.png");
+        let mut files = record("files", &serde_json::to_string(&attachment.paths).unwrap());
+        files.kind = "files".into();
+        db.clipboard_insert_with_file_representation(&files, Some(&attachment))
+            .unwrap();
+        assert!(!retry_clipboard_image_deletions(&mut db, &root));
+        assert!(path.is_file());
+
+        db.clipboard_update(&files.id, "delete").unwrap();
+        assert!(!retry_clipboard_image_deletions(&mut db, &root));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn clipboard_image_deletion_acknowledgement_is_atomic() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        db.connection
+            .execute_batch(
+                "INSERT INTO clipboard_pending_image_deletions VALUES ('first'), ('second');
+            CREATE TEMP TRIGGER abort_ack BEFORE DELETE ON clipboard_pending_image_deletions
+            WHEN old.image_path='second' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+            )
+            .unwrap();
+        let paths = ["first".to_owned(), "second".to_owned()];
+        assert!(db.acknowledge_clipboard_image_deletions(&paths).is_err());
+        assert_eq!(db.pending_clipboard_image_deletions().unwrap().len(), 2);
+        db.connection
+            .execute_batch("DROP TRIGGER abort_ack;")
+            .unwrap();
+        db.acknowledge_clipboard_image_deletions(&paths).unwrap();
+        assert!(db.pending_clipboard_image_deletions().unwrap().is_empty());
     }
 
     #[test]

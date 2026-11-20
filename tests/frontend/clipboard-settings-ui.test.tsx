@@ -413,7 +413,7 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.queryByText(/stored locally for search and is not uploaded/)).toBeNull();
     const tip = within(section).getByRole('button', { name: 'About Image Text Indexing' });
     fireEvent.click(tip);
-    expect(screen.getByRole('tooltip').textContent).toMatch(/Only newly captured images.*stored locally for search and is not uploaded/);
+    expect(screen.getByRole('tooltip').textContent).toMatch(/new images and unindexed images you copy again.*stored locally for search and is not uploaded/);
     expect(index).toHaveProperty('checked', false);
     expect(calls('clipboard_auto_image_index_set')).toHaveLength(0);
     fireEvent.keyDown(tip, { key: 'Escape' });

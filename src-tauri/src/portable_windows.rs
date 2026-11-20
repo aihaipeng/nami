@@ -330,14 +330,16 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
     if !["translation", "clipboard", "settings"].contains(&target) {
         return Err("invalid_argument".into());
     }
-    if capture && target != "settings" {
-        app.state::<AppState>()
-            .operation
-            .fetch_add(1, Ordering::SeqCst);
-        *app.state::<AppState>().target.lock().unwrap() = platform::capture_target();
-    }
-    if target != "settings" && crate::records_runtime::defer_navigation(app, target)? {
+    let paste_target = (capture && target != "settings").then(platform::capture_target);
+    if target != "settings"
+        && crate::records_runtime::defer_navigation_with_target(app, target, paste_target)?
+    {
         return Ok(());
+    }
+    if let Some(paste_target) = paste_target {
+        let state = app.state::<AppState>();
+        state.operation.fetch_add(1, Ordering::SeqCst);
+        *state.target.lock().unwrap() = paste_target;
     }
     let window = create(app, target)?;
     if target != "settings" {

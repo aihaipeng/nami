@@ -69,6 +69,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const secondaryRef = useRef(secondary);
   const draftRef = useRef(draft);
   const preferencesRef = useRef(snapshot.translationPreferences);
+  const lastBroadcast = useRef(snapshot.translationPreferences);
   const applyPreferences = useRef<(preferences: TranslationPreferences) => void>(() => {});
   sourceRef.current = source;
   primaryRef.current = primary;
@@ -119,7 +120,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     let disposed = false;
     function clearDetail() {
       setSelectedId(null); completedRecord.current = null;
-      if (partialTicket.current) cancelRequest(); else ++requestRevision.current;
+      discardRequestView();
       fromSelection.current = false; normalizedCaret.current = null;
       setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
     }
@@ -280,9 +281,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setSelectedId(null);
   }
 
-  function cancelRequest() {
+  function discardRequestView() {
     ++requestRevision.current;
     partialTicket.current = null; setPartial(null); setRetrying(false); setFailedRequest(null); setPartialEngine(null);
+  }
+
+  function cancelRequest() {
+    discardRequestView();
     if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
   }
 
@@ -368,7 +373,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setDraft(context.text); setSource(preferred.sourceLanguage); setDetectedSource(null); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
     sourceRef.current = preferred.sourceLanguage; primaryRef.current = preferred.primaryLanguage; secondaryRef.current = preferred.secondaryLanguage;
     fromSelection.current = true;
-    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error ? 'Selected text is unavailable in this application.' : null);
+    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error === 'selection_copy_disabled' ? t('selectionCopyDisabled') : context.error ? 'Selected text is unavailable in this application.' : null);
     const targets = [preferred.primaryLanguage, ...(preferred.secondaryLanguage === 'none' ? [] : [preferred.secondaryLanguage])];
     if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true);
     input.current?.focus({ preventScroll: true });
@@ -376,7 +381,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function selectHistory(record: HistoryRecord, retranslate = false) {
     setPopup(null);
-    ++requestRevision.current; fromSelection.current = false; setServiceError(null); setDetectedSource(null);
+    discardRequestView(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
     normalizedCaret.current = null;
     setSelectedId(record.id); setDraft(record.text);
     setSource(requestedSource(record)); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage); setPrimary(record.targetLanguages[0]);
@@ -385,7 +390,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
     if (retranslate && !snapshot.storageError) void translateText(record.text, requestedSource(record), record.targetLanguages, false, undefined, undefined, true);
-    else if (partialTicket.current) cancelRequest();
     if (!native) void command('window_show', { target: 'translation' });
   }
 
@@ -450,8 +454,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }
 
   applyPreferences.current = (preferences) => {
-    const next = { source: preferences.sourceLanguage, primary: preferences.primaryLanguage, secondary: preferences.secondaryLanguage };
+    const previous = lastBroadcast.current;
+    lastBroadcast.current = preferences;
     const current = { source: sourceRef.current, primary: primaryRef.current, secondary: secondaryRef.current };
+    const next = {
+      source: preferences.sourceLanguage === previous.sourceLanguage ? current.source : preferences.sourceLanguage,
+      primary: preferences.primaryLanguage === previous.primaryLanguage ? current.primary : preferences.primaryLanguage,
+      secondary: preferences.secondaryLanguage === previous.secondaryLanguage ? current.secondary : preferences.secondaryLanguage,
+    };
     if (next.source === current.source && next.primary === current.primary && next.secondary === current.secondary) return;
     sourceRef.current = next.source; primaryRef.current = next.primary; secondaryRef.current = next.secondary;
     setSource(next.source); setPrimary(next.primary); setSecondary(next.secondary);

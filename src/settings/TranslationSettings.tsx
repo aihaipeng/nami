@@ -3,6 +3,7 @@ import type { ViewProps } from '../App';
 import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { resolveLanguage, type Translate } from '../shared/i18n';
+import { ClipboardSettingTip } from './ClipboardOptions';
 import { HistoryStorageSettings } from './HistoryStorageSettings';
 import { TranslationProxySettings } from './TranslationProxySettings';
 
@@ -33,6 +34,18 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
         {!languagesAvailable && <p className="settings-field-note" role="status">{t('languageNotSupported')}</p>}
       </div>
     </section>
+    {snapshot.capabilities.selection && <section aria-labelledby="selection-copy-fallback-heading">
+      <div className="settings-section-heading clipboard-section-heading">
+        <div className="clipboard-section-title">
+          <h2 id="selection-copy-fallback-heading">{t('selectionCopyFallback')}</h2>
+          <ClipboardSettingTip label={t('selectionCopyFallbackAbout')} text={t('selectionCopyFallbackTip')} />
+        </div>
+        <input className="settings-checkbox" type="checkbox" aria-labelledby="selection-copy-fallback-heading"
+          aria-description={t('selectionCopyFallbackTip')} checked={preferences.selectionCopyFallback ?? false}
+          disabled={!!snapshot.storageError}
+          onChange={(event) => void command('translation_preferences_set', { selectionCopyFallback: event.target.checked })} />
+      </div>
+    </section>}
     <TranslationProxySettings t={t} preferences={preferences} native={native} command={command} />
     <HistoryStorageSettings t={t} available={native && !snapshot.storageError} view="translation" previewLines={snapshot.clipboardControls.previewLines?.translation ?? 3} locale={resolveLanguage(snapshot.locale)} />
   </div>;

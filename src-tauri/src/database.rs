@@ -1,13 +1,15 @@
 mod clipboard;
 mod retention;
 
+pub use clipboard::unlink_pending_clipboard_images;
+
 use crate::model::HistoryRecord;
 use rusqlite::{params, Connection, ErrorCode, Row, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 9;
+const VERSION: i64 = 10;
 pub const PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -173,6 +175,9 @@ impl HistoryDatabase {
         }
         if version < 9 {
             clipboard::migrate_v9(&mut connection)?;
+        }
+        if version < 10 {
+            clipboard::migrate_v10(&mut connection)?;
         }
         clipboard::ensure_filter_indexes(&connection)?;
         clipboard::ensure_translation_preferences(&connection)?;

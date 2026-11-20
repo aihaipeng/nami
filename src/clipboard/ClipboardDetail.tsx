@@ -8,11 +8,10 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
-import { FileList, ImagePreview, type FileEntry } from './ClipboardMedia';
+import { FileList, ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import type { ClipboardRecord } from './useClipboard';
-import { clipboardUseError, clipboardUseFeedback } from './feedback';
+import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
 import type { ClipboardResult } from '../shared/contracts';
-import { useClipboardImageText } from './useClipboardImageText';
 import './clipboard.css';
 
 export interface ClipboardDetailData extends ClipboardRecord {
@@ -47,8 +46,6 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const processing = useRef(false);
   const list = useRef<HTMLDivElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
-  const matched = detail && detail.id === id ? [detail] : [];
-  const imageText = useClipboardImageText(matched, active && native && snapshot.capabilities.imageOcr && matched.length > 0);
   useEffect(() => {
     ++operation.current; processing.current = false; setBusy(false); setFeedback(null); setFailed(null);
     list.current?.scrollTo(0, 0);
@@ -76,7 +73,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   }, [id, active, native, snapshot.window.recordsSession, attempt]);
   const shown = active && detail && !failed ? detail : null;
   const current = shown?.id === id ? shown : null;
-  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
+  const singleImage = shown?.kind === 'image' || shown?.kind === 'files' && isSingleImage(shown.files);
+  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : snapshot.capabilities.imageOcr && singleImage && shown?.imageIndexStatus !== 'empty';
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
   const [indexingId, setIndexingId] = useState<string | null>(null);
   const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
@@ -116,13 +114,12 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       if (process) await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type });
     } catch (error) {
-      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') setFeedback(type === 'copy' ? t(clipboardUseError(error)) : process ? type === 'ocr' ? 'Unable to extract and copy text. Try again.' : 'Unable to open this text for translation. Try again.' : t('nativeError'));
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') setFeedback(type === 'copy' ? t(clipboardUseError(error)) : process ? clipboardProcessError(t, error, type) : t('nativeError'));
     } finally {
       if (process && operation.current === revision) { processing.current = false; setBusy(false); }
     }
     return false;
   }
-  const singleImage = current?.kind === 'image' || current?.kind === 'files' && current.files.length === 1 && current.files[0].exists && current.files[0].isImage;
   useEffect(() => {
     if (!active || snapshot.window.recordsEditorOpen) return;
     const dismiss = (event: KeyboardEvent) => {

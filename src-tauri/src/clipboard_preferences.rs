@@ -9,7 +9,10 @@ use nami::{
     database::HistoryDatabase,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::atomic::Ordering};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+};
 use tauri::{AppHandle, Emitter, Manager, Webview};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -571,23 +574,40 @@ async fn cleanup_locked(
     if notify && removed > 0 {
         let _ = changed(app);
     }
-    let media_cleanup_failed = if images.is_empty() {
-        false
+    let media_cleanup_failed = if notify || !images.is_empty() {
+        retry_image_deletions_locked(app, root)
+            .await
+            .unwrap_or(true)
     } else {
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut failed = false;
-            for path in images {
-                failed |= nami::clipboard::remove_image(&root, &path).is_err();
-            }
-            failed
-        })
-        .await
-        .unwrap_or(true)
+        false
     };
     Ok(CleanupResult {
         removed,
         media_cleanup_failed,
     })
+}
+
+// Keep clipboard_writes held across the reference check and unlink, but not the database mutex.
+pub(crate) async fn retry_image_deletions_locked(
+    app: &AppHandle,
+    root: PathBuf,
+) -> Result<bool, String> {
+    let pending = database(app, |db| db.pending_clipboard_image_deletions()).await?;
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    let (complete, failed) = tauri::async_runtime::spawn_blocking(move || {
+        nami::database::unlink_pending_clipboard_images(&root, pending)
+    })
+    .await
+    .map_err(|_| "storage_worker")?;
+    if !complete.is_empty() {
+        database(app, move |db| {
+            db.acknowledge_clipboard_image_deletions(&complete)
+        })
+        .await?;
+    }
+    Ok(failed)
 }
 
 pub(crate) async fn enforce_history_locked(app: &AppHandle) {

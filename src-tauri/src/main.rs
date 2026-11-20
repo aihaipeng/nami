@@ -40,7 +40,7 @@ mod records_runtime;
 
 pub struct AppState {
     records_dirty: AtomicBool,
-    records_navigation: Mutex<Option<String>>,
+    records_navigation: Mutex<Option<records_runtime::PendingNavigation>>,
     clipboard_enabled: AtomicBool,
     clipboard_options: Mutex<clipboard_preferences::ClipboardOptions>,
     clipboard_recording_menu: Mutex<Option<MenuItem<tauri::Wry>>>,
@@ -75,6 +75,7 @@ pub struct AppState {
     registered_shortcuts: Mutex<Vec<Shortcut>>,
     selection: Mutex<Option<selection::SelectionContext>>,
     selection_presentation: Mutex<Option<u64>>,
+    selection_target: Mutex<Option<platform::Target>>,
     selection_source: Mutex<Option<serde_json::Value>>,
     selection_revision: AtomicU64,
     selection_busy: AtomicBool,
@@ -131,6 +132,7 @@ impl Default for AppState {
             registered_shortcuts: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             selection_presentation: Mutex::new(None),
+            selection_target: Mutex::new(None),
             selection_source: Mutex::new(None),
             selection_revision: AtomicU64::new(0),
             selection_busy: AtomicBool::new(false),
@@ -545,6 +547,25 @@ fn main() {
                         .lock()
                         .unwrap()
                         .apply_page(page, true);
+                    let app = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        let _write = state.clipboard_writes.lock().await;
+                        let result = match clipboard_runtime::image_root(&app) {
+                            Ok(root) => {
+                                clipboard_preferences::retry_image_deletions_locked(&app, root)
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match result {
+                            Ok(true) => {
+                                eprintln!("Nami clipboard maintenance: clipboard_cleanup_failed")
+                            }
+                            Err(error) => eprintln!("Nami clipboard maintenance: {error}"),
+                            Ok(false) => (),
+                        }
+                    });
                 }
                 Err(error) => *app.state::<AppState>().storage_error.lock().unwrap() = Some(error),
             }

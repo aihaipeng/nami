@@ -12,6 +12,16 @@ pub struct Target {
     started: f64,
 }
 
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+impl Target {
+    pub(crate) fn test_identity() -> Self {
+        Self {
+            pid: -1,
+            started: 0.0,
+        }
+    }
+}
+
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
 

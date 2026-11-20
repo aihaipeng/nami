@@ -32,7 +32,6 @@ beforeEach(() => {
     }
     if (name === 'clipboard_record_detail') return fetchDetail ? fetchDetail(id!) : structuredClone(records.find((record) => record.id === id)!);
     if (name === 'clipboard_record_use') return { status: 'copied', copyStatus: 'current', code: null };
-    if (name === 'clipboard_record_has_text') return id === 'image-text';
     if (name === 'clipboard_record_update') {
       const record = records.find((record) => record.id === id)!;
       const action = (args as { action: string }).action;
@@ -256,14 +255,15 @@ describe('clipboard details', () => {
     expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', first().text);
   });
 
-  it.each([['image-text', true], ['image-blank', false]] as const)('only exposes recognized image actions for %s', async (id, text) => {
-    records[1] = { ...first(), id, kind: 'image', text: 'Image', width: 2400, height: 1600, characterCount: null, size: 1536 * 1024 };
+  it.each([['image-unknown', 'unindexed', true], ['image-text', 'indexed', true], ['image-blank', 'empty', false]] as const)('uses stored status without probing %s', async (id, imageIndexStatus, text) => {
+    records[1] = { ...first(), id, kind: 'image', text: 'Image', imageIndexStatus, width: 2400, height: 1600, characterCount: null, size: 1536 * 1024 };
     bridge.snapshot.window.clipboardDetailId = id;
     bridge.snapshot.window.translationVisible = true;
     render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
     await waitFor(() => expect(within(pane()).getByText('2400 × 1600')).toBeTruthy());
-    await waitFor(() => expect(calls('clipboard_record_has_text').length).toBeGreaterThan(0));
     await act(async () => {});
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
+    expect(calls('clipboard_record_process')).toHaveLength(0);
     expect(!!within(pane()).queryByRole('button', { name: 'Extract text' })).toBe(text);
     expect(!!within(pane()).queryByRole('button', { name: 'Translate' })).toBe(text);
     expect(within(pane()).queryByText('Characters')).toBeNull();
@@ -271,6 +271,20 @@ describe('clipboard details', () => {
     expect(within(pane()).getByText('1.5 MB')).toBeTruthy();
     const actions = [...pane().querySelectorAll('[data-action]')].map((element) => (element as HTMLElement).dataset.action);
     if (text) expect(actions.indexOf('note')).toBe(actions.indexOf('ocr') + 1);
+  });
+
+  it('reports no text from an explicit detail action without copying', async () => {
+    records[1] = { ...first(), kind: 'image', imageIndexStatus: 'unindexed' };
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'clipboard_record_process') throw 'ocr_no_text';
+      return invoke(name, args);
+    });
+    direct();
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Translate' }));
+    expect(await within(pane()).findByText('No text recognized')).toBeTruthy();
+    expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'translate' }]);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
   it('shows every file and only the applicable size metadata', async () => {

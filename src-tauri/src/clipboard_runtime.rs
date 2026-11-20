@@ -207,7 +207,7 @@ pub(crate) fn start(app: &AppHandle) {
                     .image_index_jobs
                     .lock()
                     .unwrap()
-                    .finish(id, &result);
+                    .finish(id, Some(epoch), &result);
                 let _ = changed(&app);
             }
         });
@@ -289,7 +289,7 @@ pub(crate) fn start(app: &AppHandle) {
                 && state.clipboard_options.lock().unwrap().auto_image_index)
                 .then(|| state.image_index_epoch.load(Ordering::SeqCst));
             let result = tauri::async_runtime::spawn_blocking(move || {
-                let mut index_job = None;
+                let mut index_job = Ok(None);
                 let saved = persist_capture_with(
                     &root,
                     capture,
@@ -301,17 +301,14 @@ pub(crate) fn start(app: &AppHandle) {
                         }
                         let mut database = state.database.lock().unwrap();
                         let db = database.as_mut().ok_or("storage_unavailable")?;
-                        let saved =
+                        let persisted =
                             db.clipboard_insert_capture(record, representation, formatting)?;
-                        if let Some(epoch) =
-                            index_epoch.filter(|_| saved.kind == "image" && saved.id == record.id)
-                        {
-                            index_job = Some((saved.id, epoch));
-                        }
+                        // OCR lookup happens after commit; its failure must not trigger image cleanup.
+                        index_job = pending_image_index(db, persisted, index_epoch);
                         Ok(())
                     },
                 )?;
-                Ok((saved, index_job))
+                index_job.map(|job| (saved, job))
             })
             .await
             .map_err(|_| "storage_worker".to_owned())
@@ -319,20 +316,19 @@ pub(crate) fn start(app: &AppHandle) {
             if matches!(result, Ok((true, _))) {
                 crate::clipboard_preferences::enforce_history_locked(&app).await;
             }
+            if let Ok((_, Some((id, epoch)))) = &result {
+                if state
+                    .image_index_jobs
+                    .lock()
+                    .unwrap()
+                    .start(id, Some(*epoch))
+                {
+                    let _ = index_tx.send((id.clone(), *epoch));
+                }
+            }
             drop(_write);
             match result {
-                Ok((saved, index_job)) => {
-                    if let Some((id, epoch)) = index_job {
-                        if state
-                            .image_index_jobs
-                            .lock()
-                            .unwrap()
-                            .pending
-                            .insert(id.clone())
-                        {
-                            let _ = index_tx.send((id, epoch));
-                        }
-                    }
+                Ok((saved, _)) => {
                     acknowledge(&state.clipboard_version, baseline, captured_version);
                     failure = None;
                     if saved {
@@ -348,6 +344,20 @@ pub(crate) fn start(app: &AppHandle) {
             }
         }
     });
+}
+
+fn pending_image_index(
+    db: &HistoryDatabase,
+    saved: ClipboardRecord,
+    index_epoch: Option<u64>,
+) -> Result<Option<(String, u64)>, String> {
+    let Some(epoch) = index_epoch.filter(|_| saved.kind == "image") else {
+        return Ok(None);
+    };
+    Ok(db
+        .clipboard_ocr_text(&saved.id)?
+        .is_none()
+        .then_some((saved.id, epoch)))
 }
 
 fn capture_error(app: &AppHandle, error: &str) {
@@ -561,6 +571,52 @@ fn persist_capture_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recopy_queues_only_unindexed_images_when_enabled() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let mut image = ClipboardRecord {
+            id: "original".into(),
+            kind: "image".into(),
+            text: "Image".into(),
+            date: "2026-11-20T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: Some("fixture.png".into()),
+            fingerprint: "fixture".into(),
+        };
+        let original = db.clipboard_insert_capture(&image, None, None).unwrap();
+        assert_eq!(pending_image_index(&db, original, None).unwrap(), None);
+        image.id = "recopy".into();
+        let recopy = db.clipboard_insert_capture(&image, None, None).unwrap();
+        assert_eq!(
+            pending_image_index(&db, recopy.clone(), Some(7)).unwrap(),
+            Some(("original".into(), 7))
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            1
+        );
+        for text in ["", "Corrected text"] {
+            if text.is_empty() {
+                db.clipboard_index_image("original", "fixture", text)
+                    .unwrap();
+            } else {
+                db.clipboard_correct_image_text("original", text).unwrap();
+            }
+            assert_eq!(
+                pending_image_index(&db, recopy.clone(), Some(8)).unwrap(),
+                None
+            );
+            assert_eq!(
+                db.clipboard_ocr_text("original").unwrap().as_deref(),
+                Some(text)
+            );
+        }
+    }
 
     #[test]
     fn recording_types_skip_unselected_items_before_saving() {

@@ -312,12 +312,9 @@ describe('clipboard text processing', () => {
       { ...records[0], id: 'ordinary' },
       { ...records[0], id: 'blank', text: '   ', isFavorite: true },
       { ...records[0], id: 'text-image', kind: 'image', isFavorite: true },
-      { ...records[0], id: 'empty-image', kind: 'image', isFavorite: true },
       { ...records[0], id: 'ordinary-image', kind: 'image' },
       { ...records[1] },
     ];
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? ['text-image', 'ordinary-image'].includes((args as { recordId: string }).recordId) : original(name, args));
     await mount('clipboard');
     await waitFor(() => expect(within(row('text-image')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     const local = 'Recognizes text on this Mac without sending the image or text.';
@@ -333,38 +330,43 @@ describe('clipboard text processing', () => {
     expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
     expect(actions('ordinary')).toEqual(['Copy', 'Translate', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
     expect(actions('ordinary-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
-    for (const id of ['blank', 'empty-image', 'pinned']) {
+    for (const id of ['blank', 'pinned']) {
       expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
       expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
     }
-    expect(calls('clipboard_record_has_text').map(([, args]) => args)).toEqual([{ recordId: 'text-image' }, { recordId: 'empty-image' }, { recordId: 'ordinary-image' }, { recordId: 'pinned' }]);
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
     expect(within(row('first')).getByRole('button', { name: 'Translate' })).toBeTruthy();
-    expect(calls('clipboard_record_has_text').filter(([, args]) => (args as { recordId: string }).recordId !== 'pinned')).toHaveLength(3);
   });
 
   it('offers image text actions for a single image file without treating ordinary file paths as text', async () => {
     records = ['image-file', 'blank-file', 'document-file', 'multiple-files'].map((id) => ({ ...records[0], id, kind: 'files' }));
     const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? (args as { recordId: string }).recordId === 'image-file' : original(name, args));
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name !== 'clipboard_files') return original(name, args);
+      const { recordId } = args as { recordId: string };
+      return Array.from({ length: recordId === 'multiple-files' ? 2 : 1 }, (_, i) => ({ path: `/synthetic/${i}`, name: String(i), exists: true, isDir: false, isImage: recordId !== 'document-file', iconDataUrl: null }));
+    });
     await mount('clipboard');
     await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     expect(within(row('image-file')).getByRole('button', { name: 'Translate' })).toBeTruthy();
-    for (const id of ['blank-file', 'document-file', 'multiple-files']) {
+    for (const id of ['document-file', 'multiple-files']) {
       expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
       expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
     }
+    expect(within(row('blank-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
     for (const label of ['Translate', 'Extract text']) await act(async () => fireEvent.click(within(row('image-file')).getByRole('button', { name: label })));
     expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'image-file', action: 'translate' }, { recordId: 'image-file', action: 'ocr' }]);
   });
 
   it('rechecks image files after reopening and removes actions when the referenced file changes or disappears', async () => {
     records = [{ ...records[0], id: 'image-file', kind: 'files' }];
-    let hasText = true, missing = false;
+    let isImage = true, missing = false;
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_record_has_text') { if (missing) throw new Error('clipboard_file_missing'); return hasText; }
+      if (name === 'clipboard_files') return [{ path: '/synthetic/file', name: 'file', exists: !missing, isDir: false, isImage, iconDataUrl: null }];
       return original(name, args);
     });
     await mount('clipboard');
@@ -373,13 +375,14 @@ describe('clipboard text processing', () => {
       fireEvent.click(within(document.querySelector<HTMLElement>(view === 'translation' ? '.clipboard-panel .history-toolbar' : '#translation-history .history-toolbar')!).getByRole('button', { name: view === 'translation' ? 'Translations' : 'Clipboard' }));
       await waitFor(() => expect(bridge.snapshot.window.recordView).toBe(view));
     };
-    await switchView('translation'); hasText = false; await switchView('clipboard');
+    await switchView('translation'); isImage = false; await switchView('clipboard');
     await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Extract text' })).toBeNull());
-    await switchView('translation'); hasText = true; await switchView('clipboard');
+    await switchView('translation'); isImage = true; await switchView('clipboard');
     await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     await switchView('translation'); missing = true; await switchView('clipboard');
     await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Translate' })).toBeNull());
-    expect(calls('clipboard_record_has_text')).toHaveLength(4);
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
+    expect(calls('clipboard_files')).toHaveLength(4);
   });
 
   it('keeps text translation available without image OCR capability and does not probe images', async () => {
@@ -392,54 +395,23 @@ describe('clipboard text processing', () => {
     expect(calls('clipboard_record_has_text')).toHaveLength(0);
   });
 
-  it('serializes image detection, stops after leaving the view, and retries the discarded result on reopening', async () => {
-    records = [1, 2].map((index) => ({ ...records[0], id: `picture-${index}`, kind: 'image', isFavorite: true }));
-    let finish: (hasText: boolean) => void = () => {};
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? new Promise<boolean>((resolve) => { finish = resolve; }) : original(name, args));
-    await mount('clipboard'); await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
-    expect(calls('clipboard_record_has_text')[0][1]).toEqual({ recordId: 'picture-1' });
-    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
-    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
-    await act(async () => finish(true));
-    expect(calls('clipboard_record_has_text')).toHaveLength(1);
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? true : original(name, args));
-    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
-    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(3));
-    expect(calls('clipboard_record_has_text').map(([, args]) => args)).toEqual([{ recordId: 'picture-1' }, { recordId: 'picture-1' }, { recordId: 'picture-2' }]);
-    expect(within(row('picture-2')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
-  });
-
-  it('allows explicit extraction from the image menu even after a failed OCR probe', async () => {
+  it.each([['Extract text', 'ocr'], ['Translate', 'translate']])('offers explicit %s on unknown images without probing and reports empty results', async (label, action) => {
     records = [{ ...records[0], id: 'picture', kind: 'image' }];
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => {
-      if (name === 'clipboard_record_has_text') throw new Error('ocr_recognition_failed');
+      if (name === 'clipboard_record_process') throw 'ocr_no_text';
       return invoke(name, args);
     });
     await mount('clipboard');
-    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    await waitFor(() => expect(row('picture')).toBeTruthy());
+    await act(async () => {});
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
+    expect(calls('clipboard_record_process')).toHaveLength(0);
     fireEvent.contextMenu(row('picture'));
-    fireEvent.click(screen.getByRole('menuitem', { name: /Extract text/ }));
-    await waitFor(() => expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'ocr' }));
-  });
-
-  it('does not cache recognition failures and retries them when the clipboard view is reopened', async () => {
-    records = [{ ...records[0], id: 'picture', kind: 'image', isFavorite: true }];
-    let fail = true;
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_record_has_text') { if (fail) throw new Error('ocr_failed'); return true; }
-      return original(name, args);
-    });
-    await mount('clipboard'); await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
-    expect(within(row('picture')).queryByRole('button', { name: 'Extract text' })).toBeNull();
-    fail = false;
-    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
-    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
-    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
-    await waitFor(() => expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
-    expect(calls('clipboard_record_has_text')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('menuitem', { name: label }));
+    expect(await screen.findByText('No text recognized')).toBeTruthy();
+    expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'picture', action }]);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
   it('opens the highlighted record note from search and leaves typing in the editor alone', async () => {
@@ -459,7 +431,6 @@ describe('clipboard text processing', () => {
     let finish: () => void = () => {};
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_record_has_text') return true;
       if (name === 'clipboard_record_process') return new Promise<void>((resolve) => { finish = resolve; });
       return original(name, args);
     });
@@ -492,8 +463,6 @@ describe('clipboard text processing', () => {
 
   it('dispatches text/image translation and OCR by record ID without invoking copy or paste', async () => {
     records = [{ ...records[0] }, { ...records[0], id: 'picture', kind: 'image' }];
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? true : original(name, args));
     await mount('clipboard'); await waitFor(() => expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     for (const [id, label] of [['first', 'Translate'], ['picture', 'Translate'], ['picture', 'Extract text']]) {
       await act(async () => fireEvent.click(within(row(id)).getByRole('button', { name: label })));
@@ -508,7 +477,6 @@ describe('clipboard text processing', () => {
     let fail = true;
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_record_has_text') return true;
       if (name === 'clipboard_record_process') { if (fail) throw new Error('synthetic_failure'); return; }
       return original(name, args);
     });
@@ -528,7 +496,6 @@ describe('clipboard text processing', () => {
     let finish: () => void = () => {};
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_record_has_text') return true;
       if (name === 'clipboard_record_process') return new Promise<void>((resolve) => { finish = resolve; });
       return original(name, args);
     });
@@ -636,8 +603,6 @@ describe('database clipboard history', () => {
 
   it('dispatches available image processing from the menu through the same record actions', async () => {
     records = [{ ...records[0], kind: 'image' }];
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_record_has_text' ? true : original(name, args));
     await mount('clipboard');
     await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
     for (const [label, action] of [['Translate', 'translate'], ['Extract text', 'ocr']]) {
@@ -688,23 +653,21 @@ describe('database clipboard history', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
-  it('corrects image text without copying, retains a failed edit, and ignores a late empty probe', async () => {
+  it('corrects image text without copying, retains a failed edit, without probing the image when browsing', async () => {
     records = [{ ...records[0], id: 'picture', kind: 'image' }];
     const invoke = bridge.invoke.getMockImplementation()!;
-    let completeProbe!: (value: boolean) => void;
     let fail = true;
     bridge.invoke.mockImplementation(async (name, args) => {
-      if (name === 'clipboard_record_has_text') return new Promise<boolean>((resolve) => { completeProbe = resolve; });
       if (name === 'clipboard_record_ocr_text') return 'NAMl-0U-016';
       if (name === 'clipboard_record_update') {
         if (fail) throw new Error('storage_unavailable');
-        bridge.listeners.get('clipboard_ocr_corrected')?.forEach((callback) => callback({ payload: 'picture' }));
         return;
       }
       return invoke(name, args);
     });
     await mount('clipboard');
-    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    await waitFor(() => expect(row('picture')).toBeTruthy());
+    expect(calls('clipboard_record_has_text')).toHaveLength(0);
     fireEvent.contextMenu(row('picture'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Correct Recognized Text' }));
     const dialog = screen.getByRole('dialog', { name: 'Correct Recognized Text' });
@@ -727,7 +690,6 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'correct_ocr', text: 'NAMI-OU-016\n已核对' });
     expect(calls('clipboard_record_process')).toHaveLength(0);
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    await act(async () => completeProbe(false));
     expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
   });
 
@@ -1948,7 +1910,7 @@ describe('database clipboard history', () => {
   });
 
   it('appends a page once without duplicating records', async () => {
-    queryHandler = async (request) => request.cursor ? { ...page(), records: [records[0], { ...records[0], id: 'second' }], hasMore: false } : { ...page(), cursor, hasMore: true };
+    queryHandler = async (request) => request.cursor ? { ...page(), records: [records[0], { ...records[0], id: 'second' }, { ...records[0], id: 'second' }], hasMore: false } : { ...page(), cursor, hasMore: true };
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     scrollNearEnd();

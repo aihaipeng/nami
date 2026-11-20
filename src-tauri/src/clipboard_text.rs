@@ -3,7 +3,7 @@ use crate::{
 };
 use nami::clipboard::ClipboardRecord;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::atomic::Ordering,
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -83,13 +83,13 @@ fn image_bytes(
 
 #[derive(Default)]
 pub(crate) struct IndexJobs {
-    pub pending: HashSet<String>,
+    pending: HashMap<String, Option<u64>>,
     failed: VecDeque<String>,
 }
 
 impl IndexJobs {
     pub fn status(&self, id: &str) -> &'static str {
-        if self.pending.contains(id) {
+        if self.pending.contains_key(id) {
             "pending"
         } else if self.failed.iter().any(|failed| failed == id) {
             "failed"
@@ -98,7 +98,22 @@ impl IndexJobs {
         }
     }
 
-    pub fn finish(&mut self, id: String, result: &Result<(), String>) {
+    pub fn start(&mut self, id: &str, epoch: Option<u64>) -> bool {
+        if self
+            .pending
+            .get(id)
+            .is_some_and(|previous| epoch.is_none() || previous.is_none() || *previous == epoch)
+        {
+            return false;
+        }
+        self.pending.insert(id.to_owned(), epoch);
+        true
+    }
+
+    pub fn finish(&mut self, id: String, epoch: Option<u64>, result: &Result<(), String>) {
+        if self.pending.get(&id) != Some(&epoch) {
+            return;
+        }
         self.pending.remove(&id);
         self.failed.retain(|failed| failed != &id);
         if result
@@ -162,7 +177,7 @@ async fn text(
         return Ok((record, text));
     }
     let state = app.state::<AppState>();
-    // One Vision worker, shared by detection and explicit actions; never hold the database mutex here.
+    // One Vision worker, shared by indexing and explicit actions; never hold the database mutex here.
     let mut cache = state.image_text.lock().await;
     if matches!(index, Some(IndexRequest::Automatic(epoch)) if !indexing_enabled(&state, epoch)) {
         return Err("cancelled".into());
@@ -264,37 +279,27 @@ pub(crate) async fn correct(app: &AppHandle, id: String, corrected: String) -> R
     }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    let record_id = id.clone();
     clipboard_runtime::database(app, move |db| {
-        db.clipboard_correct_image_text(&record_id, &corrected)
+        db.clipboard_correct_image_text(&id, &corrected)
     })
     .await?;
-    clipboard_runtime::changed(app)?;
-    for label in ["clipboard", "translation"] {
-        if let Some(view) = app.get_webview(label) {
-            view.emit("clipboard_ocr_corrected", &id)
-                .map_err(|_| "event_emit")?;
-        }
-    }
-    Ok(())
+    clipboard_runtime::changed(app)
 }
 
 pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Result<(), String> {
     if action == "index" {
         let state = app.state::<AppState>();
-        if !state
-            .image_index_jobs
-            .lock()
-            .unwrap()
-            .pending
-            .insert(id.clone())
-        {
+        if !state.image_index_jobs.lock().unwrap().start(&id, None) {
             return Ok(());
         }
         let result = text(app, id.clone(), Some(IndexRequest::Manual))
             .await
             .map(|_| ());
-        state.image_index_jobs.lock().unwrap().finish(id, &result);
+        state
+            .image_index_jobs
+            .lock()
+            .unwrap()
+            .finish(id, None, &result);
         let _ = clipboard_runtime::changed(app);
         return result;
     }
@@ -462,6 +467,21 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_epoch_recopy_replaces_stale_job_without_duplicating_current_work() {
+        let mut jobs = IndexJobs::default();
+        assert!(jobs.start("image", Some(1)));
+        assert!(!jobs.start("image", Some(1)));
+        assert!(jobs.start("image", Some(3)));
+        jobs.finish("image".into(), Some(1), &Err("cancelled".into()));
+        assert_eq!(jobs.status("image"), "pending");
+        assert!(!jobs.start("image", Some(3)));
+        jobs.finish("image".into(), Some(3), &Ok(()));
+        assert_eq!(jobs.status("image"), "unindexed");
+        assert!(jobs.start("image", None));
+        assert!(!jobs.start("image", Some(4)));
+    }
 
     #[test]
     fn cache_retains_no_text_and_evicts_old_results_with_a_memory_bound() {
