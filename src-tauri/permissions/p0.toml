@@ -11,12 +11,12 @@ commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "r
 [[permission]]
 identifier = "allow-p0-clipboard"
 description = "Clipboard window may query and restore local clipboard history."
-commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_open_target", "clipboard_details_select", "clipboard_note_open", "clipboard_record_has_text", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files"]
+commands.allow = ["window_pin", "records_view_set", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_open_target", "clipboard_details_select", "clipboard_note_open", "clipboard_record_has_text", "clipboard_record_ocr_text", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files"]
 
 [[permission]]
 identifier = "allow-p0-settings"
 description = "Settings, system permission requests and confirmed management of local clipboard history."
-commands.allow = ["locale_set", "permission_request", "translation_engine_set", "translation_preferences_set", "translation_shortcut_set", "translation_shortcuts_restore", "translation_shortcut_capture", "clipboard_recording_type_set", "clipboard_shortcut_set", "clipboard_options_get", "clipboard_excluded_app_pick", "clipboard_excluded_app_remove", "clipboard_behavior_set", "records_open_focus_set", "records_preview_lines_set", "clipboard_record_shortcut_set", "records_storage_info", "records_cleanup_preview", "records_cleanup_apply"]
+commands.allow = ["locale_set", "permission_request", "translation_engine_set", "translation_preferences_set", "translation_shortcut_set", "translation_shortcuts_restore", "translation_shortcut_capture", "clipboard_recording_type_set", "clipboard_shortcut_set", "clipboard_options_get", "clipboard_auto_image_index_set", "clipboard_excluded_app_pick", "clipboard_excluded_app_remove", "clipboard_behavior_set", "records_open_focus_set", "records_preview_lines_set", "clipboard_record_shortcut_set", "records_storage_info", "records_cleanup_preview", "records_cleanup_apply"]
 
 [[permission]]
 identifier = "allow-p0-records-history"

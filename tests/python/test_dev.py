@@ -36,25 +36,33 @@ def test_native_mode_sets_environment_and_preserves_failure(tmp_path, monkeypatc
     assert calls[0][1]['env']['NAMI_UI_TEST_VISIBLE'] == visible
 
 
-def test_smoke_runs_only_visible_clipboard_shortcuts(tmp_path, monkeypatch):
+@pytest.mark.parametrize('failed_phase', ['translation_smoke_', 'ocr_search_', 'rich_text_smoke_', 'translation-ui', 'native'])
+def test_smoke_runs_core_cases_and_propagates_failures(tmp_path, monkeypatch, failed_phase):
     executable = tmp_path / 'python'
     executable.touch()
     monkeypatch.setattr(dev, 'python_path', lambda: executable)
     monkeypatch.setattr(dev.sys, 'platform', 'darwin')
+    monkeypatch.setenv('NAMI_UI_TEST_CASE', 'clipboard-editor')
     calls = []
 
     def run(args, **kwargs):
-        calls.append((args, kwargs['env']))
-        return SimpleNamespace(returncode=7)
+        phase = args[-1] if args[0] == 'cargo' else 'translation-ui' if args[0] == 'npm' else 'native'
+        if phase == 'translation-ui':
+            assert args[-1] == 'tests/frontend/translation-reliability.test.tsx'
+        calls.append(phase)
+        if phase == 'native':
+            assert args[-2:] == ['tests/python/test_cross_app_fixture.py', 'tests/python/test_native_ui.py::test_native_ui']
+            assert 'NAMI_UI_TEST_CASE' not in kwargs['env']
+            assert kwargs['env']['NAMI_UI_TEST_SMOKE'] == '1'
+            assert kwargs['env']['NAMI_UI_TEST_VISIBLE'] == '1'
+        return SimpleNamespace(returncode=7 if phase == failed_phase else 0)
 
     monkeypatch.setattr(dev.subprocess, 'run', run)
     with pytest.raises(SystemExit) as exit:
         dev.main(['smoke'])
     assert exit.value.code == 7
-    assert len(calls) == 1
-    assert calls[0][0][-1] == 'tests/python/test_native_ui.py::test_native_ui'
-    assert calls[0][1]['NAMI_UI_TEST_CASE'] == 'clipboard-shortcuts'
-    assert calls[0][1]['NAMI_UI_TEST_VISIBLE'] == '1'
+    phases = ['translation_smoke_', 'ocr_search_', 'rich_text_smoke_', 'translation-ui', 'native']
+    assert calls == phases[:phases.index(failed_phase) + 1]
 
 
 @pytest.mark.parametrize('platform', ['win32', 'linux'])

@@ -19,6 +19,8 @@ import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
 type Popup = 'source' | 'primary' | 'secondary';
+type TranslationRequest = { text: string; source: string; targets: string[]; fromSelection: boolean };
+type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 
 let sourceMeasure: CanvasRenderingContext2D | null | undefined;
 
@@ -43,6 +45,9 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const copying = useRef(new Map<number, number>());
   const requestRevision = useRef(0);
   const completedRecord = useRef<HistoryRecord | null>(null);
+  const partialTicket = useRef<{ id: string; request: TranslationRequest; pending: boolean } | null>(null);
+  const [partial, setPartial] = useState<PartialTranslation | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
   const fromSelection = useRef(false);
   const receiveSelection = useRef<(context: { text: string; error: string | null }) => void>(() => {});
@@ -75,7 +80,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useEffect(() => {
     ++copyOperation.current; copying.current.clear(); setCopyFailed(false);
     return () => { ++copyOperation.current; };
-  }, [selectedId, draft, cachedResults, state.recordView, state.translationVisible, state.recordsSession]);
+  }, [selectedId, draft, cachedResults, partial?.id, state.recordView, state.translationVisible, state.recordsSession]);
   const capabilities = snapshot.capabilities;
   const languagesAvailable = supportsTranslation(snapshot.translationEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
   const currentWindow = useRef(state);
@@ -110,7 +115,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     let disposed = false;
     function clearDetail() {
       setSelectedId(null); completedRecord.current = null;
-      ++requestRevision.current; fromSelection.current = false; normalizedCaret.current = null;
+      if (partialTicket.current) cancelRequest(); else ++requestRevision.current;
+      fromSelection.current = false; normalizedCaret.current = null;
       setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
     }
     const removeSelection = listen<HistorySelection>('history_sample_selected', ({ payload }) => {
@@ -272,30 +278,58 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function cancelRequest() {
     ++requestRevision.current;
+    partialTicket.current = null; setPartial(null); setRetrying(false);
     if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
   }
 
   async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false) {
-    if (snapshot.storageError) return;
     const origin = reuse ?? completedRecord.current;
     cancelRequest();
     const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation?.engine === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
     setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null); setDetectedSource(null);
-    if (!supportsTranslation(snapshot.translationEngine, sourceLanguage, targetLanguages)) return;
+    if (snapshot.storageError || !supportsTranslation(snapshot.translationEngine, sourceLanguage, targetLanguages)) return;
     if (!inputWithinLimits(text)) { setNotice('inputLimit'); return; }
     if (!native) { setServiceError('Open Nami to translate.'); return; }
     const revision = requestRevision.current;
     await cancellation.current;
     if (requestRevision.current !== revision) return;
+    await runTranslation({ text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured }, revision,
+      origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {});
+  }
+
+  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; reuse?: { recordId: string; focusHistory?: boolean; targetIndex?: number } }) {
     activity(1);
     try {
-      const record = await invoke<HistoryRecord>('translation_run', { text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {}) });
+      const result = await invoke<HistoryRecord | { partial: PartialTranslation }>('translation_run', { ...request, ...options });
       if (requestRevision.current !== revision) return;
-      completedRecord.current = record;
-      setCachedResults(record.translations); setSelectedId(record.id); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage);
+      const output = 'partial' in result ? result.partial : result;
+      if ('partial' in result) {
+        completedRecord.current = null;
+        partialTicket.current = { id: result.partial.id, request, pending: false };
+        setPartial(result.partial); setSelectedId(null);
+      } else {
+        completedRecord.current = result;
+        partialTicket.current = null;
+        setPartial(null); setSelectedId(result.id);
+      }
+      setCachedResults(output.translations); setDetectedSource(output.sourceLanguage === 'auto' ? null : output.sourceLanguage);
     } catch (error) {
       if (requestRevision.current === revision && String(error) !== 'cancelled') setServiceError(String(error));
-    } finally { activity(-1); }
+    } finally {
+      if (options.retryId && requestRevision.current === revision) {
+        if (partialTicket.current) partialTicket.current.pending = false;
+        setRetrying(false);
+      }
+      activity(-1);
+    }
+  }
+
+  function retryTranslation() {
+    const ticket = partialTicket.current;
+    if (!ticket || ticket.id !== partial?.id || ticket.pending || snapshot.storageError) return;
+    ticket.pending = true;
+    setRetrying(true); setServiceError(null);
+    void runTranslation(ticket.request, ++requestRevision.current, { retryId: ticket.id });
   }
 
   function submit(focusHistory = false) {
@@ -328,7 +362,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     completedRecord.current = record;
     setCachedResults(retranslate ? [] : record.translations);
     setNotice(null);
-    if (retranslate) void translateText(record.text, requestedSource(record), record.targetLanguages, false, undefined, undefined, true);
+    if (retranslate && !snapshot.storageError) void translateText(record.text, requestedSource(record), record.targetLanguages, false, undefined, undefined, true);
+    else if (partialTicket.current) cancelRequest();
     if (!native) void command('window_show', { target: 'translation' });
   }
 
@@ -351,8 +386,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }
 
   function copyTranslation(requestedIndex: number) {
-    const index = requestedIndex === 1 && cachedResults[1] ? 1 : 0;
-    const recordId = completedRecord.current?.id ?? selectedId;
+    const index = partial ? requestedIndex : requestedIndex === 1 && cachedResults[1] ? 1 : 0;
+    const recordId = partial?.id ?? completedRecord.current?.id ?? selectedId;
     if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
     setPopup(null); setCopyFailed(false);
     const operation = ++copyOperation.current;
@@ -471,6 +506,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       <div className={cn('result-columns', secondary === 'none' && 'single-column', taskStatus && !hasResults && 'task-status-only')}>
         {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" tabIndex={-1} key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
           {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
+          {partial?.errors[index] && <div className="result-error" data-tauri-drag-region="false">
+            <span role="alert">{partial.errors[index]}</span>
+            <button type="button" disabled={retrying || !!snapshot.storageError} onClick={retryTranslation}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
+          </div>}
         </section>)}
         {taskStatus && !hasResults && <p className="translation-status" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
         <RecordFeedback message={copyFailed ? t('copyFailed') : null} />

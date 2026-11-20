@@ -1,6 +1,8 @@
 use crate::{commands::on_main, platform, AppState};
 use nami::{
-    clipboard::{self, ClipboardFileRepresentation, ClipboardRecord, RecordingTypes},
+    clipboard::{
+        self, ClipboardFileRepresentation, ClipboardRecord, ClipboardTextFormatting, RecordingTypes,
+    },
     database::HistoryDatabase,
 };
 use std::path::{Path, PathBuf};
@@ -57,21 +59,35 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
 pub(crate) async fn payload(
     app: &AppHandle,
     id: String,
-    restore_files: bool,
+    restore_formats: bool,
+    plain_text: bool,
 ) -> Result<platform::ClipboardPayload, String> {
     let root = image_root(app)?;
-    let (record, representation) = database(app, move |database| {
-        Ok((
-            database.clipboard_record(&id)?,
-            if restore_files {
-                database.clipboard_file_representation(&id)?
-            } else {
-                None
-            },
-        ))
+    let (record, files, formatting) = database(app, move |database| {
+        let record = database.clipboard_record(&id)?;
+        if plain_text && record.kind != "text" {
+            return Err("invalid_argument".into());
+        }
+        let files = if restore_formats && record.kind != "text" {
+            database.clipboard_file_representation(&id)?
+        } else {
+            None
+        };
+        let formatting = if restore_formats && !plain_text && record.kind == "text" {
+            database.clipboard_text_formatting(&id)?
+        } else {
+            None
+        };
+        Ok((record, files, formatting))
     })
     .await?;
-    tauri::async_runtime::spawn_blocking(move || record_payload(&root, record, representation))
+    if let Some(formatting) = formatting {
+        return Ok(platform::ClipboardPayload::RichText {
+            text: record.text,
+            formatting,
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || record_payload(&root, record, files))
         .await
         .map_err(|_| "storage_worker")?
 }
@@ -181,6 +197,15 @@ pub(crate) fn start(app: &AppHandle) {
     state
         .clipboard_version
         .store(platform::clipboard_version(), Ordering::SeqCst);
+    let (index_tx, mut index_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u64)>();
+    if platform::capabilities().image_ocr {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some((id, epoch)) = index_rx.recv().await {
+                let _ = crate::clipboard_text::index_image(&app, id, epoch).await;
+            }
+        });
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut failure = None;
@@ -254,29 +279,46 @@ pub(crate) fn start(app: &AppHandle) {
             let captured_version = capture.version;
             let types = *state.clipboard_recording_types.lock().unwrap();
             let worker = app.clone();
+            let index_epoch = (platform::capabilities().image_ocr
+                && state.clipboard_options.lock().unwrap().auto_image_index)
+                .then(|| state.image_index_epoch.load(Ordering::SeqCst));
             let result = tauri::async_runtime::spawn_blocking(move || {
-                persist_capture_with(&root, capture, types, |record, representation| {
-                    let state = worker.state::<AppState>();
-                    if let Some(error) = state.storage_error.lock().unwrap().clone() {
-                        return Err(error);
-                    }
-                    let mut database = state.database.lock().unwrap();
-                    database
-                        .as_mut()
-                        .ok_or("storage_unavailable")?
-                        .clipboard_insert_with_file_representation(record, representation)
-                        .map(|_| ())
-                })
+                let mut index_job = None;
+                let saved = persist_capture_with(
+                    &root,
+                    capture,
+                    types,
+                    |record, representation, formatting| {
+                        let state = worker.state::<AppState>();
+                        if let Some(error) = state.storage_error.lock().unwrap().clone() {
+                            return Err(error);
+                        }
+                        let mut database = state.database.lock().unwrap();
+                        let db = database.as_mut().ok_or("storage_unavailable")?;
+                        let saved =
+                            db.clipboard_insert_capture(record, representation, formatting)?;
+                        if let Some(epoch) =
+                            index_epoch.filter(|_| saved.kind == "image" && saved.id == record.id)
+                        {
+                            index_job = Some((saved.id, epoch));
+                        }
+                        Ok(())
+                    },
+                )?;
+                Ok((saved, index_job))
             })
             .await
             .map_err(|_| "storage_worker".to_owned())
             .and_then(|result| result);
-            if matches!(result, Ok(true)) {
+            if matches!(result, Ok((true, _))) {
                 crate::clipboard_preferences::enforce_history_locked(&app).await;
             }
             drop(_write);
             match result {
-                Ok(saved) => {
+                Ok((saved, index_job)) => {
+                    if let Some(job) = index_job {
+                        let _ = index_tx.send(job);
+                    }
                     acknowledge(&state.clipboard_version, baseline, captured_version);
                     failure = None;
                     if saved {
@@ -324,9 +366,9 @@ pub(crate) fn persist_capture(
         root,
         capture,
         RecordingTypes::default(),
-        |record, representation| {
+        |record, representation, formatting| {
             database
-                .clipboard_insert_with_file_representation(record, representation)
+                .clipboard_insert_capture(record, representation, formatting)
                 .map(|_| ())
         },
     )
@@ -386,16 +428,32 @@ fn persist_capture_with(
     root: &Path,
     capture: platform::ClipboardCapture,
     types: RecordingTypes,
-    insert: impl FnOnce(&ClipboardRecord, Option<&ClipboardFileRepresentation>) -> Result<(), String>,
+    insert: impl FnOnce(
+        &ClipboardRecord,
+        Option<&ClipboardFileRepresentation>,
+        Option<&ClipboardTextFormatting>,
+    ) -> Result<(), String>,
 ) -> Result<bool, String> {
     let mut created_image = None;
     let mut representation = None;
+    let mut formatting = None;
     let (kind, text, image_path, fingerprint) = match capture.payload {
         platform::ClipboardPayload::Text(text) => {
             if !types.text {
                 return Ok(false);
             }
             let fingerprint = clipboard::fingerprint("text", text.as_bytes());
+            ("text", text, None, fingerprint)
+        }
+        platform::ClipboardPayload::RichText {
+            text,
+            formatting: rich,
+        } => {
+            if !types.text {
+                return Ok(false);
+            }
+            let fingerprint = rich.fingerprint(&text);
+            formatting = Some(rich);
             ("text", text, None, fingerprint)
         }
         payload @ (platform::ClipboardPayload::Files(_)
@@ -477,7 +535,7 @@ fn persist_capture_with(
         image_path,
         fingerprint,
     };
-    let saved = insert(&record, representation.as_ref());
+    let saved = insert(&record, representation.as_ref(), formatting.as_ref());
     if saved.is_err() {
         if let Some(path) = created_image {
             clipboard::remove_image(root, &path)?;
@@ -525,10 +583,12 @@ mod tests {
                 payload,
                 source_app: None,
             };
-            assert!(!persist_capture_with(root, capture, types, |_, _| panic!(
-                "filtered copy was saved"
-            ))
-            .unwrap());
+            assert!(
+                !persist_capture_with(root, capture, types, |_, _, _| panic!(
+                    "filtered copy was saved"
+                ))
+                .unwrap()
+            );
         }
     }
 
@@ -565,15 +625,16 @@ mod tests {
             &store,
             capture(vec![picture.clone()]),
             files_only,
-            |_, _| panic!("single image was saved as a file")
+            |_, _, _| panic!("single image was saved as a file")
         )
         .unwrap());
         assert!(persist_capture_with(
             &store,
             capture(vec![picture.clone(), "/other".into()]),
             files_only,
-            |record, representation| {
+            |record, representation, formatting| {
                 assert_eq!(record.kind, "files");
+                assert!(formatting.is_none());
                 assert!(representation.is_none());
                 Ok(())
             }
@@ -584,8 +645,9 @@ mod tests {
             &store,
             capture(vec![picture]),
             images_only,
-            |record, representation| {
+            |record, representation, formatting| {
                 assert_eq!(record.kind, "image");
+                assert!(formatting.is_none());
                 assert!(representation.is_some());
                 Ok(())
             }
@@ -918,7 +980,7 @@ mod tests {
                 source_app: None,
             },
             RecordingTypes::default(),
-            |record, representation| {
+            |record, representation, _formatting| {
                 let _guard = database
                     .try_lock()
                     .expect("file IO and image recognition must precede the SQL lock");
@@ -1149,13 +1211,13 @@ mod tests {
             &root,
             capture(),
             RecordingTypes::default(),
-            |record, representation| {
+            |record, representation, formatting| {
                 assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
                 let mut guard = database
                     .try_lock()
                     .expect("preparation must not hold the SQL lock");
                 *saved.borrow_mut() =
-                    Some(guard.clipboard_insert_with_file_representation(record, representation)?);
+                    Some(guard.clipboard_insert_capture(record, representation, formatting)?);
                 Ok(())
             },
         )
@@ -1184,7 +1246,7 @@ mod tests {
                 source_app: None,
             },
             RecordingTypes::default(),
-            |record, _representation| {
+            |record, _representation, _formatting| {
                 let guard = database
                     .try_lock()
                     .expect("resource preparation must release the SQL lock");

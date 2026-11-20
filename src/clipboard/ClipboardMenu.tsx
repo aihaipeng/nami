@@ -6,9 +6,9 @@ import { RecordMenu } from '../shared/RecordMenu';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import type { ClipboardRecord } from './useClipboard';
 
-export function ClipboardMenu({ record, x, y, canPaste, canTranslate, canOcr, canOpenTarget, t, busy, onClose, onReturnFocus, onAction }: {
-  record: ClipboardRecord; x: number; y: number; canPaste: boolean; canTranslate: boolean; canOcr: boolean; canOpenTarget: boolean; t: Translate; busy: boolean;
-  onReturnFocus: () => void; onClose: () => void; onAction: (action: 'paste' | 'translate' | 'ocr' | 'openTarget' | 'favorite' | 'pin' | 'note' | 'delete') => void;
+export function ClipboardMenu({ record, x, y, canPaste, canTranslate, canOcr, canCorrectOcr, canOpenTarget, t, busy, onClose, onReturnFocus, onAction }: {
+  record: ClipboardRecord; x: number; y: number; canPaste: boolean; canTranslate: boolean; canOcr: boolean; canCorrectOcr: boolean; canOpenTarget: boolean; t: Translate; busy: boolean;
+  onReturnFocus: () => void; onClose: () => void; onAction: (action: 'paste' | 'pastePlain' | 'translate' | 'ocr' | 'correctOcr' | 'openTarget' | 'favorite' | 'pin' | 'note' | 'delete') => void;
 }) {
   const [target, setTarget] = useState<{ id: string; kind: keyof typeof openTargetLabels } | null>(null);
   useEffect(() => {
@@ -23,9 +23,11 @@ export function ClipboardMenu({ record, x, y, canPaste, canTranslate, canOcr, ca
   const TargetIcon = kind === 'email' ? Mail : kind === 'link' ? ExternalLink : FolderOpen;
   const items = [
     { action: 'paste', label: 'Paste', icon: <ClipboardPaste aria-hidden="true" />, disabled: !canPaste },
+    ...(record.kind === 'text' ? [{ action: 'pastePlain' as const, label: t('clipboardPastePlain'), icon: <ClipboardPaste aria-hidden="true" />, disabled: !canPaste }] : []),
     ...(kind ? [{ action: 'openTarget' as const, label: t(openTargetLabels[kind]), icon: <TargetIcon aria-hidden="true" /> }] : []),
-    ...(canTranslate ? [{ action: 'translate' as const, label: 'Translate', icon: <HistoryIcon name="languages" />, disabled: busy }] : []),
-    ...(canOcr ? [{ action: 'ocr' as const, label: 'Extract text', icon: <HistoryIcon name="ocr" />, disabled: busy }] : []),
+    ...(canTranslate ? [{ action: 'translate' as const, label: 'Translate', description: t('clipboardTranslatePrivacy'), icon: <HistoryIcon name="languages" />, disabled: busy }] : []),
+    ...(canOcr ? [{ action: 'ocr' as const, label: 'Extract text', description: t('clipboardOcrPrivacy'), icon: <HistoryIcon name="ocr" />, disabled: busy }] : []),
+    ...(canCorrectOcr ? [{ action: 'correctOcr' as const, label: t('clipboardCorrectOcr'), icon: <HistoryIcon name="ocr" />, disabled: busy }] : []),
     { action: 'favorite', label: record.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: record.isFavorite },
     { action: 'pin', label: record.isPinned ? 'Unpin record' : 'Pin record', icon: <HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} /> },
     { action: 'note', label: 'Note', icon: <HistoryIcon name="note" /> },

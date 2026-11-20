@@ -1,6 +1,10 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipboardPayload {
     Text(String),
+    RichText {
+        text: String,
+        formatting: nami::clipboard::ClipboardTextFormatting,
+    },
     Image {
         bytes: Vec<u8>,
         extension: String,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 6;
+const VERSION: i64 = 9;
 pub const PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -164,6 +164,15 @@ impl HistoryDatabase {
         }
         if version < 6 {
             clipboard::migrate_v6(&mut connection)?;
+        }
+        if version < 7 {
+            clipboard::migrate_v7(&mut connection)?;
+        }
+        if version < 8 {
+            clipboard::migrate_v8(&mut connection)?;
+        }
+        if version < 9 {
+            clipboard::migrate_v9(&mut connection)?;
         }
         clipboard::ensure_filter_indexes(&connection)?;
         clipboard::ensure_translation_preferences(&connection)?;

@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { ActivityBeam } from '../shared/ActivityBeam';
 
 interface Detail { title: string; text: string; kind: 'text' | 'image' | 'files' }
-export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, saveTitle }: { recordId: string; saveTitle?: (title: string) => Promise<boolean>; onClose: () => void; onReturnFocus: () => void; onSaved?: (detail: Detail) => void }) {
+export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, saveTitle, ocrLabel }: { recordId: string; ocrLabel?: string; saveTitle?: (title: string) => Promise<boolean>; onClose: () => void; onReturnFocus: () => void; onSaved?: (detail: Detail) => void }) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
@@ -28,15 +28,19 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
   useEffect(() => {
     let active = true;
     setError(false);
-    void invoke<Detail>(saveTitle ? 'history_record_note' : 'clipboard_record_detail', { recordId }).then((value) => {
+    const load = ocrLabel
+      ? invoke<string>('clipboard_record_ocr_text', { recordId }).then((text): Detail => ({ title: '', text, kind: 'image' }))
+      : invoke<Detail>(saveTitle ? 'history_record_note' : 'clipboard_record_detail', { recordId });
+    void load.then((value) => {
       if (!active) return;
       setDetail(value); setTitle(value.title); setText(value.text);
     }).catch(() => { if (active) setError(true); });
     return () => { active = false; };
-  }, [recordId, attempt, Boolean(saveTitle)]);
-  useEffect(() => { if (detail) card.current?.querySelector('input')?.focus({ preventScroll: true }); }, [detail]);
+  }, [recordId, attempt, Boolean(saveTitle), ocrLabel]);
+  const focusField = ocrLabel ? 'textarea' : 'input';
+  useEffect(() => { if (detail) card.current?.querySelector<HTMLElement>(focusField)?.focus({ preventScroll: true }); }, [detail, focusField]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; window.clearTimeout(timer.current); }; }, []);
-  const dirty = detail !== null && (title !== detail.title || detail.kind === 'text' && text !== detail.text);
+  const dirty = detail !== null && (title !== detail.title || (ocrLabel || detail.kind === 'text') && text !== detail.text);
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   useEffect(() => {
@@ -55,7 +59,7 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
       void invoke('records_editor_set', { dirty: false, open: false }).catch(() => {});
     };
   }, []);
-  useEffect(() => { (navigation ? confirmation.current?.querySelector('button') : card.current?.querySelector('input'))?.focus({ preventScroll: true }); }, [navigation]);
+  useEffect(() => { (navigation ? confirmation.current?.querySelector('button') : card.current?.querySelector<HTMLElement>(focusField))?.focus({ preventScroll: true }); }, [navigation, focusField]);
   function finishNavigation() {
     onClose();
     void invoke('records_navigation_resolve', { proceed: true });
@@ -63,18 +67,20 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
   function cancelNavigation() {
     setNavigation(false);
     void invoke('records_navigation_resolve', { proceed: false });
-    card.current?.querySelector('input')?.focus({ preventScroll: true });
+    card.current?.querySelector<HTMLElement>(focusField)?.focus({ preventScroll: true });
   }
   function close(navigate = false) {
     if (saving || closing) return;
     setClosing(true);
     timer.current = window.setTimeout(() => { if (navigate) finishNavigation(); else { onClose(); onReturnFocus(); } }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 140);
   }
+  const canSave = !ocrLabel || Boolean(text.trim()) && dirty;
   async function save(navigate = false) {
-    if (!detail || saving || closing) return;
+    if (!detail || saving || closing || !canSave) return;
     setSaving(true); setError(false);
     try {
-      if (saveTitle) { if (!await saveTitle(title)) throw new Error('note_save'); }
+      if (ocrLabel) await invoke('clipboard_record_update', { recordId, action: 'correct_ocr', text });
+      else if (saveTitle) { if (!await saveTitle(title)) throw new Error('note_save'); }
       else await invoke('clipboard_record_update', { recordId, action: 'edit', title, ...(detail.kind === 'text' ? { text } : {}) });
       if (!mounted.current) return;
       dirtyRef.current = false;
@@ -87,14 +93,14 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
     } catch { if (mounted.current) setError(true); }
     finally { if (mounted.current) setSaving(false); }
   }
-  const nonEditable = detail !== null && detail.kind !== 'text';
+  const nonEditable = !ocrLabel && detail !== null && detail.kind !== 'text';
   const content = nonEditable ? 'Non-editable content' : text;
   return createPortal(<div className={`clipboard-editor-layer${entered && !closing ? ' open' : ''}${closing ? ' closing' : ''}`} onPointerDown={(event) => { if (event.target === event.currentTarget && !navigation) close(); }}>
-    <form ref={card} className="floating-panel clipboard-editor" role="dialog" aria-modal="true" aria-label="Note" tabIndex={-1}
+    <form ref={card} className="floating-panel clipboard-editor" role="dialog" aria-modal="true" aria-label={ocrLabel || "Note"} tabIndex={-1}
       onSubmit={(event) => { event.preventDefault(); if (!navigation) void save(); }} onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (navigation) cancelNavigation(); else close(); }
-        if (event.key === 'Enter' && !navigation && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        if (event.key === 'Enter' && !navigation && !event.shiftKey && !event.altKey && (ocrLabel ? (event.ctrlKey || event.metaKey) : (!event.ctrlKey && !event.metaKey))) {
           if (event.target instanceof HTMLButtonElement && event.target.type !== 'submit') return;
           event.preventDefault(); event.stopPropagation();
           if (!event.repeat) void save();
@@ -109,14 +115,14 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
       }}>
       <ActivityBeam label="Working" active={!detail && !error || saving} />
       <div aria-hidden={!detail || undefined} inert={!detail || navigation}>
-        <label><span className="clipboard-editor-label">Title</span><input aria-label="Title" maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={!detail || saving || closing} /></label>
-        <label><span className="clipboard-editor-label">Content</span><textarea className={nonEditable ? 'non-editable' : undefined} aria-label="Content" value={content} readOnly={!!saveTitle || detail?.kind !== 'text'} onChange={(event) => { if (!nonEditable && !saveTitle) setText(event.target.value); }} disabled={nonEditable || !detail || saving || closing} /></label>
+        {!ocrLabel && <label><span className="clipboard-editor-label">Title</span><input aria-label="Title" maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={!detail || saving || closing} /></label>}
+        <label><span className="clipboard-editor-label">{ocrLabel || "Content"}</span><textarea className={nonEditable ? 'non-editable' : undefined} aria-label={ocrLabel || "Content"} value={content} readOnly={!ocrLabel && (!!saveTitle || detail?.kind !== 'text')} onChange={(event) => { if (!nonEditable && !saveTitle) setText(event.target.value); }} disabled={nonEditable || !detail || saving || closing} /></label>
       </div>
       {error && !navigation && <p role="alert" className="clipboard-editor-error">{detail ? 'Could not save changes. Your edits are preserved.' : 'Could not load this record.'}{!detail && <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button>}</p>}
-      <div className="clipboard-editor-actions" inert={navigation}><button type="button" onClick={() => close()} disabled={saving || closing} aria-keyshortcuts="Escape">Cancel<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button><button type="submit" disabled={!detail || saving || closing} aria-keyshortcuts="Enter">Save<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span></button></div>
+      <div className="clipboard-editor-actions" inert={navigation}><button type="button" onClick={() => close()} disabled={saving || closing} aria-keyshortcuts="Escape">Cancel<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button><button type="submit" disabled={!canSave || !detail || saving || closing} aria-keyshortcuts={ocrLabel ? "Meta+Enter Control+Enter" : "Enter"}>Save<span className="keycaps" aria-hidden="true"><kbd>{ocrLabel ? "⌘↵" : "↵"}</kbd></span></button></div>
       {navigation && <div ref={confirmation} className="clipboard-navigation-confirm" role="alertdialog" aria-modal="true" aria-label="Save changes?">
-        <strong>Save changes?</strong><p>Your note has unsaved changes.</p>{error && <p role="alert" className="clipboard-editor-error">Could not save changes. Your edits are preserved.</p>}
-        <div className="clipboard-editor-actions"><button type="button" disabled={saving || closing} onClick={cancelNavigation}>Cancel</button><button type="button" disabled={saving || closing} onClick={() => close(true)}>Discard</button><button type="button" disabled={saving || closing} onClick={() => void save(true)}>Save</button></div>
+        <strong>Save changes?</strong><p>{ocrLabel ? "Your corrected text has unsaved changes." : "Your note has unsaved changes."}</p>{error && <p role="alert" className="clipboard-editor-error">Could not save changes. Your edits are preserved.</p>}
+        <div className="clipboard-editor-actions"><button type="button" disabled={saving || closing} onClick={cancelNavigation}>Cancel</button><button type="button" disabled={saving || closing} onClick={() => close(true)}>Discard</button><button type="button" disabled={!canSave || saving || closing} onClick={() => void save(true)}>Save</button></div>
       </div>}
     </form>
   </div>, document.body);

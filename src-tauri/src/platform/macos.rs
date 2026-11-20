@@ -263,6 +263,48 @@ pub fn open_clipboard_target(
     Ok(())
 }
 
+#[cfg(feature = "ui-tests")]
+pub fn test_activate_fixture(pid: u32, bundle: &std::path::Path) -> Result<Target, &'static str> {
+    let pid = i32::try_from(pid).map_err(|_| "invalid fixture PID")?;
+    let target = unsafe {
+        let application: Option<Retained<AnyObject>> =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        let application = application.ok_or("fixture process was not registered with AppKit")?;
+        if !matching_fixture_bundle(&application, bundle) {
+            return Err("fixture process did not register the generated bundle path");
+        }
+        identity(&application).ok_or("fixture process has no launch identity")?
+    };
+    if target_bundle_id(target).as_deref() != Some("dev.local.nami.cross-app-fixture") {
+        return Err("fixture process did not register the expected bundle identity");
+    }
+    if !target_focused(target) {
+        activate(target);
+    }
+    Ok(target)
+}
+
+#[cfg(feature = "ui-tests")]
+unsafe fn matching_fixture_bundle(application: &AnyObject, bundle: &std::path::Path) -> bool {
+    let url: Option<Retained<NSURL>> = msg_send![application, bundleURL];
+    url.and_then(|url| url.path())
+        .is_some_and(|path| std::path::Path::new(&path.to_string()) == bundle)
+}
+
+#[cfg(feature = "ui-tests")]
+pub fn test_close_fixture(bundle: &std::path::Path) {
+    unsafe {
+        let applications: Retained<AnyObject> = msg_send![class!(NSRunningApplication), runningApplicationsWithBundleIdentifier: ns_string!("dev.local.nami.cross-app-fixture")];
+        let count: usize = msg_send![&*applications, count];
+        for index in 0..count {
+            let application: Retained<AnyObject> = msg_send![&*applications, objectAtIndex: index];
+            if matching_fixture_bundle(&application, bundle) {
+                let _: bool = msg_send![&*application, forceTerminate];
+            }
+        }
+    }
+}
+
 pub fn activate(target: Target) -> bool {
     unsafe {
         let Some(application) = running(target) else {
@@ -555,6 +597,14 @@ pub fn paste_keys_down(target: Target, expected_version: i64) -> Result<(), &'st
     }
     if clipboard_version() != expected_version {
         return Err("clipboard_changed");
+    }
+    #[cfg(feature = "ui-tests")]
+    if std::env::var_os("NAMI_UI_TEST_REPORT").is_some()
+        && std::env::var("NAMI_UI_TEST_CASE").as_deref() == Ok("cross-app")
+        && (std::env::var("NAMI_UI_TEST_CROSS_APP").as_deref() != Ok("full")
+            || target_bundle_id(target).as_deref() != Some("dev.local.nami.cross-app-fixture"))
+    {
+        return Err("cross_app_test_paste_not_enabled");
     }
     let chord = paste_chord();
     // Session tap, not the process id: a V event posted only to the pid never

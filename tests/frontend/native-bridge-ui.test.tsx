@@ -151,12 +151,13 @@ describe('native view connection and feedback', () => {
     const view = await mount();
     expect(bridge.listeners.get('storage_error')?.size).toBe(1);
     expect(bridge.listeners.get('clipboard_capture_changed')?.size).toBe(1);
+    expect(bridge.listeners.get('history_detail_removed')?.size).toBe(1);
     expect(bridge.listeners.get('clipboard_binding_changed')?.size).toBe(1);
     expect(bridge.listeners.get('clipboard_controls_changed')?.size).toBe(1);
     expect(bridge.listeners.get('clipboard_translation_ready')?.size).toBe(1);
     expect(bridge.listeners.get('translation_preferences_changed')?.size).toBe(2);
     expect(bridge.listeners.get('translation_focus_requested')?.size).toBe(1);
-    expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(15);
+    expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(16);
     view.unmount(); await act(async () => {});
     expect([...bridge.listeners.values()].reduce((count, listeners) => count + listeners.size, 0)).toBe(0);
     const count = calls('window_show').length;

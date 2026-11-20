@@ -345,11 +345,26 @@ pub(crate) fn present(app: &AppHandle, presentation_id: u64) -> Result<(), Strin
     not(feature = "portable-ui")
 ))]
 pub(crate) fn test_empty_summon(app: &AppHandle, open_when_empty: bool) -> Result<(), String> {
-    if app.config().identifier != "dev.local.nami.ui-tests" {
+    test_summon_from(app, None, open_when_empty)
+}
+
+#[cfg(all(
+    feature = "ui-tests",
+    target_os = "macos",
+    not(feature = "portable-ui")
+))]
+pub(crate) fn test_summon_from(
+    app: &AppHandle,
+    target: Option<platform::Target>,
+    open_when_empty: bool,
+) -> Result<(), String> {
+    if !matches!(
+        app.config().identifier.as_str(),
+        "dev.local.nami.ui-tests" | "dev.local.nami.ui-tests.denial"
+    ) {
         return Err("permission_denied".into());
     }
-    *app.state::<AppState>().selection_origin.lock().unwrap() =
-        Some(SelectionOrigin { target: None });
+    *app.state::<AppState>().selection_origin.lock().unwrap() = Some(SelectionOrigin { target });
     show_selected(app, open_when_empty)
 }
 

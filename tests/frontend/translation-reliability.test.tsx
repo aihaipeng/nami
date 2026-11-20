@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
@@ -11,9 +11,14 @@ const submit = (text: string) => {
   fireEvent.change(source(), { target: { value: text } });
   fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
 };
-function deferred() {
-  let resolve!: (value: ReturnType<typeof result>) => void;
-  const promise = new Promise<ReturnType<typeof result>>((done) => { resolve = done; });
+const column = (index: number) => screen.getByRole('region', { name: index ? 'Secondary language' : 'Primary language' });
+const partialResult = (failed: number, id = 'partial-test', error = 'Target unavailable') => ({ partial: {
+  id, sourceLanguage: 'ja', translations: failed === 0 ? ['', 'Partial second'] : ['Partial first', ''],
+  errors: failed === 0 ? [error, null] : [null, error],
+} });
+function deferred<T = ReturnType<typeof result>>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
 
@@ -24,6 +29,103 @@ describe('translation reliability', () => {
     await mount(); submit('Fail both targets');
     await waitFor(() => expect(screen.getAllByRole('alert').map((value) => value.textContent)).toEqual(['Service unavailable']));
     expect(calls('translation_run')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it.each([0, 1])('isolates failed column %i and copies only the successful column by partial ID', async (failed) => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.resolve(partialResult(failed)) : invoke(name, args));
+    await mount(); submit('Partial input');
+    await within(column(failed)).findByRole('button', { name: 'Retry' });
+    expect(within(column(failed)).getByRole('alert').textContent).toBe('Target unavailable');
+    expect(column(1 - failed).textContent).toBe(failed ? 'Partial first' : 'Partial second');
+    expect(within(column(1 - failed)).queryByRole('alert')).toBeNull();
+    expect(document.querySelector('.source-bar')?.getAttribute('data-detected-language')).toBe('ja');
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    await act(async () => {
+      fireEvent.keyDown(source(), { key: String(failed + 1), metaKey: true });
+      fireEvent.keyDown(source(), { key: String(2 - failed), metaKey: true });
+    });
+    expect(calls('translation_sample_copy')).toEqual([['translation_sample_copy', { sampleId: 'partial-test', part: failed ? 'primary' : 'secondary' }]]);
+  });
+
+  it('retries the original captured request once at a time and accepts a refreshed partial ticket before completion', async () => {
+    const pending = deferred<ReturnType<typeof partialResult>>();
+    const run = vi.fn().mockResolvedValueOnce(partialResult(1)).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(result('Captured input'));
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => {
+      if (name === 'translation_run') return run(args);
+      if (name === 'selection_take' && calls('selection_take').length === 2) return Promise.resolve({ text: 'Captured input', error: null });
+      return invoke(name, args);
+    });
+    await mount(); await emit('selection_ready', null);
+    const retry = await within(column(1)).findByRole('button', { name: 'Retry' });
+    const cancellations = calls('translation_cancel').length;
+    fireEvent.click(retry); fireEvent.click(retry);
+    expect(run.mock.calls).toEqual([
+      [{ text: 'Captured input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: true }],
+      [{ text: 'Captured input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: true, retryId: 'partial-test' }],
+    ]);
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+    expect(column(0).textContent).toBe('Partial first');
+    await act(async () => pending.resolve(partialResult(1, 'partial-next', 'Still unavailable')));
+    expect(within(column(1)).getByRole('alert').textContent).toBe('Still unavailable');
+    fireEvent.keyDown(source(), { key: '1', metaKey: true });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'partial-next', part: 'primary' });
+    fireEvent.click(within(column(1)).getByRole('button', { name: 'Retry' }));
+    await within(column(1)).findByText('Second result');
+    expect(run.mock.calls[2]).toEqual([{ ...run.mock.calls[0][0], retryId: 'partial-next' }]);
+    expect(calls('translation_cancel')).toHaveLength(cancellations);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    fireEvent.keyDown(source(), { key: '2', metaKey: true });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-runtime', part: 'secondary' });
+  });
+
+  it('replaces only current results when changing a cached target, and omits reuse on retry', async () => {
+    await mount(); submit('Change cached target');
+    await within(column(1)).findByText('Synthetic translation 2');
+    const count = bridge.history.records.length;
+    const pending = deferred<ReturnType<typeof partialResult>>();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    const run = vi.fn().mockReturnValueOnce(pending.promise).mockRejectedValueOnce('Retry request failed');
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? run(args) : invoke(name, args));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
+    await user.click(screen.getByRole('option', { name: 'French' }));
+    expect(column(0).textContent).toBe('Synthetic translation 1');
+    expect(column(1).textContent).toBe('');
+    expect(run.mock.calls[0][0]).toMatchObject({ reuse: { recordId: 'translation-test', targetIndex: 1 } });
+    await act(async () => pending.resolve({ partial: { ...partialResult(1).partial, translations: ['Synthetic translation 1', ''] } }));
+    const retry = within(column(1)).getByRole('button', { name: 'Retry' });
+    await user.click(retry);
+    await screen.findByText('Retry request failed');
+    expect(run.mock.calls[1]).toEqual([{ text: 'Change cached target', source: 'auto', targets: ['en', 'fr'], fromSelection: false, retryId: 'partial-test' }]);
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+    expect(column(0).textContent).toBe('Synthetic translation 1');
+    expect(screen.queryByText('Synthetic translation 2')).toBeNull();
+    expect(bridge.history.records).toHaveLength(count);
+  });
+
+  it.each(['edit', 'engine', 'history', 'language'] as const)('clears the partial and ignores a late retry after %s', async (change) => {
+    const pending = deferred<ReturnType<typeof result> | ReturnType<typeof partialResult>>();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    const run = vi.fn().mockResolvedValueOnce(partialResult(1)).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(result('New language result'));
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? run(args) : invoke(name, args));
+    await mount(); submit('Expired input');
+    fireEvent.click(await within(column(1)).findByRole('button', { name: 'Retry' }));
+    const cancellations = calls('translation_cancel').length;
+    if (change === 'edit') fireEvent.change(source(), { target: { value: 'New text' } });
+    if (change === 'engine') await emit('translation_engine_changed', 'google');
+    if (change === 'history') await emit('history_sample_selected', { sampleId: historySamples[1].id, record: historySamples[1], retranslate: false });
+    if (change === 'language') {
+      await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'fr' });
+      expect(run.mock.calls[2]).toEqual([{ text: 'Expired input', source: 'auto', targets: ['en', 'fr'], fromSelection: false }]);
+    }
+    await waitFor(() => expect(calls('translation_cancel')).toHaveLength(cancellations + 1));
+    await act(async () => pending.resolve(change === 'history' ? result('Stale complete') : partialResult(0, 'stale-ticket')));
+    expect(screen.queryByRole('button', { name: /Retry/ })).toBeNull();
+    expect(column(0).textContent).toBe(change === 'history' ? historySamples[1].translations[0] : change === 'language' ? 'Translated New language result' : '');
+    expect(screen.queryByText('Partial second')).toBeNull();
   });
 
   it('copies without a success message and only reports failures for the current draft', async () => {

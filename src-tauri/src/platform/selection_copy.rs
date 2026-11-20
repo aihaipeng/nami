@@ -9,10 +9,6 @@ pub struct CopySnapshot {
     items: Vec<Item>,
 }
 
-unsafe fn general() -> *mut AnyObject {
-    msg_send![class!(NSPasteboard), generalPasteboard]
-}
-
 unsafe fn version(board: *mut AnyObject) -> i64 {
     let count: isize = msg_send![board, changeCount];
     count as i64
@@ -163,7 +159,7 @@ pub fn begin_selection_copy(target: super::Target) -> Result<CopySnapshot, &'sta
     if super::secure_input() {
         return Err("selection_secure");
     }
-    let saved = unsafe { snapshot(general())? };
+    let saved = unsafe { snapshot(super::runtime_pasteboard())? };
     super::send_copy(target)?;
     Ok(saved)
 }
@@ -174,7 +170,7 @@ pub fn finish_selection_copy(
     accept_text: bool,
 ) -> Result<String, &'static str> {
     unsafe {
-        let board = general();
+        let board = super::runtime_pasteboard();
         if expected == saved.version || version(board) != expected {
             return Err("clipboard_changed");
         }

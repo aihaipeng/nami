@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::time::Instant;
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const TRANSLATION_BUDGET: Duration = Duration::from_secs(20);
+const TRANSLATION_TIMEOUT: &str = "The translation request timed out. Try again.";
 const TRANSLATION_RETRY_LIMIT: usize = 3;
 const TRANSLATION_RETRY_DELAY: Duration = Duration::from_millis(300);
 mod edge;
@@ -30,12 +33,14 @@ struct SegmentResult {
 
 pub struct TranslationResult {
     pub translations: Vec<String>,
+    pub errors: Vec<Option<String>>,
     pub source_language: String,
     pub detections: Vec<crate::model::LanguageDetection>,
 }
 
 type BatchTranslation = Vec<SegmentResult>;
-type BatchFuture<'a> = Pin<Box<dyn Future<Output = Result<BatchTranslation, String>> + Send + 'a>>;
+type BatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BatchTranslation, BatchError>> + Send + 'a>>;
 pub fn languages(engine: &str) -> &'static [Language] {
     match engine {
         "google" => google::languages(),
@@ -438,26 +443,51 @@ fn matched_language(codes: &[Option<String>]) -> Option<String> {
     language.map(str::to_string)
 }
 
-fn network_error(error: reqwest::Error) -> String {
-    if error.is_timeout() {
-        "The translation request timed out. Try again.".into()
-    } else {
-        "Unable to connect to the translation service. Check your network.".into()
+#[derive(Debug)]
+struct BatchError {
+    message: String,
+    retry: bool,
+}
+
+impl BatchError {
+    fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retry: false,
+        }
     }
 }
 
-async fn response_bytes(mut response: Response) -> Result<Vec<u8>, String> {
-    match response.status().as_u16() {
-        200..=299 => {}
-        429 => return Err("Too many translation requests. Try again later.".into()),
-        401 | 403 => return Err("The translation service is temporarily unavailable.".into()),
-        code => {
-            return Err(format!(
-                "The translation service request failed (HTTP {code}). Try again."
-            ))
-        }
+fn network_error(error: reqwest::Error) -> BatchError {
+    BatchError {
+        message: if error.is_timeout() {
+            TRANSLATION_TIMEOUT.into()
+        } else {
+            "Unable to connect to the translation service. Check your network.".into()
+        },
+        retry: error.is_timeout() || error.is_connect() || error.is_body() || error.is_request(),
     }
-    let oversized = || "The translation response exceeds the supported size.".to_string();
+}
+
+fn status_error(code: u16) -> Option<BatchError> {
+    let message = match code {
+        200..=299 => return None,
+        429 => "Too many translation requests. Try again later.".into(),
+        401 | 403 => "The translation service is temporarily unavailable.".into(),
+        _ => format!("The translation service request failed (HTTP {code}). Try again."),
+    };
+    Some(BatchError {
+        message,
+        retry: matches!(code, 408 | 500..=599),
+    })
+}
+
+async fn response_bytes(mut response: Response) -> Result<Vec<u8>, BatchError> {
+    if let Some(error) = status_error(response.status().as_u16()) {
+        return Err(error);
+    }
+    let oversized =
+        || BatchError::permanent("The translation response exceeds the supported size.");
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -484,21 +514,31 @@ fn join_lines(translations: &[String], endings: &[&str]) -> String {
     result
 }
 
-async fn with_translation_retries<'a, T: 'a>(
+async fn with_translation_retries<T, F: Future<Output = Result<T, BatchError>>>(
+    deadline: Instant,
     delay: Duration,
-    mut operation: impl FnMut() -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
+    mut operation: impl FnMut() -> F,
 ) -> Result<T, String> {
-    let mut last_error = String::new();
-    for attempt in 0..=TRANSLATION_RETRY_LIMIT {
-        if attempt > 0 {
-            tokio::time::sleep(delay).await;
+    tokio::time::timeout_at(deadline, async {
+        let mut retries_left = TRANSLATION_RETRY_LIMIT;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(TRANSLATION_TIMEOUT.into());
+            }
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(error) if !error.retry || retries_left == 0 => {
+                    return Err(error.message);
+                }
+                Err(_) => {
+                    retries_left -= 1;
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
-        match operation().await {
-            Ok(value) => return Ok(value),
-            Err(error) => last_error = error,
-        }
-    }
-    Err(last_error)
+    })
+    .await
+    .map_err(|_| TRANSLATION_TIMEOUT.to_owned())?
 }
 
 fn fetch_batch<'a>(
@@ -512,7 +552,11 @@ fn fetch_batch<'a>(
         let request = match engine {
             "google" => google::request(client, active, source, target),
             "edge" => edge::request(client, active, source, target),
-            _ => return Err("Choose a supported translation engine.".into()),
+            _ => {
+                return Err(BatchError::permanent(
+                    "Choose a supported translation engine.",
+                ))
+            }
         };
         let response = request.send().await.map_err(network_error)?;
         let data = response_bytes(response).await?;
@@ -521,6 +565,7 @@ fn fetch_batch<'a>(
             "edge" => edge::parse(&data, active.len(), source),
             _ => unreachable!(),
         }
+        .map_err(BatchError::permanent)
     })
 }
 
@@ -567,7 +612,7 @@ pub fn configured_proxy(url: &str, enabled: bool) -> Result<Option<reqwest::Prox
 fn translation_client(proxy_url: &str, proxy_enabled: bool) -> Result<Client, String> {
     let mut builder = Client::builder()
         .user_agent("Nami/0.1")
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none());
     if let Some(proxy) = configured_proxy(proxy_url, proxy_enabled)? {
         builder = builder.proxy(proxy);
@@ -636,6 +681,7 @@ pub async fn translate(
     proxy_url: &str,
     proxy_enabled: bool,
 ) -> Result<TranslationResult, String> {
+    let deadline = Instant::now() + TRANSLATION_BUDGET;
     validate_text(input)?;
     validate_options(engine, source, targets)?;
     let units = text::units(input, source == "auto");
@@ -653,6 +699,7 @@ pub async fn translate(
     if batch_plan.is_empty() {
         return Ok(TranslationResult {
             translations: targets.iter().map(|_| input.to_string()).collect(),
+            errors: vec![None; targets.len()],
             source_language: if source == "auto" {
                 "und".into()
             } else {
@@ -662,53 +709,116 @@ pub async fn translate(
         });
     }
     let client = translation_client(proxy_url, proxy_enabled)?;
-    let mut results = Vec::with_capacity(targets.len());
-    let mut detections = Vec::new();
-    for (target_index, target) in targets.iter().enumerate() {
-        let mut target_detections = vec![None; units.len()];
-        let mut translated_units: Vec<String> =
-            units.iter().map(|unit| unit.original.to_string()).collect();
-        for batch in &batch_plan {
+    let translate_target = |index: usize| {
+        translate_target(
+            &client,
+            engine,
+            input,
+            source,
+            targets[index].as_str(),
+            (&units, &prepared, &batch_plan),
+            deadline,
+        )
+    };
+    Ok(translate_targets(source, targets.len(), translate_target).await)
+}
+
+async fn translate_targets<F>(
+    source: &str,
+    count: usize,
+    target: impl Fn(usize) -> F,
+) -> TranslationResult
+where
+    F: Future<Output = Result<TranslatedColumn, String>>,
+{
+    let first = target(0);
+    let columns = if count == 2 {
+        let (first, second) = tokio::join!(first, target(1));
+        vec![first, second]
+    } else {
+        vec![first.await]
+    };
+    collect_columns(source, columns)
+}
+
+type TranslatedColumn = (String, Vec<crate::model::LanguageDetection>);
+
+async fn translate_target(
+    client: &Client,
+    engine: &str,
+    input: &str,
+    source: &str,
+    target: &str,
+    plan: (&[text::Unit<'_>], &[&str], &[Vec<usize>]),
+    deadline: Instant,
+) -> Result<TranslatedColumn, String> {
+    let (units, prepared, batch_plan) = plan;
+    let mut target_detections = vec![None; units.len()];
+    let mut translated_units: Vec<String> =
+        units.iter().map(|unit| unit.original.to_string()).collect();
+    for batch in batch_plan {
+        let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
+        let translated = with_translation_retries(deadline, TRANSLATION_RETRY_DELAY, || {
+            fetch_batch(client, engine, &active, source, target)
+        })
+        .await?;
+        for (index, result) in batch.iter().zip(translated) {
+            translated_units[*index] = units[*index].restore(&result.text)?;
+            target_detections[*index] = result.detection;
+        }
+    }
+    if source == "auto" {
+        // Rejoin same-language sentences to retain pronouns and paragraph context.
+        let groups = context_groups(input, units, &target_detections);
+        let prepared: Vec<&str> = groups
+            .iter()
+            .map(|(unit, _)| unit.prepared.as_str())
+            .collect();
+        for batch in batches(&prepared) {
             let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
-            let translated = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
-                fetch_batch(&client, engine, &active, source, target)
+            let contextual = with_translation_retries(deadline, TRANSLATION_RETRY_DELAY, || {
+                fetch_batch(client, engine, &active, source, target)
             })
             .await?;
-            for (index, result) in batch.iter().zip(translated) {
-                translated_units[*index] = units[*index].restore(&result.text)?;
-                target_detections[*index] = result.detection;
-            }
-        }
-        if source == "auto" {
-            // Rejoin same-language sentences to retain pronouns and paragraph context.
-            let groups = context_groups(input, &units, &target_detections);
-            let prepared: Vec<&str> = groups
-                .iter()
-                .map(|(unit, _)| unit.prepared.as_str())
-                .collect();
-            for batch in batches(&prepared) {
-                let active: Vec<&str> = batch.iter().map(|index| prepared[*index]).collect();
-                let contextual = with_translation_retries(TRANSLATION_RETRY_DELAY, || {
-                    fetch_batch(&client, engine, &active, source, target)
-                })
-                .await?;
-                for (index, result) in batch.iter().zip(contextual) {
-                    let (unit, range) = &groups[*index];
-                    let restored = unit.restore(&result.text)?;
-                    for index in range.clone() {
-                        translated_units[index].clear();
-                        target_detections[index] = None;
-                    }
-                    translated_units[range.start] = restored;
-                    target_detections[range.start] = result.detection;
+            for (index, result) in batch.iter().zip(contextual) {
+                let (unit, range) = &groups[*index];
+                let restored = unit.restore(&result.text)?;
+                for index in range.clone() {
+                    translated_units[index].clear();
+                    target_detections[index] = None;
                 }
+                translated_units[range.start] = restored;
+                target_detections[range.start] = result.detection;
             }
         }
-        if target_index == 0 {
-            detections.extend(target_detections.into_iter().flatten());
-        }
-        results.push(translated_units.concat());
     }
+    Ok((
+        translated_units.concat(),
+        target_detections.into_iter().flatten().collect(),
+    ))
+}
+
+fn collect_columns(
+    source: &str,
+    columns: Vec<Result<TranslatedColumn, String>>,
+) -> TranslationResult {
+    let mut translations = Vec::with_capacity(columns.len());
+    let mut errors = Vec::with_capacity(columns.len());
+    let mut detections = None;
+    for column in columns {
+        match column {
+            Ok((text, detected)) => {
+                translations.push(text);
+                errors.push(None);
+                detections.get_or_insert(detected);
+            }
+            Err(error) => {
+                translations.push(String::new());
+                errors.push(Some(error));
+            }
+        }
+    }
+    let detections = detections.unwrap_or_default();
     let resolved = if source == "auto" {
         matched_language(
             &detections
@@ -720,11 +830,12 @@ pub async fn translate(
     } else {
         source.to_string()
     };
-    Ok(TranslationResult {
-        translations: results,
+    TranslationResult {
+        translations,
+        errors,
         source_language: resolved,
         detections,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1109,16 +1220,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_transient_translation_failures_before_reporting() {
+    async fn translation_smoke_parallel_deadline_keeps_peer_result() {
+        // The first column waits for the second to have actually started.
+        let peer_started = tokio::sync::Notify::new();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let result = translate_targets("en", 2, |index| {
+            let peer_started = &peer_started;
+            async move {
+                with_translation_retries(deadline, Duration::ZERO, || async {
+                    if index == 0 {
+                        peer_started.notified().await;
+                        Ok(("peer result".into(), Vec::new()))
+                    } else {
+                        peer_started.notify_one();
+                        std::future::pending().await
+                    }
+                })
+                .await
+            }
+        })
+        .await;
+        assert_eq!(result.translations, ["peer result", ""]);
+        assert_eq!(result.errors, [None, Some(TRANSLATION_TIMEOUT.into())]);
+    }
+
+    #[test]
+    fn translation_smoke_keeps_completed_columns_in_order() {
+        for failed in [0, 1] {
+            let result = collect_columns(
+                "auto",
+                (0..2)
+                    .map(|index| {
+                        if index == failed {
+                            Err(TRANSLATION_TIMEOUT.into())
+                        } else {
+                            Ok((
+                                "complete".into(),
+                                vec![crate::model::LanguageDetection {
+                                    language: "fr".into(),
+                                    raw_language: "fr".into(),
+                                    score: None,
+                                }],
+                            ))
+                        }
+                    })
+                    .collect(),
+            );
+            assert_eq!(result.translations[failed], "");
+            assert_eq!(result.translations[1 - failed], "complete");
+            assert_eq!(result.errors[failed].as_deref(), Some(TRANSLATION_TIMEOUT));
+            assert_eq!(result.errors[1 - failed], None);
+            assert_eq!(result.source_language, "fr");
+        }
+    }
+
+    #[tokio::test]
+    async fn translation_smoke_retries_only_transient_failures() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         assert_eq!(TRANSLATION_RETRY_LIMIT, 3);
         assert_eq!(TRANSLATION_RETRY_DELAY, Duration::from_millis(300));
         let calls = AtomicUsize::new(0);
-        let result = with_translation_retries(Duration::ZERO, || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let result = with_translation_retries(deadline, Duration::ZERO, || {
             let attempt = calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if attempt < TRANSLATION_RETRY_LIMIT {
-                    Err(format!("transient {attempt}"))
+                    Err(status_error(503).unwrap())
                 } else {
                     Ok(attempt)
                 }
@@ -1130,24 +1297,65 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), TRANSLATION_RETRY_LIMIT + 1);
 
         calls.store(0, Ordering::SeqCst);
-        let error = with_translation_retries(Duration::ZERO, || {
+        let error = with_translation_retries(deadline, Duration::ZERO, || {
             let attempt = calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move { Err::<usize, _>(format!("failure {attempt}")) })
+            Box::pin(async move { Err::<usize, _>(status_error(500 + attempt as u16).unwrap()) })
         })
         .await
         .unwrap_err();
-        assert_eq!(error, format!("failure {TRANSLATION_RETRY_LIMIT}"));
+        assert!(error.contains("HTTP 503"));
         assert_eq!(calls.load(Ordering::SeqCst), TRANSLATION_RETRY_LIMIT + 1);
 
         calls.store(0, Ordering::SeqCst);
-        let ready = with_translation_retries(Duration::ZERO, || {
+        let ready = with_translation_retries(deadline, Duration::ZERO, || {
             calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok::<_, String>("ready") })
+            Box::pin(async { Ok("ready") })
         })
         .await
         .unwrap();
         assert_eq!(ready, "ready");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        for code in [301, 400, 401, 403, 429] {
+            calls.store(0, Ordering::SeqCst);
+            let error = with_translation_retries(deadline, Duration::ZERO, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err::<(), _>(status_error(code).unwrap()))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error, status_error(code).unwrap().message);
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "HTTP {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn translation_smoke_budget_cancels_pending_batch_and_blocks_new_work() {
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let error = with_translation_retries(deadline, Duration::ZERO, || {
+            std::future::pending::<Result<(), BatchError>>()
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, TRANSLATION_TIMEOUT);
+        let error = with_translation_retries(deadline, Duration::ZERO, || {
+            panic!("expired budget must not send another request");
+            #[allow(unreachable_code)]
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, TRANSLATION_TIMEOUT);
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let mut attempts = 0;
+        let error = with_translation_retries(deadline, Duration::from_secs(1), || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(status_error(503).unwrap()))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, TRANSLATION_TIMEOUT);
+        assert_eq!(attempts, 1);
     }
 
     #[tokio::test]

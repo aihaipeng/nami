@@ -71,7 +71,19 @@ pub fn recognize_image_text(bytes: &[u8]) -> Result<String, String> {
         };
         let request = VNRecognizeTextRequest::new();
         request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-        request.setAutomaticallyDetectsLanguage(true);
+        // Prefer CJK-aware recognition for mixed short text without dropping supported scripts.
+        if let Ok(languages) = unsafe { request.supportedRecognitionLanguagesAndReturnError() } {
+            let mut languages: Vec<_> = languages.iter().collect();
+            languages.sort_by_key(|language| match language.to_string().as_str() {
+                "zh-Hans" => 0,
+                "en-US" => 1,
+                _ => 2,
+            });
+            request.setRecognitionLanguages(&NSArray::from_retained_slice(&languages));
+            request.setAutomaticallyDetectsLanguage(false);
+        } else {
+            request.setAutomaticallyDetectsLanguage(true);
+        }
         request.setMinimumTextHeight(0.0);
         let requests = NSArray::from_slice(&[request.as_ref() as &VNRequest]);
         handler

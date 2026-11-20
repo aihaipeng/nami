@@ -75,6 +75,7 @@ pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
+    pub auto_image_index: bool,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
     pub record_shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
@@ -96,6 +97,7 @@ impl Default for ClipboardOptions {
             .collect(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
+            auto_image_index: false,
             records_open_focus: RecordsOpenFocus::default(),
             preview_lines: Default::default(),
             record_shortcuts: Default::default(),
@@ -113,6 +115,8 @@ impl ClipboardOptions {
         {
             options.excluded_apps = apps;
         }
+        options.auto_image_index =
+            db.preference("clipboard_auto_image_index")?.as_deref() == Some("true");
         options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
         options.activation = db
             .preference("clipboard_activation")?
@@ -325,6 +329,37 @@ pub async fn clipboard_record_shortcut_set(
     .await?;
     state.clipboard_options.lock().unwrap().record_shortcuts = shortcuts;
     publish_controls(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clipboard_auto_image_index_set(
+    window: Webview,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().image_ocr {
+        return Err("platform_unavailable".into());
+    }
+    set_auto_image_index(&app, enabled).await
+}
+
+pub(crate) async fn set_auto_image_index(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    database(app, move |db| {
+        db.preference_set(
+            "clipboard_auto_image_index",
+            if enabled { "true" } else { "false" },
+        )
+    })
+    .await?;
+    let mut options = state.clipboard_options.lock().unwrap();
+    if options.auto_image_index != enabled {
+        options.auto_image_index = enabled;
+        state.image_index_epoch.fetch_add(1, Ordering::SeqCst);
+    }
     Ok(())
 }
 

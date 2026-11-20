@@ -122,6 +122,9 @@
   .language-picker > svg { width: 10px; height: 10px; color: hsl(var(--muted-foreground)); }
   .result-columns { display: flex; flex: 1; min-height: 0; margin: 8px 0 12px; }
   .result-column { flex: 1; min-width: 0; position: relative; overflow: auto; padding: 8px 24px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-mask-image: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); mask-image: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); }
+  .result-error { display: grid; justify-items: start; gap: 4px; }
+  .result-error [role=alert] { color: hsl(var(--destructive)); }
+  .result-error button { border-radius: 6px; padding: 4px 8px; background: hsl(var(--foreground) / .05); }
   .result-columns { position: relative; }
   html[data-native-history=true] .result-column:last-child { margin-right: 8px; }
   html[data-native-history=true] .result-columns:not(.single-column) > .result-column:first-child { flex: 0 0 50%; }

@@ -10,7 +10,7 @@ MODES = {
     'unit': ['-m', 'not native and not signing and not tools'],
     'native': ['-s', '-m', 'native'],
     'native-visible': ['-s', '-m', 'native'],
-    'smoke': ['-s', 'tests/python/test_native_ui.py::test_native_ui'],
+    'smoke': ['-s', 'tests/python/test_cross_app_fixture.py', 'tests/python/test_native_ui.py::test_native_ui'],
     'signing': ['-s', '-m', 'signing'],
     'tools': ['-s', '-m', 'tools'],
 }
@@ -111,7 +111,17 @@ def main(args=None):
         raise SystemExit(run_suite(mode, python))
     environment = {**os.environ, 'NAMI_UI_TEST_VISIBLE': '1' if mode in {'native-visible', 'smoke'} else '0'}
     if mode == 'smoke':
-        environment['NAMI_UI_TEST_CASE'] = 'clipboard-shortcuts'
+        environment.pop('NAMI_UI_TEST_CASE', None)
+        environment['NAMI_UI_TEST_SMOKE'] = '1'
+        commands = [
+            ['cargo', 'test', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', case]
+            for case in ('translation_smoke_', 'ocr_search_', 'rich_text_smoke_')
+        ]
+        commands.append(['npm', 'exec', '--', 'vitest', 'run', 'tests/frontend/translation-reliability.test.tsx'])
+        for command in commands:
+            result = subprocess.run(command, cwd=ROOT, env=environment)
+            if result.returncode:
+                raise SystemExit(result.returncode)
     result = subprocess.run([str(python), '-m', 'pytest', '-q', *MODES[mode]], cwd=ROOT, env=environment)
     raise SystemExit(result.returncode)
 

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 
 pub const MAX_FILE_COUNT: usize = 4096;
+pub const MAX_RICH_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -83,6 +84,37 @@ impl HistoryPolicy {
             .map(|limit| Self { limit })
             .filter(|policy| policy.valid())
             .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardTextFormatting {
+    pub html: Option<Vec<u8>>,
+    pub rtf: Option<Vec<u8>>,
+}
+
+impl ClipboardTextFormatting {
+    pub fn valid(&self) -> bool {
+        (self.html.is_some() || self.rtf.is_some())
+            && self
+                .html
+                .iter()
+                .chain(&self.rtf)
+                .all(|data| !data.is_empty() && data.len() <= MAX_RICH_TEXT_BYTES)
+    }
+
+    pub fn fingerprint(&self, text: &str) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"rich-text\0");
+        for data in [
+            text.as_bytes(),
+            self.html.as_deref().unwrap_or_default(),
+            self.rtf.as_deref().unwrap_or_default(),
+        ] {
+            hash.update((data.len() as u64).to_be_bytes());
+            hash.update(data);
+        }
+        format!("{:x}", hash.finalize())
     }
 }
 

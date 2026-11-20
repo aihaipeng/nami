@@ -31,6 +31,16 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
     finally { setSavingCapture(false); }
   }
 
+  async function saveImageIndex(enabled: boolean) {
+    setSavingCapture(true);
+    setCaptureError(false);
+    try {
+      await invoke('clipboard_auto_image_index_set', { enabled });
+      options.setOptions((current) => current && { ...current, autoImageIndex: enabled });
+    } catch { setCaptureError(true); }
+    finally { setSavingCapture(false); }
+  }
+
   return <div className="clipboard-settings">
     {options.loadError && <div className="clipboard-load-error" role="alert"><span>{t('clipboardSettingsLoadFailed')}</span>
       <button type="button" className="settings-action" onClick={options.retry}>{t('retry')}</button></div>}
@@ -46,6 +56,15 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
             <input className="settings-checkbox" id={`clipboard-type-${kind}`} type="checkbox" aria-label={t(label)} aria-description={'note' in row ? t(row.note) : undefined} checked={types[kind]} aria-disabled={savingCapture || undefined} onChange={(event) => { if (!savingCapture) void saveCapture(kind, event.target.checked); }} />
           </label>)}
         </fieldset>
+        {snapshot.capabilities.imageOcr && <>
+          <label className="settings-field">
+            <span className="settings-field-content">{t('clipboardAutoImageIndex')}</span>
+            <input className="settings-checkbox" type="checkbox" aria-describedby="clipboard-image-index-note"
+              checked={options.options?.autoImageIndex ?? false} disabled={!canCapture || !options.options || savingCapture}
+              onChange={(event) => void saveImageIndex(event.target.checked)} />
+          </label>
+          <p id="clipboard-image-index-note" className="clipboard-setting-note">{t('clipboardAutoImageIndexDescription')}</p>
+        </>}
         {captureStatus && <p className="clipboard-setting-note" role="status">{t(captureStatus)}</p>}
         {captureError && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>

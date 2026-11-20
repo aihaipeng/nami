@@ -33,7 +33,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const [processing, setProcessing] = useState<string | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; ocr?: true } | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
@@ -56,6 +56,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
   const canTranslateRecord = (record: ClipboardRecord) => record.kind === 'text' ? !!record.text.trim() : snapshot.capabilities.imageOcr && imageText.get(record.id) === true;
   const canOcrRecord = (record: ClipboardRecord) => record.kind !== 'text' && canTranslateRecord(record) && snapshot.capabilities.clipboardWrite;
+  // Keep an explicit retry available even when the automatic probe failed or is still running.
+  const canRequestOcr = (record: ClipboardRecord) => canOcrRecord(record)
+    || record.kind === 'image' && snapshot.capabilities.imageOcr && snapshot.capabilities.clipboardWrite && imageText.get(record.id) === undefined;
   const selection = snapshot.window.translationVisible ? snapshot.window.clipboardDetailId : selected;
   const visibleIds = new Set(records.map(({ id }) => id));
   const ordered = [...records.filter((record) => record.isPinned), ...records.filter((record) => !record.isPinned)];
@@ -107,7 +110,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     if (!native) return;
     let disposed = false;
     const remove = listen<string>('clipboard_note_requested', ({ payload }) => {
-      if (!disposed) { setMenu(null); setEditing(payload); }
+      if (!disposed) { setMenu(null); setEditing({ id: payload }); }
     });
     return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
   }, [native]);
@@ -160,8 +163,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     await command('records_details_toggle');
   }
 
-  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'activate') {
-    if (!native || (action === 'paste' ? !snapshot.capabilities.autoPaste : !snapshot.capabilities.clipboardWrite)) return false;
+  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'pastePlain' | 'activate') {
+    if (!native || (action === 'paste' || action === 'pastePlain' ? !snapshot.capabilities.autoPaste : !snapshot.capabilities.clipboardWrite)) return false;
     const current = ++operation.current;
     setSelected(recordId); setFeedback(null);
     try {
@@ -295,10 +298,10 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     if (key.repeat || !usableShortcut(action)) return;
     if (action === 'preview') { void command('records_details_toggle', { recordId: record.id }); }
     else if (action === 'openTarget') { if (record.kind !== 'image') void openRecordTarget(record.id); }
-    else if (action === 'note') setEditing(record.id);
+    else if (action === 'note') setEditing({ id: record.id });
     else if (action === 'copyRecord') rowButton?.closest('article')?.querySelector<HTMLButtonElement>('[data-action=copy] button')?.click();
     else if (action === 'translate' || action === 'ocr') {
-      if (action === 'translate' ? canTranslateRecord(record) : canOcrRecord(record)) void processRecord(record.id, action);
+      if (action === 'translate' ? canTranslateRecord(record) : canRequestOcr(record)) void processRecord(record.id, action);
     } else if (action === 'delete') {
       if (processing) return;
       setFeedback(null);
@@ -328,7 +331,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : undefined} /> : record.kind !== 'text' ? <ClipboardMedia record={record} native={native} /> : <span className="history-preview history-text-preview">{historyPreview(record.text)}</span>}
       </button>
       <RecordActions allowMarkedDelete recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} deleteLabel={t('deleteClipboard')}
-        canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => useRecord(record.id, 'copy')} onNote={() => setEditing(record.id)} busy={processing !== null} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
+        canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => useRecord(record.id, 'copy')} onNote={() => setEditing({ id: record.id })} busy={processing !== null} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
         onUpdate={(action) => { void clipboard.update(record.id, action); }} />
     </article>;
   }
@@ -342,15 +345,16 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status"><p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : kindFilter ? t(kindFilter === 'text' ? 'clipboardTextEmpty' : kindFilter === 'image' ? 'clipboardImagesEmpty' : 'clipboardFilesEmpty') : !snapshot.capabilities.clipboardWrite ? t('platformUnavailable') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardRecordingPaused')}</p>{kindFilter && <button onClick={() => { remember(); setKindFilter(null); }}>{t('clearClipboardFilter')}</button>}</div>}
     </HistoryList>
     <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
-    {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
+    {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canRequestOcr(menuRecord)} canCorrectOcr={native && menuRecord.kind === 'image' && snapshot.capabilities.imageOcr} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
-      if (action === 'paste') void useRecord(menuRecord.id, action);
+      if (action === 'paste' || action === 'pastePlain') void useRecord(menuRecord.id, action);
       else if (action === 'translate' || action === 'ocr') void processRecord(menuRecord.id, action);
       else if (action === 'openTarget') void openRecordTarget(menuRecord.id);
-      else if (action === 'note') setEditing(menuRecord.id);
+      else if (action === 'note') setEditing({ id: menuRecord.id });
+      else if (action === 'correctOcr') setEditing({ id: menuRecord.id, ocr: true });
       else void clipboard.update(menuRecord.id, action);
     }} />}
-    {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} onSaved={(detail) => clipboard.applyEdit(editing, detail)} onReturnFocus={() => { editorReturn.current = editing; }} />}
+    {editing && <ClipboardEditor recordId={editing.id} ocrLabel={editing.ocr ? t('clipboardCorrectOcr') : undefined} onClose={() => setEditing(null)} onSaved={(detail) => { if (editing.ocr) clipboard.refresh(); else clipboard.applyEdit(editing.id, detail); }} onReturnFocus={() => { editorReturn.current = editing.id; }} />}
     <RecordFeedback message={active ? processingError ?? (feedback ? t(feedback) : null) : null} />
   </section>;
 }

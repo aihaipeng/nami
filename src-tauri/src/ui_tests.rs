@@ -1184,6 +1184,225 @@ fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_translation_partial(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        on_main(app, |app| show(app, "translation"))?;
+        wait_dom(
+            app,
+            "return {ready:!!document.querySelector('.source-input')};",
+        )?;
+        let persisted = |id: &str| {
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            database
+                .as_ref()
+                .ok_or("isolated test database")?
+                .record(id)
+        };
+        let history_total = || {
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            database
+                .as_ref()
+                .ok_or("isolated test database")?
+                .page(&nami::database::HistoryQuery::default(), None, 1)
+                .map(|page| page.total_records)
+        };
+        let initial_total = history_total()?;
+        evaluate_dom(
+            app,
+            r#"
+window.__partialArgs = {text:'Synthetic split primary',source:'auto',targets:['en','ja'],fromSelection:false};
+window.__partialRun = null;
+(async()=>{
+  const invoke = window.__TAURI_INTERNALS__.invoke;
+  const reject = async action => {try{await action();return 'unexpected success';}catch(e){return String(e);}};
+  try {
+    const {partial} = await invoke('translation_run',window.__partialArgs);
+    await invoke('translation_sample_copy',{sampleId:partial.id,part:'primary'});
+    const badCopy=await reject(()=>invoke('translation_sample_copy',{sampleId:partial.id,part:'secondary'}));
+    const badRetry=await reject(()=>invoke('translation_run',{...window.__partialArgs,text:'Changed original',retryId:partial.id}));
+    window.__partialRun={partial,badCopy,badRetry};
+  } catch(e) { window.__partialRun={error:String(e)}; }
+})();return true;
+"#,
+        )?;
+        let initial = wait_dom(
+            app,
+            "return {ready:!!window.__partialRun,...window.__partialRun};",
+        )?;
+        let partial_id = initial["partial"]["id"]
+            .as_str()
+            .ok_or_else(|| format!("missing split response: {initial}"))?;
+        if initial["partial"]["translations"] != serde_json::json!(["Synthetic translation en", ""])
+            || initial["partial"]["errors"]
+                != serde_json::json!([null, "Synthetic service unavailable"])
+            || initial["badCopy"] != "invalid_argument"
+            || initial["badRetry"] != "invalid_argument"
+            || persisted(partial_id)?.is_some()
+            || on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })? != Some(crate::platform::ClipboardPayload::Text(
+                "Synthetic translation en".into(),
+            ))
+        {
+            return Err(format!(
+                "partial copy, isolation or retry validation failed: {initial}"
+            ));
+        }
+        samples.push(serde_json::json!({"primarySurvives":true,"secondaryCopyRejected":true,"requestMutationRejected":true,"partialNotPersisted":true}));
+        evaluate_dom(
+            app,
+            r#"
+window.__retryRun=null;
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke, retryId=window.__partialRun.partial.id;
+  try {
+    const record=await invoke('translation_run',{...window.__partialArgs,retryId});
+    let staleCopy;
+    try{await invoke('translation_sample_copy',{sampleId:retryId,part:'primary'});}catch(e){staleCopy=String(e);}
+    window.__retryRun={record,staleCopy};
+  } catch(e) { window.__retryRun={error:String(e)}; }
+})();return true;
+"#,
+        )?;
+        let retried = wait_dom(
+            app,
+            "return {ready:!!window.__retryRun,...window.__retryRun};",
+        )?;
+        let saved_id = retried["record"]["id"]
+            .as_str()
+            .ok_or_else(|| format!("retry did not complete: {retried}"))?;
+        let saved = persisted(saved_id)?.ok_or("complete retry not stored")?;
+        if saved.translations != ["Synthetic translation en", "Synthetic translation ja"]
+            || retried["staleCopy"] != "invalid_argument"
+        {
+            return Err(format!("retry storage or token check failed: {retried}"));
+        }
+        samples.push(serde_json::json!({"onlyFailedColumnRetried":true,"completePersisted":true,"expiredCopyRejected":true}));
+
+        evaluate_dom(
+            app,
+            r#"
+window.__nextRun=null;
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke;
+  try {
+    const {partial}=await invoke('translation_run',{...window.__partialArgs,text:'Synthetic split secondary'});
+    await invoke('translation_sample_copy',{sampleId:partial.id,part:'secondary'});
+    let totalError;
+    try{await invoke('translation_run',{...window.__partialArgs,text:'Synthetic split total failure'});}catch(e){totalError=String(e);}
+    const heldArgs={...window.__partialArgs,text:'Synthetic held retry'};
+    const held=(await invoke('translation_run',heldArgs)).partial;
+    window.__nextRun={partial,totalError,held};
+    window.__heldResult=null;
+    invoke('translation_run',{...heldArgs,retryId:held.id}).then(value=>window.__heldResult={value}, error=>window.__heldResult={error:String(error)});
+  } catch(e) {window.__nextRun={error:String(e)};}
+})();return true;
+"#,
+        )?;
+        let next = wait_dom(
+            app,
+            "return {ready:!!window.__nextRun,...window.__nextRun};",
+        )?;
+        let second_id = next["partial"]["id"]
+            .as_str()
+            .ok_or_else(|| format!("missing secondary: {next}"))?;
+        let held_id = next["held"]["id"]
+            .as_str()
+            .ok_or("missing cancellation fixture")?;
+        if next["partial"]["translations"] != serde_json::json!(["", "Synthetic translation ja"])
+            || next["partial"]["errors"]
+                != serde_json::json!(["Synthetic service unavailable", null])
+            || next["totalError"] != "Synthetic service unavailable"
+            || persisted(second_id)?.is_some()
+            || on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })? != Some(crate::platform::ClipboardPayload::Text(
+                "Synthetic translation ja".into(),
+            ))
+        {
+            return Err(format!(
+                "secondary preservation or total error failed: {next}"
+            ));
+        }
+        samples.push(serde_json::json!({"secondarySurvives":true,"doubleFailureRejected":true}));
+        let state = app.state::<AppState>();
+        let retrying = || {
+            state
+                .pending_translation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|draft| draft.retrying)
+        };
+        for _ in 0..50 {
+            if retrying() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !retrying() {
+            return Err("held retry did not start".into());
+        }
+        evaluate_dom(
+            app,
+            r#"
+window.__heldCopy=null;
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke;
+  const retryId=window.__nextRun.held.id;
+  try {
+    await invoke('translation_sample_copy',{sampleId:retryId,part:'primary'});
+    let doubleRetry;
+    try { await invoke('translation_run',{...window.__partialArgs,text:'Synthetic held retry',retryId}); } catch(e) { doubleRetry=String(e); }
+    await invoke('translation_cancel');
+    window.__heldCopy={doubleRetry};
+  } catch(e) {window.__heldCopy={error:String(e)};}
+})();return true;
+"#,
+        )?;
+        let during = wait_dom(
+            app,
+            "return {ready:!!window.__heldCopy,...window.__heldCopy};",
+        )?;
+        if during["doubleRetry"] != "invalid_argument"
+            || on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })? != Some(crate::platform::ClipboardPayload::Text(
+                "Synthetic translation en".into(),
+            ))
+        {
+            return Err(format!(
+                "copy or duplicate retry protection during failed-column retry: {during}"
+            ));
+        }
+        samples.push(serde_json::json!({"copyDuringRetry":true,"duplicateRetryRejected":true}));
+        let cancelled = wait_dom(
+            app,
+            "return {ready:!!window.__heldResult,...window.__heldResult};",
+        )?;
+        let total = history_total()?;
+        if cancelled["error"] != "cancelled"
+            || persisted(held_id)?.is_some()
+            || total != initial_total + 1
+        {
+            return Err(format!("cancelled retry changed history: {cancelled}, before={initial_total}, after={total}"));
+        }
+        samples.push(
+            serde_json::json!({"inFlightRetryCancelled":true,"onlyOneCompleteHistoryRecord":true}),
+        );
+        Ok(())
+    })();
+    DomCase {
+        name: "translation partial columns and retry through WKWebView IPC",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_right_control_dom(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -2325,6 +2544,11 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   window.clipboardSettingsProbe.stage='options';
   const defaults=await invoke('clipboard_options_get');
   if(defaults.activation!=='paste'||defaults.historyPolicy.limit!==500||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
+  if(defaults.autoImageIndex!==false)throw Error('automatic image OCR is not opt-in');
+  for (const enabled of [true,false]) {
+    await invoke('clipboard_auto_image_index_set',{enabled});
+    if((await invoke('clipboard_options_get')).autoImageIndex!==enabled)throw Error('image index setting did not update');
+  }
   await invoke('clipboard_behavior_set',{activation:'copy'});
   if((await invoke('clipboard_options_get')).activation!=='copy')throw Error('copy preference did not update');
   const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
@@ -2496,7 +2720,7 @@ const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>i
 const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
 const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
 const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⇧⌘O'].join(),bindings,kept};
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⌘O','⇧⌘O'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -5076,6 +5300,10 @@ fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
         let press = |code, flags, chars, unmodified| {
             post_records_key(app, code, flags, chars, unmodified, false)
         };
+        on_main(app, |_| crate::platform::test_clipboard_history())?;
+        samples.push(
+            serde_json::json!({"privateClipboardExcluded":true,"independentNamedPasteboard":true}),
+        );
         let check = |action: &str, predicate: &str| {
             wait_records(
                 app,
@@ -5442,7 +5670,12 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         }
         crate::clipboard_runtime::changed(app)?;
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
-        check("OCR image ready", "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-ocr'&&!!row.querySelector('[data-action=ocr]')")?;
+        check(
+            "OCR image ready with privacy descriptions",
+            "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-ocr'
+             &&row.querySelector('[data-action=ocr] button')?.getAttribute('aria-description')==='Recognizes text on this Mac without sending the image or text.'
+             &&row.querySelector('[data-action=translate] button')?.getAttribute('aria-description')==='Sends text to the selected translation service.'",
+        )?;
         press(31, CMD | SHIFT, "O", "O")?;
         let ocr = check(
             "Extract Text",
@@ -5510,6 +5743,104 @@ return true;
         }
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
         samples.push(check("Open with record list focus", "document.hasFocus()&&!!row&&document.activeElement===row.querySelector('.history-row-select')&&!focused")?);
+        on_main(app, |_| crate::platform::test_rich_text_capture_limit())?;
+        let rich = crate::platform::ClipboardPayload::RichText {
+            text: "Synthetic rich clipboard smoke".into(),
+            formatting: nami::clipboard::ClipboardTextFormatting {
+                html: Some(b"<b>Synthetic rich clipboard smoke</b>".to_vec()),
+                rtf: Some(br"{\rtf1\b Synthetic rich clipboard smoke}".to_vec()),
+            },
+        };
+        let capture = on_main(app, {
+            let rich = rich.clone();
+            move |app| {
+                let version = crate::platform::write_clipboard(&rich).map_err(|(code, _)| code)?;
+                app.state::<AppState>()
+                    .clipboard_version
+                    .store(version, Ordering::SeqCst);
+                crate::platform::read_clipboard(|_| false)?
+                    .ok_or_else(|| "missing synthetic rich clipboard capture".into())
+            }
+        })?;
+        if capture.payload != rich {
+            return Err("HTML/RTF did not round-trip AppKit capture".into());
+        }
+        let root = crate::clipboard_runtime::image_root(app)?;
+        let rich_id = {
+            let state = app.state::<AppState>();
+            let mut database = state.database.lock().unwrap();
+            let database = database.as_mut().ok_or("isolated test database")?;
+            crate::clipboard_runtime::persist_capture(database, &root, capture)?;
+            database
+                .clipboard_page("Synthetic rich clipboard smoke", false, None, 10)?
+                .records
+                .into_iter()
+                .next()
+                .ok_or("rich capture not searchable as plaintext")?
+                .id
+        };
+        *app.state::<AppState>().target.lock().unwrap() = None;
+        for (action, expected) in [
+            ("paste", rich),
+            (
+                "pastePlain",
+                crate::platform::ClipboardPayload::Text("Synthetic rich clipboard smoke".into()),
+            ),
+        ] {
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                &format!(
+                    r#"
+window.__richPaste=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{rich_id:?},action:{action:?}}})
+  .then(result=>window.__richPaste=result,error=>window.__richPaste={{error:String(error)}});
+return true;
+"#
+                ),
+            )?;
+            let result = wait_records(
+                app,
+                "return {ready:!!window.__richPaste,...window.__richPaste};",
+            )?;
+            if result["code"] != "target_unavailable" || result["copyStatus"] != "current" {
+                return Err(format!("rich paste safety boundary ({action}): {result}"));
+            }
+            let actual = on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })?;
+            if actual != Some(expected) {
+                return Err(format!("isolated pasteboard did not match {action}"));
+            }
+            samples.push(
+                serde_json::json!({"clipboardFormat":action,"noTarget":true,"bytesMatch":true}),
+            );
+        }
+        let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+window.__richInvalid=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{recordId:'smoke-ocr',action:'pastePlain'})
+  .then(()=>window.__richInvalid='unexpected_success',error=>window.__richInvalid=String(error));
+return true;
+"#,
+        )?;
+        let invalid = wait_records(
+            app,
+            "return {ready:window.__richInvalid!==null,error:window.__richInvalid};",
+        )?;
+        if invalid["error"] != "invalid_argument"
+            || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version
+        {
+            return Err(
+                "plain paste of an image was not rejected before clipboard mutation".into(),
+            );
+        }
+        samples.push(
+            serde_json::json!({"oversizedHtmlFallsBack":true,"imagePlainPasteRejected":true}),
+        );
         let fixture =
             std::env::temp_dir().join(format!("nami-open-smoke-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
@@ -5950,6 +6281,357 @@ return {ready:document.activeElement===p.querySelector('.history-search input')&
     }
 }
 
+struct CrossAppFixture {
+    app: AppHandle,
+    bundle: std::path::PathBuf,
+    report: std::path::PathBuf,
+    next_line: std::cell::Cell<usize>,
+    pid: u32,
+}
+
+impl Drop for CrossAppFixture {
+    fn drop(&mut self) {
+        let bundle = self.bundle.clone();
+        let _ = on_main(&self.app, move |_| {
+            crate::platform::test_close_fixture(&bundle);
+            Ok(())
+        });
+    }
+}
+
+impl CrossAppFixture {
+    fn start(app: &AppHandle, executable: &std::path::Path, mode: &str) -> Result<Self, String> {
+        let bundle = executable
+            .ancestors()
+            .nth(3)
+            .ok_or("missing fixture bundle")?
+            .to_owned();
+        let report = bundle.with_file_name(format!("fixture-{mode}-{}.log", uuid::Uuid::new_v4()));
+        std::fs::File::create_new(&report).map_err(|error| error.to_string())?;
+        let mut fixture = Self {
+            app: app.clone(),
+            bundle,
+            report,
+            next_line: std::cell::Cell::new(0),
+            pid: 0,
+        };
+        // LaunchServices assigns the launch identity that production target checks require.
+        let status = std::process::Command::new("/usr/bin/open")
+            .args(["-n", "--stdout"])
+            .arg(&fixture.report)
+            .arg(&fixture.bundle)
+            .args(["--args", "--smoke", mode])
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err("LaunchServices could not open the synthetic target".into());
+        }
+        fixture.pid = fixture
+            .wait_event()?
+            .strip_prefix("READY ")
+            .and_then(|pid| pid.parse().ok())
+            .filter(|pid| *pid > 0)
+            .ok_or("invalid synthetic READY marker")?;
+        Ok(fixture)
+    }
+
+    fn next_event(&self) -> Result<Option<String>, String> {
+        let data = std::fs::read_to_string(&self.report).map_err(|error| error.to_string())?;
+        let line = data
+            .split_inclusive('\n')
+            .nth(self.next_line.get())
+            .and_then(|line| line.strip_suffix('\n'));
+        if line.is_some() {
+            self.next_line.set(self.next_line.get() + 1);
+        }
+        Ok(line.map(str::to_owned))
+    }
+
+    fn wait_event(&self) -> Result<String, String> {
+        for _ in 0..200 {
+            if let Some(event) = self.next_event()? {
+                return Ok(event);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("timed out waiting for synthetic target response".into())
+    }
+
+    fn expect(&self, expected: &str) -> Result<(), String> {
+        if self.wait_event()? == expected {
+            Ok(())
+        } else {
+            Err(format!("synthetic target did not report {expected}"))
+        }
+    }
+
+    fn focused(&self, app: &AppHandle) -> Result<crate::platform::Target, String> {
+        let pid = self.pid;
+        let bundle = self.bundle.clone();
+        let target = on_main(app, move |_| {
+            crate::platform::test_activate_fixture(pid, &bundle).map_err(str::to_owned)
+        })?;
+        for _ in 0..100 {
+            if on_main(app, move |_| Ok(crate::platform::target_focused(target)))? {
+                return Ok(target);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("the synthetic target never became frontmost; no keys sent".into())
+    }
+}
+
+fn run_cross_app(app: &AppHandle) -> DomCase {
+    const TEXT: &str = "NAMI synthetic selection";
+    const MARKER: &str = "NAMI synthetic clipboard baseline";
+    let mut samples = Vec::new();
+    let result = (|| {
+        let mode = std::env::var("NAMI_UI_TEST_CROSS_APP").unwrap_or_default();
+        let expected_identity = if mode == "denied-fresh" {
+            "dev.local.nami.ui-tests.denial"
+        } else {
+            "dev.local.nami.ui-tests"
+        };
+        if app.config().identifier != expected_identity {
+            return Err("cross-app smoke needs the matching isolated Nami identity".into());
+        }
+        if !matches!(
+            mode.as_str(),
+            "selection" | "full" | "denied" | "denied-fresh"
+        ) {
+            return Err("set NAMI_UI_TEST_CROSS_APP=selection, full (dedicated test session only), denied, or denied-fresh".into());
+        }
+        let denied = matches!(mode.as_str(), "denied" | "denied-fresh");
+        let path =
+            std::env::var_os("NAMI_UI_TEST_FIXTURE").ok_or("missing synthetic target bundle")?;
+        let path = std::path::Path::new(&path);
+        if !path.ends_with("Nami Cross-App Fixture.app/Contents/MacOS/cross-app-fixture") {
+            return Err("invalid synthetic target bundle path".into());
+        }
+        let trusted = on_main(app, |_| Ok(crate::platform::accessibility()))?;
+        if trusted == denied {
+            return Err("isolated Nami's current Accessibility permission does not match the requested mode; permission is changed only by the user".into());
+        }
+        let buffer = |text: &'static str| {
+            on_main(app, move |app| {
+                let version = crate::platform::write_text(text).map_err(|(code, _)| code)?;
+                app.state::<AppState>()
+                    .clipboard_version
+                    .store(version, Ordering::SeqCst);
+                Ok(version)
+            })
+        };
+        let is_buffer = |text: &'static str| {
+            on_main(app, move |_| {
+                Ok(
+                    crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload)
+                        == Some(crate::platform::ClipboardPayload::Text(text.into())),
+                )
+            })
+        };
+        let mut previous = None;
+        let fixture_modes: &[&str] = if trusted {
+            &["ax", "copy", "empty"]
+        } else {
+            &["ax"]
+        };
+        for &fixture_mode in fixture_modes {
+            if app.get_window("translation").is_some() {
+                on_main(app, |app| crate::windows::hide(app, "translation"))?;
+                wait_motion(app)?;
+            }
+            let version = buffer(MARKER)?;
+            let fixture = CrossAppFixture::start(app, path, fixture_mode)?;
+            let target = fixture.focused(app)?;
+            let fallback = fixture_mode == "copy";
+            let expected = if trusted && fixture_mode != "empty" {
+                TEXT
+            } else {
+                ""
+            };
+            let direct = crate::platform::selected_text(target);
+            if (!trusted && direct != Err("permission_required"))
+                || (trusted && !fallback && fixture_mode == "ax" && direct.as_deref() != Ok(TEXT))
+                || (trusted && fixture_mode == "empty" && direct.as_deref() != Ok(""))
+                || (fallback
+                    && !matches!(
+                        direct,
+                        Err("selection_unavailable" | "selection_focus_unavailable")
+                    ))
+            {
+                return Err(format!(
+                    "unexpected AX status from synthetic {fixture_mode} target: {:?}",
+                    direct.as_ref().map(|_| "text")
+                ));
+            }
+            let start = std::time::Instant::now();
+            on_main(app, move |app| {
+                if !crate::platform::target_focused(target) {
+                    return Err("synthetic target lost focus before selection".into());
+                }
+                crate::selection::test_summon_from(app, Some(target), true)
+            })?;
+            if fallback {
+                fixture.expect(&format!("COPY {TEXT}")).map_err(|error| {
+                    let running = app
+                        .state::<AppState>()
+                        .selection_busy
+                        .load(Ordering::SeqCst);
+                    format!("{error}; selection still running: {running}")
+                })?;
+            }
+            wait_dom(
+                app,
+                &format!(
+                    r#"
+const input=document.querySelector('.source-input'),alert=document.querySelector('.translation-status[role=alert]');
+return {{ready:input?.value==={expected:?}&&!input.closest('[inert]')&&({trusted}||alert?.textContent.includes('Accessibility')),hasInput:!!input,sourceMatches:input?.value==={expected:?},inert:!!input?.closest('[inert]'),alert:alert?.textContent}};
+"#
+                ),
+            )?;
+            let elapsed = start.elapsed().as_millis();
+            if !is_buffer(MARKER)?
+                || (!fallback
+                    && on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version)
+            {
+                return Err(
+                    "selection changed the isolated baseline instead of preserving it".into(),
+                );
+            }
+            if fixture.next_event()?.is_some() {
+                return Err("synthetic target received an unexpected clipboard action".into());
+            }
+            samples.push(serde_json::json!({"process":fixture_mode,"axAuthorized":trusted,"clipboardPreserved":true,"copyReceived":fallback,"elapsedMs":elapsed}));
+            previous = Some(target);
+        }
+        let previous = previous.ok_or("no synthetic target ran")?;
+        for _ in 0..100 {
+            if !on_main(app, move |_| Ok(crate::platform::target_alive(previous)))? {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if on_main(app, move |_| Ok(crate::platform::target_alive(previous)))? {
+            return Err("synthetic target did not terminate".into());
+        }
+        {
+            let state = app.state::<AppState>();
+            state
+                .database
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or("test database")?
+                .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                    id: "cross-app-paste".into(),
+                    kind: "text".into(),
+                    text: TEXT.into(),
+                    date: "2099-01-01T00:00:00Z".into(),
+                    is_favorite: false,
+                    is_pinned: false,
+                    source_app: None,
+                    image_path: None,
+                    fingerprint: "cross-app-paste".into(),
+                })?;
+        }
+        crate::clipboard_runtime::changed(app)?;
+        records_mode(app, "clipboard")?;
+        let paste = || -> Result<serde_json::Value, String> {
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+window.__fixturePaste=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{recordId:'cross-app-paste',action:'paste'})
+    .then(value=>window.__fixturePaste=value,error=>window.__fixturePaste={error:String(error)});
+return true;
+"#,
+            )?;
+            wait_records(
+                app,
+                "return {ready:!!window.__fixturePaste,...window.__fixturePaste};",
+            )
+        };
+        let fixture = CrossAppFixture::start(app, path, "paste")?;
+        let target = fixture.focused(app)?;
+        if trusted {
+            // A stale version guarantees this preflight can never dispatch a key, even if focus races.
+            let old_version = buffer(MARKER)?;
+            let current = buffer("NAMI synthetic replacement copy")?;
+            if current == old_version {
+                return Err("isolated clipboard version did not advance".into());
+            }
+            let changed = on_main(app, move |_| {
+                Ok(crate::platform::paste_keys_down(target, old_version))
+            })?;
+            if changed != Err("clipboard_changed") || !is_buffer("NAMI synthetic replacement copy")?
+            {
+                return Err("paste preflight accepted an overwritten clipboard".into());
+            }
+            on_main(app, |app| {
+                crate::windows::resume_navigation(app, "clipboard")
+            })?;
+            for _ in 0..50 {
+                if on_main(app, move |_| Ok(!crate::platform::target_focused(target)))? {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let lost = on_main(app, move |_| {
+                if !crate::platform::target_alive(target) {
+                    return Err("live focus test target terminated".into());
+                }
+                Ok(crate::platform::paste_keys_down(target, old_version))
+            })?;
+            if lost != Err("target_unavailable") || fixture.next_event()?.is_some() {
+                return Err(
+                    "paste preflight did not reject a live target after focus moved".into(),
+                );
+            }
+            samples.push(serde_json::json!({"changedVersionRejected":true,"liveUnfocusedTargetRejected":true}));
+        }
+        if denied || mode == "full" {
+            *app.state::<AppState>().target.lock().unwrap() = Some(target);
+            let result = paste()?;
+            if mode == "full" {
+                fixture.expect(&format!("PASTE [{TEXT}]"))?;
+                if result["status"] != "dispatched" {
+                    return Err(format!(
+                        "paste was received but host reported failure: {result}"
+                    ));
+                }
+                samples.push(serde_json::json!({"actualExternalPasteReceived":true}));
+            } else {
+                if result["code"] != "permission_required" || fixture.next_event()?.is_some() {
+                    return Err(format!(
+                        "permission denial did not protect target: {result}"
+                    ));
+                }
+                samples
+                    .push(serde_json::json!({"pastePermissionDenied":true,"noPasteReceived":true,"freshIdentity":mode=="denied-fresh"}));
+            }
+        }
+        if trusted {
+            *app.state::<AppState>().target.lock().unwrap() = Some(previous);
+            let result = paste()?;
+            if result["code"] != "target_unavailable"
+                || result["copyStatus"] != "current"
+                || fixture.next_event()?.is_some()
+            {
+                return Err(format!("dead target protection failed: {result}"));
+            }
+            samples.push(serde_json::json!({"exitedPasteTargetRejected":true}));
+        }
+        Ok(())
+    })();
+    DomCase {
+        name: "cross-process selection and clipboard safety",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_selection_open(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -6069,6 +6751,10 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
             sample["performanceGateApplied"] = false.into();
             sample["nativeVisible"] = true.into();
             sample["clipboardVersionUnchanged"] = true.into();
+            if index == 0 {
+                sample["isolatedAccessibilityGranted"] =
+                    on_main(app, |_| Ok(crate::platform::accessibility()))?.into();
+            }
             if let Some(handoff) = handoff {
                 sample["hideHandoff"] = handoff;
             }
@@ -6101,25 +6787,38 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
 }
 
 fn clipboard_text_fixture(text: bool) -> Result<Vec<u8>, String> {
+    clipboard_text_image(640.0, 160.0, text.then_some("HELLO NAMI"), None)
+}
+
+fn clipboard_text_image(
+    width: f64,
+    height: f64,
+    text: Option<&str>,
+    stamp: Option<&str>,
+) -> Result<Vec<u8>, String> {
     use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
     use objc2_foundation::{ns_string, NSData, NSPoint, NSRect, NSSize, NSString};
     unsafe {
         let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
-        let image: *mut AnyObject = msg_send![image, initWithSize: NSSize::new(640.0,160.0)];
+        let image: *mut AnyObject = msg_send![image, initWithSize: NSSize::new(width,height)];
         let image = Retained::from_raw(image).ok_or("synthetic image allocation")?;
         let _: () = msg_send![&*image, lockFocus];
         let white: Retained<AnyObject> = msg_send![class!(NSColor), whiteColor];
         let _: () = msg_send![&*white, setFill];
-        let _: () = msg_send![class!(NSBezierPath), fillRect: NSRect::new(NSPoint::new(0.0,0.0),NSSize::new(640.0,160.0))];
-        if text {
+        let _: () = msg_send![class!(NSBezierPath), fillRect: NSRect::new(NSPoint::new(0.0,0.0),NSSize::new(width,height))];
+        if let Some(text) = text {
             let attributes: Retained<AnyObject> =
                 msg_send![class!(NSMutableDictionary), dictionary];
             let font: Retained<AnyObject> = msg_send![class!(NSFont), boldSystemFontOfSize: 48f64];
             let color: Retained<AnyObject> = msg_send![class!(NSColor), blackColor];
             let _: () = msg_send![&*attributes, setObject: &*font, forKey: ns_string!("NSFont")];
             let _: () = msg_send![&*attributes, setObject: &*color, forKey: ns_string!("NSColor")];
-            let label = NSString::from_str("HELLO NAMI");
+            let label = NSString::from_str(text);
             let _: () = msg_send![&*label, drawAtPoint: NSPoint::new(48.0,48.0), withAttributes: &*attributes];
+            if let Some(stamp) = stamp {
+                let stamp = NSString::from_str(stamp);
+                let _: () = msg_send![&*stamp, drawAtPoint: NSPoint::new(48.0,125.0), withAttributes: &*attributes];
+            }
         }
         let _: () = msg_send![&*image, unlockFocus];
         let tiff: Retained<NSData> = msg_send![&*image, TIFFRepresentation];
@@ -6129,6 +6828,330 @@ fn clipboard_text_fixture(text: bool) -> Result<Vec<u8>, String> {
         let png: Retained<NSData> =
             msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
         Ok(png.to_vec())
+    }
+}
+
+fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
+    use std::time::Instant;
+
+    use crate::{clipboard_preferences::set_auto_image_index, clipboard_text::VISION_CALLS};
+    let mut samples = Vec::new();
+    let mut media = Vec::new();
+    let directory = std::env::temp_dir().join(format!("nami-index-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let state = app.state::<AppState>();
+        std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join("history.sqlite3");
+        let database = crate::database::HistoryDatabase::open(&path)?;
+        if crate::clipboard_preferences::ClipboardOptions::load(&database)?.auto_image_index {
+            return Err("automatic OCR must default to off".into());
+        }
+        *state.database.lock().unwrap() = Some(database);
+        on_main(app, |app| {
+            crate::clipboard_runtime::start(app);
+            app.state::<AppState>()
+                .clipboard_enabled
+                .store(true, Ordering::SeqCst);
+            Ok(())
+        })?;
+        let nonce = directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut expected_count = 0;
+        let mut pending = Vec::new();
+        let mut retry_fixture = None;
+        let mut capture = |payload| -> Result<_, String> {
+            let started = Instant::now();
+            let version = on_main(app, move |_| {
+                crate::platform::write_clipboard(&payload).map_err(|(code, _)| code.into())
+            })?;
+            expected_count += 1;
+            loop {
+                let observed = {
+                    let locked = state.database.lock().unwrap();
+                    let db = locked.as_ref().ok_or("test database")?;
+                    let page = db.clipboard_page("", false, None, 1)?;
+                    if page.total_records == expected_count
+                        && state.clipboard_version.load(Ordering::SeqCst) == version
+                    {
+                        let summary = page.records.first().ok_or("missing captured image")?;
+                        Some(db.clipboard_record(&summary.id)?)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(record) = observed {
+                    media.push(record.image_path.clone().ok_or("missing image path")?);
+                    return Ok((record, started, version));
+                }
+                if started.elapsed() > Duration::from_secs(5) {
+                    return Err("capture timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        };
+        let fixture = |label: String, stamp: String| {
+            on_main(app, move |_| {
+                clipboard_text_image(1920.0, 1080.0, Some(&label), Some(&stamp))
+            })
+        };
+        let mut last_version = 0;
+        for enabled in [false, true] {
+            tauri::async_runtime::block_on(set_auto_image_index(app, enabled))?;
+            let inputs = (0..8)
+                .map(|index| {
+                    let label = format!("Nami Error E247 海浪 Capture {index}");
+                    fixture(label, format!("{nonce} {enabled} {index}")).map(|bytes| {
+                        crate::platform::ClipboardPayload::Image {
+                            bytes,
+                            extension: "png".into(),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for payload in inputs {
+                let (record, started, version) = capture(payload)?;
+                last_version = version;
+                let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
+                samples.push(
+                    serde_json::json!({"phase":"capture", "enabled":enabled, "ms":capture_ms}),
+                );
+                if enabled {
+                    // Observe each job concurrently with the next capture, not after the whole burst.
+                    let app = app.clone();
+                    pending.push(std::thread::spawn(move || -> Result<_, String> {
+                        loop {
+                            let lock = app.state::<AppState>();
+                            let db = lock.database.lock().unwrap();
+                            if let Some(text) = db
+                                .as_ref()
+                                .ok_or("test database")?
+                                .clipboard_ocr_text(&record.id)?
+                            {
+                                return Ok((
+                                    record.id,
+                                    text,
+                                    started.elapsed().as_secs_f64() * 1000.0,
+                                ));
+                            }
+                            drop(db);
+                            if started.elapsed() > Duration::from_secs(10) {
+                                return Err("automatic OCR timed out".into());
+                            }
+                            std::thread::sleep(Duration::from_millis(8));
+                        }
+                    }));
+                } else if retry_fixture.is_none() {
+                    retry_fixture = Some(record);
+                }
+            }
+        }
+        let mut ids = Vec::new();
+        let mut chinese_hits = 0;
+        for pending in pending {
+            let (id, text, ms) = pending.join().map_err(|_| "OCR observer panicked")??;
+            if !text.contains("E247") || !text.contains('\n') {
+                return Err("automatic OCR did not preserve fixture text".into());
+            }
+            chinese_hits += usize::from(text.contains("海浪"));
+            ids.push(id);
+            samples.push(serde_json::json!({"phase":"capture-to-searchable", "ms":ms}));
+        }
+        if chinese_hits != ids.len() {
+            return Err(format!(
+                "Vision missed the mixed Chinese fixture: {chinese_hits}/{}",
+                ids.len()
+            ));
+        }
+        let photo = directory.join("Fixture E247 海浪.png");
+        let photo_bytes = fixture("Nami Error E247 海浪 Image File".into(), nonce)?;
+        let dimensions = crate::platform::image_dimensions(&photo_bytes)?;
+        std::fs::write(&photo, &photo_bytes).map_err(|error| error.to_string())?;
+        let (file, _, _) = capture(crate::platform::ClipboardPayload::Files(vec![photo
+            .to_string_lossy()
+            .into_owned()]))?;
+        let blank = on_main(app, |_| clipboard_text_fixture(false))?;
+        let (blank, _, version) = capture(crate::platform::ClipboardPayload::Image {
+            bytes: blank,
+            extension: "png".into(),
+        })?;
+        if tauri::async_runtime::block_on(crate::clipboard_text::has_text(app, blank.id.clone()))? {
+            return Err("blank image probe unexpectedly found text".into());
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let original = loop {
+            {
+                let lock = state.database.lock().unwrap();
+                let db = lock.as_ref().ok_or("test database")?;
+                if let (Some(text), Some(blank_text)) = (
+                    db.clipboard_ocr_text(&file.id)?,
+                    db.clipboard_ocr_text(&blank.id)?,
+                ) {
+                    if !blank_text.is_empty() || !text.contains("E247") {
+                        return Err("unexpected OCR result".into());
+                    }
+                    break text;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("file or empty OCR did not complete".into());
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        };
+        if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version
+            || last_version >= version
+        {
+            return Err("automatic OCR modified the pasteboard".into());
+        }
+        state.clipboard_enabled.store(false, Ordering::SeqCst);
+        let old_epoch = state.image_index_epoch.load(Ordering::SeqCst);
+        tauri::async_runtime::block_on(set_auto_image_index(app, false))?;
+        {
+            let mut lock = state.database.lock().unwrap();
+            drop(lock.take());
+            let db = crate::database::HistoryDatabase::open(&path)?;
+            let all = db.clipboard_page("", false, None, 100)?;
+            if all.total_records != 18 || all.records.iter().any(|record| record.kind != "image") {
+                return Err(
+                    "automatic OCR inserted a derived text record or lost a capture".into(),
+                );
+            }
+            if all
+                .records
+                .iter()
+                .filter(|record| {
+                    !ids.contains(&record.id) && record.id != file.id && record.id != blank.id
+                })
+                .any(|record| !matches!(db.clipboard_ocr_text(&record.id), Ok(None)))
+            {
+                return Err("enabling automatic OCR backfilled a prior capture".into());
+            }
+            for (term, count) in [("fixture e247 海浪.png", 1), ("e247", 9)] {
+                let result = db.clipboard_page(term, false, None, 100)?;
+                if result.total_records != count
+                    || result
+                        .records
+                        .iter()
+                        .filter(|row| row.id == file.id)
+                        .count()
+                        != 1
+                {
+                    return Err(format!(
+                        "search did not return the original image exactly once: {term}"
+                    ));
+                }
+            }
+            for (term, min_count) in [
+                ("E247", 9),
+                ("海浪", 9),
+                ("海", 9),
+                ("fixture e247 海浪.png", 1),
+            ] {
+                let timings: Vec<f64> = (0..50)
+                    .map(|_| {
+                        let start = Instant::now();
+                        let page = db.clipboard_page(term, false, None, 100)?;
+                        if page.total_records < min_count {
+                            return Err("search missed fixture".to_owned());
+                        }
+                        Ok(start.elapsed().as_secs_f64() * 1000.0)
+                    })
+                    .collect::<Result<_, _>>()?;
+                samples.push(
+                    serde_json::json!({"phase":"database-search", "term":term, "ms":timings}),
+                );
+            }
+            *lock = Some(db);
+        }
+        tauri::async_runtime::block_on(async {
+            *state.image_text.lock().await = Default::default();
+        });
+        let calls = VISION_CALLS.load(Ordering::SeqCst);
+        if calls != 10 {
+            return Err(format!(
+                "expected one Vision call per new image, got {calls}"
+            ));
+        }
+        let started = Instant::now();
+        let results = tauri::async_runtime::block_on(async {
+            tokio::join!(
+                crate::clipboard_text::has_text(app, file.id.clone()),
+                crate::clipboard_text::has_text(app, blank.id.clone())
+            )
+        });
+        if results != (Ok(true), Ok(false)) || VISION_CALLS.load(Ordering::SeqCst) != calls {
+            return Err("reopened OCR results started new Vision work".into());
+        }
+        samples.push(serde_json::json!({"phase":"cold-cache-reuse-two-records","ms":started.elapsed().as_secs_f64()*1000.0, "visionCalls":calls,"additionalVisionCalls":0,"chineseHits":chinese_hits,"chineseSamples":8,"dimensions":dimensions}));
+        // Explicit extraction takes the persisted original (case and newlines), not the folded index.
+        on_main(app, |app| {
+            let state = app.state::<AppState>();
+            state.windows.lock().unwrap().history_visible = true;
+            Ok(())
+        })?;
+        tauri::async_runtime::block_on(crate::clipboard_text::process(
+            app,
+            file.id.clone(),
+            "ocr".into(),
+        ))?;
+        let copied = on_main(app, |_| Ok(crate::platform::read_clipboard(|_| false)?))?;
+        if !copied.is_some_and(|capture| {
+            capture.payload == crate::platform::ClipboardPayload::Text(original)
+        }) || VISION_CALLS.load(Ordering::SeqCst) != calls
+        {
+            return Err("manual extraction did not reuse the exact persisted original".into());
+        }
+        samples.push(serde_json::json!({"phase":"explicit-extraction-after-reopen","additionalVisionCalls":0}));
+        let retry = retry_fixture.ok_or("missing retry fixture")?;
+        let root = crate::clipboard_runtime::image_root(app)?;
+        let image = root.join(retry.image_path.ok_or("missing retry fixture image")?);
+        let saved = directory.join("retry-image.png");
+        if tauri::async_runtime::block_on(crate::clipboard_text::index_image(
+            app,
+            retry.id.clone(),
+            old_epoch,
+        )) != Err("cancelled".into())
+        {
+            return Err("disabled epoch did not cancel a queued task".into());
+        }
+        std::fs::rename(&image, &saved).map_err(|error| error.to_string())?;
+        let missing =
+            tauri::async_runtime::block_on(crate::clipboard_text::has_text(app, retry.id.clone()));
+        std::fs::rename(&saved, &image).map_err(|error| error.to_string())?;
+        if missing != Err("clipboard_image_missing".into())
+            || VISION_CALLS.load(Ordering::SeqCst) != calls
+        {
+            return Err("missing image was treated as a completed OCR result".into());
+        }
+        tauri::async_runtime::block_on(crate::clipboard_text::process(
+            app,
+            retry.id,
+            "ocr".into(),
+        ))?;
+        if VISION_CALLS.load(Ordering::SeqCst) != calls + 1 {
+            return Err("manual retry did not run Vision exactly once".into());
+        }
+        samples.push(
+            serde_json::json!({"phase":"cancelled-job-and-failed-read-retry","retryVisionCalls":1}),
+        );
+        Ok(())
+    })();
+    let state = app.state::<AppState>();
+    state.clipboard_enabled.store(false, Ordering::SeqCst);
+    drop(state.database.lock().unwrap().take());
+    if let Ok(root) = crate::clipboard_runtime::image_root(app) {
+        for path in media {
+            let _ = nami::clipboard::remove_image(&root, &path);
+        }
+    }
+    let _ = std::fs::remove_dir_all(directory);
+    DomCase {
+        name: "clipboard local image indexing and performance",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
     }
 }
 
@@ -6731,30 +7754,32 @@ return {ready:rows.length===5&&image.includes('ocr'),text,image,blank,files,icon
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"window.__kindIpc={done:false};(async()=>{try { const invoke=window.__TAURI_INTERNALS__.invoke;const blank=await invoke('clipboard_record_has_text',{recordId:'kind-image-blank'}),image=await invoke('clipboard_record_has_text',{recordId:'kind-image-text'});let textOcrRejected=false;try{await invoke('clipboard_record_process',{recordId:'kind-text-favorite',action:'ocr'});}catch(error){textOcrRejected=error==='invalid_argument';}window.__kindIpc={done:true,blank,image,textOcrRejected};}catch(error){window.__kindIpc={done:true,error:String(error)};}})();return true;"#,
+            r#"window.__kindIpc={done:false};(async()=>{try { const invoke=window.__TAURI_INTERNALS__.invoke;const blank=await invoke('clipboard_record_has_text',{recordId:'kind-image-blank'}),image=await invoke('clipboard_record_has_text',{recordId:'kind-image-text'});let blankOcrRejected=false,textOcrRejected=false;try{await invoke('clipboard_record_process',{recordId:'kind-image-blank',action:'ocr'});}catch(error){blankOcrRejected=error==='ocr_no_text';}try{await invoke('clipboard_record_process',{recordId:'kind-text-favorite',action:'ocr'});}catch(error){textOcrRejected=error==='invalid_argument';}window.__kindIpc={done:true,blank,image,blankOcrRejected,textOcrRejected};}catch(error){window.__kindIpc={done:true,error:String(error)};}})();return true;"#,
         )?;
         let ipc = wait_records(
             app,
             "return {ready:window.__kindIpc?.done,...window.__kindIpc};",
         )?;
+        let probe_only = {
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            let database = database.as_ref().ok_or("test database")?;
+            database
+                .clipboard_page("HELLO NAMI", false, None, 100)?
+                .total_records
+                == 0
+                && database.clipboard_page("", false, None, 100)?.total_records == 5
+        };
         if ipc["blank"] != false
             || ipc["image"] != true
+            || ipc["blankOcrRejected"] != true
             || ipc["textOcrRejected"] != true
+            || !probe_only
             || app
                 .state::<AppState>()
                 .clipboard_version
                 .load(Ordering::SeqCst)
                 != version
-            || app
-                .state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_ref()
-                .ok_or("test database")?
-                .clipboard_page("", false, None, 100)?
-                .total_records
-                != 5
         {
             return Err(format!("OCR detection or invalid-action protection: {ipc}"));
         }
@@ -6941,7 +7966,49 @@ return {ready:image.includes('Translate')&&image.includes('Extract text')&&image
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-file"] [aria-label="Translate"]').click();return true;"#,
         )?;
         samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value;return {ready:text?.includes('HELLO NAMI'),text};"#)?);
+        records_mode(app, "clipboard")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+window.__extractFile={done:false};
+(async()=>{
+  try {
+    const invoke=window.__TAURI_INTERNALS__.invoke;
+    const search=()=>invoke('clipboard_query',{query:'HELLO NAMI',favoritesOnly:false,kind:'files'});
+    const before=await search();
+    await invoke('clipboard_record_process',{recordId:'kind-image-file',action:'ocr'});
+    const after=await search();
+    window.__extractFile={done:true,before:before.page.totalRecords,ids:after.page.records.map(row=>row.id)};
+  } catch(error) { window.__extractFile={done:true,error:String(error)}; }
+})();
+return true;
+"#,
+        )?;
+        let extracted = wait_records(
+            app,
+            "return {ready:window.__extractFile?.done,...window.__extractFile};",
+        )?;
+        if extracted["before"] != 0 || extracted["ids"] != serde_json::json!(["kind-image-file"]) {
+            return Err(format!(
+                "file Translate must not index; explicit Extract text must succeed: {extracted}"
+            ));
+        }
+        samples.push(extracted);
         std::fs::write(&file_image, &blank_png).map_err(|_| "fixture image update")?;
+        // Leave and re-enter the clipboard view so it probes mutable file records again.
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .set_record_view(crate::model::RecordView::Translation);
+            apply_translation(app)
+        })?;
+        wait_records(
+            app,
+            "return {ready:!!document.querySelector('.clipboard-panel')?.closest('[hidden]')};",
+        )?;
         records_mode(app, "clipboard")?;
         evaluate_view_dom(
             app,
@@ -7038,14 +8105,116 @@ return {ready:image.includes('Translate')&&image.includes('Extract text')&&image
             .as_ref()
             .ok_or("test database")?
             .clipboard_page("HELLO NAMI", false, None, 100)?;
-        if !saved
-            .records
-            .iter()
-            .any(|record| record.kind == "text" && record.text.contains("HELLO NAMI"))
+        if saved.total_records != 3
+            || !saved
+                .records
+                .iter()
+                .any(|record| record.kind == "text" && record.text.contains("HELLO NAMI"))
+            || !saved
+                .records
+                .iter()
+                .any(|record| record.id == "kind-image-text" && record.text == "Needle image")
+            || !saved
+                .records
+                .iter()
+                .any(|record| record.id == "kind-image-file")
         {
-            return Err("background OCR did not save its recognized text".into());
+            return Err("explicit OCR must find both originals without duplicating the extracted text record".into());
         }
-        samples.push(serde_json::json!({"backgroundOcrSaved":true,"browsedRecordRetained":true}));
+        samples.push(serde_json::json!({"backgroundOcrSaved":true,"browsedRecordRetained":true,"originalImageAndFileSearchable":true,"extractedTextDeduplicated":true}));
+        let version_before_edit = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('.clipboard-panel [data-record-id="kind-image-text"]');
+row?.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:100}));
+return true;
+"#,
+        )?;
+        wait_records(
+            app,
+            r#"
+const item=[...document.querySelectorAll('[role=menuitem]')].find(el=>el.textContent.trim()==='Correct Recognized Text');
+item?.click(); return {ready:!!item};
+"#,
+        )?;
+        samples.push(wait_records(app, r#"
+const area=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] textarea');
+return {ready:area?.value==='HELLO NAMI'&&document.activeElement===area, prefilled:area?.value==='HELLO NAMI'};
+"#)?);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const area=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] textarea');
+Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(area,'Corrected E247\n已核对');
+area.dispatchEvent(new Event('input',{bubbles:true}));
+return true;
+"#,
+        )?;
+        wait_records(
+            app,
+            r#"
+const save=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] button[type=submit]:not(:disabled)');
+save?.click();return {ready:!!save};
+"#,
+        )?;
+        wait_records(
+            app,
+            r#"return {ready:!document.querySelector('[role=dialog][aria-label="Correct Recognized Text"]')};"#,
+        )?;
+        if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version_before_edit {
+            return Err("saving OCR correction modified the pasteboard".into());
+        }
+        {
+            let state = app.state::<AppState>();
+            let lock = state.database.lock().unwrap();
+            let db = lock.as_ref().ok_or("test database")?;
+            let old = db.clipboard_page_filtered("HELLO NAMI", false, Some("image"), None, 10)?;
+            let corrected = db.clipboard_page("已核对", false, None, 10)?;
+            if old.total_records != 0
+                || corrected.total_records != 1
+                || corrected.records[0].id != "kind-image-text"
+            {
+                return Err(
+                    "corrected keywords did not replace the old image search projection".into(),
+                );
+            }
+        }
+        let calls = crate::clipboard_text::VISION_CALLS.load(Ordering::SeqCst);
+        tauri::async_runtime::block_on(crate::clipboard_text::process(
+            app,
+            "kind-image-text".into(),
+            "ocr".into(),
+        ))?;
+        let captured = on_main(app, |_| Ok(crate::platform::read_clipboard(|_| false)?))?;
+        if !captured.is_some_and(|capture| {
+            capture.payload
+                == crate::platform::ClipboardPayload::Text("Corrected E247\n已核对".into())
+        }) {
+            return Err("Extract text did not use the corrected text".into());
+        }
+        records_mode(app, "clipboard")?;
+        wait_records(
+            app,
+            r#"
+const action=document.querySelector('.clipboard-panel [data-record-id="kind-image-text"] [aria-label="Translate"]:not(:disabled):not([aria-hidden=true])');
+action?.click(); return {ready:!!action};
+"#,
+        )?;
+        samples.push(wait_dom(
+            app,
+            r#"
+const source=document.querySelector('.source-input')?.value;
+const dispatched=document.querySelector('.translation-status[role=alert]')?.textContent==='translation_network_disabled_in_tests';
+return {ready:source==='Corrected E247 已核对'&&dispatched,correctedTranslationSource:source,translationAttempted:dispatched};
+"#,
+        )?);
+        if crate::clipboard_text::VISION_CALLS.load(Ordering::SeqCst) != calls {
+            return Err("copying or translating corrected text reran Vision".into());
+        }
+        samples.push(serde_json::json!({"correctedIndex":true,"saveDidNotWritePasteboard":true,"extractedCorrectedText":true,"additionalVisionCalls":0}));
         Ok(())
     })();
     if let Some(database) = original_database {
@@ -7223,11 +8392,12 @@ fn run_history_pagination(app: &AppHandle) -> DomCase {
 }
 
 pub fn start(app: &AppHandle) -> Result<(), String> {
-    if app.config().identifier != "dev.local.nami.ui-tests" {
-        return Err(
-            "native UI tests require the isolated dev.local.nami.ui-tests application identity"
-                .into(),
-        );
+    let identity = app.config().identifier.as_str();
+    let fresh_denial = identity == "dev.local.nami.ui-tests.denial"
+        && std::env::var("NAMI_UI_TEST_CASE").as_deref() == Ok("cross-app")
+        && std::env::var("NAMI_UI_TEST_CROSS_APP").as_deref() == Ok("denied-fresh");
+    if identity != "dev.local.nami.ui-tests" && !fresh_denial {
+        return Err("native UI tests require an isolated test application identity".into());
     }
     let path = std::env::var_os("NAMI_UI_TEST_REPORT").ok_or("test_report_path_missing")?;
     let run_id = std::env::var("NAMI_UI_TEST_RUN_ID").unwrap_or_default();
@@ -7245,9 +8415,11 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-editor",
             "clipboard-media",
             "clipboard-kind-text",
+            "clipboard-image-index",
             "clipboard-details",
             "translation-actions",
             "translation-controls",
+            "translation-partial",
             "translation-settings",
             "unified-records",
             "records-geometry",
@@ -7255,6 +8427,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "records-pagination",
             "records-open",
             "selection-open",
+            "cross-app",
         ]
         .contains(&case.as_str())
         {
@@ -7264,8 +8437,12 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         std::thread::spawn(move || {
             let result = if case == "selection-open" {
                 run_selection_open(&app)
+            } else if case == "cross-app" {
+                run_cross_app(&app)
             } else if case == "records-open" {
                 run_records_open(&app)
+            } else if case == "clipboard-image-index" {
+                run_clipboard_image_index(&app)
             } else if case == "clipboard-kind-text" {
                 run_clipboard_kind_text(&app)
             } else if case == "clipboard-details" {
@@ -7280,6 +8457,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_unified_records(&app)
             } else if case == "translation-controls" {
                 run_right_control_dom(&app)
+            } else if case == "translation-partial" {
+                run_translation_partial(&app)
             } else if case == "translation-settings" {
                 run_translation_settings(&app)
             } else if case == "translation-actions" {

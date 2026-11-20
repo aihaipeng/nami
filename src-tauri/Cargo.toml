@@ -12,7 +12,13 @@ name = "export-history-icons"
 path = "src/bin/export-history-icons.rs"
 required-features = ["ui-tests"]
 
+[[bin]]
+name = "cross-app-fixture"
+path = "src/bin/cross-app-fixture.rs"
+required-features = ["cross-app-fixture"]
+
 [features]
+cross-app-fixture = ["objc2-app-kit/NSResponder", "objc2-app-kit/NSText", "objc2-app-kit/NSTextView"]
 portable-ui = []
 ui-tests = []
 

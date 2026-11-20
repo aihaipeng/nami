@@ -320,6 +320,14 @@ describe('clipboard text processing', () => {
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_has_text' ? ['text-image', 'ordinary-image'].includes((args as { recordId: string }).recordId) : original(name, args));
     await mount('clipboard');
     await waitFor(() => expect(within(row('text-image')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    const local = 'Recognizes text on this Mac without sending the image or text.';
+    const online = 'Sends text to the selected translation service.';
+    expect(within(row('text-image')).getByRole('button', { name: 'Extract text' }).getAttribute('aria-description')).toBe(local);
+    expect(within(row('text-image')).getByRole('button', { name: 'Translate' }).getAttribute('aria-description')).toBe(online);
+    fireEvent.contextMenu(row('text-image'));
+    expect(screen.getByRole('menuitem', { name: 'Extract text' }).getAttribute('aria-description')).toBe(local);
+    expect(screen.getByRole('menuitem', { name: 'Translate' }).getAttribute('aria-description')).toBe(online);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
     expect(actions('first')).toEqual(['Copy', 'Translate', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
     expect(actions('text-image')).toEqual(['Copy', 'Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
@@ -400,6 +408,20 @@ describe('clipboard text processing', () => {
     await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(3));
     expect(calls('clipboard_record_has_text').map(([, args]) => args)).toEqual([{ recordId: 'picture-1' }, { recordId: 'picture-1' }, { recordId: 'picture-2' }]);
     expect(within(row('picture-2')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
+  });
+
+  it('allows explicit extraction from the image menu even after a failed OCR probe', async () => {
+    records = [{ ...records[0], id: 'picture', kind: 'image' }];
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'clipboard_record_has_text') throw new Error('ocr_recognition_failed');
+      return invoke(name, args);
+    });
+    await mount('clipboard');
+    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    fireEvent.contextMenu(row('picture'));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Extract text/ }));
+    await waitFor(() => expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'ocr' }));
   });
 
   it('does not cache recognition failures and retries them when the clipboard view is reopened', async () => {
@@ -631,17 +653,18 @@ describe('database clipboard history', () => {
     fireEvent.contextMenu(row('first'), { clientX: 190, clientY: 200 });
     const menu = screen.getByRole('menu');
     const items = within(menu).getAllByRole('menuitem');
-    expect(items.map((item) => item.textContent)).toEqual(['Paste', 'Translate', 'Favorite', 'Pin record', 'Note', 'Delete']);
+    expect(items.map((item) => item.textContent)).toEqual(['Paste', 'Paste as Plain Text', 'Translate', 'Favorite', 'Pin record', 'Note', 'Delete']);
     expect(items.every((item) => item.children.length === 2)).toBe(true);
-    expect(items[5].classList.contains('clipboard-menu-delete')).toBe(true);
+    expect(items.at(-1)?.classList.contains('clipboard-menu-delete')).toBe(true);
     expect(calls('clipboard_record_use')).toHaveLength(0);
     expect(document.activeElement).toBe(items[0]);
     fireEvent.keyDown(items[0], { key: 'ArrowDown' });
     expect(document.activeElement).toBe(items[1]);
-    fireEvent.click(items[2]);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Favorite' }));
     await waitFor(() => expect(records[0].isFavorite).toBe(true));
     expect(screen.queryByRole('menu')).toBeNull();
     fireEvent.contextMenu(row('pinned'));
+    expect(screen.queryByRole('menuitem', { name: 'Paste as Plain Text' })).toBeNull();
     const remove = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Delete' });
     fireEvent.click(remove);
     await waitFor(() => expect(row('pinned')).toBeNull());
@@ -655,11 +678,57 @@ describe('database clipboard history', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Paste' }));
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'paste' }));
     fireEvent.contextMenu(row('first'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Paste as Plain Text' }));
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'pastePlain' }));
+    fireEvent.contextMenu(row('first'));
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
     fireEvent.contextMenu(row('first'));
     fireEvent.scroll(document.querySelector('.history-list')!);
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('corrects image text without copying, retains a failed edit, and ignores a late empty probe', async () => {
+    records = [{ ...records[0], id: 'picture', kind: 'image' }];
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let completeProbe!: (value: boolean) => void;
+    let fail = true;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'clipboard_record_has_text') return new Promise<boolean>((resolve) => { completeProbe = resolve; });
+      if (name === 'clipboard_record_ocr_text') return 'NAMl-0U-016';
+      if (name === 'clipboard_record_update') {
+        if (fail) throw new Error('storage_unavailable');
+        bridge.listeners.get('clipboard_ocr_corrected')?.forEach((callback) => callback({ payload: 'picture' }));
+        return;
+      }
+      return invoke(name, args);
+    });
+    await mount('clipboard');
+    await waitFor(() => expect(calls('clipboard_record_has_text')).toHaveLength(1));
+    fireEvent.contextMenu(row('picture'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Correct Recognized Text' }));
+    const dialog = screen.getByRole('dialog', { name: 'Correct Recognized Text' });
+    const text = await within(dialog).findByRole('textbox', { name: 'Correct Recognized Text' });
+    const save = within(dialog).getByRole('button', { name: 'Save' });
+    expect(document.activeElement).toBe(text);
+    expect(text).toHaveProperty('value', 'NAMl-0U-016');
+    expect(save).toHaveProperty('disabled', true);
+    fireEvent.change(text, { target: { value: '  ' } });
+    expect(save).toHaveProperty('disabled', true);
+    fireEvent.change(text, { target: { value: 'NAMI-OU-016\n已核对' } });
+    expect(fireEvent.keyDown(text, { key: 'Enter' })).toBe(true);
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    fireEvent.click(save);
+    await within(dialog).findByRole('alert');
+    expect(text).toHaveProperty('value', 'NAMI-OU-016\n已核对');
+    fail = false;
+    fireEvent.keyDown(text, { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'correct_ocr', text: 'NAMI-OU-016\n已核对' });
+    expect(calls('clipboard_record_process')).toHaveLength(0);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    await act(async () => completeProbe(false));
+    expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
   });
 
   it('opens a note card with empty title and full content, saves original text and renders the title', async () => {

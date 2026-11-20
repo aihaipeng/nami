@@ -316,7 +316,15 @@ describe('clipboard details', () => {
   });
 
   it('reestablishes a failed detail subscription on Retry', async () => {
-    vi.mocked(listen).mockRejectedValueOnce(new Error('subscription_failed'));
+    const subscribe = vi.mocked(listen).getMockImplementation()!;
+    let fail = true;
+    vi.mocked(listen).mockImplementation((event, handler, options) => {
+      if (event === 'clipboard_changed' && fail) {
+        fail = false;
+        return Promise.reject(new Error('subscription_failed'));
+      }
+      return subscribe(event, handler, options);
+    });
     direct();
     fireEvent.click(await within(pane()).findByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));

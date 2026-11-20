@@ -32,6 +32,14 @@ impl ImageTextCache {
     }
 }
 
+#[cfg(all(
+    feature = "ui-tests",
+    target_os = "macos",
+    not(feature = "portable-ui")
+))]
+pub(crate) static VISION_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn eligible(record: &ClipboardRecord) -> Result<(), String> {
     if !["text", "image", "files"].contains(&record.kind.as_str()) {
         return Err("invalid_argument".into());
@@ -70,9 +78,33 @@ fn image_bytes(
     nami::clipboard::read_file_preview(std::path::Path::new(&entry.path)).map(Some)
 }
 
-async fn text(app: &AppHandle, id: String) -> Result<(ClipboardRecord, String), String> {
-    let record =
-        clipboard_runtime::database(app, move |database| database.clipboard_record(&id)).await?;
+fn indexing_enabled(state: &AppState, epoch: u64) -> bool {
+    let options = state.clipboard_options.lock().unwrap();
+    options.auto_image_index && state.image_index_epoch.load(Ordering::SeqCst) == epoch
+}
+
+pub(crate) async fn index_image(app: &AppHandle, id: String, epoch: u64) -> Result<(), String> {
+    if !indexing_enabled(&app.state::<AppState>(), epoch) {
+        return Err("cancelled".into());
+    }
+    text(app, id, Some(epoch)).await.map(|_| ())
+}
+
+async fn text(
+    app: &AppHandle,
+    id: String,
+    index_epoch: Option<u64>,
+) -> Result<(ClipboardRecord, String), String> {
+    let (record, persisted) = clipboard_runtime::database(app, move |db| {
+        let record = db.clipboard_record(&id)?;
+        let persisted = if record.kind == "image" {
+            db.clipboard_ocr_text(&id)?
+        } else {
+            None
+        };
+        Ok((record, persisted))
+    })
+    .await?;
     eligible(&record)?;
     if record.kind == "text" {
         return Ok((record.clone(), record.text));
@@ -80,9 +112,23 @@ async fn text(app: &AppHandle, id: String) -> Result<(ClipboardRecord, String), 
     if !platform::capabilities().image_ocr {
         return Err("platform_unavailable".into());
     }
+    if let Some(text) = persisted {
+        return Ok((record, text));
+    }
     let state = app.state::<AppState>();
     // One Vision worker, shared by detection and explicit actions; never hold the database mutex here.
     let mut cache = state.image_text.lock().await;
+    if index_epoch.is_some_and(|epoch| !indexing_enabled(&state, epoch) || record.kind != "image") {
+        return Err("cancelled".into());
+    }
+    if record.kind == "image" {
+        let id = record.id.clone();
+        if let Some(text) =
+            clipboard_runtime::database(app, move |db| db.clipboard_ocr_text(&id)).await?
+        {
+            return Ok((record, text));
+        }
+    }
     let root = clipboard_runtime::image_root(app)?;
     let source = record.clone();
     // File records reference mutable paths; cache by the bytes actually recognized.
@@ -99,19 +145,93 @@ async fn text(app: &AppHandle, id: String) -> Result<(ClipboardRecord, String), 
     let Some((bytes, fingerprint)) = image else {
         return Ok((record, String::new()));
     };
-    if let Some(text) = cache.get(&fingerprint) {
-        return Ok((record, text));
+    let result = if let Some(text) = cache.get(&fingerprint) {
+        text
+    } else {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(all(
+                feature = "ui-tests",
+                target_os = "macos",
+                not(feature = "portable-ui")
+            ))]
+            VISION_CALLS.fetch_add(1, Ordering::SeqCst);
+            platform::recognize_image_text(&bytes)
+        })
+        .await
+        .map_err(|_| "storage_worker")??;
+        cache.insert(fingerprint, result.clone());
+        result
+    };
+    if let Some(epoch) = index_epoch {
+        let _write = state.clipboard_writes.lock().await;
+        if indexing_enabled(&state, epoch) {
+            let (id, fingerprint, text) = (
+                record.id.clone(),
+                record.fingerprint.clone(),
+                result.clone(),
+            );
+            let saved = clipboard_runtime::database(app, move |db| {
+                db.clipboard_index_image(&id, &fingerprint, &text)
+            })
+            .await?;
+            if saved && !result.is_empty() {
+                clipboard_runtime::changed(app)?;
+            }
+        }
     }
-    let result =
-        tauri::async_runtime::spawn_blocking(move || platform::recognize_image_text(&bytes))
-            .await
-            .map_err(|_| "storage_worker")??;
-    cache.insert(fingerprint, result.clone());
     Ok((record, result))
 }
 
 pub(crate) async fn has_text(app: &AppHandle, id: String) -> Result<bool, String> {
-    text(app, id).await.map(|(_, text)| !text.trim().is_empty())
+    text(app, id, None)
+        .await
+        .map(|(_, text)| !text.trim().is_empty())
+}
+
+pub(crate) async fn correction_text(app: &AppHandle, id: String) -> Result<String, String> {
+    let record_id = id.clone();
+    clipboard_runtime::database(app, move |db| {
+        if db.clipboard_record(&record_id)?.kind != "image" {
+            return Err("invalid_argument".into());
+        }
+        Ok(())
+    })
+    .await?;
+    match text(app, id, None).await {
+        Ok((_, text)) => Ok(text),
+        Err(error)
+            if [
+                "ocr_invalid_image",
+                "ocr_image_limit",
+                "ocr_recognition_failed",
+            ]
+            .contains(&error.as_str()) =>
+        {
+            Ok(String::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) async fn correct(app: &AppHandle, id: String, corrected: String) -> Result<(), String> {
+    if !platform::capabilities().image_ocr {
+        return Err("platform_unavailable".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let record_id = id.clone();
+    clipboard_runtime::database(app, move |db| {
+        db.clipboard_correct_image_text(&record_id, &corrected)
+    })
+    .await?;
+    clipboard_runtime::changed(app)?;
+    for label in ["clipboard", "translation"] {
+        if let Some(view) = app.get_webview(label) {
+            view.emit("clipboard_ocr_corrected", &id)
+                .map_err(|_| "event_emit")?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Result<(), String> {
@@ -124,13 +244,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     let translation_revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let session = state.windows.lock().unwrap().records_session;
     on_main(app, |app| crate::records_runtime::protect_result(&app)).await??;
-    let (record, text) = text(app, id).await?;
-    if text.trim().is_empty() {
-        return Err("ocr_no_text".into());
-    }
-    if action == "translate" {
-        nami::translation::validate_text(&text)?;
-    }
+    let (record, text) = text(app, id, None).await?;
     if action == "ocr" && record.kind == "text" {
         return Err("invalid_argument".into());
     }
@@ -138,11 +252,23 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     let record_id = record.id.clone();
     let fingerprint = record.fingerprint.clone();
     let kind = record.kind.clone();
-    clipboard_runtime::database(app, move |database| {
+    let text = clipboard_runtime::database(app, move |database| {
         let current = database.clipboard_record(&record_id)?;
-        revalidate(&current, &kind, &fingerprint)
+        revalidate(&current, &kind, &fingerprint)?;
+        // Corrections can commit while this operation is waiting on Vision or the write lock.
+        Ok(if kind == "image" {
+            database.clipboard_ocr_text(&record_id)?.unwrap_or(text)
+        } else {
+            text
+        })
     })
     .await?;
+    if text.trim().is_empty() {
+        return Err("ocr_no_text".into());
+    }
+    if action == "translate" {
+        nami::translation::validate_text(&text)?;
+    }
     let copied = text.clone();
     let source = record.source_app.clone();
     let background_source = source.clone();
@@ -213,8 +339,9 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             preferences.source_language,
             targets,
             background_source,
-            None,
-            Some(translation_revision),
+            crate::commands::TranslationRunMode::Background {
+                revision: translation_revision,
+            },
         )
         .await?;
         return Ok(());
@@ -232,7 +359,9 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
             image_path: None,
         };
         let saved_id = clipboard_runtime::database(app, move |database| {
-            database.clipboard_insert(&captured).map(|record| record.id)
+            database
+                .clipboard_insert_ocr_result(&record.id, &captured)
+                .map(|record| record.id)
         })
         .await?;
         crate::clipboard_preferences::enforce_history_locked(app).await;

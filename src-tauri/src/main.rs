@@ -51,6 +51,7 @@ pub struct AppState {
     clipboard_writes: tokio::sync::Mutex<()>,
     image_text: tokio::sync::Mutex<clipboard_text::ImageTextCache>,
     image_text_operation: AtomicU64,
+    image_index_epoch: AtomicU64,
     clipboard_translation: Mutex<Option<selection::SelectionContext>>,
     history: Mutex<history::HistoryStore>,
     database: Mutex<Option<database::HistoryDatabase>>,
@@ -65,6 +66,7 @@ pub struct AppState {
     target: Mutex<Option<platform::Target>>,
     operation: AtomicU64,
     translation_revision: AtomicU64,
+    pending_translation: Mutex<Option<commands::PendingTranslation>>,
     translation_engine: Mutex<String>,
     translation_preferences: Mutex<translation::Preferences>,
     shortcuts_suspended: AtomicBool,
@@ -102,6 +104,7 @@ impl Default for AppState {
             clipboard_writes: tokio::sync::Mutex::new(()),
             image_text: tokio::sync::Mutex::new(clipboard_text::ImageTextCache::default()),
             image_text_operation: AtomicU64::new(0),
+            image_index_epoch: AtomicU64::new(0),
             clipboard_translation: Mutex::new(None),
             history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
             database: Mutex::new(None),
@@ -116,6 +119,7 @@ impl Default for AppState {
             target: Mutex::new(None),
             operation: AtomicU64::new(0),
             translation_revision: AtomicU64::new(0),
+            pending_translation: Mutex::new(None),
             translation_engine: Mutex::new("edge".into()),
             translation_preferences: Mutex::new(translation::Preferences::defaults(
                 platform::capabilities().primary_modifier,
@@ -374,11 +378,13 @@ fn main() {
             commands::clipboard_record_detail,
             commands::clipboard_open_target,
             commands::clipboard_record_has_text,
+            commands::clipboard_record_ocr_text,
             commands::clipboard_record_process,
             commands::clipboard_translation_take,
             commands::clipboard_record_update,
             commands::clipboard_recording_type_set,
             clipboard_preferences::clipboard_options_get,
+            clipboard_preferences::clipboard_auto_image_index_set,
             clipboard_preferences::clipboard_excluded_app_pick,
             clipboard_preferences::clipboard_excluded_app_remove,
             clipboard_preferences::clipboard_behavior_set,
@@ -395,6 +401,17 @@ fn main() {
             commands::permission_request,
         ])
         .setup(|app| {
+            #[cfg(feature = "ui-tests")]
+            if app.config().identifier == "dev.local.nami.ui-tests.denial"
+                && !(std::env::var_os("NAMI_UI_TEST_REPORT").is_some()
+                    && std::env::var("NAMI_UI_TEST_CASE").as_deref() == Ok("cross-app")
+                    && std::env::var("NAMI_UI_TEST_CROSS_APP").as_deref() == Ok("denied-fresh"))
+            {
+                return Err(std::io::Error::other(
+                    "isolated denial host requires the cross-app denial smoke",
+                )
+                .into());
+            }
             #[cfg(target_os = "macos")]
             shortcut_capture::install_window_shortcuts(app.handle());
             #[cfg(feature = "ui-tests")]

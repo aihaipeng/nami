@@ -1,5 +1,5 @@
 use super::{ClipboardCapture, ClipboardPayload};
-use nami::clipboard::MAX_FILE_COUNT;
+use nami::clipboard::{ClipboardTextFormatting, MAX_FILE_COUNT, MAX_RICH_TEXT_BYTES};
 use objc2::{
     class, msg_send,
     rc::{Allocated, Retained},
@@ -36,11 +36,19 @@ unsafe fn private(board: *mut AnyObject) -> bool {
 }
 
 unsafe fn bytes(object: *mut AnyObject, kind: &str) -> Result<Option<Vec<u8>>, &'static str> {
+    bounded_bytes(object, kind, LIMIT)
+}
+
+unsafe fn bounded_bytes(
+    object: *mut AnyObject,
+    kind: &str,
+    max: usize,
+) -> Result<Option<Vec<u8>>, &'static str> {
     let kind = NSString::from_str(kind);
     let data: Option<Retained<AnyObject>> = msg_send![object, dataForType: &*kind];
     let Some(data) = data else { return Ok(None) };
     let length: usize = msg_send![&*data, length];
-    if length > LIMIT {
+    if length > max {
         return Err("clipboard_capture_limit");
     }
     let pointer: *const u8 = msg_send![&*data, bytes];
@@ -59,15 +67,19 @@ unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>,
         return Ok(None);
     }
     let objects: Option<Retained<AnyObject>> = msg_send![board, pasteboardItems];
+    let mut single_item = None;
     let mut files = Vec::new();
     let mut total = 0usize;
-    if let Some(objects) = objects {
-        let count: usize = msg_send![&*objects, count];
+    if let Some(objects) = &objects {
+        let count: usize = msg_send![&**objects, count];
         if count > MAX_FILE_COUNT {
             return Err("clipboard_capture_limit");
         }
         for index in 0..count {
-            let item: *mut AnyObject = msg_send![&*objects, objectAtIndex: index];
+            let item: *mut AnyObject = msg_send![&**objects, objectAtIndex: index];
+            if count == 1 {
+                single_item = Some(item);
+            }
             if private(item) {
                 return Ok(None);
             }
@@ -125,7 +137,25 @@ unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>,
         Some(ClipboardPayload::Files(files))
     } else if let Some(bytes) = bytes(board, "public.utf8-plain-text")? {
         let text = String::from_utf8(bytes).map_err(|_| "clipboard_text_encoding")?;
-        (!text.trim().is_empty()).then_some(ClipboardPayload::Text(text))
+        if text.trim().is_empty() {
+            None
+        } else if let Some(item) = single_item {
+            let optional = |kind| match bounded_bytes(item, kind, MAX_RICH_TEXT_BYTES) {
+                Err("clipboard_capture_limit") => Ok(None),
+                other => other.map(|data| data.filter(|bytes| !bytes.is_empty())),
+            };
+            let formatting = ClipboardTextFormatting {
+                html: optional("public.html")?,
+                rtf: optional("public.rtf")?,
+            };
+            Some(if formatting.valid() {
+                ClipboardPayload::RichText { text, formatting }
+            } else {
+                ClipboardPayload::Text(text)
+            })
+        } else {
+            Some(ClipboardPayload::Text(text))
+        }
     } else {
         None
     };
@@ -325,12 +355,25 @@ unsafe fn write(
     let objects: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
     let prepared = (|| -> Result<(), &'static str> {
         match payload {
-            ClipboardPayload::Text(text) => {
+            ClipboardPayload::Text(text) | ClipboardPayload::RichText { text, .. } => {
                 if text.len() > LIMIT || text.trim().is_empty() {
                     return Err("invalid_argument");
                 }
                 let item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
                 set_bytes(&item, "public.utf8-plain-text", text.as_bytes())?;
+                if let ClipboardPayload::RichText { formatting, .. } = payload {
+                    if !formatting.valid() {
+                        return Err("invalid_argument");
+                    }
+                    for (kind, bytes) in [
+                        ("public.html", &formatting.html),
+                        ("public.rtf", &formatting.rtf),
+                    ] {
+                        if let Some(bytes) = bytes {
+                            set_bytes(&item, kind, bytes)?;
+                        }
+                    }
+                }
                 let _: () = msg_send![&*objects, addObject: &*item];
             }
             ClipboardPayload::Image { bytes, extension } => {
@@ -482,6 +525,35 @@ pub fn clipboard_image_preview(bytes: &[u8], max_pixels: u32) -> Result<Vec<u8>,
             return Err("clipboard_image_invalid");
         }
         Ok(std::slice::from_raw_parts(pointer, length).to_vec())
+    }
+}
+
+#[cfg(feature = "ui-tests")]
+pub fn test_rich_text_capture_limit() -> Result<(), String> {
+    unsafe {
+        let name = NSString::from_str(&format!(
+            "dev.local.nami.rich-limit.{}",
+            uuid::Uuid::new_v4()
+        ));
+        let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+        let result = (|| -> Result<(), String> {
+            let _: isize = msg_send![board, clearContents];
+            let data = objc2_foundation::NSData::with_bytes(&vec![b'x'; MAX_RICH_TEXT_BYTES + 1]);
+            let plain = "Synthetic formatting fallback";
+            let plain_value = NSString::from_str(plain);
+            let ok: bool = msg_send![board, setString: &*plain_value, forType: ns_string!("public.utf8-plain-text")];
+            let rich: bool = msg_send![board, setData: &*data, forType: ns_string!("public.html")];
+            if !ok
+                || !rich
+                || read(board)?.map(|(_, payload)| payload)
+                    != Some(ClipboardPayload::Text(plain.into()))
+            {
+                return Err("oversized HTML must fall back to plain text".into());
+            }
+            Ok(())
+        })();
+        let _: () = msg_send![board, releaseGlobally];
+        result
     }
 }
 

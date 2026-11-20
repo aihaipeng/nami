@@ -2,7 +2,7 @@ use super::retention::{candidates, check_cleanup, cleanup_parameters, persist_li
 use super::{storage_error, HistoryDatabase};
 use crate::clipboard::{
     valid_image_name, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage, ClipboardRecord,
-    HistoryPolicy, MAX_FILE_COUNT, MAX_TEXT_BYTES,
+    ClipboardTextFormatting, HistoryPolicy, MAX_FILE_COUNT, MAX_RICH_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::model::RecordView;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
@@ -160,6 +160,107 @@ pub(super) fn migrate_v6(connection: &mut rusqlite::Connection) -> Result<(), St
     tx.commit().map_err(storage_error)
 }
 
+pub(super) fn migrate_v7(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch("CREATE TABLE clipboard_ocr (
+        sequence INTEGER PRIMARY KEY REFERENCES clipboard_records(sequence) ON DELETE CASCADE,
+        search_folded TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE clipboard_ocr_search USING fts5(search_folded,content='clipboard_ocr',content_rowid='sequence',tokenize='trigram case_sensitive 1');
+    CREATE TRIGGER clipboard_ocr_insert AFTER INSERT ON clipboard_ocr BEGIN
+        INSERT INTO clipboard_ocr_search(rowid,search_folded) VALUES(new.sequence,new.search_folded);
+    END;
+    CREATE TRIGGER clipboard_ocr_delete AFTER DELETE ON clipboard_ocr BEGIN
+        INSERT INTO clipboard_ocr_search(clipboard_ocr_search,rowid,search_folded) VALUES('delete',old.sequence,old.search_folded);
+    END;
+    CREATE TRIGGER clipboard_ocr_update AFTER UPDATE OF search_folded ON clipboard_ocr
+    WHEN old.search_folded != new.search_folded BEGIN
+        INSERT INTO clipboard_ocr_search(clipboard_ocr_search,rowid,search_folded) VALUES('delete',old.sequence,old.search_folded);
+        INSERT INTO clipboard_ocr_search(rowid,search_folded) VALUES(new.sequence,new.search_folded);
+    END;
+    PRAGMA user_version=7;")
+    .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
+pub(super) fn migrate_v8(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch(&format!("CREATE TABLE clipboard_text_formatting (
+        sequence INTEGER PRIMARY KEY REFERENCES clipboard_records(sequence) ON DELETE CASCADE,
+        html BLOB CHECK(html IS NULL OR (typeof(html)='blob' AND length(html) BETWEEN 1 AND {MAX_RICH_TEXT_BYTES})),
+        rtf BLOB CHECK(rtf IS NULL OR (typeof(rtf)='blob' AND length(rtf) BETWEEN 1 AND {MAX_RICH_TEXT_BYTES})),
+        CHECK(html IS NOT NULL OR rtf IS NOT NULL)
+    ); PRAGMA user_version=8;")).map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
+fn file_search_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
+pub(super) fn migrate_v9(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    tx.execute_batch("ALTER TABLE clipboard_ocr ADD COLUMN original_text TEXT;
+        CREATE TRIGGER IF NOT EXISTS clipboard_search_update AFTER UPDATE OF search_folded ON clipboard_contents
+        WHEN old.search_folded != new.search_folded BEGIN
+            INSERT INTO clipboard_search(clipboard_search,rowid,search_folded) VALUES('delete',old.sequence,old.search_folded);
+            INSERT INTO clipboard_search(rowid,search_folded) VALUES(new.sequence,new.search_folded);
+        END; PRAGMA user_version=9;").map_err(storage_error)?;
+    {
+        let mut query = tx.prepare("SELECT r.sequence,f.paths FROM clipboard_records r JOIN clipboard_file_representations f USING(sequence) WHERE r.kind='image' AND octet_length(f.paths)<=?1").map_err(storage_error)?;
+        let mut rows = query
+            .query([MAX_TEXT_BYTES as i64])
+            .map_err(storage_error)?;
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            let sequence: i64 = row.get(0).map_err(storage_error)?;
+            let paths: String = row.get(1).map_err(storage_error)?;
+            let Ok(paths) = serde_json::from_str::<Vec<String>>(&paths) else {
+                continue;
+            };
+            let [path] = paths.as_slice() else { continue };
+            if !std::path::Path::new(path).is_absolute() || path.contains('\0') {
+                continue;
+            }
+            tx.execute(
+                "UPDATE clipboard_contents SET search_folded=?2 WHERE sequence=?1",
+                params![sequence, file_search_name(path).to_lowercase()],
+            )
+            .map_err(storage_error)?;
+        }
+    }
+    tx.commit().map_err(storage_error)
+}
+
+fn save_ocr(
+    connection: &Connection,
+    id: &str,
+    fingerprint: Option<&str>,
+    text: &str,
+) -> Result<bool, String> {
+    if text.contains('\0') || text.len() > MAX_TEXT_BYTES {
+        return Err("invalid_argument".into());
+    }
+    let updated = connection.execute(
+        "INSERT INTO clipboard_ocr(sequence,search_folded,original_text)
+         SELECT r.sequence,?3,CASE WHEN r.kind='image' THEN ?4 END
+         FROM clipboard_records r JOIN clipboard_contents c USING(sequence)
+         WHERE r.id=?1 AND (r.kind='image' OR (?2 IS NULL AND r.kind='files' AND json_array_length(c.text)=1))
+         AND (?2 IS NULL OR (r.fingerprint=?2 AND NOT EXISTS (SELECT 1 FROM clipboard_ocr o WHERE o.sequence=r.sequence AND o.original_text IS NOT NULL)))
+         ON CONFLICT(sequence) DO UPDATE SET search_folded=excluded.search_folded,original_text=excluded.original_text",
+        params![id, fingerprint, text.to_lowercase(), text],
+    ).map_err(storage_error)?;
+    Ok(updated != 0)
+}
+
 fn valid_file_representation(
     record: &ClipboardRecord,
     representation: &ClipboardFileRepresentation,
@@ -221,6 +322,22 @@ pub(super) fn ensure_filter_indexes(connection: &rusqlite::Connection) -> Result
         CREATE INDEX IF NOT EXISTS clipboard_kind_favorites ON clipboard_records(kind,is_favorite,is_pinned DESC,created_at DESC,sequence DESC);").map_err(storage_error)
 }
 
+const SEARCH_CANDIDATES: &str =
+    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match
+    UNION ALL SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH :match
+    UNION ALL SELECT rowid FROM clipboard_ocr_search WHERE clipboard_ocr_search MATCH :match";
+const SEARCH_LITERAL: &str = " AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)
+    OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0)
+    OR EXISTS (SELECT 1 FROM clipboard_ocr o WHERE o.sequence=clipboard_records.sequence AND instr(o.search_folded,:needle)>0))";
+// Count across the three projections once, without reading unrelated large bodies for OCR hits.
+const SEARCH_INDEXED_COUNT: &str = "SELECT c.sequence FROM clipboard_search JOIN clipboard_contents c ON c.sequence=clipboard_search.rowid WHERE clipboard_search MATCH :match AND instr(c.search_folded,:needle)>0
+    UNION ALL SELECT t.sequence FROM clipboard_title_search JOIN clipboard_titles t ON t.sequence=clipboard_title_search.rowid WHERE clipboard_title_search MATCH :match AND instr(t.search_folded,:needle)>0
+    UNION ALL SELECT o.sequence FROM clipboard_ocr_search JOIN clipboard_ocr o ON o.sequence=clipboard_ocr_search.rowid WHERE clipboard_ocr_search MATCH :match AND instr(o.search_folded,:needle)>0";
+const SEARCH_SCAN_COUNT: &str =
+    "SELECT sequence FROM clipboard_contents WHERE instr(search_folded,:needle)>0
+    UNION ALL SELECT sequence FROM clipboard_titles WHERE instr(search_folded,:needle)>0
+    UNION ALL SELECT sequence FROM clipboard_ocr WHERE instr(search_folded,:needle)>0";
+
 impl HistoryDatabase {
     pub fn clipboard_page(
         &self,
@@ -262,9 +379,7 @@ impl HistoryDatabase {
         let broad = if indexed {
             let mut probe = self
                 .connection
-                .prepare_cached(
-                    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?1 UNION ALL SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH ?1 LIMIT 1024",
-                )
+                .prepare_cached(&format!("{SEARCH_CANDIDATES} LIMIT 1024"))
                 .map_err(storage_error)?;
             let mut rows = probe.query([&matched]).map_err(storage_error)?;
             let mut count = 0;
@@ -276,11 +391,11 @@ impl HistoryDatabase {
             false
         };
         let search = if needle.is_empty() {
-            ""
+            String::new()
         } else if indexed && !broad {
-            " AND sequence IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match UNION SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH :match) AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0) OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0))"
+            format!(" AND sequence IN ({SEARCH_CANDIDATES}){SEARCH_LITERAL}")
         } else {
-            " AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0) OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0))"
+            SEARCH_LITERAL.to_owned()
         };
         let hint = if broad {
             if kind.is_some() && favorites_only {
@@ -317,13 +432,27 @@ impl HistoryDatabase {
         let total_records = if needle.is_empty() && !favorites_only && kind.is_none() {
             self.clipboard_total_records
         } else {
-            let sql = format!(
-                "SELECT count(*) FROM clipboard_records WHERE 1=1{favorite}{kind_filter}{search}"
-            );
+            let matches = if needle.is_empty() {
+                None
+            } else if indexed {
+                Some(SEARCH_INDEXED_COUNT)
+            } else {
+                Some(SEARCH_SCAN_COUNT)
+            };
+            let mut count_filters = filters.clone();
+            if indexed && broad {
+                count_filters.push((":match", &matched));
+            }
+            let sql = match matches {
+                Some(matches) if !favorites_only && kind.is_none() =>
+                    format!("SELECT count(DISTINCT sequence) FROM ({matches})"),
+                Some(matches) => format!("SELECT count(*) FROM clipboard_records WHERE sequence IN ({matches}){favorite}{kind_filter}"),
+                None => format!("SELECT count(*) FROM clipboard_records WHERE 1=1{favorite}{kind_filter}"),
+            };
             self.connection
                 .prepare_cached(&sql)
                 .map_err(storage_error)?
-                .query_row(filters.as_slice(), |row| row.get::<_, i64>(0))
+                .query_row(count_filters.as_slice(), |row| row.get::<_, i64>(0))
                 .map_err(storage_error)? as usize
         };
         let mut bindings: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
@@ -408,7 +537,65 @@ impl HistoryDatabase {
         record: &ClipboardRecord,
         representation: Option<&ClipboardFileRepresentation>,
     ) -> Result<ClipboardRecord, String> {
-        self.insert_clipboard_record(record, representation, true)
+        self.clipboard_insert_capture(record, representation, None)
+    }
+
+    pub fn clipboard_insert_capture(
+        &mut self,
+        record: &ClipboardRecord,
+        representation: Option<&ClipboardFileRepresentation>,
+        formatting: Option<&ClipboardTextFormatting>,
+    ) -> Result<ClipboardRecord, String> {
+        self.insert_clipboard_record(record, representation, formatting, true, None)
+    }
+
+    pub fn clipboard_text_formatting(
+        &self,
+        id: &str,
+    ) -> Result<Option<ClipboardTextFormatting>, String> {
+        let stored = self.connection.query_row(
+            "SELECT f.html,f.rtf FROM clipboard_text_formatting f JOIN clipboard_records r USING(sequence) WHERE r.id=?1 AND r.kind='text'",
+            [id], |row| Ok(ClipboardTextFormatting { html: row.get(0)?, rtf: row.get(1)? }),
+        ).optional().map_err(storage_error)?;
+        if stored.as_ref().is_some_and(|value| !value.valid()) {
+            return Err("storage_corrupt".into());
+        }
+        Ok(stored)
+    }
+
+    pub fn clipboard_ocr_text(&self, id: &str) -> Result<Option<String>, String> {
+        self.connection.query_row("SELECT o.original_text FROM clipboard_ocr o JOIN clipboard_records r USING(sequence) WHERE r.id=?1 AND r.kind='image' AND o.original_text IS NOT NULL", [id], |row| row.get(0)).optional().map_err(storage_error)
+    }
+
+    pub fn clipboard_index_image(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        save_ocr(&self.connection, id, Some(fingerprint), text)
+    }
+
+    pub fn clipboard_correct_image_text(&mut self, id: &str, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() || self.clipboard_record(id)?.kind != "image" {
+            return Err("invalid_argument".into());
+        }
+        if !save_ocr(&self.connection, id, None, text)? {
+            return Err("not_found".into());
+        }
+        Ok(())
+    }
+
+    /// Saves the existing extracted text record and indexes its source as one change.
+    pub fn clipboard_insert_ocr_result(
+        &mut self,
+        source_id: &str,
+        record: &ClipboardRecord,
+    ) -> Result<ClipboardRecord, String> {
+        if record.kind != "text" || record.text.trim().is_empty() || record.text.contains('\0') {
+            return Err("invalid_argument".into());
+        }
+        self.insert_clipboard_record(record, None, None, true, Some(source_id))
     }
 
     pub fn clipboard_insert_translation_copy(&mut self, text: String) -> Result<(), String> {
@@ -423,18 +610,25 @@ impl HistoryDatabase {
             source_app: Some(serde_json::json!({"name":"Nami"})),
             image_path: None,
         };
-        self.insert_clipboard_record(&record, None, false)
+        self.insert_clipboard_record(&record, None, None, false, None)
             .map(|_| ())
     }
 
     pub fn clipboard_duplicate(&mut self, id: &str) -> Result<(), String> {
         let mut record = self.clipboard_record(id)?;
         let representation = self.clipboard_file_representation(id)?;
+        let formatting = self.clipboard_text_formatting(id)?;
         record.id = uuid::Uuid::new_v4().to_string();
         record.date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         record.is_favorite = false;
         record.is_pinned = false;
-        self.insert_clipboard_record(&record, representation.as_ref(), false)?;
+        self.insert_clipboard_record(
+            &record,
+            representation.as_ref(),
+            formatting.as_ref(),
+            false,
+            None,
+        )?;
         Ok(())
     }
 
@@ -442,11 +636,16 @@ impl HistoryDatabase {
         &mut self,
         record: &ClipboardRecord,
         representation: Option<&ClipboardFileRepresentation>,
+        formatting: Option<&ClipboardTextFormatting>,
         deduplicate: bool,
+        ocr_source_id: Option<&str>,
     ) -> Result<ClipboardRecord, String> {
         if record.id.is_empty()
             || !["text", "image", "files"].contains(&record.kind.as_str())
             || record.text.len() > MAX_TEXT_BYTES
+            || formatting.is_some_and(|value| {
+                record.kind != "text" || record.text.trim().is_empty() || !value.valid()
+            })
             || record.fingerprint.is_empty()
             || chrono::DateTime::parse_from_rfc3339(&record.date).is_err()
             || (record.kind == "image") != record.image_path.is_some()
@@ -479,17 +678,18 @@ impl HistoryDatabase {
             }
             let summary = paths
                 .iter()
-                .map(|path| {
-                    std::path::Path::new(path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(path)
-                })
+                .map(|path| file_search_name(path))
                 .collect::<Vec<_>>()
                 .join("\n");
             (summary, paths.join("\n"))
         } else {
-            (record.text.clone(), record.text.clone())
+            let search = representation
+                .filter(|_| record.kind == "image")
+                .map_or_else(
+                    || record.text.clone(),
+                    |file| file_search_name(&file.paths[0]).to_owned(),
+                );
+            (record.text.clone(), search)
         };
         let summary: String = summary.chars().take(256).collect();
         let source = record
@@ -505,6 +705,11 @@ impl HistoryDatabase {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        if let Some(ocr_source_id) = ocr_source_id {
+            if !save_ocr(&transaction, ocr_source_id, None, &record.text)? {
+                return Err("invalid_argument".into());
+            }
+        }
         let source_id = if let Some(source) = source {
             transaction
                 .execute(
@@ -524,8 +729,10 @@ impl HistoryDatabase {
         } else {
             None
         };
+        let html = formatting.and_then(|value| value.html.as_deref());
+        let rtf = formatting.and_then(|value| value.rtf.as_deref());
         let duplicate: Option<String> = if deduplicate {
-            transaction.query_row("SELECT id FROM clipboard_records WHERE fingerprint=?1 AND kind=?2 AND ((kind='image' AND image_path IS ?4) OR (kind!='image' AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND c.text=?3))) ORDER BY sequence DESC LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path], |row| row.get(0)).optional().map_err(storage_error)?
+            transaction.query_row("SELECT r.id FROM clipboard_records r LEFT JOIN clipboard_text_formatting f USING(sequence) WHERE r.fingerprint=?1 AND r.kind=?2 AND ((r.kind='image' AND r.image_path IS ?4) OR (r.kind!='image' AND EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=r.sequence AND c.text=?3))) AND f.html IS ?5 AND f.rtf IS ?6 ORDER BY r.sequence DESC LIMIT 1", params![record.fingerprint,record.kind,record.text,record.image_path,html,rtf], |row| row.get(0)).optional().map_err(storage_error)?
         } else {
             None
         };
@@ -537,6 +744,9 @@ impl HistoryDatabase {
                     params![record.date, source_id, id, created],
                 )
                 .map_err(storage_error)?;
+            if record.kind == "image" {
+                transaction.execute("UPDATE clipboard_contents SET search_folded=?2 WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1) AND search_folded<>?2", params![id,search_text.to_lowercase()]).map_err(storage_error)?;
+            }
             id
         } else {
             transaction.execute("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,image_path,fingerprint) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![record.id,record.kind,summary,record.date,created,record.is_favorite,record.is_pinned,source_id,record.image_path,record.fingerprint]).map_err(storage_error)?;
@@ -556,6 +766,9 @@ impl HistoryDatabase {
             transaction.execute("INSERT INTO clipboard_file_representations(sequence,paths,image_path) VALUES((SELECT sequence FROM clipboard_records WHERE id=?1),?2,?3) ON CONFLICT(sequence) DO UPDATE SET paths=excluded.paths,image_path=excluded.image_path", params![id,paths,representation.image_path]).map_err(storage_error)?;
         } else {
             transaction.execute("DELETE FROM clipboard_file_representations WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1)", [&id]).map_err(storage_error)?;
+        }
+        if formatting.is_some() && inserted {
+            transaction.execute("INSERT INTO clipboard_text_formatting(sequence,html,rtf) VALUES((SELECT sequence FROM clipboard_records WHERE id=?1),?2,?3)", params![id,html,rtf]).map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)?;
         if inserted {
@@ -646,10 +859,25 @@ impl HistoryDatabase {
             .optional()
             .map_err(storage_error)?
             .ok_or("not_found")?;
-        if let Some(text) = text {
-            if kind != "text" {
-                return Err("invalid_argument".into());
-            }
+        if text.is_some() && kind != "text" {
+            return Err("invalid_argument".into());
+        }
+        let same_text = if let Some(text) = text {
+            tx.query_row(
+                "SELECT text=?2 FROM clipboard_contents WHERE sequence=?1",
+                params![sequence, text],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?
+        } else {
+            false
+        };
+        if let Some(text) = text.filter(|_| !same_text) {
+            tx.execute(
+                "DELETE FROM clipboard_text_formatting WHERE sequence=?1",
+                [sequence],
+            )
+            .map_err(storage_error)?;
             // Delete/insert fires the existing external-content FTS triggers atomically.
             tx.execute(
                 "DELETE FROM clipboard_contents WHERE sequence=?1",
@@ -812,7 +1040,9 @@ impl HistoryDatabase {
                 COALESCE((SELECT sum(octet_length(id)+octet_length(kind)+octet_length(summary)+octet_length(date)+octet_length(title)+octet_length(fingerprint)+COALESCE(octet_length(image_path),0)) FROM clipboard_records),0)
                 + COALESCE((SELECT sum(octet_length(text)+octet_length(search_folded)) FROM clipboard_contents),0)
                 + COALESCE((SELECT sum(octet_length(search_folded)) FROM clipboard_titles),0)
-                + COALESCE((SELECT sum(octet_length(paths)+octet_length(image_path)) FROM clipboard_file_representations),0)",
+                + COALESCE((SELECT sum(octet_length(search_folded)+COALESCE(octet_length(original_text),0)) FROM clipboard_ocr),0)
+                + COALESCE((SELECT sum(octet_length(paths)+octet_length(image_path)) FROM clipboard_file_representations),0)
+                + COALESCE((SELECT sum(COALESCE(length(html),0)+COALESCE(length(rtf),0)) FROM clipboard_text_formatting),0)",
             [], |row| row.get::<_, i64>(0),
         ).map_err(storage_error).and_then(|bytes| u64::try_from(bytes).map_err(|_| "storage_corrupt".into()))
     }
@@ -895,6 +1125,7 @@ impl HistoryDatabase {
             "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
             "clipboard_activation",
+            "clipboard_auto_image_index",
             "records_open_focus",
             "clipboard_preview_lines",
             "translation_preview_lines",
@@ -1226,7 +1457,7 @@ mod tests {
         db.clipboard_edit("preserved", "ÉCOLE 海浪 \"100%_\"", None)
             .unwrap();
         let before = serde_json::to_value(db.clipboard_detail("preserved").unwrap()).unwrap();
-        db.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; PRAGMA user_version=5;").unwrap();
+        db.connection.execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; PRAGMA user_version=5;").unwrap();
         drop(db);
         for _ in 0..2 {
             let db = HistoryDatabase::open(&path).unwrap();
@@ -1314,7 +1545,7 @@ mod tests {
         db.clipboard_update("edit", "favorite").unwrap();
         db.connection
             .execute_batch(
-                "DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
+                "DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; ALTER TABLE clipboard_records DROP COLUMN title; PRAGMA user_version=3;",
             )
             .unwrap();
         drop(db);
@@ -1441,6 +1672,428 @@ mod tests {
     }
 
     #[test]
+    fn rich_text_smoke_reopens_deduplicates_and_clears_only_after_body_changes() {
+        let root = std::env::temp_dir().join(format!("nami-rich-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let legacy = record("legacy", "Same body");
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            db.clipboard_insert(&legacy).unwrap();
+            db.connection
+                .execute_batch("DROP TABLE clipboard_text_formatting; ALTER TABLE clipboard_ocr DROP COLUMN original_text; PRAGMA user_version=7;")
+                .unwrap();
+        }
+        let first = ClipboardTextFormatting {
+            html: Some(b"<b>Same body</b>".to_vec()),
+            rtf: Some(br"{\rtf1\b Same body}".to_vec()),
+        };
+        let second = ClipboardTextFormatting {
+            html: Some(b"<i>Same body</i>".to_vec()),
+            rtf: None,
+        };
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            assert_eq!(db.clipboard_text_formatting("legacy").unwrap(), None);
+            let mut rich = record("first", "Same body");
+            rich.fingerprint = first.fingerprint(&rich.text);
+            assert_ne!(rich.fingerprint, second.fingerprint(&rich.text));
+            assert_eq!(
+                db.clipboard_insert_capture(&rich, None, Some(&first))
+                    .unwrap()
+                    .id,
+                "first"
+            );
+            // Even when hashes collide, exact format bytes are checked.
+            rich.id = "second".into();
+            assert_eq!(
+                db.clipboard_insert_capture(&rich, None, Some(&second))
+                    .unwrap()
+                    .id,
+                "second"
+            );
+            rich.id = "duplicate".into();
+            assert_eq!(
+                db.clipboard_insert_capture(&rich, None, Some(&first))
+                    .unwrap()
+                    .id,
+                "first"
+            );
+        }
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            db.clipboard_text_formatting("first").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            db.clipboard_text_formatting("second").unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            db.clipboard_page("Same body", false, None, 20)
+                .unwrap()
+                .total_records,
+            3
+        );
+        db.clipboard_edit("first", "Note", Some("Same body"))
+            .unwrap();
+        assert_eq!(
+            db.clipboard_text_formatting("first").unwrap(),
+            Some(first.clone())
+        );
+        db.clipboard_duplicate("first").unwrap();
+        let copies = db
+            .clipboard_page("Same body", false, None, 20)
+            .unwrap()
+            .records;
+        let copy = copies
+            .iter()
+            .find(|row| !["legacy", "first", "second"].contains(&row.id.as_str()))
+            .unwrap();
+        assert_eq!(db.clipboard_text_formatting(&copy.id).unwrap(), Some(first));
+        db.clipboard_edit("first", "Note", Some("Edited body"))
+            .unwrap();
+        assert_eq!(db.clipboard_text_formatting("first").unwrap(), None);
+        assert_eq!(db.clipboard_record("first").unwrap().text, "Edited body");
+        db.clipboard_update(&copy.id, "delete").unwrap();
+        assert_eq!(
+            db.connection
+                .query_row(
+                    "SELECT count(*) FROM clipboard_text_formatting",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rich_text_smoke_rejects_oversized_or_empty_attachments_without_writing() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        for html in [
+            None,
+            Some(vec![]),
+            Some(vec![b'x'; MAX_RICH_TEXT_BYTES + 1]),
+        ] {
+            let formatting = ClipboardTextFormatting { html, rtf: None };
+            assert_eq!(
+                db.clipboard_insert_capture(&record("rejected", "Body"), None, Some(&formatting))
+                    .unwrap_err(),
+                "invalid_argument"
+            );
+        }
+        assert_eq!(
+            db.clipboard_page("", false, None, 20)
+                .unwrap()
+                .total_records,
+            0
+        );
+    }
+
+    #[test]
+    fn image_text_correction_replaces_search_and_survives_restart_without_changing_history() {
+        let root =
+            std::env::temp_dir().join(format!("nami-ocr-correction-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let image = image_record("ocr-corrected");
+        let corrected = "NAMI-OU-016\n已核对";
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            db.clipboard_insert(&image).unwrap();
+            let derived = record("previous-extraction", "NAMl-0U-016");
+            db.clipboard_insert_ocr_result(&image.id, &derived).unwrap();
+            db.clipboard_edit(&image.id, "Keep note", None).unwrap();
+            assert!(db
+                .clipboard_correct_image_text(&derived.id, corrected)
+                .is_err());
+            for invalid in [" ", "bad\0text"] {
+                assert!(db.clipboard_correct_image_text(&image.id, invalid).is_err());
+            }
+            assert_eq!(
+                db.clipboard_ocr_text(&image.id).unwrap().as_deref(),
+                Some(derived.text.as_str())
+            );
+            db.clipboard_correct_image_text(&image.id, corrected)
+                .unwrap();
+            assert!(!db
+                .clipboard_index_image(&image.id, &image.fingerprint, &derived.text)
+                .unwrap());
+        }
+        let db = HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            db.clipboard_ocr_text(&image.id).unwrap().as_deref(),
+            Some(corrected)
+        );
+        assert_eq!(db.clipboard_detail(&image.id).unwrap().title, "Keep note");
+        assert_eq!(
+            db.clipboard_record(&image.id).unwrap().image_path,
+            image.image_path
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .total_records,
+            2
+        );
+        assert_eq!(
+            db.clipboard_page("NAMl-0U-016", false, None, 10)
+                .unwrap()
+                .records[0]
+                .id,
+            "previous-extraction"
+        );
+        assert_eq!(
+            db.clipboard_page("已核对", false, None, 10)
+                .unwrap()
+                .records[0]
+                .id,
+            image.id
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_ocr_preserves_legacy_search_and_reuses_exact_results() {
+        let root = std::env::temp_dir().join(format!("nami-ocr-v8-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let image = image_record("ocr-image");
+        let blank = image_record("ocr-blank");
+        let raw = "Mixed CASE E247\n海浪";
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            db.clipboard_insert_with_file_representation(
+                &image,
+                Some(&representation(&image, "ÉCOLE E247.png")),
+            )
+            .unwrap();
+            let mut malformed = image_record("malformed-attachment");
+            malformed.fingerprint.push_str("malformed");
+            db.clipboard_insert_with_file_representation(
+                &malformed,
+                Some(&representation(&malformed, "invalid.png")),
+            )
+            .unwrap();
+            db.connection.execute("UPDATE clipboard_file_representations SET paths='bad JSON' WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1)", [&malformed.id]).unwrap();
+            db.connection.execute_batch("UPDATE clipboard_contents SET search_folded='';
+                INSERT INTO clipboard_ocr(sequence,search_folded) SELECT sequence,'legacy keyword' FROM clipboard_records WHERE id='ocr-image';
+                ALTER TABLE clipboard_ocr DROP COLUMN original_text;
+                DROP TRIGGER clipboard_search_update; PRAGMA user_version=8;").unwrap();
+        }
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            assert_eq!(db.clipboard_ocr_text(&image.id).unwrap(), None);
+            for term in ["legacy keyword", "école e247.png"] {
+                assert_eq!(
+                    db.clipboard_page(term, false, None, 10).unwrap().records[0].id,
+                    image.id
+                );
+            }
+            assert!(!db.clipboard_index_image(&image.id, "stale", raw).unwrap());
+            assert!(db
+                .clipboard_index_image(&image.id, &image.fingerprint, "invalid\0text")
+                .is_err());
+            assert_eq!(db.clipboard_ocr_text(&image.id).unwrap(), None);
+            assert!(db
+                .clipboard_index_image(&image.id, &image.fingerprint, raw)
+                .unwrap());
+            assert!(!db
+                .clipboard_index_image(&image.id, &image.fingerprint, "duplicate")
+                .unwrap());
+            let mut blank = blank.clone();
+            blank.fingerprint.push_str("blank");
+            db.clipboard_insert(&blank).unwrap();
+            assert!(db
+                .clipboard_index_image(&blank.id, &blank.fingerprint, "")
+                .unwrap());
+        }
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            assert_eq!(
+                db.clipboard_ocr_text(&image.id).unwrap().as_deref(),
+                Some(raw)
+            );
+            assert_eq!(
+                db.clipboard_ocr_text(&blank.id).unwrap().as_deref(),
+                Some("")
+            );
+            for term in ["E247", "海浪", "海", "école e247.png"] {
+                let page = db.clipboard_page(term, false, None, 10).unwrap();
+                assert_eq!(page.total_records, 1, "term {term}");
+                assert_eq!(page.records[0].id, image.id);
+            }
+            db.clipboard_update(&image.id, "delete").unwrap();
+            assert_eq!(db.clipboard_ocr_text(&image.id).unwrap(), None);
+            assert!(!db
+                .clipboard_index_image(&image.id, &image.fingerprint, raw)
+                .unwrap());
+            assert_eq!(
+                db.clipboard_page("E247", false, None, 10)
+                    .unwrap()
+                    .total_records,
+                0
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ocr_search_migrates_v6_and_reopens_without_rewriting_originals() {
+        let root = std::env::temp_dir().join(format!("nami-ocr-v6-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let image = image_record("image");
+        let extracted = record("extracted", "OCR \"ÉCOLE\" 海浪");
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            db.clipboard_insert(&image).unwrap();
+            db.clipboard_edit("image", "OCR title", None).unwrap();
+            db.clipboard_update("image", "favorite").unwrap();
+            db.clipboard_insert(&extracted).unwrap();
+            db.connection.execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; PRAGMA user_version=6;").unwrap();
+        }
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            assert_eq!(
+                db.clipboard_page("ocr", false, None, 20)
+                    .unwrap()
+                    .total_records,
+                2
+            );
+            assert_eq!(
+                db.clipboard_page_filtered("école", false, Some("image"), None, 20)
+                    .unwrap()
+                    .total_records,
+                0
+            );
+            assert_eq!(
+                db.clipboard_insert_ocr_result("image", &record("repeat", &extracted.text))
+                    .unwrap()
+                    .id,
+                "extracted"
+            );
+            let first = db.clipboard_page("ocr", false, None, 1).unwrap();
+            let next = db
+                .clipboard_page("ocr", false, first.cursor.as_ref(), 1)
+                .unwrap();
+            assert_eq!(first.total_records, 2);
+            assert_eq!(next.records.len(), 1);
+            assert_ne!(first.records[0].id, next.records[0].id);
+        }
+        {
+            let mut db = HistoryDatabase::open(&path).unwrap();
+            for query in ["\"éCoLe\"", "海浪"] {
+                let page = db
+                    .clipboard_page_filtered(query, true, Some("image"), None, 20)
+                    .unwrap();
+                assert_eq!(page.total_records, 1);
+                assert_eq!(page.records[0].id, "image");
+                assert!(page.records[0].text.is_empty());
+            }
+            let original = db.clipboard_record("image").unwrap();
+            assert_eq!(original.fingerprint, image.fingerprint);
+            assert_eq!(original.image_path, image.image_path);
+            assert_eq!(db.clipboard_detail("image").unwrap().title, "OCR title");
+            db.clipboard_update("image", "delete").unwrap();
+        }
+        {
+            let db = HistoryDatabase::open(&path).unwrap();
+            let page = db.clipboard_page("école", false, None, 20).unwrap();
+            assert_eq!(page.total_records, 1);
+            assert_eq!(page.records[0].id, "extracted");
+            assert_eq!(db.connection.query_row("SELECT count(*) FROM clipboard_ocr_search WHERE clipboard_ocr_search MATCH 'école'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ocr_search_replaces_single_file_snapshot_and_cascades_on_cleanup() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let paths = serde_json::to_string(&[file_path("sample.png")]).unwrap();
+        let mut file = record("file", &paths);
+        file.kind = "files".into();
+        db.clipboard_insert(&file).unwrap();
+        let before = db.clipboard_storage_bytes().unwrap();
+        for (id, text) in [("old", "Old wording"), ("new", "New wording")] {
+            db.clipboard_insert_ocr_result("file", &record(id, text))
+                .unwrap();
+        }
+        for (query, count) in [("old wording", 0), ("new wording", 1), ("sample.png", 1)] {
+            assert_eq!(
+                db.clipboard_page_filtered(query, false, Some("files"), None, 20)
+                    .unwrap()
+                    .total_records,
+                count
+            );
+        }
+        assert_eq!(db.clipboard_record("file").unwrap().text, paths);
+        assert!(db.clipboard_storage_bytes().unwrap() > before);
+        let token = db
+            .records_cleanup_preview(RecordView::Clipboard, None)
+            .unwrap()
+            .token;
+        assert_eq!(db.clipboard_cleanup(None, 1, Some(&token)).unwrap().0, 3);
+        assert_eq!(db.clipboard_storage_bytes().unwrap(), 0);
+        assert_eq!(db.connection.query_row("SELECT count(*) FROM clipboard_ocr_search WHERE clipboard_ocr_search MATCH 'wording'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn ocr_search_rejects_invalid_input_and_rolls_back_if_extracted_text_cannot_be_saved() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        db.clipboard_insert(&image_record("image")).unwrap();
+        db.clipboard_insert(&record("text", "Existing text"))
+            .unwrap();
+        let mut files = record(
+            "multiple",
+            &serde_json::to_string(&[file_path("a.png"), file_path("b.png")]).unwrap(),
+        );
+        files.kind = "files".into();
+        db.clipboard_insert(&files).unwrap();
+        for id in ["missing", "text", "multiple"] {
+            assert_eq!(
+                db.clipboard_insert_ocr_result(id, &record("new", "Rejected wording"))
+                    .unwrap_err(),
+                "invalid_argument"
+            );
+        }
+        for text in [" \n", "bad\0text", &"x".repeat(MAX_TEXT_BYTES + 1)] {
+            assert_eq!(
+                db.clipboard_insert_ocr_result("image", &record("new", text))
+                    .unwrap_err(),
+                "invalid_argument"
+            );
+        }
+        db.clipboard_insert_ocr_result("image", &record("first", "Previous wording"))
+            .unwrap();
+        assert!(db
+            .clipboard_insert_ocr_result("image", &record("first", "Rejected wording"))
+            .is_err());
+        assert_eq!(
+            db.clipboard_page("rejected wording", false, None, 20)
+                .unwrap()
+                .total_records,
+            0
+        );
+        assert_eq!(
+            db.clipboard_page("previous wording", false, None, 20)
+                .unwrap()
+                .total_records,
+            2
+        );
+        assert_eq!(
+            db.clipboard_page("", false, None, 20)
+                .unwrap()
+                .total_records,
+            4
+        );
+    }
+
+    #[test]
     fn file_representations_migrate_v4_without_changing_records_and_reopen() {
         let root = std::env::temp_dir().join(format!("nami-files-v4-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1459,7 +2112,7 @@ mod tests {
         files.kind = "files".into();
         db.clipboard_insert(&files).unwrap();
         db.connection
-            .execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP INDEX clipboard_image_resources; PRAGMA user_version=4;")
             .unwrap();
         drop(db);
 
@@ -1662,8 +2315,27 @@ mod tests {
                 .total_records,
             1
         );
+        assert_eq!(
+            db.clipboard_page("replacement.png", false, None, 10)
+                .unwrap()
+                .records[0]
+                .id,
+            "image"
+        );
+        assert_eq!(
+            db.clipboard_page("original.png", false, None, 10)
+                .unwrap()
+                .total_records,
+            0
+        );
         assert_eq!(db.clipboard_insert(&duplicate).unwrap().id, "image");
         assert_eq!(db.clipboard_file_representation("image").unwrap(), None);
+        assert_eq!(
+            db.clipboard_page("replacement.png", false, None, 10)
+                .unwrap()
+                .total_records,
+            0
+        );
     }
 
     #[test]
@@ -1854,7 +2526,7 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join("test.sqlite3");
             let mut db = HistoryDatabase::open(&path).unwrap();
-            db.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
+            db.connection.execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences;").unwrap();
             migrate(&mut db.connection).unwrap();
             let source =
                 serde_json::json!({"name":"Synthetic","iconDataUrl":"data:image/png;base64,test"})
@@ -2226,7 +2898,7 @@ mod tests {
             serde_json::json!({"p50Ms":times[times.len()/2],"p95Ms":times[times.len()*95/100],"samples":times.len()})
         }
         let mut reports = Vec::new();
-        for size in [10_000, 100_000] {
+        for size in [10_000usize, 100_000] {
             let directory = std::env::temp_dir()
                 .join(format!("nami-clipboard-benchmark-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&directory).unwrap();
@@ -2239,7 +2911,8 @@ mod tests {
                     .unwrap();
                 let source_id = tx.last_insert_rowid();
                 let mut metadata=tx.prepare("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,fingerprint,image_path) VALUES(?1,?7,?2,'2026-11-15T00:00:00Z',?3,?4,?5,?6,?1,?8)").unwrap();
-                let mut contents=tx.prepare("INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?2)").unwrap();
+                let mut contents=tx.prepare("INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?3)").unwrap();
+                let mut ocr=tx.prepare("INSERT INTO clipboard_ocr(sequence,search_folded,original_text) VALUES(?1,?2,?3)").unwrap();
                 let mut representations=tx.prepare("INSERT INTO clipboard_file_representations(sequence,paths,image_path) VALUES(?1,?2,?3)").unwrap();
                 let image_path = format!("origin/00/{}.png", "0".repeat(64));
                 let image_files =
@@ -2255,7 +2928,7 @@ mod tests {
                         .execute(params![
                             format!("item-{index}"),
                             text.chars().take(256).collect::<String>(),
-                            index,
+                            index as i64,
                             index % 10 == 0,
                             index % 1000 == 0,
                             source_id,
@@ -2264,8 +2937,17 @@ mod tests {
                         ])
                         .unwrap();
                     let sequence = tx.last_insert_rowid();
-                    contents.execute(params![sequence, text]).unwrap();
+                    contents
+                        .execute(params![
+                            sequence,
+                            text,
+                            if image { "benchmark-image.png" } else { &text }
+                        ])
+                        .unwrap();
                     if image {
+                        let raw = format!("OCR-Token-{index:06} 海浪\nStatus code E247");
+                        ocr.execute(params![sequence, raw.to_lowercase(), raw])
+                            .unwrap();
                         representations
                             .execute(params![sequence, image_files, image_path])
                             .unwrap();
@@ -2273,6 +2955,7 @@ mod tests {
                 }
                 drop(metadata);
                 drop(contents);
+                drop(ocr);
                 drop(representations);
                 tx.commit().unwrap();
             }
@@ -2288,6 +2971,10 @@ mod tests {
                 ("favoriteText", "", true, Some("text")),
                 ("image", "", false, Some("image")),
                 ("broadText", "common", false, Some("text")),
+                ("ocrUnique", "ocr-token-000007", false, None),
+                ("ocrBroad", "e247", false, None),
+                ("ocrShort", "海浪", false, None),
+                ("imageName", "benchmark-image.png", false, None),
             ] {
                 let mut times = Vec::new();
                 for _ in 0..30 {
@@ -2295,6 +2982,11 @@ mod tests {
                     let page = db
                         .clipboard_page_filtered(query, favorite, kind, None, 100)
                         .unwrap();
+                    if label == "ocrUnique" {
+                        assert_eq!(page.total_records, 1);
+                    } else if matches!(label, "ocrBroad" | "ocrShort" | "imageName") {
+                        assert_eq!(page.total_records, size.div_ceil(7));
+                    }
                     let _json = serde_json::to_vec(&page).unwrap();
                     times.push(started.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -2335,7 +3027,7 @@ mod tests {
             drop(db);
             std::fs::remove_dir_all(directory).unwrap();
         }
-        let report = serde_json::json!({"scope":"isolated synthetic clipboard with one image+file representation per seven rows; database+summary JSON, not click-to-frame or physical disk cold start","runs":reports});
+        let report = serde_json::json!({"scope":"isolated synthetic clipboard with one indexed image+file representation per seven rows; database+summary JSON, not click-to-frame or physical disk cold start","runs":reports});
         let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/clipboard-benchmark.json");
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         println!("{report}");
@@ -2778,7 +3470,7 @@ mod tests {
             source_app: None,
         };
         database.insert(&translation, "edge", || true).unwrap();
-        database.connection.execute_batch("DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
+        database.connection.execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
         database
             .connection
             .execute(

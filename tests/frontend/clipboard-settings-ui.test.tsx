@@ -376,6 +376,7 @@ describe('clipboard privacy, retention and behavior', () => {
       if (name === 'clipboard_options_get') return {
         excludedApps: apps,
         activation: 'paste',
+        autoImageIndex: false,
       };
       if (name === 'clipboard_excluded_app_pick') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }, { bundleId: 'com.example.synthetic', name: 'Synthetic App' }];
       if (name === 'clipboard_excluded_app_remove') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }];
@@ -400,6 +401,33 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(within(types).getAllByRole('checkbox')).toHaveLength(3);
     expect(within(types).queryByRole('switch')).toBeNull();
     expect(screen.getByRole('heading', { level: 2, name: 'Excluded Apps' })).toBeTruthy();
+  });
+
+  it('opts into on-device image indexing, only updates on success and can disable it', async () => {
+    await openSettings();
+    const index = screen.getByRole('checkbox', { name: 'Index image text automatically' });
+    expect(index).toHaveProperty('checked', false);
+    expect(screen.getByText(/stored locally for search and is not uploaded/)).toBeTruthy();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let fail = true;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'clipboard_auto_image_index_set') {
+        if (fail) throw new Error('storage_unavailable');
+        return;
+      }
+      return invoke(name, args);
+    });
+    fireEvent.click(index);
+    await screen.findByRole('alert');
+    expect(index).toHaveProperty('checked', false);
+    fail = false;
+    fireEvent.click(index);
+    await waitFor(() => expect(index).toHaveProperty('checked', true));
+    fireEvent.click(index);
+    await waitFor(() => expect(index).toHaveProperty('checked', false));
+    expect(calls('clipboard_auto_image_index_set').map(([, args]) => args)).toEqual([{
+      enabled: true,
+    }, { enabled: true }, { enabled: false }]);
   });
 
   it('opens a one-line tip without a confirmation button and keeps keyboard focus on its trigger', async () => {
