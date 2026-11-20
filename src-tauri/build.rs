@@ -43,7 +43,6 @@ fn main() {
             "clipboard_capture_set",
             "clipboard_recording_type_set",
             "clipboard_options_get",
-            "clipboard_auto_image_index_set",
             "clipboard_excluded_app_pick",
             "clipboard_excluded_app_remove",
             "clipboard_behavior_set",

@@ -197,17 +197,17 @@ pub(crate) fn start(app: &AppHandle) {
     state
         .clipboard_version
         .store(platform::clipboard_version(), Ordering::SeqCst);
-    let (index_tx, mut index_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u64)>();
+    let (index_tx, mut index_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     if platform::capabilities().image_ocr {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some((id, epoch)) = index_rx.recv().await {
-                let result = crate::clipboard_text::index_image(&app, id.clone(), epoch).await;
+            while let Some(id) = index_rx.recv().await {
+                let result = crate::clipboard_text::index_image(&app, id.clone()).await;
                 app.state::<AppState>()
                     .image_index_jobs
                     .lock()
                     .unwrap()
-                    .finish(id, Some(epoch), &result);
+                    .finish(id, &result);
                 let _ = changed(&app);
             }
         });
@@ -285,9 +285,7 @@ pub(crate) fn start(app: &AppHandle) {
             let captured_version = capture.version;
             let types = *state.clipboard_recording_types.lock().unwrap();
             let worker = app.clone();
-            let index_epoch = (platform::capabilities().image_ocr
-                && state.clipboard_options.lock().unwrap().auto_image_index)
-                .then(|| state.image_index_epoch.load(Ordering::SeqCst));
+            let auto_index = platform::capabilities().image_ocr;
             let result = tauri::async_runtime::spawn_blocking(move || {
                 let mut index_job = Ok(None);
                 let saved = persist_capture_with(
@@ -304,7 +302,7 @@ pub(crate) fn start(app: &AppHandle) {
                         let persisted =
                             db.clipboard_insert_capture(record, representation, formatting)?;
                         // OCR lookup happens after commit; its failure must not trigger image cleanup.
-                        index_job = pending_image_index(db, persisted, index_epoch);
+                        index_job = pending_image_index(db, persisted, auto_index);
                         Ok(())
                     },
                 )?;
@@ -316,14 +314,9 @@ pub(crate) fn start(app: &AppHandle) {
             if matches!(result, Ok((true, _))) {
                 crate::clipboard_preferences::enforce_history_locked(&app).await;
             }
-            if let Ok((_, Some((id, epoch)))) = &result {
-                if state
-                    .image_index_jobs
-                    .lock()
-                    .unwrap()
-                    .start(id, Some(*epoch))
-                {
-                    let _ = index_tx.send((id.clone(), *epoch));
+            if let Ok((_, Some(id))) = &result {
+                if state.image_index_jobs.lock().unwrap().start(id) {
+                    let _ = index_tx.send(id.clone());
                 }
             }
             drop(_write);
@@ -349,15 +342,15 @@ pub(crate) fn start(app: &AppHandle) {
 fn pending_image_index(
     db: &HistoryDatabase,
     saved: ClipboardRecord,
-    index_epoch: Option<u64>,
-) -> Result<Option<(String, u64)>, String> {
-    let Some(epoch) = index_epoch.filter(|_| saved.kind == "image") else {
+    auto_index: bool,
+) -> Result<Option<String>, String> {
+    if !auto_index || saved.kind != "image" {
         return Ok(None);
-    };
+    }
     Ok(db
         .clipboard_ocr_text(&saved.id)?
         .is_none()
-        .then_some((saved.id, epoch)))
+        .then_some(saved.id))
 }
 
 fn capture_error(app: &AppHandle, error: &str) {
@@ -573,7 +566,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recopy_queues_only_unindexed_images_when_enabled() {
+    fn recopy_queues_only_unindexed_images() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let mut image = ClipboardRecord {
             id: "original".into(),
@@ -587,12 +580,12 @@ mod tests {
             fingerprint: "fixture".into(),
         };
         let original = db.clipboard_insert_capture(&image, None, None).unwrap();
-        assert_eq!(pending_image_index(&db, original, None).unwrap(), None);
+        assert_eq!(pending_image_index(&db, original, false).unwrap(), None);
         image.id = "recopy".into();
         let recopy = db.clipboard_insert_capture(&image, None, None).unwrap();
         assert_eq!(
-            pending_image_index(&db, recopy.clone(), Some(7)).unwrap(),
-            Some(("original".into(), 7))
+            pending_image_index(&db, recopy.clone(), true).unwrap(),
+            Some("original".into())
         );
         assert_eq!(
             db.clipboard_page("", false, None, 100)
@@ -608,7 +601,7 @@ mod tests {
                 db.clipboard_correct_image_text("original", text).unwrap();
             }
             assert_eq!(
-                pending_image_index(&db, recopy.clone(), Some(8)).unwrap(),
+                pending_image_index(&db, recopy.clone(), true).unwrap(),
                 None
             );
             assert_eq!(

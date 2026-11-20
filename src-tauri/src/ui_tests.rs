@@ -2296,11 +2296,10 @@ return {ready:true,helpVisible:true,height};
         )?;
         samples.push(wait_view_dom(app, "settings", r#"
 const types=[...document.querySelectorAll('.clipboard-recording-types .settings-checkbox')];
-const index=document.querySelector('input[aria-labelledby="clipboard-image-index-heading"]');
-if(types.length!==3||!index)return {ready:false};
-const right=index.getBoundingClientRect().right, recordingRight=types.map(box=>box.getBoundingClientRect().right);
+if(types.length!==3||document.querySelector('#clipboard-image-index-heading')||document.querySelector('[aria-label="Index image text automatically"]'))return {ready:false};
+const right=types[0].getBoundingClientRect().right, recordingRight=types.map(box=>box.getBoundingClientRect().right);
 if(recordingRight.some(value=>Math.abs(value-right)>0.25))throw Error(`clipboard checkboxes must share a right edge: ${recordingRight} vs ${right}`);
-return {ready:true,recordingRight,indexRight:right};
+return {ready:true,recordingRight};
 "#)?);
         let state = app.state::<AppState>();
         {
@@ -2600,11 +2599,10 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   window.clipboardSettingsProbe.stage='options';
   const defaults=await invoke('clipboard_options_get');
   if(defaults.activation!=='paste'||defaults.historyPolicy.limit!==500||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
-  if(defaults.autoImageIndex!==true)throw Error('automatic image OCR is not on by default');
-  for (const enabled of [false,true]) {
-    await invoke('clipboard_auto_image_index_set',{enabled});
-    if((await invoke('clipboard_options_get')).autoImageIndex!==enabled)throw Error('image index setting did not update');
-  }
+  if('autoImageIndex' in defaults)throw Error('retired image index option is still exposed');
+  let retiredImageIndex=false;
+  try {await invoke('clipboard_auto_image_index_set',{enabled:false});} catch (_) {retiredImageIndex=true;}
+  if(!retiredImageIndex)throw Error('retired image index command is still callable');
   await invoke('clipboard_behavior_set',{activation:'copy'});
   if((await invoke('clipboard_options_get')).activation!=='copy')throw Error('copy preference did not update');
   const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
@@ -6975,7 +6973,7 @@ fn clipboard_text_image(
 fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
     use std::time::Instant;
 
-    use crate::{clipboard_preferences::set_auto_image_index, clipboard_text::VISION_CALLS};
+    use crate::clipboard_text::VISION_CALLS;
     let mut samples = Vec::new();
     let mut media = Vec::new();
     let directory = std::env::temp_dir().join(format!("nami-index-{}", uuid::Uuid::new_v4()));
@@ -6984,14 +6982,6 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
         let path = directory.join("history.sqlite3");
         let database = crate::database::HistoryDatabase::open(&path)?;
-        if !crate::clipboard_preferences::ClipboardOptions::load(&database)?.auto_image_index {
-            return Err("automatic OCR must default to on".into());
-        }
-        let mut database = database;
-        database.preference_set("clipboard_auto_image_index", "false")?;
-        if crate::clipboard_preferences::ClipboardOptions::load(&database)?.auto_image_index {
-            return Err("explicit opt-out was overridden".into());
-        }
         *state.database.lock().unwrap() = Some(database);
         on_main(app, |app| {
             crate::clipboard_runtime::start(app);
@@ -7007,8 +6997,6 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             .into_owned();
         let mut expected_count = 0;
         let mut pending = Vec::new();
-        let mut retry_fixture = None;
-        let mut recopy_fixture = None;
         let mut capture = |payload| -> Result<_, String> {
             let started = Instant::now();
             let version = on_main(app, move |_| {
@@ -7045,57 +7033,42 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             })
         };
         let mut last_version = 0;
-        for enabled in [false, true] {
-            tauri::async_runtime::block_on(set_auto_image_index(app, enabled))?;
-            let inputs = (0..8)
-                .map(|index| {
-                    let label = format!("Nami Error E247 海浪 Capture {index}");
-                    fixture(label, format!("{nonce} {enabled} {index}")).map(|bytes| {
-                        crate::platform::ClipboardPayload::Image {
-                            bytes,
-                            extension: "png".into(),
-                        }
-                    })
+        let inputs = (0..8)
+            .map(|index| {
+                let label = format!("Nami Error E247 海浪 Capture {index}");
+                fixture(label, format!("{nonce} {index}")).map(|bytes| {
+                    crate::platform::ClipboardPayload::Image {
+                        bytes,
+                        extension: "png".into(),
+                    }
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            for payload in inputs {
-                let (record, started, version) = capture(payload)?;
-                last_version = version;
-                let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
-                samples.push(
-                    serde_json::json!({"phase":"capture", "enabled":enabled, "ms":capture_ms}),
-                );
-                if enabled {
-                    // Observe each job concurrently with the next capture, not after the whole burst.
-                    let app = app.clone();
-                    pending.push(std::thread::spawn(move || -> Result<_, String> {
-                        loop {
-                            let lock = app.state::<AppState>();
-                            let db = lock.database.lock().unwrap();
-                            if let Some(text) = db
-                                .as_ref()
-                                .ok_or("test database")?
-                                .clipboard_ocr_text(&record.id)?
-                            {
-                                return Ok((
-                                    record.id,
-                                    text,
-                                    started.elapsed().as_secs_f64() * 1000.0,
-                                ));
-                            }
-                            drop(db);
-                            if started.elapsed() > Duration::from_secs(10) {
-                                return Err("automatic OCR timed out".into());
-                            }
-                            std::thread::sleep(Duration::from_millis(8));
-                        }
-                    }));
-                } else if retry_fixture.is_none() {
-                    retry_fixture = Some(record);
-                } else if recopy_fixture.is_none() {
-                    recopy_fixture = Some(record);
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for payload in inputs {
+            let (record, started, version) = capture(payload)?;
+            last_version = version;
+            let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
+            samples.push(serde_json::json!({"phase":"capture", "ms":capture_ms}));
+            // Observe each job concurrently with the next capture, not after the whole burst.
+            let app = app.clone();
+            pending.push(std::thread::spawn(move || -> Result<_, String> {
+                loop {
+                    let lock = app.state::<AppState>();
+                    let db = lock.database.lock().unwrap();
+                    if let Some(text) = db
+                        .as_ref()
+                        .ok_or("test database")?
+                        .clipboard_ocr_text(&record.id)?
+                    {
+                        return Ok((record.id, text, started.elapsed().as_secs_f64() * 1000.0));
+                    }
+                    drop(db);
+                    if started.elapsed() > Duration::from_secs(10) {
+                        return Err("automatic OCR timed out".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(8));
                 }
-            }
+            }));
         }
         let mut ids = Vec::new();
         let mut chinese_hits = 0;
@@ -7115,7 +7088,7 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             ));
         }
         let photo = directory.join("Fixture E247 海浪.png");
-        let photo_bytes = fixture("Nami Error E247 海浪 Image File".into(), nonce)?;
+        let photo_bytes = fixture("Nami Error E247 海浪 Image File".into(), nonce.clone())?;
         let dimensions = crate::platform::image_dimensions(&photo_bytes)?;
         std::fs::write(&photo, &photo_bytes).map_err(|error| error.to_string())?;
         let (file, _, _) = capture(crate::platform::ClipboardPayload::Files(vec![photo
@@ -7155,27 +7128,15 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             return Err("automatic OCR modified the pasteboard".into());
         }
         state.clipboard_enabled.store(false, Ordering::SeqCst);
-        let old_epoch = state.image_index_epoch.load(Ordering::SeqCst);
-        tauri::async_runtime::block_on(set_auto_image_index(app, false))?;
         {
             let mut lock = state.database.lock().unwrap();
             drop(lock.take());
             let db = crate::database::HistoryDatabase::open(&path)?;
             let all = db.clipboard_page("", false, None, 100)?;
-            if all.total_records != 18 || all.records.iter().any(|record| record.kind != "image") {
+            if all.total_records != 10 || all.records.iter().any(|record| record.kind != "image") {
                 return Err(
                     "automatic OCR inserted a derived text record or lost a capture".into(),
                 );
-            }
-            if all
-                .records
-                .iter()
-                .filter(|record| {
-                    !ids.contains(&record.id) && record.id != file.id && record.id != blank.id
-                })
-                .any(|record| !matches!(db.clipboard_ocr_text(&record.id), Ok(None)))
-            {
-                return Err("enabling automatic OCR backfilled a prior capture".into());
             }
             for (term, count) in [("fixture e247 海浪.png", 1), ("e247", 9)] {
                 let result = db.clipboard_page(term, false, None, 100)?;
@@ -7273,19 +7234,38 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         {
             return Err("single-image indexing accepted a text record".into());
         }
-        let retry = retry_fixture.ok_or("missing retry fixture")?;
         let root = crate::clipboard_runtime::image_root(app)?;
-        let image = root.join(retry.image_path.ok_or("missing retry fixture image")?);
+        let retry_bytes = fixture(
+            "Nami Error E247 海浪 Retry".into(),
+            format!("{nonce} retry"),
+        )?;
+        let retry_image = nami::clipboard::store_image(&root, &retry_bytes, "png")?;
+        media.push(retry_image.clone());
+        let retry = state
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("test database")?
+            .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: format!("synthetic-retry-{nonce}"),
+                kind: "image".into(),
+                text: String::new(),
+                date: "2026-11-20T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: Some(retry_image),
+                fingerprint: nami::clipboard::fingerprint("image", &retry_bytes),
+            })?;
+        let image = root.join(
+            retry
+                .image_path
+                .clone()
+                .ok_or("missing retry fixture image")?,
+        );
         let saved = directory.join("retry-image.png");
-        if tauri::async_runtime::block_on(crate::clipboard_text::index_image(
-            app,
-            retry.id.clone(),
-            old_epoch,
-        )) != Err("cancelled".into())
-        {
-            return Err("disabled epoch did not cancel a queued task".into());
-        }
-        // Exercise a single old image through the real IPC while automatic indexing is off.
+        // Exercise an unindexed historical image through the real IPC.
         on_main(app, |app| show(app, "translation"))?;
         wait_dom(app, "return {ready:!!window.__TAURI_INTERNALS__?.invoke};")?;
         let index = |key: &str| -> Result<serde_json::Value, String> {
@@ -7338,7 +7318,7 @@ window.__indexProbe=null;
                     .records
                     .iter()
                     .any(|record| record.id == retry.id)
-                || db.clipboard_page("", false, None, 100)?.total_records != 19
+                || db.clipboard_page("", false, None, 100)?.total_records != 12
                 || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != before
                 || VISION_CALLS.load(Ordering::SeqCst) != calls + 1
             {
@@ -7346,7 +7326,6 @@ window.__indexProbe=null;
             }
             samples.push(serde_json::json!({"phase":"single-image-retry-through-ipc","retryVisionCalls":1,"clipboardPreserved":true,"noDerivedRecord":true}));
         }
-        let recopy = recopy_fixture.ok_or("missing unindexed recopy fixture")?;
         state
             .database
             .lock()
@@ -7354,7 +7333,29 @@ window.__indexProbe=null;
             .as_mut()
             .ok_or("test database")?
             .clipboard_correct_image_text(&retry.id, "Corrected retry fixture")?;
-        tauri::async_runtime::block_on(set_auto_image_index(app, true))?;
+        let recopy_bytes = fixture(
+            "Nami Error E247 海浪 Recopy".into(),
+            format!("{nonce} recopy"),
+        )?;
+        let recopy_image = nami::clipboard::store_image(&root, &recopy_bytes, "png")?;
+        media.push(recopy_image.clone());
+        let recopy = state
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("test database")?
+            .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: format!("synthetic-recopy-{nonce}"),
+                kind: "image".into(),
+                text: String::new(),
+                date: "2026-11-20T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: Some(recopy_image),
+                fingerprint: nami::clipboard::fingerprint("image", &recopy_bytes),
+            })?;
         on_main(app, |app| {
             let state = app.state::<AppState>();
             state
@@ -7390,7 +7391,7 @@ window.__indexProbe=null;
                 if state.clipboard_version.load(Ordering::SeqCst) == version {
                     let lock = state.database.lock().unwrap();
                     let db = lock.as_ref().ok_or("test database")?;
-                    if db.clipboard_page("", false, None, 1)?.total_records != 19 {
+                    if db.clipboard_page("", false, None, 1)?.total_records != 13 {
                         return Err("recopy created a duplicate or derived text record".into());
                     }
                     if let Some(text) = db.clipboard_ocr_text(&record.id)? {

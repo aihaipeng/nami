@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { FileText, Folder, Image } from 'lucide-react';
 import type { ViewProps } from '../App';
 import { resolveLanguage } from '../shared/i18n';
-import { ClipboardExcludedApps, ClipboardReuseSettings, ClipboardSettingTip, useClipboardOptions } from './ClipboardOptions';
+import { ClipboardExcludedApps, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
 
 import { HistoryStorageSettings } from './HistoryStorageSettings';
 
@@ -15,7 +15,7 @@ const rows = [
 
 export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' | 'snapshot' | 'native'>) {
   const [savingCapture, setSavingCapture] = useState(false);
-  const [saveError, setSaveError] = useState<'capture' | 'index' | null>(null);
+  const [saveError, setSaveError] = useState<'capture' | null>(null);
   const canManage = native && !snapshot.storageError;
   const options = useClipboardOptions(canManage);
   const canCapture = canManage && snapshot.capabilities.clipboardWrite;
@@ -28,16 +28,6 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
     setSaveError(null);
     try { await invoke('clipboard_recording_type_set', { kind, enabled }); }
     catch { setSaveError('capture'); }
-    finally { setSavingCapture(false); }
-  }
-
-  async function saveImageIndex(enabled: boolean) {
-    setSavingCapture(true);
-    setSaveError(null);
-    try {
-      await invoke('clipboard_auto_image_index_set', { enabled });
-      options.setOptions((current) => current && { ...current, autoImageIndex: enabled });
-    } catch { setSaveError('index'); }
     finally { setSavingCapture(false); }
   }
 
@@ -60,19 +50,6 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
         {saveError === 'capture' && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>
     </section>
-    {snapshot.capabilities.imageOcr && <section aria-labelledby="clipboard-image-index-heading">
-      <div className="settings-section-heading clipboard-section-heading">
-        <div className="clipboard-section-title">
-          <h2 id="clipboard-image-index-heading">{t('clipboardAutoImageIndex')}</h2>
-          <ClipboardSettingTip label={t('clipboardAboutImageIndex')} text={t('clipboardAutoImageIndexDescription')} />
-        </div>
-        <input className="settings-checkbox" type="checkbox" aria-labelledby="clipboard-image-index-heading"
-          aria-description={t('clipboardAutoImageIndexDescription')}
-          checked={options.options?.autoImageIndex ?? false} disabled={!canCapture || !options.options || savingCapture}
-          onChange={(event) => void saveImageIndex(event.target.checked)} />
-      </div>
-      {saveError === 'index' && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
-    </section>}
     <ClipboardExcludedApps t={t} state={options} available={canCapture} />
     <HistoryStorageSettings t={t} available={canManage} view="clipboard" previewLines={snapshot.clipboardControls.previewLines?.clipboard ?? 3} locale={resolveLanguage(snapshot.locale)} />
     <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture}

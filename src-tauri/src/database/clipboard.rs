@@ -1204,7 +1204,6 @@ impl HistoryDatabase {
             "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
             "clipboard_activation",
-            "clipboard_auto_image_index",
             "records_open_focus",
             "clipboard_preview_lines",
             "translation_preview_lines",

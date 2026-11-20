@@ -7,7 +7,7 @@ import type { Translate } from '../shared/i18n';
 
 type ExcludedApp = { bundleId: string; name: string; iconDataUrl?: string };
 type Activation = 'paste' | 'copy';
-type Options = { excludedApps: ExcludedApp[]; activation: Activation; autoImageIndex: boolean };
+type Options = { excludedApps: ExcludedApp[]; activation: Activation };
 
 function Setting({ label, children }: { label: string; children: ReactNode }) {
   return <div className="settings-field clipboard-option-row">

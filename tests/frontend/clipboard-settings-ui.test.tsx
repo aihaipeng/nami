@@ -376,7 +376,6 @@ describe('clipboard privacy, retention and behavior', () => {
       if (name === 'clipboard_options_get') return {
         excludedApps: apps,
         activation: 'paste',
-        autoImageIndex: false,
       };
       if (name === 'clipboard_excluded_app_pick') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }, { bundleId: 'com.example.synthetic', name: 'Synthetic App' }];
       if (name === 'clipboard_excluded_app_remove') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }];
@@ -403,41 +402,12 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.getByRole('heading', { level: 2, name: 'Excluded Apps' })).toBeTruthy();
   });
 
-  it('shows local image indexing in its own section with an on-demand tip and saves the opt-in', async () => {
+  it('does not expose the retired automatic image indexing toggle', async () => {
     await openSettings();
-    const section = screen.getByRole('region', { name: 'Index image text automatically' });
-    expect(within(section).getByRole('heading', { level: 2, name: 'Index image text automatically' })).toBeTruthy();
-    expect(within(screen.getByRole('region', { name: 'Clipboard Recording' })).queryByRole('checkbox', { name: 'Index image text automatically' })).toBeNull();
-    const index = within(section).getByRole('checkbox', { name: 'Index image text automatically' });
-    expect(index).toHaveProperty('checked', false);
-    expect(screen.queryByText(/stored locally for search and is not uploaded/)).toBeNull();
-    const tip = within(section).getByRole('button', { name: 'About Image Text Indexing' });
-    fireEvent.click(tip);
-    expect(screen.getByRole('tooltip').textContent).toMatch(/new images and unindexed images you copy again.*stored locally for search and is not uploaded/);
-    expect(index).toHaveProperty('checked', false);
+    expect(screen.queryByRole('region', { name: 'Index image text automatically' })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: 'Index image text automatically' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'About Image Text Indexing' })).toBeNull();
     expect(calls('clipboard_auto_image_index_set')).toHaveLength(0);
-    fireEvent.keyDown(tip, { key: 'Escape' });
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    const invoke = bridge.invoke.getMockImplementation()!;
-    let fail = true;
-    bridge.invoke.mockImplementation(async (name, args) => {
-      if (name === 'clipboard_auto_image_index_set') {
-        if (fail) throw new Error('storage_unavailable');
-        return;
-      }
-      return invoke(name, args);
-    });
-    fireEvent.click(index);
-    await within(section).findByRole('alert');
-    expect(index).toHaveProperty('checked', false);
-    fail = false;
-    fireEvent.click(index);
-    await waitFor(() => expect(index).toHaveProperty('checked', true));
-    fireEvent.click(index);
-    await waitFor(() => expect(index).toHaveProperty('checked', false));
-    expect(calls('clipboard_auto_image_index_set').map(([, args]) => args)).toEqual([{
-      enabled: true,
-    }, { enabled: true }, { enabled: false }]);
   });
 
   it('opens a one-line tip without a confirmation button and keeps keyboard focus on its trigger', async () => {

@@ -96,7 +96,7 @@ export const initialSnapshot: AppSnapshot = {
   clipboardRecordingTypes: { text: true, image: true, files: true },
   clipboardBinding: defaultClipboardBinding,
   clipboardShortcutEnabled: true,
-  clipboardControls: { autoImageIndex: true, recordsOpenFocus: 'search', previewLines: { clipboard: 3, translation: 3 }, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
+  clipboardControls: { recordsOpenFocus: 'search', previewLines: { clipboard: 3, translation: 3 }, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
   accessibility: false,
   shortcutErrors: [],
   window: {

@@ -3,7 +3,7 @@ use crate::{
 };
 use nami::clipboard::ClipboardRecord;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashSet, VecDeque},
     sync::atomic::Ordering,
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -83,13 +83,13 @@ fn image_bytes(
 
 #[derive(Default)]
 pub(crate) struct IndexJobs {
-    pending: HashMap<String, Option<u64>>,
+    pending: HashSet<String>,
     failed: VecDeque<String>,
 }
 
 impl IndexJobs {
     pub fn status(&self, id: &str) -> &'static str {
-        if self.pending.contains_key(id) {
+        if self.pending.contains(id) {
             "pending"
         } else if self.failed.iter().any(|failed| failed == id) {
             "failed"
@@ -98,23 +98,14 @@ impl IndexJobs {
         }
     }
 
-    pub fn start(&mut self, id: &str, epoch: Option<u64>) -> bool {
-        if self
-            .pending
-            .get(id)
-            .is_some_and(|previous| epoch.is_none() || previous.is_none() || *previous == epoch)
-        {
-            return false;
-        }
-        self.pending.insert(id.to_owned(), epoch);
-        true
+    pub fn start(&mut self, id: &str) -> bool {
+        self.pending.insert(id.to_owned())
     }
 
-    pub fn finish(&mut self, id: String, epoch: Option<u64>, result: &Result<(), String>) {
-        if self.pending.get(&id) != Some(&epoch) {
+    pub fn finish(&mut self, id: String, result: &Result<(), String>) {
+        if !self.pending.remove(&id) {
             return;
         }
-        self.pending.remove(&id);
         self.failed.retain(|failed| failed != &id);
         if result
             .as_ref()
@@ -128,30 +119,14 @@ impl IndexJobs {
     }
 }
 
-#[derive(Clone, Copy)]
-enum IndexRequest {
-    Manual,
-    Automatic(u64),
-}
-
-fn indexing_enabled(state: &AppState, epoch: u64) -> bool {
-    let options = state.clipboard_options.lock().unwrap();
-    options.auto_image_index && state.image_index_epoch.load(Ordering::SeqCst) == epoch
-}
-
-pub(crate) async fn index_image(app: &AppHandle, id: String, epoch: u64) -> Result<(), String> {
-    if !indexing_enabled(&app.state::<AppState>(), epoch) {
-        return Err("cancelled".into());
-    }
-    text(app, id, Some(IndexRequest::Automatic(epoch)))
-        .await
-        .map(|_| ())
+pub(crate) async fn index_image(app: &AppHandle, id: String) -> Result<(), String> {
+    text(app, id, true).await.map(|_| ())
 }
 
 async fn text(
     app: &AppHandle,
     id: String,
-    index: Option<IndexRequest>,
+    index: bool,
 ) -> Result<(ClipboardRecord, String), String> {
     let (record, persisted) = clipboard_runtime::database(app, move |db| {
         let record = db.clipboard_record(&id)?;
@@ -164,7 +139,7 @@ async fn text(
     })
     .await?;
     eligible(&record)?;
-    if index.is_some() && record.kind != "image" {
+    if index && record.kind != "image" {
         return Err("invalid_argument".into());
     }
     if record.kind == "text" {
@@ -179,9 +154,6 @@ async fn text(
     let state = app.state::<AppState>();
     // One Vision worker, shared by indexing and explicit actions; never hold the database mutex here.
     let mut cache = state.image_text.lock().await;
-    if matches!(index, Some(IndexRequest::Automatic(epoch)) if !indexing_enabled(&state, epoch)) {
-        return Err("cancelled".into());
-    }
     if record.kind == "image" {
         let id = record.id.clone();
         if let Some(text) =
@@ -223,27 +195,23 @@ async fn text(
         cache.insert(fingerprint, result.clone());
         result
     };
-    if let Some(index) = index {
+    if index {
         let _write = state.clipboard_writes.lock().await;
-        if !matches!(index, IndexRequest::Automatic(epoch) if !indexing_enabled(&state, epoch)) {
-            let (id, fingerprint, text) = (
-                record.id.clone(),
-                record.fingerprint.clone(),
-                result.clone(),
-            );
-            clipboard_runtime::database(app, move |db| {
-                db.clipboard_index_image(&id, &fingerprint, &text)
-            })
-            .await?;
-        } else {
-            return Err("cancelled".into());
-        }
+        let (id, fingerprint, text) = (
+            record.id.clone(),
+            record.fingerprint.clone(),
+            result.clone(),
+        );
+        clipboard_runtime::database(app, move |db| {
+            db.clipboard_index_image(&id, &fingerprint, &text)
+        })
+        .await?;
     }
     Ok((record, result))
 }
 
 pub(crate) async fn has_text(app: &AppHandle, id: String) -> Result<bool, String> {
-    text(app, id, None)
+    text(app, id, false)
         .await
         .map(|(_, text)| !text.trim().is_empty())
 }
@@ -257,7 +225,7 @@ pub(crate) async fn correction_text(app: &AppHandle, id: String) -> Result<Strin
         Ok(())
     })
     .await?;
-    match text(app, id, None).await {
+    match text(app, id, false).await {
         Ok((_, text)) => Ok(text),
         Err(error)
             if [
@@ -289,17 +257,11 @@ pub(crate) async fn correct(app: &AppHandle, id: String, corrected: String) -> R
 pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Result<(), String> {
     if action == "index" {
         let state = app.state::<AppState>();
-        if !state.image_index_jobs.lock().unwrap().start(&id, None) {
+        if !state.image_index_jobs.lock().unwrap().start(&id) {
             return Ok(());
         }
-        let result = text(app, id.clone(), Some(IndexRequest::Manual))
-            .await
-            .map(|_| ());
-        state
-            .image_index_jobs
-            .lock()
-            .unwrap()
-            .finish(id, None, &result);
+        let result = text(app, id.clone(), true).await.map(|_| ());
+        state.image_index_jobs.lock().unwrap().finish(id, &result);
         let _ = clipboard_runtime::changed(app);
         return result;
     }
@@ -312,7 +274,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     let translation_revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let session = state.windows.lock().unwrap().records_session;
     on_main(app, |app| crate::records_runtime::protect_result(&app)).await??;
-    let (record, text) = text(app, id, None).await?;
+    let (record, text) = text(app, id, false).await?;
     if action == "ocr" && record.kind == "text" {
         return Err("invalid_argument".into());
     }
@@ -469,18 +431,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_epoch_recopy_replaces_stale_job_without_duplicating_current_work() {
+    fn duplicate_index_jobs_do_not_start_twice() {
         let mut jobs = IndexJobs::default();
-        assert!(jobs.start("image", Some(1)));
-        assert!(!jobs.start("image", Some(1)));
-        assert!(jobs.start("image", Some(3)));
-        jobs.finish("image".into(), Some(1), &Err("cancelled".into()));
+        assert!(jobs.start("image"));
+        assert!(!jobs.start("image"));
         assert_eq!(jobs.status("image"), "pending");
-        assert!(!jobs.start("image", Some(3)));
-        jobs.finish("image".into(), Some(3), &Ok(()));
+        jobs.finish("image".into(), &Err("cancelled".into()));
         assert_eq!(jobs.status("image"), "unindexed");
-        assert!(jobs.start("image", None));
-        assert!(!jobs.start("image", Some(4)));
+        assert!(jobs.start("image"));
+        jobs.finish("image".into(), &Ok(()));
+        assert_eq!(jobs.status("image"), "unindexed");
+        jobs.finish("image".into(), &Ok(()));
     }
 
     #[test]

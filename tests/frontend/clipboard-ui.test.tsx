@@ -2165,14 +2165,11 @@ describe('database clipboard history', () => {
     expect(screen.queryByText(message)).toBeNull();
   });
 
-  it('explains missing image text only when the search can include images and auto-index is off', async () => {
-    bridge.snapshot.clipboardControls.autoImageIndex = false;
+  it('does not show a retired automatic-indexing hint when image text is missing', async () => {
     await mount('clipboard');
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search clipboard' }), { target: { value: 'Missing OCR phrase' } });
-    const hint = 'Automatic image indexing is off. You can index an image from its details.';
-    expect(await screen.findByText(hint)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
-    expect(screen.queryByText(hint)).toBeNull();
+    expect(await screen.findByText('No matching clipboard records')).toBeTruthy();
+    expect(screen.queryByText(/Automatic image indexing is off/)).toBeNull();
   });
 
   it('preserves a search when clearing an empty kind filter', async () => {
