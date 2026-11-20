@@ -9,7 +9,7 @@ export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyA
 export type ClipboardRecordAction = typeof clipboardRecordActions[number];
 type RecordShortcut = { binding: KeyBinding | null; enabled: boolean };
 export type RecordsOpenFocus = 'search' | 'list';
-export type ClipboardControls = { recordsOpenFocus?: RecordsOpenFocus; previewLines?: Record<'clipboard' | 'translation', number>; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
+export type ClipboardControls = { autoImageIndex?: boolean; recordsOpenFocus?: RecordsOpenFocus; previewLines?: Record<'clipboard' | 'translation', number>; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
 
 export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
   const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = ['alt']) => ({ enabled: true, binding: { code, modifiers } });

@@ -97,7 +97,7 @@ impl Default for ClipboardOptions {
             .collect(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
-            auto_image_index: false,
+            auto_image_index: true,
             records_open_focus: RecordsOpenFocus::default(),
             preview_lines: Default::default(),
             record_shortcuts: Default::default(),
@@ -115,8 +115,9 @@ impl ClipboardOptions {
         {
             options.excluded_apps = apps;
         }
-        options.auto_image_index =
-            db.preference("clipboard_auto_image_index")?.as_deref() == Some("true");
+        if let Some(enabled) = db.preference("clipboard_auto_image_index")? {
+            options.auto_image_index = enabled == "true";
+        }
         options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
         options.activation = db
             .preference("clipboard_activation")?
@@ -267,6 +268,7 @@ pub async fn clipboard_excluded_app_remove(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardControls {
+    auto_image_index: bool,
     activation: Activation,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
@@ -276,6 +278,7 @@ pub(crate) struct ClipboardControls {
 impl ClipboardOptions {
     pub(crate) fn controls(&self) -> ClipboardControls {
         ClipboardControls {
+            auto_image_index: self.auto_image_index,
             activation: self.activation,
             records_open_focus: self.records_open_focus,
             preview_lines: self.preview_lines.clone(),
@@ -360,6 +363,8 @@ pub(crate) async fn set_auto_image_index(app: &AppHandle, enabled: bool) -> Resu
         options.auto_image_index = enabled;
         state.image_index_epoch.fetch_add(1, Ordering::SeqCst);
     }
+    drop(options);
+    publish_controls(app, &state);
     Ok(())
 }
 

@@ -1393,6 +1393,51 @@ window.__heldCopy=null;
         samples.push(
             serde_json::json!({"inFlightRetryCancelled":true,"onlyOneCompleteHistoryRecord":true}),
         );
+        evaluate_dom(
+            app,
+            r#"
+window.__alternateRun=null;
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke, args=window.__partialArgs;
+  try {
+    const {partial}=await invoke('translation_run',args);
+    const mixed=await invoke('translation_run',{...args,retryId:partial.id,retryEngine:'google'});
+    const full=await invoke('translation_run',{...args,text:'Synthetic split total failure',retryEngine:'google'});
+    const snapshot=await invoke('app_snapshot');
+    window.__alternateRun={mixed,full,engine:snapshot.translationEngine};
+  } catch(e) {window.__alternateRun={error:String(e)};}
+})();return true;
+"#,
+        )?;
+        let swapped = wait_dom(
+            app,
+            "return {ready:!!window.__alternateRun,...window.__alternateRun};",
+        )?;
+        let mixed_id = swapped["mixed"]["id"]
+            .as_str()
+            .ok_or_else(|| format!("alternate retry failed: {swapped}"))?;
+        let mixed = persisted(mixed_id)?.ok_or("mixed result was not saved")?;
+        if mixed.translations
+            != [
+                "Synthetic translation en",
+                "Synthetic Google translation ja",
+            ]
+            || mixed
+                .translation
+                .is_none_or(|metadata| metadata.target_engines != ["edge", "google"])
+            || swapped["full"]["translations"]
+                != serde_json::json!([
+                    "Synthetic Google translation en",
+                    "Synthetic Google translation ja"
+                ])
+            || swapped["engine"] != "edge"
+            || history_total()? != initial_total + 3
+        {
+            return Err(format!(
+                "alternate engine reran a successful column or changed the default: {swapped}"
+            ));
+        }
+        samples.push(serde_json::json!({"failedColumnOnly":true,"providerProvenancePreserved":true,"totalFailureRecovered":true,"preferredEngineUnchanged":true}));
         Ok(())
     })();
     DomCase {
@@ -1661,7 +1706,7 @@ fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value
             wait_records(app, "const row=document.querySelector('#translation-history .history-items .history-row-select');row?.focus();return {ready:!!row&&document.hasFocus()&&document.activeElement===row};")?;
         }
         post_records_key(app, 36, 1 << 20, "\r", "\r", false)?;
-        samples.push(wait_dom(app, &format!("const error=document.querySelector('.translation-status[role=alert]')?.textContent;return {{ready:error==='translation_network_disabled_in_tests',detail:{detail},error}};"))?);
+        samples.push(wait_dom(app, &format!("const error=document.querySelector('.translation-status [role=alert]')?.textContent;return {{ready:error==='translation_network_disabled_in_tests',detail:{detail},error}};"))?);
         if !detail {
             // Restore the displayed translation so the detail shortcut starts on a saved record.
             let id = app
@@ -1675,7 +1720,7 @@ fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value
             on_main(app, move |app| {
                 crate::commands::select_history_sample(app, Some(id), false, false)
             })?;
-            wait_dom(app, "return {ready:!!document.querySelector('.result-column span')&&!document.querySelector('.translation-status[role=alert]')};")?;
+            wait_dom(app, "return {ready:!!document.querySelector('.result-column span')&&!document.querySelector('.translation-status [role=alert]')};")?;
         }
     }
     let mut result = {
@@ -2552,8 +2597,8 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   window.clipboardSettingsProbe.stage='options';
   const defaults=await invoke('clipboard_options_get');
   if(defaults.activation!=='paste'||defaults.historyPolicy.limit!==500||!defaults.excludedApps.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('unexpected default options');
-  if(defaults.autoImageIndex!==false)throw Error('automatic image OCR is not opt-in');
-  for (const enabled of [true,false]) {
+  if(defaults.autoImageIndex!==true)throw Error('automatic image OCR is not on by default');
+  for (const enabled of [false,true]) {
     await invoke('clipboard_auto_image_index_set',{enabled});
     if((await invoke('clipboard_options_get')).autoImageIndex!==enabled)throw Error('image index setting did not update');
   }
@@ -3762,6 +3807,7 @@ return document.activeElement===document.body;
             translation: Some(crate::model::TranslationMetadata {
                 requested_source: "auto".into(),
                 engine: "edge".into(),
+                target_engines: Vec::new(),
                 strategy_version: crate::translation::STRATEGY_VERSION,
                 detections: vec![
                     crate::model::LanguageDetection {
@@ -6492,7 +6538,7 @@ fn run_cross_app(app: &AppHandle) -> DomCase {
                 app,
                 &format!(
                     r#"
-const input=document.querySelector('.source-input'),alert=document.querySelector('.translation-status[role=alert]');
+const input=document.querySelector('.source-input'),alert=document.querySelector('.translation-status [role=alert]');
 return {{ready:input?.value==={expected:?}&&!input.closest('[inert]')&&({trusted}||alert?.textContent.includes('Accessibility')),hasInput:!!input,sourceMatches:input?.value==={expected:?},inert:!!input?.closest('[inert]'),alert:alert?.textContent}};
 "#
                 ),
@@ -6628,7 +6674,10 @@ return true;
             {
                 return Err(format!("dead target protection failed: {result}"));
             }
-            samples.push(serde_json::json!({"exitedPasteTargetRejected":true}));
+            wait_records(app, "return {ready:document.querySelector('.record-feedback')?.textContent.includes('Press ⌘V to paste manually')};")?;
+            samples.push(
+                serde_json::json!({"exitedPasteTargetRejected":true,"manualPasteHintVisible":true}),
+            );
         }
         Ok(())
     })();
@@ -6851,8 +6900,13 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
         let path = directory.join("history.sqlite3");
         let database = crate::database::HistoryDatabase::open(&path)?;
+        if !crate::clipboard_preferences::ClipboardOptions::load(&database)?.auto_image_index {
+            return Err("automatic OCR must default to on".into());
+        }
+        let mut database = database;
+        database.preference_set("clipboard_auto_image_index", "false")?;
         if crate::clipboard_preferences::ClipboardOptions::load(&database)?.auto_image_index {
-            return Err("automatic OCR must default to off".into());
+            return Err("explicit opt-out was overridden".into());
         }
         *state.database.lock().unwrap() = Some(database);
         on_main(app, |app| {
@@ -7112,6 +7166,26 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             return Err("manual extraction did not reuse the exact persisted original".into());
         }
         samples.push(serde_json::json!({"phase":"explicit-extraction-after-reopen","additionalVisionCalls":0}));
+        let derived_text_id = state
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("test database")?
+            .clipboard_page_filtered("", false, Some("text"), None, 1)?
+            .records
+            .into_iter()
+            .next()
+            .ok_or("missing derived text fixture")?
+            .id;
+        if tauri::async_runtime::block_on(crate::clipboard_text::process(
+            app,
+            derived_text_id,
+            "index".into(),
+        )) != Err("invalid_argument".into())
+        {
+            return Err("single-image indexing accepted a text record".into());
+        }
         let retry = retry_fixture.ok_or("missing retry fixture")?;
         let root = crate::clipboard_runtime::image_root(app)?;
         let image = root.join(retry.image_path.ok_or("missing retry fixture image")?);
@@ -7124,26 +7198,65 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         {
             return Err("disabled epoch did not cancel a queued task".into());
         }
+        // Exercise a single old image through the real IPC while automatic indexing is off.
+        on_main(app, |app| show(app, "translation"))?;
+        wait_dom(app, "return {ready:!!window.__TAURI_INTERNALS__?.invoke};")?;
+        let index = |key: &str| -> Result<serde_json::Value, String> {
+            evaluate_dom(
+                app,
+                &format!(
+                    r#"
+window.__indexProbe=null;
+(async()=>{{
+  const invoke=window.__TAURI_INTERNALS__.invoke, recordId={id:?};
+  try {{
+    const before=(await invoke('clipboard_record_detail',{{recordId}})).imageIndexStatus;
+    let error;
+    try {{await invoke('clipboard_record_process',{{recordId,action:'index'}});}} catch(e) {{error=String(e);}}
+    const after=(await invoke('clipboard_record_detail',{{recordId}})).imageIndexStatus;
+    window.__indexProbe={{key:{key:?},before,after,error}};
+  }} catch(e) {{window.__indexProbe={{key:{key:?},probeError:String(e)}};}}
+}})();return true;
+"#,
+                    id = retry.id
+                ),
+            )?;
+            wait_dom(
+                app,
+                &format!(
+                    "return {{ready:window.__indexProbe?.key==={key:?},...window.__indexProbe}};"
+                ),
+            )
+        };
+        let before = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
         std::fs::rename(&image, &saved).map_err(|error| error.to_string())?;
-        let missing =
-            tauri::async_runtime::block_on(crate::clipboard_text::has_text(app, retry.id.clone()));
+        let missing = index("missing");
         std::fs::rename(&saved, &image).map_err(|error| error.to_string())?;
-        if missing != Err("clipboard_image_missing".into())
+        let missing = missing?;
+        if missing["before"] != "unindexed"
+            || missing["after"] != "failed"
+            || missing["error"] != "clipboard_image_missing"
             || VISION_CALLS.load(Ordering::SeqCst) != calls
         {
-            return Err("missing image was treated as a completed OCR result".into());
+            return Err(format!("missing image lacked retriable status: {missing}"));
         }
-        tauri::async_runtime::block_on(crate::clipboard_text::process(
-            app,
-            retry.id,
-            "ocr".into(),
-        ))?;
-        if VISION_CALLS.load(Ordering::SeqCst) != calls + 1 {
-            return Err("manual retry did not run Vision exactly once".into());
+        let completed = index("restored")?;
+        let db = state.database.lock().unwrap();
+        let db = db.as_ref().ok_or("test database")?;
+        if completed["before"] != "failed"
+            || completed["after"] != "indexed"
+            || !db
+                .clipboard_page("E247", false, None, 100)?
+                .records
+                .iter()
+                .any(|record| record.id == retry.id)
+            || db.clipboard_page("", false, None, 100)?.total_records != 19
+            || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != before
+            || VISION_CALLS.load(Ordering::SeqCst) != calls + 1
+        {
+            return Err(format!("single-image retry changed the clipboard or lost its searchable original: {completed}"));
         }
-        samples.push(
-            serde_json::json!({"phase":"cancelled-job-and-failed-read-retry","retryVisionCalls":1}),
-        );
+        samples.push(serde_json::json!({"phase":"single-image-retry-through-ipc","retryVisionCalls":1,"clipboardPreserved":true,"noDerivedRecord":true}));
         Ok(())
     })();
     let state = app.state::<AppState>();
@@ -7818,7 +7931,7 @@ return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.in
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-text"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value,error=document.querySelector('.translation-status[role=alert]')?.textContent;return {ready:text?.includes('HELLO NAMI')&&error==='translation_network_disabled_in_tests',text,error};"#)?);
+        samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value,error=document.querySelector('.translation-status [role=alert]')?.textContent;return {ready:text?.includes('HELLO NAMI')&&error==='translation_network_disabled_in_tests',text,error};"#)?);
         let before_hover = app
             .state::<AppState>()
             .translation_revision
@@ -8215,7 +8328,7 @@ action?.click(); return {ready:!!action};
             app,
             r#"
 const source=document.querySelector('.source-input')?.value;
-const dispatched=document.querySelector('.translation-status[role=alert]')?.textContent==='translation_network_disabled_in_tests';
+const dispatched=document.querySelector('.translation-status [role=alert]')?.textContent==='translation_network_disabled_in_tests';
 return {ready:source==='Corrected E247 已核对'&&dispatched,correctedTranslationSource:source,translationAttempted:dispatched};
 "#,
         )?);

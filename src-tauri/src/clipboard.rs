@@ -191,6 +191,8 @@ pub struct ClipboardDetail {
     pub height: Option<u32>,
     pub size: Option<u64>,
     pub character_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_index_status: Option<&'static str>,
     pub files: Vec<FileEntry>,
     #[serde(skip)]
     pub image_path: Option<String>,

@@ -32,6 +32,23 @@ describe('translation reliability', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
+  it.each([false, true])('explicitly retries with the alternate engine (partial: %s)', async (partial) => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    const pending = deferred();
+    const run = vi.fn().mockImplementationOnce(() => partial ? Promise.resolve(partialResult(1)) : Promise.reject('Engine unavailable'))
+      .mockReturnValueOnce(pending.promise);
+    bridge.invoke.mockImplementation((name, args) => name === 'translation_run' ? run(args) : invoke(name, args));
+    await mount(); submit('Keep this input');
+    const button = await screen.findByRole('button', { name: 'Retry with Google' });
+    expect(run).toHaveBeenCalledTimes(1);
+    fireEvent.click(button);
+    expect(run.mock.calls[1]?.[0]).toEqual({ text: 'Keep this input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: false, retryEngine: 'google', ...(partial ? { retryId: 'partial-test' } : {}) });
+    if (partial) expect(column(0).textContent).toBe('Partial first');
+    await act(async () => pending.resolve(result('Keep this input')));
+    expect(column(0).textContent).toBe('Translated Keep this input');
+    expect(calls('translation_preferences_set')).toHaveLength(0);
+  });
+
   it.each([0, 1])('isolates failed column %i and copies only the successful column by partial ID', async (failed) => {
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? Promise.resolve(partialResult(failed)) : invoke(name, args));

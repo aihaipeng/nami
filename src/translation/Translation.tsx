@@ -19,6 +19,8 @@ import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
 type Popup = 'source' | 'primary' | 'secondary';
+type Engine = 'edge' | 'google';
+type TranslationReuse = { recordId: string; focusHistory?: boolean; targetIndex?: number };
 type TranslationRequest = { text: string; source: string; targets: string[]; fromSelection: boolean };
 type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 
@@ -48,6 +50,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const partialTicket = useRef<{ id: string; request: TranslationRequest; pending: boolean } | null>(null);
   const [partial, setPartial] = useState<PartialTranslation | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [failedRequest, setFailedRequest] = useState<{ request: TranslationRequest; engine: Engine; reuse?: TranslationReuse } | null>(null);
+  const [partialEngine, setPartialEngine] = useState<Engine | null>(null);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
   const fromSelection = useRef(false);
   const receiveSelection = useRef<(context: { text: string; error: string | null }) => void>(() => {});
@@ -278,14 +282,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function cancelRequest() {
     ++requestRevision.current;
-    partialTicket.current = null; setPartial(null); setRetrying(false);
+    partialTicket.current = null; setPartial(null); setRetrying(false); setFailedRequest(null); setPartialEngine(null);
     if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
   }
 
   async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false) {
     const origin = reuse ?? completedRecord.current;
     cancelRequest();
-    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation?.engine === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
+    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation && (reuse.translation.targetEngines?.[index] ?? reuse.translation.engine) === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
     setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null); setDetectedSource(null);
     if (snapshot.storageError || !supportsTranslation(snapshot.translationEngine, sourceLanguage, targetLanguages)) return;
     if (!inputWithinLimits(text)) { setNotice('inputLimit'); return; }
@@ -297,7 +301,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {});
   }
 
-  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; reuse?: { recordId: string; focusHistory?: boolean; targetIndex?: number } }) {
+  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; retryEngine?: Engine; reuse?: TranslationReuse }) {
+    const engine = options.retryEngine ?? (options.retryId ? partialEngine : null) ?? snapshot.translationEngine;
     activity(1);
     try {
       const result = await invoke<HistoryRecord | { partial: PartialTranslation }>('translation_run', { ...request, ...options });
@@ -306,7 +311,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       if ('partial' in result) {
         completedRecord.current = null;
         partialTicket.current = { id: result.partial.id, request, pending: false };
-        setPartial(result.partial); setSelectedId(null);
+        setPartial(result.partial); setPartialEngine(engine); setSelectedId(null);
       } else {
         completedRecord.current = result;
         partialTicket.current = null;
@@ -314,9 +319,12 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       }
       setCachedResults(output.translations); setDetectedSource(output.sourceLanguage === 'auto' ? null : output.sourceLanguage);
     } catch (error) {
-      if (requestRevision.current === revision && String(error) !== 'cancelled') setServiceError(String(error));
+      if (requestRevision.current === revision && String(error) !== 'cancelled') {
+        setServiceError(String(error));
+        if (!options.retryId) setFailedRequest({ request, engine, reuse: options.reuse });
+      }
     } finally {
-      if (options.retryId && requestRevision.current === revision) {
+      if ((options.retryId || options.retryEngine) && requestRevision.current === revision) {
         if (partialTicket.current) partialTicket.current.pending = false;
         setRetrying(false);
       }
@@ -324,13 +332,27 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     }
   }
 
-  function retryTranslation() {
+  const currentRetryEngine = partialEngine ?? failedRequest?.engine;
+  const otherEngine = currentRetryEngine === 'edge' ? 'google' : 'edge';
+  const retryRequest = partial ? partialTicket.current?.request : failedRequest?.request;
+  const canRetryElsewhere = !!currentRetryEngine && !!retryRequest && supportsTranslation(otherEngine, retryRequest.source,
+    retryRequest.targets.filter((_, index) => !partial || !!partial.errors[index]));
+
+  function retryTranslation(engine?: Engine) {
     const ticket = partialTicket.current;
-    if (!ticket || ticket.id !== partial?.id || ticket.pending || snapshot.storageError) return;
-    ticket.pending = true;
-    setRetrying(true); setServiceError(null);
-    void runTranslation(ticket.request, ++requestRevision.current, { retryId: ticket.id });
+    if (retrying || snapshot.storageError) return;
+    if (ticket && ticket.id === partial?.id && !ticket.pending) {
+      ticket.pending = true;
+      setRetrying(true); setServiceError(null);
+      void runTranslation(ticket.request, ++requestRevision.current, { retryId: ticket.id, ...(engine ? { retryEngine: engine } : {}) });
+    } else if (failedRequest && engine) {
+      setRetrying(true); setServiceError(null); setFailedRequest(null);
+      void runTranslation(failedRequest.request, ++requestRevision.current, { retryEngine: engine, ...(failedRequest.reuse ? { reuse: failedRequest.reuse } : {}) });
+    }
   }
+  const retryElsewhere = canRetryElsewhere && <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(otherEngine)}>
+    {t(otherEngine === 'google' ? 'retryWithGoogle' : 'retryWithEdge')}
+  </button>;
 
   function submit(focusHistory = false) {
     if (!draft.trim() || composing.current || snapshot.storageError || !languagesAvailable) return;
@@ -508,13 +530,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
           {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
           {partial?.errors[index] && <div className="result-error" data-tauri-drag-region="false">
             <span role="alert">{partial.errors[index]}</span>
-            <button type="button" disabled={retrying || !!snapshot.storageError} onClick={retryTranslation}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
+            <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
+            {retryElsewhere}
           </div>}
         </section>)}
-        {taskStatus && !hasResults && <p className="translation-status" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
+        {taskStatus && !hasResults && <div className="translation-status" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && retryElsewhere}</div>}
         <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
       </div>
-      {taskStatus && hasResults && <p className="translation-status with-results" data-tauri-drag-region="false" role={serviceError ? 'alert' : 'status'}>{taskStatus}</p>}
+      {taskStatus && hasResults && <div className="translation-status with-results" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && !partial && retryElsewhere}</div>}
       <footer className={cn('translation-footer', secondary === 'none' && 'single-column')}>
         <div className="language-slot">{picker('primary', primary, (value) => changeLanguage('primary', value))}</div>
         <div className={cn('language-slot', secondary === 'none' && 'secondary-off')}>

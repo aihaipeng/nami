@@ -124,12 +124,13 @@
   .result-column { flex: 1; min-width: 0; position: relative; overflow: auto; padding: 8px 24px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-mask-image: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); mask-image: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); }
   .result-error { display: grid; justify-items: start; gap: 4px; }
   .result-error [role=alert] { color: hsl(var(--destructive)); }
-  .result-error button { border-radius: 6px; padding: 4px 8px; background: hsl(var(--foreground) / .05); }
+  .result-error button, .translation-status button { border-radius: 6px; padding: 4px 8px; background: hsl(var(--foreground) / .05); }
   .result-columns { position: relative; }
   html[data-native-history=true] .result-column:last-child { margin-right: 8px; }
   html[data-native-history=true] .result-columns:not(.single-column) > .result-column:first-child { flex: 0 0 50%; }
   .result-columns:not(.single-column, .task-status-only)::after { position: absolute; content: ''; pointer-events: none; left: 50%; top: 3%; height: 94%; width: 1px; background: linear-gradient(to bottom, transparent, hsl(var(--foreground) / .28) 25%, hsl(var(--foreground) / .28) 75%, transparent); }
   .translation-status { position: absolute; inset: 0 32px; display: flex; align-items: center; justify-content: center; margin: 0; color: hsl(var(--muted-foreground)); font-size: 14px; line-height: 1.5; text-align: center; }
+  .translation-status:has(button) { flex-direction: column; gap: 6px; }
   .translation-status.with-results { position: static; flex-shrink: 0; padding: 0 24px 8px; }
   .translation-footer { position: relative; display: flex; align-items: center; flex-shrink: 0; height: 28px; margin-bottom: 2px; }
   .language-slot { width: 50%; min-width: 0; padding-left: 8px; padding-right: 24px; }

@@ -57,6 +57,30 @@ function direct() {
 }
 
 describe('clipboard details', () => {
+  it('shows index status, retries one image and never calls extract or copy', async () => {
+    records[1] = { ...first(), kind: 'image', imageIndexStatus: 'unindexed' };
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let finish!: () => void;
+    bridge.invoke.mockImplementation((name, args) => name === 'clipboard_record_process'
+      ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
+    direct();
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Index image text' }));
+    expect(within(pane()).getByText('Indexing image text…')).toBeTruthy();
+    expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'index' });
+    first().imageIndexStatus = 'failed';
+    await act(async () => finish());
+    await emit('clipboard_changed', 30);
+    expect(await within(pane()).findByText('Could not index image text')).toBeTruthy();
+    fireEvent.click(within(pane()).getByRole('button', { name: 'Retry' }));
+    first().imageIndexStatus = 'empty';
+    await act(async () => finish());
+    await emit('clipboard_changed', 31);
+    expect(await within(pane()).findByText('No text recognized')).toBeTruthy();
+    first().imageIndexStatus = 'indexed';
+    await emit('clipboard_changed', 32);
+    expect(await within(pane()).findByText('Image text is searchable')).toBeTruthy();
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+  });
   it('retains an OCR result during pointer movement and automatic focus until explicit keyboard browsing', async () => {
     await open();
     await windowState({ recordsBrowsing: false });

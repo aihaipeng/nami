@@ -819,6 +819,7 @@ impl HistoryDatabase {
         Ok(crate::clipboard::ClipboardDetail {
             title,
             character_count: (record.kind == "text").then(|| record.text.chars().count()),
+            image_index_status: None,
             id: record.id,
             date: record.date,
             is_favorite: record.is_favorite,

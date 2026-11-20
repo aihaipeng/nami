@@ -177,6 +177,7 @@ impl HistoryStore {
                         crate::model::TranslationMetadata {
                             requested_source: metadata.requested_source.clone(),
                             engine: metadata.engine.clone(),
+                            target_engines: metadata.target_engines.clone(),
                             strategy_version: metadata.strategy_version,
                             detections: Vec::new(),
                         }

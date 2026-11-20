@@ -13,6 +13,8 @@ pub struct LanguageDetection {
 pub struct TranslationMetadata {
     pub requested_source: String,
     pub engine: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_engines: Vec<String>,
     pub strategy_version: u32,
     pub detections: Vec<LanguageDetection>,
 }

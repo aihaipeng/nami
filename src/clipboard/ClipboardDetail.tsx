@@ -21,7 +21,13 @@ export interface ClipboardDetailData extends ClipboardRecord {
   size: number | null;
   characterCount: number | null;
   files: FileEntry[];
+  imageIndexStatus?: keyof typeof imageIndexLabels;
 }
+
+const imageIndexLabels = {
+  unindexed: 'clipboardImageUnindexed', pending: 'clipboardImageIndexPending',
+  failed: 'clipboardImageIndexFailed', empty: 'clipboardImageIndexEmpty', indexed: 'clipboardImageIndexed',
+} as const;
 
 function formatSize(bytes: number) {
   return bytes < 1024 * 1024 ? `${(bytes / 1024).toLocaleString('en', { maximumFractionDigits: 1 })} KB` : `${(bytes / (1024 * 1024)).toLocaleString('en', { maximumFractionDigits: 1 })} MB`;
@@ -72,6 +78,16 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const current = shown?.id === id ? shown : null;
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
+  const [indexingId, setIndexingId] = useState<string | null>(null);
+  const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
+  async function indexImage(recordId: string) {
+    const revision = operation.current;
+    setIndexingId(recordId);
+    setFeedback(null);
+    try { await invoke('clipboard_record_process', { recordId, action: 'index' }); }
+    catch { if (operation.current === revision) setFeedback(t('clipboardImageIndexFailed')); }
+    finally { setIndexingId((id) => id === recordId ? null : id); }
+  }
   async function revealFile(index: number) {
     if (!current || loading) return;
     const revision = operation.current;
@@ -130,6 +146,9 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} onReveal={snapshot.capabilities.clipboardOpenTarget && current.files.length > 1 ? (index) => { void revealFile(index); } : undefined} revealLabel={t('clipboardRevealFile')} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
+    {current && indexStatus && <div className="clipboard-image-index-status"><span role="status">{t(imageIndexLabels[indexStatus])}</span>
+      {(indexStatus === 'unindexed' || indexStatus === 'failed') && <button type="button" disabled={loading || busy} onClick={() => { void indexImage(current.id); }}>{t(indexStatus === 'failed' ? 'retry' : 'clipboardIndexImage')}</button>}
+    </div>}
     {current && <footer className="clipboard-detail-metadata">
       <div><span>Application</span><RecordHeading date={current.date} label={current.sourceApp?.name ?? 'Nami'} sourceApp={current.sourceApp} /></div>
       {current.width != null && current.height != null && <div><span>Dimensions</span><span>{current.width} × {current.height}</span></div>}

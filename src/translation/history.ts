@@ -3,6 +3,7 @@ export const TRANSLATION_STRATEGY_VERSION = 1;
 export interface TranslationMetadata {
   requestedSource: string;
   engine: string;
+  targetEngines?: string[];
   strategyVersion: number;
   detections: { rawLanguage: string; language: string; score: number | null }[];
 }

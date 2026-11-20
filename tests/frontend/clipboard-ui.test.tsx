@@ -1739,15 +1739,20 @@ describe('database clipboard history', () => {
     expect(ids()).toEqual(['plain-new', 'plain-old']);
   });
 
-  it('omits successful copy, paste and manual-paste footer messages', async () => {
+  it('keeps success quiet and explains manual paste when dispatch fails after copying', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     let status = 'copied';
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_record_use' ? { status, copyStatus: 'current', code: null } : original(name, args));
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
-    for (status of ['copied', 'dispatched', 'manual']) {
+    for (status of ['copied', 'dispatched']) {
       await act(async () => fireEvent.click(row('first').querySelector('.history-row-select')!));
       expect(document.querySelector('.record-feedback')).toBeNull();
     }
+    status = 'failed';
+    await act(async () => fireEvent.click(row('first').querySelector('.history-row-select')!));
+    expect(screen.getByText('Content copied. Press ⌘V to paste manually.')).toBeTruthy();
+    await emit('clipboard_use_failed', { status: 'failed', copyStatus: 'superseded', code: 'clipboard_changed' });
+    expect(screen.getByText('Clipboard content changed. Copy the record again.')).toBeTruthy();
   });
 
   it('refreshes both first pages only once per committed record update event', async () => {
@@ -2196,6 +2201,16 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(listRows()).toHaveLength(1));
     expect(screen.getByRole('button', { name: `${label} clipboard records` }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.queryByText(message)).toBeNull();
+  });
+
+  it('explains missing image text only when the search can include images and auto-index is off', async () => {
+    bridge.snapshot.clipboardControls.autoImageIndex = false;
+    await mount('clipboard');
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search clipboard' }), { target: { value: 'Missing OCR phrase' } });
+    const hint = 'Automatic image indexing is off. You can index an image from its details.';
+    expect(await screen.findByText(hint)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
+    expect(screen.queryByText(hint)).toBeNull();
   });
 
   it('preserves a search when clearing an empty kind filter', async () => {

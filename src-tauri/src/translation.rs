@@ -393,7 +393,11 @@ pub fn reusable_results(
                 .filter(|record| record.text == text)
                 .filter(|record| {
                     record.translation.as_ref().is_some_and(|metadata| {
-                        metadata.engine == engine
+                        metadata
+                            .target_engines
+                            .get(index)
+                            .unwrap_or(&metadata.engine)
+                            == engine
                             && metadata.requested_source == source
                             && metadata.strategy_version == STRATEGY_VERSION
                     })
@@ -1064,6 +1068,7 @@ mod tests {
             translation: Some(crate::model::TranslationMetadata {
                 requested_source: "auto".into(),
                 engine: "edge".into(),
+                target_engines: Vec::new(),
                 strategy_version: STRATEGY_VERSION,
                 detections: Vec::new(),
             }),

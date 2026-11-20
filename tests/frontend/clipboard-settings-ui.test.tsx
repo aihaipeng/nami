@@ -49,8 +49,8 @@ describe('clipboard recording settings', () => {
     expect(prefs.selectionEnabled).toBe(false);
     expect(prefs.disabledShortcuts).toEqual(['translate']);
     fireEvent.click(restore('Translation'));
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Open Translation' })).toHaveProperty('checked', true));
-    expect(prefs.shortcuts.translate).toEqual({ code: 'Enter', modifiers: ['meta'] });
+    await waitFor(() => expect(prefs.shortcuts.translate).toEqual({ code: 'Enter', modifiers: ['meta'] }));
+    expect(screen.getByRole('checkbox', { name: 'Open Translation' })).toHaveProperty('checked', true);
     expect(prefs.disabledShortcuts).toEqual([]);
     expect(records.preview).toEqual({ binding: { code: 'KeyY', modifiers: ['meta'] }, enabled: true });
   });

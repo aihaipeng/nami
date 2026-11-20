@@ -202,7 +202,13 @@ pub(crate) fn start(app: &AppHandle) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some((id, epoch)) = index_rx.recv().await {
-                let _ = crate::clipboard_text::index_image(&app, id, epoch).await;
+                let result = crate::clipboard_text::index_image(&app, id.clone(), epoch).await;
+                app.state::<AppState>()
+                    .image_index_jobs
+                    .lock()
+                    .unwrap()
+                    .finish(id, &result);
+                let _ = changed(&app);
             }
         });
     }
@@ -316,8 +322,16 @@ pub(crate) fn start(app: &AppHandle) {
             drop(_write);
             match result {
                 Ok((saved, index_job)) => {
-                    if let Some(job) = index_job {
-                        let _ = index_tx.send(job);
+                    if let Some((id, epoch)) = index_job {
+                        if state
+                            .image_index_jobs
+                            .lock()
+                            .unwrap()
+                            .pending
+                            .insert(id.clone())
+                        {
+                            let _ = index_tx.send((id, epoch));
+                        }
                     }
                     acknowledge(&state.clipboard_version, baseline, captured_version);
                     failure = None;
