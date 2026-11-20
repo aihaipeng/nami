@@ -2249,6 +2249,14 @@ return {ready:true,helpVisible:true,height};
             "settings",
             r#"return {ready:!document.querySelector('.clipboard-tip-panel')&&document.querySelector('[aria-label="About Excluded Apps"]').getAttribute('aria-expanded')==='false'};"#,
         )?;
+        samples.push(wait_view_dom(app, "settings", r#"
+const types=[...document.querySelectorAll('.clipboard-recording-types .settings-checkbox')];
+const index=document.querySelector('input[aria-labelledby="clipboard-image-index-heading"]');
+if(types.length!==3||!index)return {ready:false};
+const right=index.getBoundingClientRect().right, recordingRight=types.map(box=>box.getBoundingClientRect().right);
+if(recordingRight.some(value=>Math.abs(value-right)>0.25))throw Error(`clipboard checkboxes must share a right edge: ${recordingRight} vs ${right}`);
+return {ready:true,recordingRight,indexRight:right};
+"#)?);
         let state = app.state::<AppState>();
         {
             let mut database = state.database.lock().unwrap();

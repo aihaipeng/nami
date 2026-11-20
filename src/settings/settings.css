@@ -2,6 +2,7 @@
   --settings-sidebar: 243 243 245;
   --settings-page: 255 255 255;
   --settings-card: 247 247 249;
+  --settings-group-inset: 12px;
   --settings-stroke: hsl(var(--foreground) / .09);
   --settings-secondary: hsl(var(--foreground) / .72);
   --settings-muted-icon: hsl(var(--foreground) / .55);
@@ -27,7 +28,7 @@
 .settings-page h2 { margin: 0 0 8px; padding-inline: 2px; font-size: 16px; line-height: 22px; font-weight: 650; }
 .settings-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; margin: 0 0 8px; }
 .settings-section-heading h2 { margin: 0; }
-.settings-group { min-width: 0; padding: 0 12px; border-radius: 12px; background: rgb(var(--settings-card)); }
+.settings-group { min-width: 0; padding: 0 var(--settings-group-inset); border-radius: 12px; background: rgb(var(--settings-card)); }
 .settings-field { display: flex; align-items: center; gap: 12px; min-height: 40px; padding-block: 6px; }
 .settings-field + .settings-field { border-top: 1px solid var(--settings-stroke); }
 .settings-field-content { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -113,6 +114,7 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .clipboard-cleanup-category:has(input:disabled) { color: var(--settings-secondary); }
 .clipboard-cleanup-count { margin-inline-start: auto; color: var(--settings-secondary); font-variant-numeric: tabular-nums; }
 .clipboard-section-heading { padding-inline-end: 2px; }
+.clipboard-section-heading:has(> .settings-checkbox) { padding-inline-end: var(--settings-group-inset); }
 .clipboard-section-title, .clipboard-excluded-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .clipboard-section-heading > .settings-action { flex: none; }
 .settings-shell .clipboard-tip-trigger { flex: none; width: 26px; min-height: 26px; padding: 0; color: var(--settings-secondary); }

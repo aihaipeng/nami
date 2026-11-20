@@ -159,6 +159,7 @@ export const messages = {
   clipboardOcrPrivacy: ['在本机识别文字，不发送图片或文字。', 'Recognizes text on this Mac without sending the image or text.'],
   clipboardTranslatePrivacy: ['将待翻译文字发送至所选翻译服务。', 'Sends text to the selected translation service.'],
   clipboardAutoImageIndex: ['自动索引图片文字', 'Index image text automatically'],
+  clipboardAboutImageIndex: ['关于图片文字索引', 'About Image Text Indexing'],
   clipboardAutoImageIndexDescription: ['仅处理新采集的图片。识别出的文字保存在本机，可用于搜索；不会上传。', 'Only newly captured images are processed. Recognized text is stored locally for search and is not uploaded.'],
   clipboardImageDescription: ['包括可识别的单张图片文件。', 'Includes supported single image files.'],
   clipboardFilesDescription: ['普通文件和文件夹只保存路径。', 'Regular files and folders are stored as paths only.'],

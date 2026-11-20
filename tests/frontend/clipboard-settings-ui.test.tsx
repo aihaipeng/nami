@@ -403,11 +403,21 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.getByRole('heading', { level: 2, name: 'Excluded Apps' })).toBeTruthy();
   });
 
-  it('opts into on-device image indexing, only updates on success and can disable it', async () => {
+  it('shows local image indexing in its own section with an on-demand tip and saves the opt-in', async () => {
     await openSettings();
-    const index = screen.getByRole('checkbox', { name: 'Index image text automatically' });
+    const section = screen.getByRole('region', { name: 'Index image text automatically' });
+    expect(within(section).getByRole('heading', { level: 2, name: 'Index image text automatically' })).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Clipboard Recording' })).queryByRole('checkbox', { name: 'Index image text automatically' })).toBeNull();
+    const index = within(section).getByRole('checkbox', { name: 'Index image text automatically' });
     expect(index).toHaveProperty('checked', false);
-    expect(screen.getByText(/stored locally for search and is not uploaded/)).toBeTruthy();
+    expect(screen.queryByText(/stored locally for search and is not uploaded/)).toBeNull();
+    const tip = within(section).getByRole('button', { name: 'About Image Text Indexing' });
+    fireEvent.click(tip);
+    expect(screen.getByRole('tooltip').textContent).toMatch(/Only newly captured images.*stored locally for search and is not uploaded/);
+    expect(index).toHaveProperty('checked', false);
+    expect(calls('clipboard_auto_image_index_set')).toHaveLength(0);
+    fireEvent.keyDown(tip, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
     const invoke = bridge.invoke.getMockImplementation()!;
     let fail = true;
     bridge.invoke.mockImplementation(async (name, args) => {
@@ -418,7 +428,7 @@ describe('clipboard privacy, retention and behavior', () => {
       return invoke(name, args);
     });
     fireEvent.click(index);
-    await screen.findByRole('alert');
+    await within(section).findByRole('alert');
     expect(index).toHaveProperty('checked', false);
     fail = false;
     fireEvent.click(index);

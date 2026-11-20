@@ -62,7 +62,7 @@ export function ClipboardExcludedApps({ t, state, available }: { t: Translate; s
     <div className="settings-section-heading clipboard-section-heading">
       <div className="clipboard-section-title">
         <h2 id="clipboard-excluded-heading">{t('clipboardExcludedAppsHeading')}</h2>
-        <ExclusionTip label={t('clipboardAboutExcludedApps')} text={t('clipboardExcludedAppsDescription')} />
+        <ClipboardSettingTip label={t('clipboardAboutExcludedApps')} text={t('clipboardExcludedAppsDescription')} />
       </div>
       {available ? <button type="button" ref={add} className="settings-action" disabled={!apps} aria-disabled={busy || undefined}
         onClick={() => void change()}>{t('clipboardAddApp')}</button>
@@ -77,7 +77,7 @@ export function ClipboardExcludedApps({ t, state, available }: { t: Translate; s
           <div className="clipboard-excluded-name">
             <ExcludedAppIcon url={iconDataUrl} />
             <strong title={bundleId}>{name}</strong>
-            {duplicate && <ExclusionTip label={t('clipboardAboutExcludedApp').replace('{app}', identity)} text={bundleId} />}
+            {duplicate && <ClipboardSettingTip label={t('clipboardAboutExcludedApp').replace('{app}', identity)} text={bundleId} />}
           </div>
           <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button" title={remove}
             aria-label={remove} onClick={(event) => void change(bundleId, event.currentTarget)}><X aria-hidden="true" /></button>
@@ -95,7 +95,7 @@ function ExcludedAppIcon({ url }: { url?: string }) {
     : <AppWindow className="clipboard-excluded-icon clipboard-icon-fallback" aria-hidden="true" />;
 }
 
-function ExclusionTip({ label, text }: { label: string; text: string }) {
+export function ClipboardSettingTip({ label, text }: { label: string; text: string }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const id = useId();
   const [open, setOpen] = useState(false);
