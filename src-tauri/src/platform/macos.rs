@@ -99,6 +99,25 @@ unsafe fn ax_attribute(element: *const c_void, name: &NSString) -> Option<AXValu
     }
 }
 
+unsafe fn ax_parameterized_string(
+    element: *const c_void,
+    name: &NSString,
+    parameter: &AXValue,
+) -> Option<String> {
+    let mut value = std::ptr::null();
+    let status = AXUIElementCopyParameterizedAttributeValue(
+        element,
+        (name as *const NSString).cast(),
+        parameter.0,
+        &mut value,
+    );
+    if value.is_null() {
+        return None;
+    }
+    let value = AXValue(value);
+    (status == 0).then(|| ax_string(&value)).flatten()
+}
+
 unsafe fn ax_string(value: &AXValue) -> Option<String> {
     if CFGetTypeID(value.0) != CFStringGetTypeID() {
         return None;
@@ -143,17 +162,24 @@ fn resolve_selection(
     selected: Option<String>,
     range_length: Option<isize>,
     read_range: impl FnOnce() -> Option<String>,
+    read_marker: impl FnOnce() -> Option<String>,
 ) -> Result<String, &'static str> {
-    if let Some(text) = selected.as_ref().filter(|text| !text.trim().is_empty()) {
-        return Ok(text.clone());
+    if let Some(text) = selected.filter(|text| !text.trim().is_empty()) {
+        return Ok(text);
     }
-    match range_length {
-        Some(0) => Ok(String::new()),
-        Some(length) if length > 0 => read_range()
+    if range_length == Some(0) {
+        return Ok(String::new());
+    }
+    let ordinary = range_length
+        .filter(|&length| length > 0)
+        .and_then(|_| read_range());
+    match ordinary {
+        Some(text) if !text.trim().is_empty() => Ok(text),
+        ordinary => read_marker()
+            .filter(|text| !text.trim().is_empty())
+            .or(ordinary)
             .ok_or("selection_unavailable")
             .and_then(selection_result),
-        None if selected.is_some() => Ok(String::new()),
-        _ => Err("selection_unavailable"),
     }
 }
 
@@ -382,21 +408,20 @@ pub fn selected_text(target: Target) -> Result<String, &'static str> {
         }
         let range = ax_attribute(focused.0, ns_string!("AXSelectedTextRange"));
         let range_length = range.as_ref().and_then(|value| ax_range_length(value));
-        resolve_selection(selected, range_length, || {
-            let range = range.as_ref()?;
-            let mut value = std::ptr::null();
-            let status = AXUIElementCopyParameterizedAttributeValue(
-                focused.0,
-                (ns_string!("AXStringForRange") as *const NSString).cast(),
-                range.0,
-                &mut value,
-            );
-            if value.is_null() {
-                return None;
-            }
-            let value = AXValue(value);
-            (status == 0).then(|| ax_string(&value)).flatten()
-        })
+        resolve_selection(
+            selected,
+            range_length,
+            || ax_parameterized_string(focused.0, ns_string!("AXStringForRange"), range.as_ref()?),
+            || {
+                // SelectedTextKit's AX text-marker fallback (MIT; licenses/SelectedTextKit.txt).
+                let markers = ax_attribute(focused.0, ns_string!("AXSelectedTextMarkerRange"))?;
+                ax_parameterized_string(
+                    focused.0,
+                    ns_string!("AXStringForTextMarkerRange"),
+                    &markers,
+                )
+            },
+        )
     }
 }
 
@@ -774,56 +799,74 @@ mod tests {
     }
 
     #[test]
-    fn empty_selection_does_not_read_range() {
-        for (selected, range) in [
-            (Some(String::new()), Some(0)),
-            (Some(" \n".into()), None),
-            (None, Some(0)),
-        ] {
-            assert_eq!(
-                resolve_selection(selected, range, || panic!(
-                    "empty selection must not read range text"
-                )),
-                Ok(String::new())
-            );
-        }
-    }
-
-    #[test]
-    fn empty_selected_attribute_still_uses_a_nonempty_range() {
+    fn explicit_zero_range_skips_other_queries() {
         assert_eq!(
-            resolve_selection(Some(String::new()), Some(12), || Some("Range text".into())),
-            Ok("Range text".into())
-        );
-        assert_eq!(
-            resolve_selection(None, Some(12), || Some(" \n".into())),
+            resolve_selection(
+                None,
+                Some(0),
+                || panic!("read range"),
+                || panic!("read marker")
+            ),
             Ok(String::new())
         );
     }
 
     #[test]
-    fn unknown_or_failed_range_reports_unavailable() {
+    fn nonempty_ordinary_selection_skips_marker() {
         assert_eq!(
-            resolve_selection(None, None, || panic!("no valid range")),
-            Err("selection_unavailable")
+            resolve_selection(
+                Some("  Selected text\n".into()),
+                None,
+                || panic!("read range"),
+                || panic!("read marker")
+            ),
+            Ok("  Selected text\n".into())
         );
         assert_eq!(
-            resolve_selection(None, Some(-1), || panic!("invalid range")),
-            Err("selection_unavailable")
-        );
-        assert_eq!(
-            resolve_selection(Some(String::new()), Some(10), || None),
-            Err("selection_unavailable")
+            resolve_selection(
+                None,
+                Some(12),
+                || Some("Range text".into()),
+                || panic!("read marker")
+            ),
+            Ok("Range text".into())
         );
     }
 
     #[test]
-    fn nonempty_selected_text_does_not_query_range() {
+    fn outlook_and_web_text_markers_recover_an_unavailable_or_empty_selection() {
+        for selected in [None, Some(String::new())] {
+            assert_eq!(
+                resolve_selection(
+                    selected,
+                    None,
+                    || panic!("no range"),
+                    || Some("  Selected 正文 🌊\n".into())
+                ),
+                Ok("  Selected 正文 🌊\n".into())
+            );
+        }
         assert_eq!(
-            resolve_selection(Some("  Selected text\n".into()), None, || panic!(
-                "direct text must not read range"
-            )),
-            Ok("  Selected text\n".into())
+            resolve_selection(None, Some(12), || None, || Some("Marker text".into())),
+            Ok("Marker text".into())
+        );
+    }
+
+    #[test]
+    fn failed_or_blank_marker_does_not_hide_an_unknown_selection() {
+        for marker in [None, Some(" \n".into())] {
+            assert_eq!(
+                resolve_selection(Some(String::new()), None, || panic!("no range"), || marker),
+                Err("selection_unavailable")
+            );
+        }
+        assert_eq!(
+            resolve_selection(None, Some(-1), || panic!("invalid range"), || None),
+            Err("selection_unavailable")
+        );
+        assert_eq!(
+            resolve_selection(None, Some(12), || Some(" \n".into()), || None),
+            Ok(String::new())
         );
     }
 
