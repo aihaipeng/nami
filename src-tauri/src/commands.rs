@@ -103,6 +103,9 @@ pub fn window_show(window: Webview, app: AppHandle, target: String) -> Result<()
         &window,
         &["translation", "history", "clipboard", "settings"],
     )?;
+    if target == "settings" {
+        return crate::records_runtime::open_settings_window(&app);
+    }
     windows::show(&app, &target)
 }
 
@@ -1437,6 +1440,49 @@ pub async fn clipboard_record_detail(
     })
     .await
     .map_err(|_| "storage_worker")?
+}
+
+#[tauri::command]
+pub async fn clipboard_open_target(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+    file_index: Option<usize>,
+    execute: bool,
+) -> Result<Option<&'static str>, String> {
+    use nami::clipboard::open_target::{self, OpenTarget};
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_open_target {
+        return Err("platform_unavailable".into());
+    }
+    let record = crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_record(&record_id)
+    })
+    .await?;
+    let target =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Option<OpenTarget>, String> {
+            let target = open_target::resolve(&record.kind, &record.text, file_index)?;
+            if let Some(OpenTarget::File(path)) = &target {
+                if (execute || record.kind == "text") && !path.exists() {
+                    return if execute {
+                        Err("clipboard_file_missing".into())
+                    } else {
+                        Ok(None)
+                    };
+                }
+            }
+            Ok(target)
+        })
+        .await
+        .map_err(|_| "storage_worker")??;
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let kind = target.kind();
+    if execute && target != OpenTarget::ChooseFile {
+        on_main(&app, |_| platform::open_clipboard_target(target)).await??;
+    }
+    Ok(Some(kind))
 }
 
 #[tauri::command]

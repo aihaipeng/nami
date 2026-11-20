@@ -1,3 +1,4 @@
+import { clipboardOpenError, clipboardOpenTarget } from './openTarget';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -71,6 +72,16 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const current = shown?.id === id ? shown : null;
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : !!shown && snapshot.capabilities.imageOcr && imageText.get(shown.id) === true;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
+  async function revealFile(index: number) {
+    if (!current || loading) return;
+    const revision = operation.current;
+    const feedbackRevision = ++feedbackOperation.current;
+    setFeedback(null);
+    try { await clipboardOpenTarget(current.id, true, index); }
+    catch (error) {
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
+    }
+  }
   async function action(type: 'copy' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
     const process = type === 'translate' || type === 'ocr';
     if (!current || loading || processing.current && (process || type === 'delete')) return false;
@@ -116,7 +127,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     </header>
     <HistoryList scrollOnly active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
-        {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} />}
+        {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} onReveal={snapshot.capabilities.clipboardOpenTarget && current.files.length > 1 ? (index) => { void revealFile(index); } : undefined} revealLabel={t('clipboardRevealFile')} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
     {current && <footer className="clipboard-detail-metadata">

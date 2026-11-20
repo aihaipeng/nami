@@ -64,6 +64,30 @@ pub(crate) fn toggle_translation_history(app: &AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+pub(crate) fn open_settings_window(app: &AppHandle) -> Result<(), String> {
+    if defer_navigation(app, "settings")? {
+        return Ok(());
+    }
+    windows::show(app, "settings")
+}
+
+pub(crate) fn dismiss_records_window(app: &AppHandle, region: &str) -> Result<(), String> {
+    if defer_navigation(app, "close:records")? {
+        return Ok(());
+    }
+    let state = app.state::<AppState>();
+    state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+    state.operation.fetch_add(1, Ordering::SeqCst);
+    windows::hide(
+        app,
+        if region == "history" {
+            "translation"
+        } else {
+            region
+        },
+    )
+}
+
 pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pending = state.records_navigation.lock().unwrap().take();
@@ -79,6 +103,7 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
     match pending.as_deref() {
         Some("view:clipboard") => windows::set_record_view(app, "clipboard"),
         Some("view:translation") => windows::set_record_view(app, "translation"),
+        Some("close:records") => dismiss_records_window(app, "translation"),
         Some("toggle:history") => toggle_translation_history(app),
         Some(target) => {
             if target == "translation" {

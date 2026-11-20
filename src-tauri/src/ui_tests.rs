@@ -2253,7 +2253,7 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='15,3,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='16,4,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
@@ -5433,6 +5433,13 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
                 image_path: Some(path),
                 fingerprint: "smoke-ocr".into(),
             })?;
+        // Prepare the real Vision result before checking interactive shortcut readiness.
+        if !tauri::async_runtime::block_on(crate::clipboard_text::has_text(
+            app,
+            "smoke-ocr".into(),
+        ))? {
+            return Err("Vision found no text in the synthetic shortcut image".into());
+        }
         crate::clipboard_runtime::changed(app)?;
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
         check("OCR image ready", "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-ocr'&&!!row.querySelector('[data-action=ocr]')")?;
@@ -5503,6 +5510,141 @@ return true;
         }
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
         samples.push(check("Open with record list focus", "document.hasFocus()&&!!row&&document.activeElement===row.querySelector('.history-row-select')&&!focused")?);
+        let fixture =
+            std::env::temp_dir().join(format!("nami-open-smoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
+        let first = fixture.join("first.txt");
+        let second = fixture.join("second file.txt");
+        let open_targets = (|| {
+            for path in [&first, &second] {
+                std::fs::write(path, "Synthetic clipboard open smoke")
+                    .map_err(|error| error.to_string())?;
+            }
+            {
+                let state = app.state::<AppState>();
+                let mut database = state.database.lock().unwrap();
+                let database = database.as_mut().ok_or("isolated test database")?;
+                for (id, kind, text, title) in [
+                    (
+                        "smoke-open-url",
+                        "text",
+                        format!("www.example.test/{}", "a".repeat(2200)),
+                        "Open smoke web",
+                    ),
+                    (
+                        "smoke-open-mail",
+                        "text",
+                        "test+tag@example.test".into(),
+                        "Open smoke mail",
+                    ),
+                    (
+                        "smoke-open-plain",
+                        "text",
+                        format!(
+                            "https://example.test/{}\nNot a standalone link",
+                            "a".repeat(2200)
+                        ),
+                        "Open smoke plain",
+                    ),
+                    (
+                        "smoke-open-files",
+                        "files",
+                        serde_json::to_string(&[&first, &second]).unwrap(),
+                        "Open smoke group",
+                    ),
+                    (
+                        "smoke-open-file",
+                        "files",
+                        serde_json::to_string(&[&first]).unwrap(),
+                        "Open smoke single",
+                    ),
+                ] {
+                    database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                        id: id.into(),
+                        kind: kind.into(),
+                        text,
+                        date: "2099-01-01T00:00:00Z".into(),
+                        is_favorite: false,
+                        is_pinned: false,
+                        source_app: None,
+                        image_path: None,
+                        fingerprint: id.into(),
+                    })?;
+                    database.clipboard_edit(id, title, None)?;
+                }
+            }
+            let menu = |id: &str, query: &str, label: &str| {
+                search_for(query)?;
+                check(
+                    "Open target fixture found",
+                    &format!("row?.dataset.recordId==={id:?}&&count==='1 record'"),
+                )?;
+                evaluate_view_dom(
+                    app,
+                    "clipboard",
+                    &format!(
+                        r#"
+const row=document.querySelector('[data-record-id='+{id:?}+']');row.dispatchEvent(new MouseEvent('contextmenu',{{bubbles:true,cancelable:true,clientX:40,clientY:100}}));return true;
+"#
+                    ),
+                )?;
+                let sample = wait_records(
+                    app,
+                    &format!(
+                        r#"
+const item=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==={label:?});return {{ready:!!item,record:{id:?},action:item?.textContent}};
+"#
+                    ),
+                )?;
+                evaluate_view_dom(app, "clipboard", "document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));return true;")?;
+                Ok::<_, String>(sample)
+            };
+            samples.push(menu("smoke-open-url", "Open smoke web", "Open Link")?);
+            samples.push(menu("smoke-open-mail", "Open smoke mail", "Compose Email")?);
+            samples.push(menu(
+                "smoke-open-file",
+                "Open smoke single",
+                "Show in Finder",
+            )?);
+            samples.push(menu(
+                "smoke-open-files",
+                "Open smoke group",
+                "Choose File to Reveal",
+            )?);
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"
+window.__openPlain='pending';window.__TAURI_INTERNALS__.invoke('clipboard_open_target',{recordId:'smoke-open-plain',execute:true}).then(value=>window.__openPlain=value,error=>window.__openPlain=String(error));return true;
+"#,
+            )?;
+            samples.push(wait_records(app, r#"return {ready:window.__openPlain===null,action:'Reject multiline text even when its summary starts with a URL',result:window.__openPlain};"#)?);
+            evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-panel input[type=search]').focus();return true;")?;
+            press(31, CMD, "o", "o")?;
+            samples.push(check("Command-O from search", "keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted&&row?.dataset.recordId==='smoke-open-files'")?);
+            let choose = r#"
+const buttons=[...document.querySelectorAll('.clipboard-detail button.clipboard-file')];return {ready:buttons.length===2&&buttons[1].getAttribute('aria-label')==='Show in Finder: second file.txt'&&!buttons[1].disabled,action:'Choose either file in details'};
+"#;
+            samples.push(wait_dom(app, choose)?);
+            // Removing the second file after details load catches routing to the wrong index.
+            std::fs::remove_file(&second).map_err(|error| error.to_string())?;
+            evaluate_view_dom(app, "translation", "document.querySelectorAll('.clipboard-detail button.clipboard-file')[1].click();return true;")?;
+            samples.push(wait_dom(app, r#"
+const pane=document.querySelector('.clipboard-detail');return {ready:pane?.textContent.includes('The original file was moved or deleted and cannot be located'),action:'Revalidate the selected file at execution time'};
+"#)?);
+            evaluate_view_dom(
+                app,
+                "translation",
+                r#"
+window.__finderDispatch='pending';window.__TAURI_INTERNALS__.invoke('clipboard_open_target',{recordId:'smoke-open-files',fileIndex:0,execute:true}).then(value=>window.__finderDispatch=value,error=>window.__finderDispatch=String(error));return true;
+"#,
+            )?;
+            samples.push(wait_dom(app, r#"return {ready:window.__finderDispatch==='file',action:'Hand off the remaining synthetic file to Finder',result:window.__finderDispatch};"#)?);
+            Ok::<(), String>(())
+        })();
+        let _ = std::fs::remove_dir_all(fixture);
+        open_targets?;
+
         Ok(())
     })();
     if let Some(path) = owned_image {
@@ -5510,6 +5652,175 @@ return true;
     }
     DomCase {
         name: "clipboard shortcut smoke through macOS and WebView",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_record_display_shortcuts(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        const CMD: usize = 1 << 20;
+        let press = |label, code, chars| {
+            on_main(app, move |app| {
+                let window = app.get_window(label).ok_or("shortcut window")?;
+                let native = window
+                    .ns_window()
+                    .map_err(|_| "shortcut window")?
+                    .cast::<AnyObject>();
+                activate_application();
+                unsafe {
+                    let _: () = objc2::msg_send![native, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+                }
+                Ok(())
+            })?;
+            post_window_key(app, label, code, CMD, chars, chars, false)
+        };
+        let wait_visible = |label: &'static str, expected| {
+            for _ in 0..50 {
+                let visible = on_main(app, move |app| {
+                    app.get_window(label)
+                        .ok_or("shortcut window")?
+                        .is_visible()
+                        .map_err(|error| error.to_string())
+                })?;
+                if visible == expected {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(format!(
+                "Shortcut did not set {label} visibility to {expected}"
+            ))
+        };
+        on_main(app, |app| {
+            let state = app.state::<AppState>();
+            let mut regions = state.windows.lock().unwrap();
+            regions.history_pinned = true;
+            regions.translation_pinned = true;
+            drop(regions);
+            create(app, "settings")?;
+            Ok(())
+        })?;
+        let source =
+            "First preview line\nSecond preview line\nThird preview line\nFourth preview line";
+        {
+            let state = app.state::<AppState>();
+            let mut database = state.database.lock().unwrap();
+            let db = database.as_mut().ok_or("isolated database")?;
+            db.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: "smoke-preview-text".into(),
+                kind: "text".into(),
+                text: source.into(),
+                date: "2099-01-01T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: None,
+                fingerprint: "smoke-preview-text".into(),
+            })?;
+        }
+        let translation = nami::model::HistoryRecord {
+            id: "smoke-preview-source".into(),
+            title: String::new(),
+            text: source.into(),
+            source_language: "en".into(),
+            translation: None,
+            target_languages: vec!["fr".into()],
+            translations: vec!["Synthetic translation".into()],
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+        };
+        on_main(app, move |app| history_add(app, translation))?;
+        crate::clipboard_runtime::changed(app)?;
+        let measure = |id: &str, lines| {
+            format!(
+                r#"
+const node=document.querySelector('[data-record-id={id}] .history-text-preview');
+const clamp=node&&getComputedStyle(node).webkitLineClamp,height=node?.getBoundingClientRect().height;
+return {{ready:clamp==='{lines}'&&height>0&&node.scrollHeight>height,action:'Text preview height',id:{id:?},clamp,height}};
+"#
+            )
+        };
+        on_main(app, |app| resume_navigation(app, "clipboard"))?;
+        let baseline = wait_records(app, &measure("smoke-preview-text", 3))?;
+        samples.push(baseline.clone());
+        press("translation", 43, ",")?;
+        wait_visible("settings", true)?;
+        samples.push(serde_json::json!({"action":"Command-comma from Clipboard"}));
+        wait_view_dom(
+            app,
+            "settings",
+            "return {ready:!!document.querySelector('.settings-content')};",
+        )?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+window.__previewPreferences='pending';
+(async()=>{
+  const invoke=window.__TAURI_INTERNALS__.invoke;
+  const before=(await invoke('app_snapshot')).clipboardControls.previewLines;
+  if(before.clipboard!==3||before.translation!==3)throw Error('incorrect default preview lines');
+  for(const lines of [0,4]){
+    const error=await invoke('records_preview_lines_set',{view:'clipboard',lines}).then(()=>null,String);
+    if(error!=='invalid_argument')throw Error('out-of-range preview lines were accepted');
+  }
+  await invoke('records_preview_lines_set',{view:'clipboard',lines:1});
+  await invoke('records_preview_lines_set',{view:'translation',lines:2});
+})().then(()=>window.__previewPreferences='saved',error=>window.__previewPreferences=String(error));return true;
+"#,
+        )?;
+        samples.push(wait_view_dom(app,"settings",r#"return {ready:window.__previewPreferences==='saved',action:'Save distinct preview preferences and reject 0/4',status:window.__previewPreferences};"#)?);
+        {
+            let state = app.state::<AppState>();
+            let database = state.database.lock().unwrap();
+            let reloaded = crate::clipboard_preferences::ClipboardOptions::load(
+                database.as_ref().ok_or("isolated database")?,
+            )?;
+            if serde_json::to_value(reloaded.controls()).map_err(|error| error.to_string())?
+                ["previewLines"]
+                != serde_json::json!({"clipboard":1,"translation":2})
+            {
+                return Err("Preview preferences did not survive reload".into());
+            }
+        }
+        press("settings", 13, "w")?;
+        wait_visible("settings", false)?;
+        on_main(app, |app| resume_navigation(app, "clipboard"))?;
+        let compact = wait_records(app, &measure("smoke-preview-text", 1))?;
+        if compact["height"].as_f64().unwrap_or_default()
+            >= baseline["height"].as_f64().unwrap_or_default()
+        {
+            return Err("Reducing the clipboard line limit did not shrink the preview".into());
+        }
+        samples.push(compact);
+        on_main(app, |app| set_record_view(app, "translation"))?;
+        samples.push(wait_records(app, &measure("smoke-preview-source", 2))?);
+
+        for target in ["clipboard", "translation"] {
+            on_main(app, move |app| resume_navigation(app, target))?;
+            wait_visible("translation", true)?;
+            if target == "translation" {
+                press("translation", 43, ",")?;
+                wait_visible("settings", true)?;
+                samples.push(serde_json::json!({"action":"Command-comma from Translation"}));
+                press("settings", 13, "w")?;
+                wait_visible("settings", false)?;
+                on_main(app, |app| resume_navigation(app, "translation"))?;
+            }
+            press("translation", 13, "w")?;
+            wait_visible("translation", false)?;
+            samples.push(serde_json::json!({"action":"Command-W", "target":target, "hidden":true}));
+        }
+
+        Ok(())
+    })();
+    DomCase {
+        name: "record previews and macOS window shortcuts",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -6929,6 +7240,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         if ![
             "clipboard-actions",
             "clipboard-shortcuts",
+            "record-display-shortcuts",
             "clipboard-settings",
             "clipboard-editor",
             "clipboard-media",
@@ -6974,6 +7286,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_translation_action_timing(&app)
             } else if case == "clipboard-settings" {
                 run_clipboard_capture_setting(&app)
+            } else if case == "record-display-shortcuts" {
+                run_record_display_shortcuts(&app)
             } else if case == "clipboard-shortcuts" {
                 run_clipboard_shortcuts_smoke(&app)
             } else if case == "clipboard-actions" {

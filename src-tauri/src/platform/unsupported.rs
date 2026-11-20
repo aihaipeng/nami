@@ -86,3 +86,7 @@ pub(crate) fn application_presentation(_: &str) -> Option<(Option<String>, Optio
 pub fn file_icon_data_url(_: &str) -> Option<String> {
     None
 }
+
+pub fn open_clipboard_target(_: nami::clipboard::open_target::OpenTarget) -> Result<(), String> {
+    Err("platform_unavailable".into())
+}

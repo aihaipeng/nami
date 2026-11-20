@@ -896,6 +896,8 @@ impl HistoryDatabase {
             "clipboard_excluded_apps",
             "clipboard_activation",
             "records_open_focus",
+            "clipboard_preview_lines",
+            "translation_preview_lines",
             "translation_engine",
             "translation_source",
             "translation_primary",

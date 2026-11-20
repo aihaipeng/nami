@@ -5,6 +5,20 @@ import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
 
 describe('clipboard recording settings', () => {
+  it('stores separate preview limits and defaults both to three lines', async () => {
+    await mount('settings');
+    for (const [page, view, lines] of [['Clipboard', 'clipboard', 1], ['Translation', 'translation', 2]] as const) {
+      fireEvent.click(screen.getByRole('button', { name: page }));
+      fireEvent.click(screen.getByRole('button', { name: 'Preview Lines: 3' }));
+      expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['1', '2', '3']);
+      fireEvent.click(screen.getByRole('option', { name: String(lines) }));
+      await screen.findByRole('button', { name: `Preview Lines: ${lines}` });
+      expect(calls('records_preview_lines_set').at(-1)?.[1]).toEqual({ view, lines });
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    expect(screen.getByRole('button', { name: 'Preview Lines: 1' })).toBeTruthy();
+  });
+
   it('saves the shared opening focus from General', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Focus When Opening Records: Search Field' }));
@@ -62,14 +76,14 @@ describe('clipboard recording settings', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['General', 'Clipboard', 'Translation']);
     const general = within(screen.getByRole('group', { name: 'General' }));
     expect(general.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
-      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Focus Record List', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts',
+      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Focus Record List', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
     const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
     for (const [name, key] of [['Navigate Up', '↑'], ['Navigate Down', '↓'], ['Previous Category', '←'], ['Next Category', '→']]) {
       expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
     }
     expect(general.getByRole('button', { name: 'Switch Record View shortcut' }).textContent).toBe('Tab');
-    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Extract Text'];
+    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text'];
     expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
     for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();

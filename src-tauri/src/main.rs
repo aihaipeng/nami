@@ -372,6 +372,7 @@ fn main() {
             commands::clipboard_record_use,
             commands::clipboard_query,
             commands::clipboard_record_detail,
+            commands::clipboard_open_target,
             commands::clipboard_record_has_text,
             commands::clipboard_record_process,
             commands::clipboard_translation_take,
@@ -382,6 +383,7 @@ fn main() {
             clipboard_preferences::clipboard_excluded_app_remove,
             clipboard_preferences::clipboard_behavior_set,
             clipboard_preferences::records_open_focus_set,
+            clipboard_preferences::records_preview_lines_set,
             clipboard_preferences::clipboard_record_shortcut_set,
             clipboard_preferences::records_storage_info,
             clipboard_preferences::records_cleanup_preview,
@@ -393,6 +395,8 @@ fn main() {
             commands::permission_request,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            shortcut_capture::install_window_shortcuts(app.handle());
             #[cfg(feature = "ui-tests")]
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 let database = std::thread::spawn(|| -> Result<_, String> {

@@ -38,12 +38,45 @@ pub enum RecordsOpenFocus {
 }
 
 #[derive(Clone, Serialize)]
+struct RecordPreviewLines {
+    clipboard: u8,
+    translation: u8,
+}
+
+impl Default for RecordPreviewLines {
+    fn default() -> Self {
+        Self {
+            clipboard: 3,
+            translation: 3,
+        }
+    }
+}
+
+impl RecordPreviewLines {
+    fn key(view: RecordView) -> &'static str {
+        match view {
+            RecordView::Clipboard => "clipboard_preview_lines",
+            RecordView::Translation => "translation_preview_lines",
+        }
+    }
+
+    fn load(db: &HistoryDatabase, view: RecordView) -> Result<u8, String> {
+        Ok(db
+            .preference(Self::key(view))?
+            .and_then(|value| value.parse().ok())
+            .filter(|lines| (1..=3).contains(lines))
+            .unwrap_or(3))
+    }
+}
+
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
     records_open_focus: RecordsOpenFocus,
+    preview_lines: RecordPreviewLines,
     pub record_shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
 
@@ -64,6 +97,7 @@ impl Default for ClipboardOptions {
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
             records_open_focus: RecordsOpenFocus::default(),
+            preview_lines: Default::default(),
             record_shortcuts: Default::default(),
         }
     }
@@ -88,6 +122,10 @@ impl ClipboardOptions {
             .preference("records_open_focus")?
             .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or_default();
+        options.preview_lines = RecordPreviewLines {
+            clipboard: RecordPreviewLines::load(db, RecordView::Clipboard)?,
+            translation: RecordPreviewLines::load(db, RecordView::Translation)?,
+        };
         options.record_shortcuts = nami::shortcuts::ClipboardRecordShortcuts::from_store(
             db.preference("clipboard_record_shortcuts")?,
         );
@@ -227,6 +265,7 @@ pub async fn clipboard_excluded_app_remove(
 pub(crate) struct ClipboardControls {
     activation: Activation,
     records_open_focus: RecordsOpenFocus,
+    preview_lines: RecordPreviewLines,
     shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
 
@@ -235,6 +274,7 @@ impl ClipboardOptions {
         ClipboardControls {
             activation: self.activation,
             records_open_focus: self.records_open_focus,
+            preview_lines: self.preview_lines.clone(),
             shortcuts: self.record_shortcuts.clone(),
         }
     }
@@ -325,6 +365,34 @@ pub async fn records_open_focus_set(
     })
     .await?;
     state.clipboard_options.lock().unwrap().records_open_focus = focus;
+    publish_controls(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn records_preview_lines_set(
+    window: Webview,
+    app: AppHandle,
+    view: RecordView,
+    lines: u8,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    if !(1..=3).contains(&lines) {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.shortcut_writes.lock().await;
+    database(&app, move |db| {
+        db.preference_set(RecordPreviewLines::key(view), &lines.to_string())
+    })
+    .await?;
+    {
+        let mut options = state.clipboard_options.lock().unwrap();
+        match view {
+            RecordView::Clipboard => options.preview_lines.clipboard = lines,
+            RecordView::Translation => options.preview_lines.translation = lines,
+        }
+    }
     publish_controls(&app, &state);
     Ok(())
 }

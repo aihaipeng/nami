@@ -10,7 +10,7 @@ function portable(platform: 'windows' | 'linux' = 'windows') {
   bridge.snapshot.window.recordView = 'translation';
   bridge.snapshot.capabilities = {
     platform, nativeHistory: false, nativeChrome: false, nativeMaterial: false,
-    selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false,
+    selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, accessibilityPermission: false,
     primaryModifier: 'control',
   };
   bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts: defaultTranslationShortcuts('control') };

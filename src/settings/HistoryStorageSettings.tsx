@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { RefreshCw } from 'lucide-react';
 import type { MessageKey, Translate } from '../shared/i18n';
+import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { SettingsDialog } from './SettingsDialog';
 import { errorCode } from './ShortcutCapture';
 
@@ -18,8 +19,19 @@ function storageSize(bytes: number, locale: string) {
   }
 }
 
-export function HistoryStorageSettings({ t, available, view, locale }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string }) {
+export function HistoryStorageSettings({ t, available, view, locale, previewLines }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string; previewLines: number }) {
   const id = useId();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
+  const savingPreview = useRef(false);
+  async function savePreviewLines(code: string) {
+    if (savingPreview.current || Number(code) === previewLines) return;
+    savingPreview.current = true;
+    setPreviewSaveFailed(false);
+    try { await invoke('records_preview_lines_set', { view, lines: Number(code) }); }
+    catch { setPreviewSaveFailed(true); }
+    finally { savingPreview.current = false; }
+  }
   const [storage, setStorage] = useState<Storage>();
   const [storageError, setStorageError] = useState(false);
   const [refresh, refreshStorage] = useState(0);
@@ -100,6 +112,13 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
         onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearRecords')}</button>
     </div>
     <div className="settings-group">
+      <div className="settings-field">
+        <label className="settings-field-content" htmlFor={`${id}-preview-lines`}>{t('recordPreviewLines')}</label>
+        {available ? <SearchableDropdown id={`${id}-preview-lines`} label={t('recordPreviewLines')} value={String(previewLines)}
+          items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={previewOpen} onOpenChange={setPreviewOpen}
+          onChange={(code) => void savePreviewLines(code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
+      </div>
+      {previewSaveFailed && <p className="settings-field-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       <form className="settings-field" onSubmit={(event) => { event.preventDefault(); if (canSave) preview({ limit }); }}>
         <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
         {available && storage ? <div className="settings-history-limit">

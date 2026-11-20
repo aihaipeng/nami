@@ -51,7 +51,7 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
       </div>
     </section>
     <ClipboardExcludedApps t={t} state={options} available={canCapture} />
-    <HistoryStorageSettings t={t} available={canManage} view="clipboard" locale={resolveLanguage(snapshot.locale)} />
+    <HistoryStorageSettings t={t} available={canManage} view="clipboard" previewLines={snapshot.clipboardControls.previewLines?.clipboard ?? 3} locale={resolveLanguage(snapshot.locale)} />
     <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture}
       locale={resolveLanguage(snapshot.locale)} />
   </div>;

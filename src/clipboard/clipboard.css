@@ -22,7 +22,6 @@
 .clipboard-record-title { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 2px; font-size: 13px; line-height: normal; }
 .clipboard-record-content { display: block; }
 .clipboard-record-original { display: block; min-height: 0; overflow: hidden; }
-.clipboard-record-original .history-preview { display: block; -webkit-line-clamp: unset; }
 .clipboard-record-body .history-preview, .clipboard-record-body .clipboard-image-preview { margin-top: 0; }
 .clipboard-record-body[data-expanded=true] .clipboard-record-title, .clipboard-record-body[data-expanded=false] .clipboard-record-content { visibility: hidden; pointer-events: none; }
 .clipboard-editor-layer { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / .12); opacity: 0; transition: opacity 160ms ease-out; }
@@ -75,3 +74,5 @@
 .clipboard-detail-metadata .history-origin { margin-top: 1px; }
 .clipboard-detail-metadata .history-languages { white-space: normal; overflow-wrap: anywhere; font-size: 11px; }
 .clipboard-detail-metadata time { display: none; }
+.clipboard-detail button.clipboard-file { padding: 4px 6px; border-radius: 6px; }
+.clipboard-detail button.clipboard-file:is(:hover, :focus-visible):not(:disabled) { background: hsl(var(--foreground) / .1); }

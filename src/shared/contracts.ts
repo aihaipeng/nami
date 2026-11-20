@@ -33,6 +33,7 @@ export interface PlatformCapabilities {
   imageOcr: boolean;
   clipboardWrite: boolean;
   autoPaste: boolean;
+  clipboardOpenTarget: boolean;
   accessibilityPermission: boolean;
   primaryModifier: 'meta' | 'control';
 }
@@ -76,7 +77,7 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   translationEngine: 'edge',
   translationPreferences: {
@@ -95,7 +96,7 @@ export const initialSnapshot: AppSnapshot = {
   clipboardRecordingTypes: { text: true, image: true, files: true },
   clipboardBinding: defaultClipboardBinding,
   clipboardShortcutEnabled: true,
-  clipboardControls: { recordsOpenFocus: 'search', activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
+  clipboardControls: { recordsOpenFocus: 'search', previewLines: { clipboard: 3, translation: 3 }, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
   accessibility: false,
   shortcutErrors: [],
   window: {

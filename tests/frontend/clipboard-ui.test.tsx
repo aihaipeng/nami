@@ -2239,3 +2239,33 @@ describe('database clipboard history', () => {
     expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'clipboard' });
   });
 });
+
+describe('clipboard open target', () => {
+  it('uses the current record for Command-O and the context row for Open Link, passing only the record ID', async () => {
+    records = records.map((record) => ({ ...record, kind: 'text', text: `https://example.test/${record.id}` }));
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'link' : original(name, args));
+    await mount('clipboard');
+    const search = screen.getByRole('searchbox');
+    await waitFor(() => expect(row('first').hasAttribute('data-keyboard-current')).toBe(true));
+    search.focus();
+    fireEvent.keyDown(search, { key: 'o', code: 'KeyO', metaKey: true });
+    expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'first', execute: true });
+    fireEvent.contextMenu(row('pinned'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open Link' }));
+    expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'pinned', execute: true, fileIndex: undefined });
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+  });
+
+  it('keeps a disabled shortcut inactive without removing the context action', async () => {
+    bridge.snapshot.clipboardControls.shortcuts.openTarget.enabled = false;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'email' : original(name, args));
+    await mount('clipboard');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'o', code: 'KeyO', metaKey: true });
+    expect(calls('clipboard_open_target')).toHaveLength(0);
+    fireEvent.contextMenu(row('first'));
+    expect(await screen.findByRole('menuitem', { name: 'Compose Email' })).toBeTruthy();
+  });
+});

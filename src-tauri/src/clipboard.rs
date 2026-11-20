@@ -1,3 +1,5 @@
+pub mod open_target;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};

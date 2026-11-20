@@ -47,7 +47,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead' || editsText(event)) return;
       const target = event.target;
       if (target instanceof HTMLElement && target !== document.body && !footer.current?.parentElement?.contains(target)) return;
-      const shortcut = shortcuts.find(({ binding }) => matchesBinding(binding, event));
+      const shortcut = shortcuts.find(({ action, binding }) => action !== 'openSettings' && matchesBinding(binding, event));
       if (!shortcut) return;
       event.preventDefault();
       if (event.repeat) return;
@@ -84,7 +84,6 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><span>{keyLabel(binding)}</span></div>)}
       <div><span>Hide window</span><span>Esc / {capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W</span></div>
-      {!clipboard && <small>Select a record to navigate</small>}
     </div>}
   </footer>;
 }

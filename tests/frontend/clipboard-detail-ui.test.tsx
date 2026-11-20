@@ -335,3 +335,18 @@ describe('clipboard details', () => {
     expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'translation' });
   });
 });
+
+it('reveals only the chosen file and reports when it disappears after loading details', async () => {
+  Object.assign(first(), { kind: 'files', files: ['/tmp/a.txt', '/tmp/b.txt'].map((path) => ({
+    path, name: path.slice(5), exists: true, isDir: false, isImage: false, iconDataUrl: null,
+  })) });
+  const original = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name, args) => {
+    if (name === 'clipboard_open_target') throw 'clipboard_file_missing';
+    return original(name, args);
+  });
+  direct();
+  fireEvent.click(await within(pane()).findByRole('button', { name: 'Show in Finder: b.txt' }));
+  expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 1 });
+  expect(await within(pane()).findByText('The original file was moved or deleted and cannot be located')).toBeTruthy();
+});

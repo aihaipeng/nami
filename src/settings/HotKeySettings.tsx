@@ -116,6 +116,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         {(['navigateUp', 'navigateDown', 'switchView', 'previousCategory', 'nextCategory', 'focusRecords', 'preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
         {translationRow('pin')}
         {translationRow('showShortcuts')}
+        {translationRow('openSettings')}
       </div>
       {clipboardError?.group === 'general' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}
     </section>
@@ -129,6 +130,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         {clipboardRow('global', t('clipboardOpenHistory'), snapshot.clipboardBinding, snapshot.clipboardShortcutEnabled,
           canRecordClipboard ? undefined : t(snapshot.storageError ? 'clipboardSettingsSaveFailed' : 'platformUnavailable'))}
         {localRow('translate')}
+        {localRow('openTarget')}
         {localRow('ocr')}
       </div>
       {clipboardError?.group === 'clipboard' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}

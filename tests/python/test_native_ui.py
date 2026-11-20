@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'selection empty summon and clipboard protection'}
+CASE_NAMES['record-display-shortcuts'] = 'record previews and macOS window shortcuts'
 CASE_NAMES['clipboard-shortcuts'] = 'clipboard shortcut smoke through macOS and WebView'
 CASE_NAMES['records-pinned'] = 'shared pinned boundary coverage'
 CASE_NAMES['translation-controls'] = 'real WK + native controls: anchors, long source, narrow menus and native action bridge'
@@ -89,7 +90,7 @@ def valid_report():
 
 
 @pytest.mark.dfx_diagnostics
-@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'clipboard-kind-text', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
+@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'record-display-shortcuts', 'clipboard-kind-text', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
 def test_selected_report_accepts_only_its_current_complete_case(selected):
     name = CASE_NAMES[selected]
     result = {'runId': 'current', 'testCase': selected, 'passed': True,

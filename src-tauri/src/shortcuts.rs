@@ -14,6 +14,7 @@ pub enum ShortcutAction {
     ToggleHistory,
     ShowShortcuts,
     FocusSearch,
+    OpenSettings,
 }
 
 impl ShortcutAction {
@@ -28,6 +29,7 @@ impl ShortcutAction {
             "toggleHistory" => Self::ToggleHistory,
             "showShortcuts" => Self::ShowShortcuts,
             "focusSearch" => Self::FocusSearch,
+            "openSettings" => Self::OpenSettings,
             _ => return Err("invalid_argument".into()),
         })
     }
@@ -51,6 +53,7 @@ impl ShortcutAction {
             Self::ToggleHistory => "toggleHistory",
             Self::ShowShortcuts => "showShortcuts",
             Self::FocusSearch => "focusSearch",
+            Self::OpenSettings => "openSettings",
         }
     }
 }
@@ -90,6 +93,8 @@ pub struct TranslationShortcuts {
     pub show_shortcuts: Option<KeyBinding>,
     #[serde(default)]
     pub focus_search: Option<KeyBinding>,
+    #[serde(default)]
+    pub open_settings: Option<KeyBinding>,
 }
 
 impl TranslationShortcuts {
@@ -104,6 +109,7 @@ impl TranslationShortcuts {
             toggle_history: Some(KeyBinding::new("Slash", &[primary])),
             show_shortcuts: Some(KeyBinding::new("KeyK", &[primary])),
             focus_search: Some(KeyBinding::new("KeyF", &[primary])),
+            open_settings: Some(KeyBinding::new("Comma", &[primary])),
         }
     }
 
@@ -148,6 +154,7 @@ impl TranslationShortcuts {
         for action in [
             ShortcutAction::ShowShortcuts,
             ShortcutAction::FocusSearch,
+            ShortcutAction::OpenSettings,
             ShortcutAction::ToggleHistory,
         ] {
             if keys.get(action.as_str()).is_none() {
@@ -201,6 +208,7 @@ impl TranslationShortcuts {
             ShortcutAction::ToggleHistory => self.toggle_history.as_ref(),
             ShortcutAction::ShowShortcuts => self.show_shortcuts.as_ref(),
             ShortcutAction::FocusSearch => self.focus_search.as_ref(),
+            ShortcutAction::OpenSettings => self.open_settings.as_ref(),
         }
     }
 
@@ -215,6 +223,7 @@ impl TranslationShortcuts {
             ShortcutAction::ToggleHistory => &mut self.toggle_history,
             ShortcutAction::ShowShortcuts => &mut self.show_shortcuts,
             ShortcutAction::FocusSearch => &mut self.focus_search,
+            ShortcutAction::OpenSettings => &mut self.open_settings,
         };
         *slot = binding;
     }
@@ -226,6 +235,7 @@ pub enum ClipboardRecordAction {
     Preview,
     Note,
     Ocr,
+    OpenTarget,
     Translate,
     Favorite,
     Pin,
@@ -241,7 +251,7 @@ pub enum ClipboardRecordAction {
 
 impl ClipboardRecordAction {
     pub fn shared_with_translation(self) -> bool {
-        !matches!(self, Self::Ocr | Self::Translate)
+        !matches!(self, Self::Ocr | Self::OpenTarget | Self::Translate)
     }
 }
 
@@ -257,6 +267,7 @@ pub struct ClipboardRecordShortcuts {
     preview: RecordShortcut,
     note: RecordShortcut,
     ocr: RecordShortcut,
+    open_target: RecordShortcut,
     translate: RecordShortcut,
     favorite: RecordShortcut,
     pin: RecordShortcut,
@@ -290,6 +301,7 @@ impl Default for ClipboardRecordShortcuts {
             preview: enabled("KeyY", &[primary]),
             note: enabled("KeyN", &shifted),
             ocr: enabled("KeyO", &shifted),
+            open_target: enabled("KeyO", &[primary]),
             translate: enabled("KeyT", &shifted),
             favorite: enabled("KeyF", &["alt"]),
             pin: enabled("KeyP", &["alt"]),
@@ -309,12 +321,13 @@ impl Default for ClipboardRecordShortcuts {
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 14] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 15] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
             (Note, &self.note),
             (Ocr, &self.ocr),
+            (OpenTarget, &self.open_target),
             (Translate, &self.translate),
             (Favorite, &self.favorite),
             (Pin, &self.pin),
@@ -333,6 +346,7 @@ impl ClipboardRecordShortcuts {
         let defaults = Self::default();
         let restored = Self {
             ocr: defaults.ocr,
+            open_target: defaults.open_target,
             translate: defaults.translate,
             ..self.clone()
         };
@@ -343,6 +357,7 @@ impl ClipboardRecordShortcuts {
     pub fn restore_general(&self) -> Result<Self, String> {
         let restored = Self {
             ocr: self.ocr.clone(),
+            open_target: self.open_target.clone(),
             translate: self.translate.clone(),
             ..Self::default()
         };
@@ -418,6 +433,7 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::Preview => &mut self.preview,
             ClipboardRecordAction::Note => &mut self.note,
             ClipboardRecordAction::Ocr => &mut self.ocr,
+            ClipboardRecordAction::OpenTarget => &mut self.open_target,
             ClipboardRecordAction::Translate => &mut self.translate,
             ClipboardRecordAction::Favorite => &mut self.favorite,
             ClipboardRecordAction::Pin => &mut self.pin,
@@ -470,6 +486,7 @@ impl ClipboardRecordShortcuts {
                     }
                 }
                 for (key, action) in [
+                    ("openTarget", ClipboardRecordAction::OpenTarget),
                     ("copyRecord", ClipboardRecordAction::CopyRecord),
                     ("switchView", ClipboardRecordAction::SwitchView),
                     ("focusRecords", ClipboardRecordAction::FocusRecords),
@@ -531,7 +548,7 @@ pub fn normalize_binding(binding: KeyBinding) -> Result<KeyBinding, String> {
     Ok(KeyBinding { code, modifiers })
 }
 
-const TRANSLATION_ACTIONS: [ShortcutAction; 9] = [
+const TRANSLATION_ACTIONS: [ShortcutAction; 10] = [
     ShortcutAction::OpenTranslation,
     ShortcutAction::Selection,
     ShortcutAction::Translate,
@@ -541,21 +558,26 @@ const TRANSLATION_ACTIONS: [ShortcutAction; 9] = [
     ShortcutAction::ToggleHistory,
     ShortcutAction::ShowShortcuts,
     ShortcutAction::FocusSearch,
+    ShortcutAction::OpenSettings,
 ];
 
-pub const GENERAL_SHORTCUT_ACTIONS: [ShortcutAction; 6] = [
+pub const GENERAL_SHORTCUT_ACTIONS: [ShortcutAction; 7] = [
     ShortcutAction::Selection,
     ShortcutAction::OpenTranslation,
     ShortcutAction::Pin,
     ShortcutAction::ShowShortcuts,
     ShortcutAction::FocusSearch,
+    ShortcutAction::OpenSettings,
     ShortcutAction::ToggleHistory,
 ];
 
 pub fn is_general_window_action(action: ShortcutAction) -> bool {
     matches!(
         action,
-        ShortcutAction::Pin | ShortcutAction::ShowShortcuts | ShortcutAction::FocusSearch
+        ShortcutAction::Pin
+            | ShortcutAction::ShowShortcuts
+            | ShortcutAction::FocusSearch
+            | ShortcutAction::OpenSettings
     )
 }
 
@@ -766,6 +788,27 @@ mod tests {
     }
 
     #[test]
+    fn open_target_default_yields_to_a_preexisting_binding() {
+        let mut stored = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
+        let open = stored
+            .as_object_mut()
+            .unwrap()
+            .remove("openTarget")
+            .unwrap();
+        let restore = |stored: &serde_json::Value| {
+            serde_json::to_value(ClipboardRecordShortcuts::from_store(Some(
+                stored.to_string(),
+            )))
+            .unwrap()
+        };
+        assert_eq!(restore(&stored)["openTarget"], open);
+        stored["copyRecord"] = open.clone();
+        let restored = restore(&stored);
+        assert_eq!(restored["copyRecord"], open);
+        assert!(restored["openTarget"]["binding"].is_null());
+    }
+
+    #[test]
     fn plain_and_shift_only_shortcuts_survive_reload_and_navigation_reset_is_scoped() {
         use ClipboardRecordAction::*;
         let mut shortcuts = ClipboardRecordShortcuts::default();
@@ -832,6 +875,29 @@ mod tests {
         assert_eq!(
             TranslationShortcuts::defaults("control").toggle_history,
             Some(KeyBinding::new("Slash", &["control"]))
+        );
+    }
+
+    #[test]
+    fn settings_shortcut_upgrade_preserves_existing_comma_assignment() {
+        let mut old = serde_json::to_value(TranslationShortcuts::defaults("meta")).unwrap();
+        let comma = old.as_object_mut().unwrap().remove("openSettings").unwrap();
+        let load = |old: &serde_json::Value| {
+            TranslationShortcuts::from_store(
+                |key| (key == "translation_shortcuts").then(|| old.to_string()),
+                "meta",
+            )
+        };
+        assert_eq!(
+            load(&old).open_settings,
+            Some(KeyBinding::new("Comma", &["meta"]))
+        );
+        old["focusSearch"] = comma;
+        let settings = load(&old);
+        assert!(settings.open_settings.is_none());
+        assert_eq!(
+            settings.focus_search,
+            Some(KeyBinding::new("Comma", &["meta"]))
         );
     }
 

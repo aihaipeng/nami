@@ -14,6 +14,38 @@ const row = (id: string) => {
 };
 
 describe('history list and session actions', () => {
+  it('lists Open Settings without a navigation hint and respects remapping or disabling', async () => {
+    await mount('history');
+    const hotKey = screen.getByRole('button', { name: 'HotKey' });
+    fireEvent.click(hotKey);
+    const help = screen.getByRole('dialog', { name: 'HotKey' });
+    expect(within(help).getByText('Open Settings').parentElement?.textContent).toContain('⌘ ,');
+    expect(help.querySelector('small')).toBeNull();
+    fireEvent.keyDown(hotKey, { key: ',', code: 'Comma', metaKey: true });
+    expect(calls('window_show').at(-1)?.[1]).toEqual({ target: 'settings' });
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.openSettings = { code: 'F7', modifiers: [] };
+    await emit('translation_preferences_changed', preferences);
+    fireEvent.keyDown(hotKey, { key: ',', code: 'Comma', metaKey: true });
+    expect(calls('window_show')).toHaveLength(1);
+    fireEvent.keyDown(hotKey, { key: 'F7', code: 'F7', isComposing: true });
+    expect(calls('window_show')).toHaveLength(1);
+    fireEvent.keyDown(hotKey, { key: 'F7', code: 'F7' });
+    expect(calls('window_show')).toHaveLength(2);
+    await emit('translation_preferences_changed', { ...preferences, disabledShortcuts: [...preferences.disabledShortcuts, 'openSettings'] });
+    fireEvent.keyDown(hotKey, { key: 'F7', code: 'F7' });
+    expect(calls('window_show')).toHaveLength(2);
+  });
+
+  it('lets translation reuse the clipboard-only Command-O binding', async () => {
+    bridge.snapshot.translationPreferences.shortcuts.translate = { code: 'KeyO', modifiers: ['meta'] };
+    await mount('history');
+    const button = within(row('sample-03')).getByRole('button', { name: /^Translation:/ });
+    fireEvent.keyDown(button, { key: 'o', code: 'KeyO', metaKey: true });
+    await waitFor(() => expect(calls('history_sample_select').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', retranslate: true }));
+    expect(calls('clipboard_open_target')).toHaveLength(0);
+  });
+
   it('opens the note card via the shared shortcut and updates or clears only the title', async () => {
     await mount('history');
     const record = bridge.history.records.find(({ id }) => id === 'sample-03')!;

@@ -20,7 +20,7 @@ import { listen } from '@tauri-apps/api/event';
 import { translationShortcutEnabled } from '../shared/contracts';
 import { editsText, matchesBinding } from '../shared/shortcuts';
 import { ClipboardEditor } from '../clipboard/ClipboardEditor';
-import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable } from '../shared/clipboardShortcuts';
+import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, sharedRecordActions } from '../shared/clipboardShortcuts';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
@@ -226,9 +226,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (event.target !== document.body || event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead'
       || editing || menu || panel.current?.querySelector('.history-shortcuts-panel')) return;
     if (copyTranslationKeyDown(event, keyboardId, () => event.preventDefault())) return;
-    const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), event);
+    const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot, sharedRecordActions), event);
     if (action === 'preview') previewKeyDown(event);
-    else if (!action || action === 'ocr' || action === 'translate') retranslateKeyDown(event, focusedId, () => event.preventDefault());
+    else if (!action) retranslateKeyDown(event, focusedId, () => event.preventDefault());
   });
   useEffect(() => {
     if (!active || !state.historyVisible) return;
@@ -252,9 +252,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const row = target.closest<HTMLElement>('article[data-record-id]');
     if ((row || fromSearch || target.closest('.history-toolbar, .history-footer'))
       && copyTranslationKeyDown(key, row?.dataset.recordId ?? keyboardId, () => event.preventDefault())) return;
-    const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), key);
-    if (row && (!action || action === 'ocr' || action === 'translate')
-      && retranslateKeyDown(key, row.dataset.recordId, () => event.preventDefault())) return;
+    const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot, sharedRecordActions), key);
+    if (row && !action && retranslateKeyDown(key, row.dataset.recordId, () => event.preventDefault())) return;
     if (action === 'preview') {
       previewKeyDown(key, row?.dataset.recordId);
       return;
@@ -283,7 +282,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       } else if (row && action === 'navigateUp') search.current?.focus();
       return;
     }
-    if (!action || action === 'focusRecords' || action === 'switchView' || action === 'ocr' || action === 'translate') return;
+    if (!action || action === 'focusRecords' || action === 'switchView') return;
     if (fromSearch && key.key === 'Backspace' && query && action !== 'delete') return;
     const record = row ? filtered.find(({ id }) => id === row.dataset.recordId) : filtered.find(({ id }) => id === keyboardId);
     if (!record || !clipboardShortcutAvailable(snapshot, native, action)) return;
@@ -325,14 +324,14 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         });
       }}>
         <RecordHeading date={record.date} label={label} sourceApp={record.sourceApp} />
-        <span className="history-preview">{record.title || historyPreview(record.text)}</span>
+        <span className={cn('history-preview', !record.title && 'history-text-preview')}>{record.title || historyPreview(record.text)}</span>
       </button>
       <RecordActions recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} canCopy={snapshot.capabilities.clipboardWrite} copyLabel={t('copySource')} deleteLabel={t('deleteHistory')}
         onCopy={() => copyRecord(record.id)} onNote={() => whenReady(record.id, () => setEditing(record.id))} onUpdate={(action) => whenReady(record.id, () => { void updateRecord(record.id, action); })} />
     </article>;
   }
 
-  return <aside ref={panel} data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
+  return <aside ref={panel} data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.translation } as CSSProperties} aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
     <ActivityBeam label={t('working')} active={active && history.showLoading} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />

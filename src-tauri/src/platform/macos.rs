@@ -3,7 +3,7 @@ use objc2::{
     rc::{Allocated, Retained},
     runtime::AnyObject,
 };
-use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::ffi::c_void;
 
 #[derive(Clone, Copy, Debug)]
@@ -233,6 +233,34 @@ unsafe fn running(target: Target) -> Option<Retained<AnyObject>> {
     let terminated: bool = msg_send![&*application, isTerminated];
     let actual = identity(&application)?;
     (!terminated && actual.started == target.started).then_some(application)
+}
+
+pub fn open_clipboard_target(
+    target: nami::clipboard::open_target::OpenTarget,
+) -> Result<(), String> {
+    use nami::clipboard::open_target::OpenTarget;
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        match target {
+            OpenTarget::Link(url) | OpenTarget::Email(url) => {
+                let url = NSURL::URLWithString(&NSString::from_str(url.as_str()))
+                    .ok_or("invalid_argument")?;
+                let opened: bool = msg_send![workspace, openURL: &*url];
+                if !opened {
+                    return Err("clipboard_open_failed".into());
+                }
+            }
+            OpenTarget::File(path) => {
+                let path = path.to_str().ok_or("invalid_argument")?;
+                let urls = NSArray::from_retained_slice(&[NSURL::fileURLWithPath(
+                    &NSString::from_str(path),
+                )]);
+                let _: () = msg_send![workspace, activateFileViewerSelectingURLs: &*urls];
+            }
+            OpenTarget::ChooseFile => return Err("invalid_argument".into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn activate(target: Target) -> bool {

@@ -1,13 +1,13 @@
 import type { Translate } from './i18n';
 
-export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch'] as const;
+export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch', 'openSettings'] as const;
 export const globalTranslationActions = ['openTranslation', 'selection'] as const;
 export const generalShortcutActions = [...globalTranslationActions, ...recordWindowActions, 'toggleHistory'] as const;
 export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'toggleHistory'] as const;
 export const shortcutActions = [...globalTranslationActions, ...recordWindowActions, ...translationWindowActions] as const;
 
 export const shortcutTitles = {
-  openTranslation: 'openTranslation', selection: 'autofillInput', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch',
+  openTranslation: 'openTranslation', selection: 'autofillInput', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch', openSettings: 'openSettings',
   translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary', toggleHistory: 'toggleTranslationHistory',
 } as const;
 export type ShortcutAction = typeof shortcutActions[number];
@@ -34,6 +34,7 @@ export function defaultTranslationShortcuts(primary: 'meta' | 'control'): Transl
     pin: key('KeyP', 'shift'),
     showShortcuts: key('KeyK'),
     focusSearch: key('KeyF'),
+    openSettings: key('Comma'),
     toggleHistory: key('Slash'),
   };
 }
@@ -93,6 +94,7 @@ function normalizeModifiers(modifiers: readonly string[]): ShortcutModifier[] {
 function codeFromKey(key: string) {
   if (/^(Enter|Backspace|Delete|Escape|Tab|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right)|F[0-9]+)$/.test(key)) return key;
   if (key === ' ') return 'Space';
+  if (key === ',') return 'Comma';
   if (key === '`') return 'Backquote';
   if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
   if (/^[0-9]$/.test(key)) return `Digit${key}`;

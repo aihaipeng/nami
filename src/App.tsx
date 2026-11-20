@@ -1,10 +1,10 @@
-import { listenForModifierTaps } from './shared/shortcuts';
-import { useEffect, useState } from 'react';
+import { editsText, listenForModifierTaps, matchesBinding } from './shared/shortcuts';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { initialSnapshot, type AppSnapshot, type Locale, type TranslationPreferences, type WindowState, type WindowTarget } from './shared/contracts';
+import { initialSnapshot, translationShortcutEnabled, type AppSnapshot, type Locale, type TranslationPreferences, type WindowState, type WindowTarget } from './shared/contracts';
 import { resolveLanguage, translator } from './shared/i18n';
 import { Translation } from './translation/Translation';
 import { HistoryView } from './translation/HistoryView';
@@ -162,6 +162,20 @@ export default function App() {
       if (showsActivity) setPending((count) => count - 1);
     }
   }
+
+  const settingsKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    const preferences = snapshot.translationPreferences;
+    if (!translationShortcutEnabled(preferences, 'openSettings') || event.defaultPrevented || event.isComposing || event.keyCode === 229 || editsText(event)
+      || !matchesBinding(preferences.shortcuts.openSettings, event)) return;
+    event.preventDefault();
+    if (!event.repeat) void command('window_show', { target: 'settings' });
+  });
+  useEffect(() => {
+    if (!connected || target === 'settings') return;
+    const keydown = (event: KeyboardEvent) => settingsKeyDown(event);
+    window.addEventListener('keydown', keydown, true);
+    return () => window.removeEventListener('keydown', keydown, true);
+  }, [connected, target]);
 
   function activity(delta: 1 | -1) { setPending((count) => count + delta); }
   const common = { t, snapshot, command, native, activity };

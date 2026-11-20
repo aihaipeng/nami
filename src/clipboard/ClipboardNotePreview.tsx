@@ -39,7 +39,7 @@ export function ClipboardNotePreview({ record, revealed, native, media }: { reco
     <motion.span ref={title} className="clipboard-record-title" aria-hidden={expanded} initial={false} animate={{ opacity: expanded ? 0 : 1 }} transition={transition}>{record.title}</motion.span>
     <ActivityBeam label="Working" active={revealed && !ready} />
     <motion.span ref={content} className="clipboard-record-content" aria-hidden={!expanded} initial={false} animate={{ opacity: expanded ? 1 : 0 }} transition={transition}><span className="clipboard-record-original">
-      {failed === record ? <span role="alert">Could not load content. Hover again to retry.</span> : record.kind !== 'text' ? media : <span className="history-preview">{text}</span>}
+      {failed === record ? <span role="alert">Could not load content. Hover again to retry.</span> : record.kind !== 'text' ? media : <span className="history-preview history-text-preview">{text}</span>}
     </span></motion.span>
   </motion.span>;
 }

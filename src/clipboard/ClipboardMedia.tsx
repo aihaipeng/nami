@@ -63,11 +63,13 @@ function FileIcon({ entry }: { entry: FileEntry }) {
   return entry.iconDataUrl && !failed ? <img src={entry.iconDataUrl} alt="" onError={() => setFailed(true)} /> : entry.isDir ? <Folder aria-hidden="true" /> : <File aria-hidden="true" />;
 }
 
-export function FileList({ entries }: { entries: FileEntry[] }) {
-  return <span className="clipboard-files">{entries.map((entry) => <span key={entry.path} className="clipboard-file" title={entry.path} data-missing={!entry.exists}>
-    <FileIcon entry={entry} />
-    <span className="clipboard-file-name">{entry.name}</span>
-  </span>)}</span>;
+export function FileList({ entries, onReveal, revealLabel }: { entries: FileEntry[]; onReveal?: (index: number) => void; revealLabel?: string }) {
+  return <span className="clipboard-files">{entries.map((entry, index) => {
+    const content = <><FileIcon entry={entry} /><span className="clipboard-file-name">{entry.name}</span></>;
+    const props = { className: 'clipboard-file', title: entry.path, 'data-missing': !entry.exists };
+    return onReveal ? <button key={index} type="button" {...props} aria-label={`${revealLabel}: ${entry.name}`} disabled={!entry.exists} onClick={() => onReveal(index)}>{content}</button>
+      : <span key={index} {...props}>{content}</span>;
+  })}</span>;
 }
 
 function FilesPreview({ record, native }: { record: ClipboardRecord; native: boolean }) {

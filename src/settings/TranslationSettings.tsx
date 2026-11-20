@@ -34,7 +34,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
       </div>
     </section>
     <TranslationProxySettings t={t} preferences={preferences} native={native} command={command} />
-    <HistoryStorageSettings t={t} available={native && !snapshot.storageError} view="translation" locale={resolveLanguage(snapshot.locale)} />
+    <HistoryStorageSettings t={t} available={native && !snapshot.storageError} view="translation" previewLines={snapshot.clipboardControls.previewLines?.translation ?? 3} locale={resolveLanguage(snapshot.locale)} />
   </div>;
 }
 
