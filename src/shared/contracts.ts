@@ -46,7 +46,6 @@ export interface TranslationPreferences {
   proxyUrl: string;
   proxyEnabled: boolean;
   selectionEnabled: boolean;
-  selectionCopyFallback?: boolean;
   disabledShortcuts: ShortcutAction[];
   shortcuts: TranslationShortcuts;
 }
@@ -89,7 +88,6 @@ export const initialSnapshot: AppSnapshot = {
     proxyUrl: '',
     proxyEnabled: false,
     selectionEnabled: true,
-    selectionCopyFallback: false,
     disabledShortcuts: [],
     shortcuts: defaultTranslationShortcuts('control'),
   },

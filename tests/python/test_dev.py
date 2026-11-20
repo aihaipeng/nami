@@ -111,10 +111,10 @@ def test_performance_is_release_exact_and_does_not_launch_native_windows(tmp_pat
                            name, '--', '--ignored', '--exact', '--nocapture']
 
 
-def test_security_suite_covers_ax_selection_without_retired_clipboard_fallback(tmp_path):
+def test_security_suite_covers_selection_orchestration_and_macos_capture(tmp_path):
     commands = dev.suite_commands('dfx-security', tmp_path / 'python')
     rust_checks = [command for command, _ in commands if command[0] == 'cargo']
-    assert [command[-1] for command in rust_checks] == ['selection::tests', 'platform::macos::tests']
+    assert [command[-1] for command in rust_checks] == ['selection::tests', 'platform::macos::']
     assert all(command[-3:-1] == ['--bin', 'nami'] for command in rust_checks)
 
 

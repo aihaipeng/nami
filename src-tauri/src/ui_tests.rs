@@ -2553,11 +2553,6 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     window.clipboardSettingsProbe.lastRejectedCommand=name;
     throw error;
   });
-  if((await invoke('app_snapshot')).translationPreferences.selectionCopyFallback!==false)throw Error('copy fallback must default to off');
-  for(const enabled of [true,false]) {
-    await invoke('translation_preferences_set',{selectionCopyFallback:enabled});
-    if((await invoke('app_snapshot')).translationPreferences.selectionCopyFallback!==enabled)throw Error('copy fallback preference did not update');
-  }
   if((await invoke('app_snapshot')).clipboardControls.recordsOpenFocus!=='search')throw Error('expected search focus by default');
   await invoke('records_open_focus_set',{focus:'list'});
   if((await invoke('app_snapshot')).clipboardControls.recordsOpenFocus!=='list')throw Error('failed to change initial focus');
@@ -6500,17 +6495,43 @@ fn run_cross_app(app: &AppHandle) -> DomCase {
         };
         let is_buffer = |text: &'static str| {
             on_main(app, move |_| {
-                Ok(
-                    crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload)
-                        == Some(crate::platform::ClipboardPayload::Text(text.into())),
-                )
+                Ok(crate::platform::test_selection_buffer_text().as_deref() == Some(text))
             })
         };
         let mut previous = None;
         let fixture_modes: &[&str] = if trusted {
-            &["ax", "copy-disabled", "copy", "empty"]
+            &["ax", "manual-ax", "copy", "copy-delayed", "empty"]
         } else {
             &["ax"]
+        };
+        let expect_event = |fixture: &CrossAppFixture, expected: &str| -> Result<(), String> {
+            for _ in 0..120 {
+                if let Some(event) = fixture.next_event()? {
+                    if event == expected {
+                        return Ok(());
+                    }
+                    if event == "AX ENABLED" {
+                        continue;
+                    }
+                    return Err(format!("unexpected synthetic target event: {event}"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(format!("timed out waiting for {expected}"))
+        };
+        let expect_no_copy = |fixture: &CrossAppFixture| -> Result<(), String> {
+            for _ in 0..12 {
+                if let Some(event) = fixture.next_event()? {
+                    if event.starts_with("COPY ") || event.starts_with("PASTE ") {
+                        return Err(format!("unexpected synthetic clipboard action: {event}"));
+                    }
+                    if event != "AX ENABLED" {
+                        return Err(format!("unexpected synthetic target event: {event}"));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(())
         };
         for &fixture_mode in fixture_modes {
             if app.get_window("translation").is_some() {
@@ -6518,77 +6539,107 @@ fn run_cross_app(app: &AppHandle) -> DomCase {
                 wait_motion(app)?;
             }
             let version = buffer(MARKER)?;
-            let copy_disabled = fixture_mode == "copy-disabled";
-            let fixture = CrossAppFixture::start(
-                app,
-                path,
-                if copy_disabled { "copy" } else { fixture_mode },
-            )?;
+            crate::platform::test_set_last_foreign(None);
+            let fixture = CrossAppFixture::start(app, path, fixture_mode)?;
             let target = fixture.focused(app)?;
-            let fallback = fixture_mode == "copy";
-            let expected = if trusted && fixture_mode != "empty" && !copy_disabled {
+            let mut tracked = false;
+            for _ in 0..40 {
+                if crate::platform::test_last_foreign().map(|target| target.pid())
+                    == Some(fixture.pid as i32)
+                {
+                    tracked = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if !tracked {
+                return Err("the frontmost activation tracker missed the synthetic target".into());
+            }
+            // Regression: a previous shortcut target must not outrank the
+            // application that is frontmost when this shortcut fires. The
+            // stale entry is a live process, so it survives liveness checks.
+            if let Some(stale) = crate::platform::test_self_target() {
+                crate::platform::test_set_last_foreign(Some(stale));
+                let captured = [
+                    crate::platform::capture_target(),
+                    crate::platform::capture_selection_target(),
+                ];
+                crate::platform::test_set_last_foreign(None);
+                if captured
+                    .into_iter()
+                    .any(|target| target.map(|target| target.pid()) != Some(fixture.pid as i32))
+                {
+                    return Err(format!(
+                        "target resolution ignored the frontmost synthetic {fixture_mode} target"
+                    ));
+                }
+            }
+            let expected = if trusted && fixture_mode != "empty" {
                 TEXT
             } else {
                 ""
             };
-            let direct = crate::platform::selected_text(target);
-            if (!trusted && direct != Err("permission_required"))
-                || (trusted && !fallback && fixture_mode == "ax" && direct.as_deref() != Ok(TEXT))
-                || (trusted && fixture_mode == "empty" && direct.as_deref() != Ok(""))
-                || ((fallback || copy_disabled)
-                    && !matches!(
-                        direct,
-                        Err("selection_unavailable" | "selection_focus_unavailable")
-                    ))
-            {
-                return Err(format!(
-                    "unexpected AX status from synthetic {fixture_mode} target: {:?}",
-                    direct.as_ref().map(|_| "text")
-                ));
+            if trusted {
+                let direct = crate::platform::selected_text(Some(target));
+                let matches = match fixture_mode {
+                    "ax" => direct.as_deref() == Ok(TEXT),
+                    "empty" => direct.as_deref() == Ok(""),
+                    _ => {
+                        direct.as_deref() == Ok("")
+                            || matches!(
+                                direct,
+                                Err("selection_unavailable" | "selection_focus_unavailable")
+                            )
+                    }
+                };
+                if !matches {
+                    return Err(format!(
+                        "unexpected AX status from synthetic {fixture_mode} target: {:?}",
+                        direct.as_ref().map(|_| "text")
+                    ));
+                }
             }
             let start = std::time::Instant::now();
             on_main(app, move |app| {
-                app.state::<AppState>()
-                    .translation_preferences
-                    .lock()
-                    .unwrap()
-                    .selection_copy_fallback = fallback;
-                if !crate::platform::target_focused(target) {
-                    return Err("synthetic target lost focus before selection".into());
-                }
                 crate::selection::test_summon_from(app, Some(target), true)
             })?;
-            if fallback {
-                fixture.expect(&format!("COPY {TEXT}")).map_err(|error| {
+            if matches!(fixture_mode, "copy" | "copy-delayed") {
+                expect_event(&fixture, &format!("COPY {TEXT}")).map_err(|error| {
                     let running = app
                         .state::<AppState>()
                         .selection_busy
                         .load(Ordering::SeqCst);
                     format!("{error}; selection still running: {running}")
                 })?;
+            } else if fixture_mode == "manual-ax" {
+                expect_event(&fixture, "AX ENABLED")?;
             }
             wait_dom(
                 app,
                 &format!(
                     r#"
 const input=document.querySelector('.source-input'),alert=document.querySelector('.translation-status [role=alert]');
-return {{ready:input?.value==={expected:?}&&!input.closest('[inert]')&&({trusted}||alert?.textContent.includes('Accessibility'))&&(!{copy_disabled}||alert?.textContent.includes('paste it here')),hasInput:!!input,sourceMatches:input?.value==={expected:?},inert:!!input?.closest('[inert]'),alert:alert?.textContent}};
+return {{ready:input?.value==={expected:?}&&!input.closest('[inert]')&&({trusted}||alert?.textContent.includes('Accessibility')),hasInput:!!input,sourceMatches:input?.value==={expected:?},inert:!!input?.closest('[inert]'),alert:alert?.textContent}};
 "#
                 ),
             )?;
             let elapsed = start.elapsed().as_millis();
-            if !is_buffer(MARKER)?
-                || (!fallback
-                    && on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version)
+            if !matches!(fixture_mode, "copy" | "copy-delayed") {
+                expect_no_copy(&fixture)?;
+            }
+            if !is_buffer(MARKER)? {
+                return Err(
+                    "selection changed the isolated baseline instead of preserving it".into(),
+                );
+            }
+            if (!matches!(fixture_mode, "copy" | "copy-delayed") && trusted)
+                && on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version
             {
                 return Err(
                     "selection changed the isolated baseline instead of preserving it".into(),
                 );
             }
-            if fixture.next_event()?.is_some() {
-                return Err("synthetic target received an unexpected clipboard action".into());
-            }
-            samples.push(serde_json::json!({"process":fixture_mode,"axAuthorized":trusted,"clipboardPreserved":true,"copyReceived":fallback,"elapsedMs":elapsed}));
+            samples.push(serde_json::json!({"process":fixture_mode,"axAuthorized":trusted,"clipboardPreserved":true,"copyReceived":matches!(fixture_mode, "copy" | "copy-delayed"),"elapsedMs":elapsed}));
             previous = Some(target);
         }
         let previous = previous.ok_or("no synthetic target ran")?;

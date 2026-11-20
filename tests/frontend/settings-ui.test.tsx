@@ -15,20 +15,6 @@ describe('Settings', () => {
     }
   });
 
-  it('keeps the clipboard-based selection fallback off until the user opts in', async () => {
-    await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Translation' }));
-    const fallback = screen.getByRole('checkbox', { name: 'Try copying when selected text is unavailable' }) as HTMLInputElement;
-    expect(fallback.checked).toBe(false);
-    expect(fallback.getAttribute('aria-description')).toContain('may be overwritten');
-    fireEvent.click(screen.getByRole('button', { name: 'About the selection copy fallback' }));
-    expect(screen.getByRole('tooltip').textContent).toContain('may be overwritten');
-    fireEvent.click(fallback);
-    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ selectionCopyFallback: true });
-    await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, selectionCopyFallback: true });
-    expect(fallback.checked).toBe(true);
-  });
-
   it.each([
     ['Open Translation', 'translation_shortcut_set', 'record'],
     ['Preview', 'clipboard_record_shortcut_set', 'choose'],

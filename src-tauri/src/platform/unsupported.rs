@@ -6,16 +6,49 @@ pub struct Target;
 
 pub struct CopySnapshot {
     pub version: i64,
+    pub initial_text: Option<String>,
+    pub initial_has_items: bool,
 }
 
-pub fn begin_selection_copy(_: Target) -> Result<CopySnapshot, &'static str> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionRead {
+    pub version: i64,
+    pub text: Option<String>,
+    pub has_items: bool,
+}
+
+// The portable host keeps the native selection API surface even though it
+// never constructs these variants.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualAccessibility {
+    Enabled,
+    AlreadyEnabled,
+    Unsupported,
+}
+
+pub fn begin_selection_copy(_: Option<Target>) -> Result<CopySnapshot, &'static str> {
     Err(UNAVAILABLE)
 }
-pub fn finish_selection_copy(_: &CopySnapshot, _: i64, _: bool) -> Result<String, &'static str> {
+pub fn read_selection_payload() -> SelectionRead {
+    SelectionRead {
+        version: -1,
+        text: None,
+        has_items: false,
+    }
+}
+pub fn finish_selection_copy(
+    _: &CopySnapshot,
+    _: String,
+    _: i64,
+) -> Result<(String, i64), &'static str> {
     Err(UNAVAILABLE)
 }
 
 pub fn capture_target() -> Option<Target> {
+    None
+}
+pub fn capture_selection_target() -> Option<Target> {
     None
 }
 pub fn target_app_info(_: Target) -> Option<serde_json::Value> {
@@ -34,8 +67,18 @@ pub fn accessibility() -> bool {
 pub fn request_accessibility() -> bool {
     false
 }
-pub fn selected_text(_: Target) -> Result<String, &'static str> {
+pub fn selected_text(_: Option<Target>) -> Result<String, &'static str> {
     Err(UNAVAILABLE)
+}
+pub fn enable_selection_accessibility(_: Target) -> Result<ManualAccessibility, &'static str> {
+    Err(UNAVAILABLE)
+}
+pub fn wait_for_ax_ready(_: Target) -> bool {
+    false
+}
+#[allow(dead_code)]
+pub fn secure_input() -> bool {
+    false
 }
 pub fn activate(_: Target) -> bool {
     false

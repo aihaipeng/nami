@@ -146,21 +146,29 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let directory = app.path().app_log_dir()?;
         std::fs::create_dir_all(&directory)?;
+        let path = directory.join("lifecycle.jsonl");
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(directory.join("lifecycle.jsonl"))?;
-        // Keep diagnostics bounded without removing earlier exit evidence.
-        if file.metadata()?.len() < 65_536 {
-            let record = serde_json::json!({
-                "unixSeconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-                "pid": std::process::id(),
-                "event": event,
-                "code": code,
-                "appleEvent": platform::current_apple_event(),
-            });
-            writeln!(file, "{record}")?;
+            .open(&path)?;
+        // Keep diagnostics bounded while preserving the most recent history.
+        if file.metadata()?.len() >= 65_536 {
+            let rotated = directory.join("lifecycle.jsonl.1");
+            let _ = std::fs::remove_file(&rotated);
+            std::fs::rename(&path, &rotated)?;
+            file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
         }
+        let record = serde_json::json!({
+            "unixSeconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+            "pid": std::process::id(),
+            "event": event,
+            "code": code,
+            "appleEvent": platform::current_apple_event(),
+        });
+        writeln!(file, "{record}")?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -418,6 +426,8 @@ fn main() {
             }
             #[cfg(target_os = "macos")]
             shortcut_capture::install_window_shortcuts(app.handle());
+            #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+            platform::install_frontmost_tracker();
             #[cfg(feature = "ui-tests")]
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 let database = std::thread::spawn(|| -> Result<_, String> {

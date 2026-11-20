@@ -1018,12 +1018,8 @@ pub async fn translation_preferences_set(
     proxy_url: Option<String>,
     proxy_enabled: Option<bool>,
     selection_enabled: Option<bool>,
-    selection_copy_fallback: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["settings", "translation"])?;
-    if selection_copy_fallback.is_some() {
-        authorize(&window, &["settings"])?;
-    }
     let patch = crate::translation::PreferencePatch {
         engine,
         source_language,
@@ -1032,7 +1028,6 @@ pub async fn translation_preferences_set(
         proxy_url,
         proxy_enabled,
         selection_enabled,
-        selection_copy_fallback,
     };
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;

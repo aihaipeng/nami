@@ -133,8 +133,6 @@ pub struct Preferences {
     pub proxy_enabled: bool,
     pub selection_enabled: bool,
     #[serde(default)]
-    pub selection_copy_fallback: bool,
-    #[serde(default)]
     pub disabled_shortcuts: Vec<shortcuts::ShortcutAction>,
     pub shortcuts: TranslationShortcuts,
 }
@@ -149,7 +147,6 @@ impl Preferences {
             proxy_url: String::new(),
             proxy_enabled: false,
             selection_enabled: true,
-            selection_copy_fallback: false,
             disabled_shortcuts: Vec::new(),
             shortcuts: TranslationShortcuts::defaults(primary),
         }
@@ -190,8 +187,6 @@ impl Preferences {
         if let Some(enabled) = read("translation_selection_enabled") {
             preferences.selection_enabled = enabled == "true";
         }
-        preferences.selection_copy_fallback =
-            read("translation_selection_copy_fallback").as_deref() == Some("true");
         if let Some(disabled) = read("translation_disabled_shortcuts")
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
         {
@@ -258,9 +253,6 @@ impl Preferences {
             self.proxy_url = url.to_string();
             self.proxy_enabled = enabled;
         }
-        if let Some(enabled) = patch.selection_copy_fallback {
-            self.selection_copy_fallback = enabled;
-        }
         if let Some(enabled) = patch.selection_enabled {
             self.selection_enabled = enabled;
         }
@@ -324,10 +316,6 @@ impl Preferences {
                 .into(),
             ),
             (
-                "translation_selection_copy_fallback",
-                self.selection_copy_fallback.to_string(),
-            ),
-            (
                 "translation_disabled_shortcuts",
                 serde_json::to_string(&self.disabled_shortcuts).unwrap_or_else(|_| "[]".into()),
             ),
@@ -349,7 +337,6 @@ pub struct PreferencePatch {
     pub proxy_url: Option<String>,
     pub proxy_enabled: Option<bool>,
     pub selection_enabled: Option<bool>,
-    pub selection_copy_fallback: Option<bool>,
 }
 
 pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
@@ -871,27 +858,6 @@ fn collect_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selection_copy_fallback_is_opt_in_and_round_trips_through_sqlite() {
-        let mut db =
-            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
-        let mut preferences = Preferences::from_store(|key| db.preference(key).unwrap(), "meta");
-        assert!(!preferences.selection_copy_fallback);
-        for enabled in [true, false] {
-            preferences
-                .apply(PreferencePatch {
-                    selection_copy_fallback: Some(enabled),
-                    ..Default::default()
-                })
-                .unwrap();
-            for (key, value) in preferences.entries() {
-                db.preference_set(key, &value).unwrap();
-            }
-            let restored = Preferences::from_store(|key| db.preference(key).unwrap(), "meta");
-            assert_eq!(restored.selection_copy_fallback, enabled);
-        }
-    }
 
     #[test]
     fn legacy_launch_binding_and_disabled_state_survive_separation() {

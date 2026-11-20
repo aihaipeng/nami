@@ -5,15 +5,18 @@ mod macos {
         class, msg_send,
         rc::Retained,
         runtime::{AnyObject, Sel},
-        sel, DefinedClass, MainThreadMarker, MainThreadOnly,
+        sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly,
     };
-    use objc2_app_kit::{NSBackingStoreType, NSTextView, NSWindow, NSWindowStyleMask};
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSTextView, NSWindow, NSWindowStyleMask,
+    };
     use objc2_foundation::{ns_string, NSPoint, NSRange, NSRect, NSSize, NSString};
     use std::{
         cell::Cell,
         fmt,
         io::{self, Write},
         ptr::null_mut,
+        time::{Duration, Instant},
     };
 
     const SELECTION: &str = "NAMI synthetic selection";
@@ -21,7 +24,9 @@ mod macos {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Mode {
         Ax,
+        ManualAx,
         Copy,
+        CopyDelayed,
         Paste,
         Empty,
     }
@@ -30,7 +35,9 @@ mod macos {
         fn parse(value: &str) -> Option<Self> {
             match value {
                 "ax" => Some(Self::Ax),
+                "manual-ax" => Some(Self::ManualAx),
                 "copy" => Some(Self::Copy),
+                "copy-delayed" => Some(Self::CopyDelayed),
                 "paste" => Some(Self::Paste),
                 "empty" => Some(Self::Empty),
                 _ => None,
@@ -39,7 +46,9 @@ mod macos {
 
         fn initial(self) -> (&'static str, NSRange) {
             match self {
-                Self::Ax | Self::Copy => (SELECTION, NSRange::new(0, SELECTION.len())),
+                Self::Ax | Self::ManualAx | Self::Copy | Self::CopyDelayed => {
+                    (SELECTION, NSRange::new(0, SELECTION.len()))
+                }
                 Self::Paste => ("[]", NSRange::new(1, 0)),
                 Self::Empty => (SELECTION, NSRange::new(0, 0)),
             }
@@ -54,9 +63,63 @@ mod macos {
         }
     }
 
+    thread_local! {
+        static AX_READY: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    objc2::define_class!(
+        #[unsafe(super(NSApplication))]
+        #[thread_kind = MainThreadOnly]
+        struct ColdAxApplication;
+
+        impl ColdAxApplication {
+            #[unsafe(method_id(accessibilityAttributeNames))]
+            fn ax_names(&self) -> Retained<AnyObject> {
+                unsafe {
+                    let names: Retained<AnyObject> = msg_send![super(self), accessibilityAttributeNames];
+                    let names: Retained<AnyObject> = msg_send![&*names, mutableCopy];
+                    let _: () = msg_send![&*names, addObject: ns_string!("AXManualAccessibility")];
+                    names
+                }
+            }
+
+            #[unsafe(method(accessibilityIsAttributeSettable:))]
+            fn ax_settable(&self, name: &NSString) -> bool {
+                name == ns_string!("AXManualAccessibility")
+                    || unsafe { msg_send![super(self), accessibilityIsAttributeSettable: name] }
+            }
+
+            #[unsafe(method_id(accessibilityAttributeValue:))]
+            fn ax_value(&self, name: &NSString) -> Option<Retained<AnyObject>> {
+                unsafe {
+                    if name == ns_string!("AXManualAccessibility") {
+                        msg_send![class!(NSNumber), numberWithBool: AX_READY.get().is_some()]
+                    } else {
+                        msg_send![super(self), accessibilityAttributeValue: name]
+                    }
+                }
+            }
+
+            #[unsafe(method(accessibilitySetValue:forAttribute:))]
+            fn ax_set_value(&self, value: &AnyObject, name: &NSString) {
+                unsafe {
+                    if name == ns_string!("AXManualAccessibility") {
+                        let enabled: bool = msg_send![value, boolValue];
+                        if enabled {
+                            AX_READY.set(Some(Instant::now() + Duration::from_millis(120)));
+                            report(format_args!("AX ENABLED"));
+                        }
+                    } else {
+                        let _: () = msg_send![super(self), accessibilitySetValue: value, forAttribute: name];
+                    }
+                }
+            }
+        }
+    );
+
     struct EditorState {
         board: Retained<AnyObject>,
-        hides_ax_selection: bool,
+        mode: Mode,
         smoke: bool,
         copies: Cell<usize>,
         pastes: Cell<usize>,
@@ -71,7 +134,7 @@ mod macos {
         impl FixtureEditor {
             #[unsafe(method(isAccessibilitySelectorAllowed:))]
             fn allows_ax_selector(&self, selector: Sel) -> bool {
-                if self.ivars().hides_ax_selection && matches_ax_selection(selector) {
+                if self.hides_ax_selection() && matches_ax_selection(selector) {
                     false
                 } else {
                     unsafe { msg_send![super(self), isAccessibilitySelectorAllowed: selector] }
@@ -81,7 +144,7 @@ mod macos {
             #[unsafe(method_id(accessibilityAttributeValue:))]
             fn ax_attribute(&self, attribute: &NSString) -> Option<Retained<AnyObject>> {
                 // NSTextView also serves legacy attribute reads; missing is distinct from empty.
-                if self.ivars().hides_ax_selection && [
+                if self.hides_ax_selection() && [
                     ns_string!("AXSelectedText"),
                     ns_string!("AXSelectedTextRange"),
                     ns_string!("AXSelectedTextRanges"),
@@ -100,6 +163,11 @@ mod macos {
                     let text: Retained<NSString> = msg_send![&*self.text(), substringWithRange: range];
                     let board = &*self.ivars().board;
                     let _: isize = msg_send![board, clearContents];
+                    if self.ivars().mode == Mode::CopyDelayed {
+                        // Reproduce applications that advance changeCount on
+                        // clearContents and write the text a frame later.
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
                     let written: bool = msg_send![board, setString: &*text, forType: text_type()];
                     if written {
                         self.ivars().copies.set(self.ivars().copies.get() + 1);
@@ -163,12 +231,18 @@ mod macos {
         ) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(EditorState {
                 board,
-                hides_ax_selection: mode == Mode::Copy,
+                mode,
                 smoke,
                 copies: Cell::new(0),
                 pastes: Cell::new(0),
             });
             unsafe { msg_send![super(this), initWithFrame: size] }
+        }
+
+        fn hides_ax_selection(&self) -> bool {
+            matches!(self.ivars().mode, Mode::Copy | Mode::CopyDelayed)
+                || (self.ivars().mode == Mode::ManualAx
+                    && AX_READY.get().is_none_or(|ready| Instant::now() < ready))
         }
 
         fn paste_from_board(&self) {
@@ -358,7 +432,7 @@ mod macos {
     }
 
     fn usage() -> ! {
-        eprintln!("Usage: cross-app-fixture [--copy-fallback | --self-test | --smoke {{ax|copy|paste|empty}}]");
+        eprintln!("Usage: cross-app-fixture [--copy-fallback | --self-test | --smoke {{ax|manual-ax|copy|paste|empty}}]");
         std::process::exit(2);
     }
 
@@ -366,7 +440,13 @@ mod macos {
         let mtm = MainThreadMarker::new().expect("AppKit requires the main thread");
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         objc2::rc::autoreleasepool(|_| unsafe {
-            let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+            let class = if matches!(args.as_slice(), [flag, mode] if flag == "--smoke" && mode == "manual-ax")
+            {
+                ColdAxApplication::class()
+            } else {
+                class!(NSApplication)
+            };
+            let app: Retained<AnyObject> = msg_send![class, sharedApplication];
             match args.as_slice() {
                 [] => show(&app, mtm, Mode::Ax, false),
                 [arg] if arg == "--copy-fallback" => show(&app, mtm, Mode::Copy, false),

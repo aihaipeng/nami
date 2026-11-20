@@ -373,7 +373,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     setDraft(context.text); setSource(preferred.sourceLanguage); setDetectedSource(null); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
     sourceRef.current = preferred.sourceLanguage; primaryRef.current = preferred.primaryLanguage; secondaryRef.current = preferred.secondaryLanguage;
     fromSelection.current = true;
-    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error === 'selection_copy_disabled' ? t('selectionCopyDisabled') : context.error ? 'Selected text is unavailable in this application.' : null);
+    setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error === 'selection_copy_no_change' ? t('selectionCopyDisabled') : context.error ? 'Selected text is unavailable in this application.' : null);
     const targets = [preferred.primaryLanguage, ...(preferred.secondaryLanguage === 'none' ? [] : [preferred.secondaryLanguage])];
     if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true);
     input.current?.focus({ preventScroll: true });

@@ -66,7 +66,7 @@ def suite_commands(suite, python):
         'dfx-reliability': [frontend('dfx-reliability'), rust('database::tests', '--lib')],
         'dfx-security': [frontend('dfx-security'), py('-m', 'dfx_security and not signing'),
                          rust('selection::tests', '--bin', 'nami'),
-                         rust('platform::macos::tests', '--bin', 'nami'), signing],
+                         rust('platform::macos::', '--bin', 'nami'), signing],
         'dfx-diagnostics': [py('-m', 'dfx_diagnostics and not native')],
         'dfx-compatibility': [frontend('dfx-compatibility'),
                               py('-m', 'dfx_compatibility and not native'), *static],

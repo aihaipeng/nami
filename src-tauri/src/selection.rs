@@ -1,6 +1,7 @@
 use crate::{platform, windows, AppState};
 use serde::Serialize;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{atomic::Ordering, Arc};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
@@ -22,7 +23,7 @@ pub fn prepare_selected(app: &AppHandle) {
     if state.selection_busy.load(Ordering::SeqCst) {
         return;
     }
-    let target = platform::capture_target();
+    let target = platform::capture_selection_target();
     crate::record_lifecycle(
         app,
         if target.is_some() {
@@ -45,8 +46,13 @@ impl Drop for CaptureGuard {
     }
 }
 
-const COPY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-const COPY_ATTEMPTS: usize = 120;
+const AX_STABILIZE_DELAY: Duration = Duration::from_millis(150);
+const COPY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COPY_ATTEMPTS: usize = 22;
+const COPY_SETTLE_INTERVAL: Duration = Duration::from_millis(10);
+const COPY_SETTLE_ATTEMPTS: usize = 20;
+const COPY_FINISH_ATTEMPTS: usize = 3;
+const CAPTURE_ATTEMPTS: usize = 2;
 
 struct CopyGuard(AppHandle);
 impl CopyGuard {
@@ -66,153 +72,252 @@ impl Drop for CopyGuard {
     }
 }
 
-async fn readable_selection(
-    result: Result<String, &'static str>,
-    copy: impl std::future::Future<Output = Result<String, &'static str>>,
-) -> Result<String, &'static str> {
-    match result {
-        Ok(text) => Ok(if text.trim().is_empty() {
-            String::new()
-        } else {
-            text
-        }),
-        Err("permission_required") => Err("permission_required"),
-        Err(
-            "selection_secure" | "selection_non_text" | "selection_empty" | "target_unavailable",
-        ) => Ok(String::new()),
-        Err(_) => copy.await,
-    }
+fn record_phase(app: &AppHandle, phase: &'static str) {
+    let owned = app.clone();
+    let _ = app.run_on_main_thread(move || crate::record_lifecycle(&owned, phase, None));
 }
 
-fn finish_owned_copy<T>(
-    handled: &AtomicI64,
-    current_version: impl FnOnce() -> i64,
-    finish: impl FnOnce() -> Result<T, &'static str>,
-) -> Result<T, &'static str> {
-    let result = finish()?;
-    handled.store(current_version(), Ordering::SeqCst);
-    Ok(result)
-}
-
-async fn restore_copy(
+async fn selection_ax<T: Send + 'static>(
     app: &AppHandle,
-    saved: platform::CopySnapshot,
-    expected: i64,
-    accept: bool,
-) -> Result<String, &'static str> {
+    revision: u64,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, &'static str> {
     crate::commands::on_main(app, move |app| {
-        finish_owned_copy(
-            &app.state::<AppState>().clipboard_version,
-            platform::clipboard_version,
-            || platform::finish_selection_copy(&saved, expected, accept),
-        )
+        selection_is_current(&app.state::<AppState>(), revision)
+            .then_some(())
+            .ok_or("translation_cancelled")
+    })
+    .await
+    .map_err(|_| "main_thread_unavailable")??;
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|_| "selection_unavailable")
+}
+
+fn selection_is_current(state: &AppState, revision: u64) -> bool {
+    state.selection_revision.load(Ordering::SeqCst) == revision
+}
+
+/// Reads the focused selection directly. When the first pass is empty, wakes
+/// the application accessibility tree once and re-reads the focused element
+/// from the application root.
+async fn ax_capture(
+    app: &AppHandle,
+    target: Option<platform::Target>,
+    revision: u64,
+) -> Result<String, &'static str> {
+    let direct = match selection_ax(app, revision, move || platform::selected_text(target)).await {
+        Ok(Ok(text)) => text,
+        // A missing focus or unavailable application is equivalent to an
+        // empty direct read. Chromium-family applications may still expose the
+        // selection after the application accessibility switch is enabled.
+        Ok(Err("selection_application_unavailable" | "selection_focus_unavailable")) => {
+            String::new()
+        }
+        Ok(Err(code)) => return Err(code),
+        Err(code) => return Err(code),
+    };
+    if !direct.trim().is_empty() {
+        record_phase(app, "selection_ax_text");
+        return Ok(direct);
+    }
+
+    let Some(target) = target else {
+        record_phase(app, "selection_ax_empty");
+        return Ok(String::new());
+    };
+    match selection_ax(app, revision, move || {
+        platform::enable_selection_accessibility(target)
+    })
+    .await??
+    {
+        platform::ManualAccessibility::Enabled => record_phase(app, "selection_ax_activated"),
+        platform::ManualAccessibility::AlreadyEnabled
+        | platform::ManualAccessibility::Unsupported => {
+            record_phase(app, "selection_ax_empty");
+            return Ok(String::new());
+        }
+    }
+    if !selection_ax(app, revision, move || platform::wait_for_ax_ready(target)).await? {
+        record_phase(app, "selection_ax_not_ready");
+        return Ok(String::new());
+    }
+    tokio::time::sleep(AX_STABILIZE_DELAY).await;
+    let text = selection_ax(app, revision, move || platform::selected_text(Some(target))).await??;
+    record_phase(
+        app,
+        if text.trim().is_empty() {
+            "selection_ax_empty"
+        } else {
+            "selection_ax_text"
+        },
+    );
+    Ok(text)
+}
+
+fn copy_observed(
+    initial_version: i64,
+    initial_text: Option<&str>,
+    initial_has_items: bool,
+    payload: &platform::SelectionRead,
+) -> bool {
+    payload.version != initial_version
+        || payload
+            .text
+            .as_deref()
+            .is_some_and(|text| initial_text != Some(text))
+        || (!initial_has_items && payload.has_items)
+}
+
+async fn wait_for_copy(
+    app: &AppHandle,
+    revision: u64,
+    initial_version: i64,
+    initial_text: Option<String>,
+    initial_has_items: bool,
+) -> Result<i64, &'static str> {
+    for _ in 0..COPY_ATTEMPTS {
+        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+        let payload = selection_payload(app, revision).await?;
+        if copy_observed(
+            initial_version,
+            initial_text.as_deref(),
+            initial_has_items,
+            &payload,
+        ) {
+            return Ok(payload.version);
+        }
+    }
+    record_phase(app, "selection_copy_no_change");
+    Err("selection_copy_no_change")
+}
+
+async fn selection_payload(
+    app: &AppHandle,
+    revision: u64,
+) -> Result<platform::SelectionRead, &'static str> {
+    crate::commands::on_main(app, move |app| {
+        selection_is_current(&app.state::<AppState>(), revision)
+            .then(platform::read_selection_payload)
+            .ok_or("translation_cancelled")
     })
     .await
     .map_err(|_| "main_thread_unavailable")?
 }
 
-async fn copy_fallback(
+/// `changeCount` advances when a source clears the pasteboard, before it writes
+/// the copied value. Wait for a text payload (or a definitive non-text payload)
+/// before reading and restoring, otherwise a fast poll can mistake the gap for
+/// an empty selection and restore while the source is still writing.
+async fn wait_for_selection_payload(
     app: &AppHandle,
-    target: platform::Target,
+    revision: u64,
+) -> Result<(String, i64), &'static str> {
+    let mut settled: Option<(i64, String)> = None;
+    for _ in 0..COPY_SETTLE_ATTEMPTS {
+        let payload = selection_payload(app, revision).await?;
+        if let Some(text) = payload.text {
+            if settled
+                .as_ref()
+                .is_some_and(|(version, expected)| *version == payload.version && expected == &text)
+            {
+                return Ok((text, payload.version));
+            }
+            settled = Some((payload.version, text));
+        } else {
+            settled = None;
+        }
+        tokio::time::sleep(COPY_SETTLE_INTERVAL).await;
+    }
+    let payload = selection_payload(app, revision).await?;
+    Ok((payload.text.unwrap_or_default(), payload.version))
+}
+
+/// Snapshots the pasteboard, activates the captured application, sends the
+/// layout-aware copy shortcut, waits for the copied payload to settle, then
+/// restores the snapshot.
+async fn copy_capture(
+    app: &AppHandle,
+    target: Option<platform::Target>,
     revision: u64,
 ) -> Result<String, &'static str> {
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    if !state
-        .translation_preferences
-        .lock()
-        .unwrap()
-        .selection_copy_fallback
-    {
-        return Err("selection_copy_disabled");
+    if !selection_is_current(&state, revision) {
+        return Err("translation_cancelled");
     }
     let _guard = CopyGuard::new(app);
-    let saved = crate::commands::on_main(app, move |app| {
-        if !selection_is_current(&app.state::<AppState>(), revision) {
-            return Err("translation_cancelled");
-        }
-        platform::begin_selection_copy(target)
-    })
-    .await
-    .map_err(|_| "main_thread_unavailable")??;
-    let owned = app.clone();
-    crate::commands::on_main(app, move |_| {
-        crate::record_lifecycle(&owned, "selection_copy_sent", None)
-    })
-    .await
-    .map_err(|_| "main_thread_unavailable")?;
-    let (observed, accept_text) = wait_for_copy(saved.version, || async move {
-        crate::commands::on_main(app, move |_| {
-            (
-                platform::clipboard_version(),
-                platform::target_focused(target),
-            )
+    let saved = Arc::new(
+        crate::commands::on_main(app, move |app| {
+            if !selection_is_current(&app.state::<AppState>(), revision) {
+                return Err("translation_cancelled");
+            }
+            let saved = platform::begin_selection_copy(target)?;
+            crate::record_lifecycle(&app, "selection_copy_sent", None);
+            Ok(saved)
         })
         .await
-        .map_err(|_| "main_thread_unavailable")
-    })
-    .await?;
-    if observed != saved.version {
-        return restore_copy(app, saved, observed, accept_text).await;
-    }
-    // No change means no selection: never reuse the old clipboard text.
-    let owned = app.clone();
-    crate::commands::on_main(app, move |_| {
-        crate::record_lifecycle(&owned, "selection_copy_no_change", None)
-    })
-    .await
-    .map_err(|_| "main_thread_unavailable")?;
-    Ok(String::new())
-}
-
-async fn wait_for_copy<F: std::future::Future<Output = Result<(i64, bool), &'static str>>>(
-    initial: i64,
-    mut sample: impl FnMut() -> F,
-) -> Result<(i64, bool), &'static str> {
-    let mut observed = initial;
-    let mut stable = 0;
-    let mut poll = tokio::time::interval_at(
-        tokio::time::Instant::now() + COPY_POLL_INTERVAL,
-        COPY_POLL_INTERVAL,
+        .map_err(|_| "main_thread_unavailable")??,
     );
-    for attempt in 0..COPY_ATTEMPTS + 2 {
-        poll.tick().await;
-        let (version, focused) = sample().await?;
-        if !focused {
-            // Only restore a version already observed while the source had focus.
-            return Ok((
-                if observed != initial && observed == version {
-                    observed
-                } else {
-                    initial
-                },
-                false,
-            ));
-        }
-        if version == initial {
-            if attempt + 1 >= COPY_ATTEMPTS {
-                break;
+    wait_for_copy(
+        app,
+        revision,
+        saved.version,
+        saved.initial_text.clone(),
+        saved.initial_has_items,
+    )
+    .await?;
+    let (mut text, mut observed_version) = wait_for_selection_payload(app, revision).await?;
+    for _ in 0..COPY_FINISH_ATTEMPTS {
+        let saved = Arc::clone(&saved);
+        let finish_text = text.clone();
+        let result = crate::commands::on_main(app, move |app| {
+            if !selection_is_current(&app.state::<AppState>(), revision) {
+                return Err("translation_cancelled");
             }
-            continue;
-        }
-        if observed != initial && version != observed {
-            return Err("clipboard_changed");
-        }
-        if observed == version {
-            stable += 1;
-        } else {
-            observed = version;
-            stable = 0;
-        }
-        if stable >= 2 {
-            return Ok((observed, true));
+            let (text, restored) =
+                platform::finish_selection_copy(&saved, finish_text, observed_version)?;
+            app.state::<AppState>()
+                .clipboard_version
+                .store(restored, Ordering::SeqCst);
+            Ok(text)
+        })
+        .await
+        .map_err(|_| "main_thread_unavailable")?;
+        match result {
+            Ok(text) => return Ok(text),
+            Err("selection_copy_changed") => {
+                let (next_text, next_version) = wait_for_selection_payload(app, revision).await?;
+                text = next_text;
+                observed_version = next_version;
+            }
+            Err(code) => return Err(code),
         }
     }
-    Ok((observed, false))
+    Err("selection_copy_changed")
 }
 
-fn selection_is_current(state: &AppState, revision: u64) -> bool {
-    state.selection_revision.load(Ordering::SeqCst) == revision
+async fn capture_text(
+    app: &AppHandle,
+    target: Option<platform::Target>,
+    revision: u64,
+) -> Result<String, &'static str> {
+    let mut last_error = "selection_unavailable";
+    for attempt in 0..CAPTURE_ATTEMPTS {
+        if let Ok(text) = ax_capture(app, target, revision).await {
+            if !text.trim().is_empty() {
+                return Ok(text);
+            }
+        }
+        match copy_capture(app, target, revision).await {
+            Ok(text) => return Ok(text),
+            Err(code) => last_error = code,
+        }
+        if attempt + 1 < CAPTURE_ATTEMPTS {
+            record_phase(app, "selection_retry");
+        }
+    }
+    Err(last_error)
 }
 
 pub fn show_blank(app: &AppHandle) -> Result<(), String> {
@@ -268,37 +373,23 @@ pub fn show_selected(app: &AppHandle, open_when_empty: bool) -> Result<(), Strin
         .unwrap()
         .take()
         .unwrap_or_else(|| {
-            let target = platform::capture_target();
+            let target = platform::capture_selection_target();
             SelectionOrigin { target }
         });
     let SelectionOrigin { target } = origin;
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let guard = CaptureGuard(app.clone());
-        let result = match target {
-            None => Ok(String::new()),
-            Some(target) => {
-                let direct =
-                    tauri::async_runtime::spawn_blocking(move || platform::selected_text(target))
-                        .await
-                        .unwrap_or(Err("selection_unavailable"));
-                let phase = match &direct {
-                    Ok(_) => "selection_ax_text".to_string(),
-                    Err(code) => format!("selection_ax_{code}"),
-                };
-                let owned = app.clone();
-                let _ =
-                    app.run_on_main_thread(move || crate::record_lifecycle(&owned, &phase, None));
-                readable_selection(direct, copy_fallback(&app, target, revision)).await
-            }
+        let result = if !platform::accessibility() {
+            Err("permission_required")
+        } else {
+            capture_text(&app, target, revision).await
         };
         let owned = app.clone();
         let _ = app.run_on_main_thread(move || {
             let _guard = guard;
             let state = owned.state::<AppState>();
-            if !selection_is_current(&state, revision)
-                || target.is_some_and(|target| !platform::target_focused(target))
-            {
+            if !selection_is_current(&state, revision) {
                 crate::record_lifecycle(&owned, "selection_discarded", None);
                 return;
             }
@@ -310,7 +401,12 @@ pub fn show_selected(app: &AppHandle, open_when_empty: bool) -> Result<(), Strin
             crate::record_lifecycle(&owned, &phase, None);
             let (text, error) = match result {
                 Ok(text) => (text, None),
-                Err("selection_empty" | "selection_secure") => (String::new(), None),
+                // A completed capture with no new clipboard version means there
+                // was no selection; deliver an empty context instead of an error.
+                Err("selection_copy_no_change" | "selection_empty" | "selection_secure") => {
+                    (String::new(), None)
+                }
+                Err("target_unavailable") if target.is_none() => (String::new(), None),
                 Err(code) => (String::new(), Some(code.to_string())),
             };
             if text.is_empty() && !open_when_empty && error.is_none() {
@@ -356,7 +452,44 @@ pub(crate) fn present(app: &AppHandle, presentation_id: u64) -> Result<(), Strin
     not(feature = "portable-ui")
 ))]
 pub(crate) fn test_empty_summon(app: &AppHandle, open_when_empty: bool) -> Result<(), String> {
-    test_summon_from(app, None, open_when_empty)
+    // The UI handoff case must not depend on whichever real application happens
+    // to be frontmost. Capture-empty and clipboard restore are covered by the
+    // cross-app `empty` fixture; this helper exercises only empty delivery.
+    if !matches!(
+        app.config().identifier.as_str(),
+        "dev.local.nami.ui-tests" | "dev.local.nami.ui-tests.denial"
+    ) {
+        return Err("permission_denied".into());
+    }
+    let state = app.state::<AppState>();
+    if state.selection_busy.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let revision = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    *state.selection_origin.lock().unwrap() = None;
+    *state.selection.lock().unwrap() = None;
+    *state.selection_presentation.lock().unwrap() = None;
+    let owned = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let guard = CaptureGuard(owned.clone());
+        let handle = owned.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let _guard = guard;
+            let state = owned.state::<AppState>();
+            if !selection_is_current(&state, revision) {
+                return;
+            }
+            crate::record_lifecycle(&owned, "selection_result_empty", None);
+            if !open_when_empty {
+                return;
+            }
+            state.translation_revision.fetch_add(1, Ordering::SeqCst);
+            if let Err(code) = queue_input(&owned, revision, None, String::new(), None) {
+                state.shortcut_errors.lock().unwrap().push(code);
+            }
+        });
+    });
+    Ok(())
 }
 
 #[cfg(all(
@@ -394,159 +527,23 @@ mod tests {
         assert!(!selection_is_current(&state, old));
     }
 
-    #[tokio::test]
-    async fn empty_secure_nontext_and_direct_text_never_start_copy() {
-        for result in [
-            Ok(String::new()),
-            Ok(" \n\t".into()),
-            Err("selection_non_text"),
-            Err("selection_secure"),
-            Err("selection_empty"),
-            Err("target_unavailable"),
-        ] {
-            assert_eq!(
-                readable_selection(result, async {
-                    panic!("must not copy for a blank summon or protected selection")
-                })
-                .await,
-                Ok(String::new())
-            );
-        }
-        let text = "  Synthetic selected text\n第二行";
-        assert_eq!(
-            readable_selection(Ok(text.into()), async { panic!("AX text must not copy") }).await,
-            Ok(text.into())
-        );
-        assert_eq!(
-            readable_selection(Err("permission_required"), async {
-                panic!("permission failure must not copy")
-            })
-            .await,
-            Err("permission_required")
-        );
-    }
-
-    #[tokio::test]
-    async fn explicit_empty_selection_summons_without_waiting_for_copy() {
-        let started = std::time::Instant::now();
-        let result = readable_selection(Ok(String::new()), async {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            panic!("blank summon must never start the copy transaction");
-        })
-        .await;
-        assert_eq!(result, Ok(String::new()));
-        assert!(started.elapsed() < std::time::Duration::from_millis(50));
-    }
-
-    #[tokio::test]
-    async fn delayed_copy_and_copy_at_the_deadline_are_still_accepted() {
-        let mut polls = 0;
-        assert_eq!(
-            wait_for_copy(7, || {
-                polls += 1;
-                std::future::ready(Ok((if polls < 15 { 7 } else { 8 }, true)))
-            })
-            .await,
-            Ok((8, true))
-        );
-        let mut polls = 0;
-        assert_eq!(
-            wait_for_copy(7, || {
-                polls += 1;
-                std::future::ready(Ok((if polls < COPY_ATTEMPTS { 7 } else { 8 }, true)))
-            })
-            .await,
-            Ok((8, true))
-        );
-    }
-
-    #[tokio::test]
-    async fn ax_focus_failure_uses_copy_and_preserves_its_errors() {
-        assert_eq!(
-            readable_selection(Err("selection_focus_unavailable"), async {
-                Ok("Synthetic fallback text".into())
-            })
-            .await,
-            Ok("Synthetic fallback text".into())
-        );
-        for failure in [
-            "clipboard_changed",
-            "clipboard_restore_failed",
-            "translation_cancelled",
-        ] {
-            assert_eq!(
-                readable_selection(Err("selection_unavailable"), async { Err(failure) }).await,
-                Err(failure)
-            );
-        }
-        assert_eq!(
-            readable_selection(Err("selection_focus_unavailable"), async {
-                Ok(String::new())
-            })
-            .await,
-            Ok(String::new())
-        );
+    #[test]
+    fn a_late_write_without_a_version_change_is_observed() {
+        let payload = platform::SelectionRead {
+            version: 7,
+            text: Some("copied".into()),
+            has_items: true,
+        };
+        assert!(copy_observed(7, None, false, &payload));
     }
 
     #[test]
-    fn only_successful_owned_restoration_suppresses_clipboard_capture() {
-        let handled = AtomicI64::new(7);
-        assert_eq!(
-            finish_owned_copy(
-                &handled,
-                || panic!("external version must not be suppressed"),
-                || Err::<(), _>("clipboard_changed")
-            ),
-            Err("clipboard_changed")
-        );
-        assert_eq!(handled.load(Ordering::SeqCst), 7);
-        assert_eq!(
-            finish_owned_copy(&handled, || 10, || Ok("synthetic restored text")),
-            Ok("synthetic restored text")
-        );
-        assert_eq!(handled.load(Ordering::SeqCst), 10);
-    }
-
-    #[tokio::test]
-    async fn blank_summon_stops_polling_without_accepting_the_old_clipboard() {
-        let started = std::time::Instant::now();
-        let mut polls = 0;
-        assert_eq!(
-            wait_for_copy(7, || {
-                polls += 1;
-                std::future::ready(Ok((7, true)))
-            })
-            .await,
-            Ok((7, false))
-        );
-        assert_eq!(polls, COPY_ATTEMPTS);
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        eprintln!("Synthetic blank-copy wait: {:?}", started.elapsed());
-    }
-
-    #[tokio::test]
-    async fn copied_version_must_stabilize_and_a_new_copy_is_never_restored() {
-        assert_eq!(
-            wait_for_copy(7, || std::future::ready(Ok((8, true)))).await,
-            Ok((8, true))
-        );
-        let mut versions = [8, 9].into_iter();
-        assert_eq!(
-            wait_for_copy(7, || std::future::ready(Ok((
-                versions.next().unwrap(),
-                true
-            ))))
-            .await,
-            Err("clipboard_changed")
-        );
-        assert_eq!(
-            wait_for_copy(7, || std::future::ready(Ok((8, false)))).await,
-            Ok((7, false))
-        );
-        let mut samples = [(8, true), (8, false)].into_iter();
-        assert_eq!(
-            wait_for_copy(7, || std::future::ready(Ok(samples.next().unwrap()))).await,
-            Ok((8, false))
-        );
+    fn a_version_change_is_observed_even_for_the_same_text() {
+        let payload = platform::SelectionRead {
+            version: 8,
+            text: Some("same".into()),
+            has_items: true,
+        };
+        assert!(copy_observed(7, Some("same"), true, &payload));
     }
 }

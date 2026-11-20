@@ -1215,7 +1215,6 @@ impl HistoryDatabase {
             "translation_proxy_url",
             "translation_proxy_enabled",
             "translation_selection_enabled",
-            "translation_selection_copy_fallback",
             "translation_shortcuts",
             "translation_disabled_shortcuts",
         ];

@@ -1,3 +1,4 @@
+use block2::RcBlock;
 use objc2::{
     class, msg_send,
     rc::{Allocated, Retained},
@@ -5,11 +6,94 @@ use objc2::{
 };
 use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::ffi::c_void;
+use std::hash::{Hash, Hasher};
+use std::ptr::NonNull;
+use std::sync::{Mutex, Once, OnceLock};
+
+mod selection;
+pub(super) use selection::send_copy;
+pub use selection::{
+    enable_selection_accessibility, selected_text, wait_for_ax_ready, ManualAccessibility,
+};
+
+/// Last non-Nami application that received focus. Used when Nami is frontmost
+/// (for example while a settings window is open) so a shortcut still targets
+/// the application the user was working in before.
+static LAST_FOREIGN_FRONTMOST: OnceLock<Mutex<Option<Target>>> = OnceLock::new();
+static FRONTMOST_TRACKER: Once = Once::new();
+
+fn last_foreign_frontmost() -> Option<Target> {
+    (*LAST_FOREIGN_FRONTMOST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?)
+    .filter(|target| unsafe { running(*target).is_some() })
+}
+
+fn remember_foreign_frontmost(target: Target) {
+    if let Ok(mut last) = LAST_FOREIGN_FRONTMOST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *last = Some(target);
+    }
+}
+
+/// Tracks application activation independently of any shortcut press. Current
+/// workflows rely on the frontmost application, while the previous owner is
+/// kept for the case where Nami itself has just become active.
+pub fn install_frontmost_tracker() {
+    FRONTMOST_TRACKER.call_once(|| unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return;
+        }
+        let center: *mut AnyObject = msg_send![workspace, notificationCenter];
+        if center.is_null() {
+            return;
+        }
+        let handler = RcBlock::new(|notification: NonNull<AnyObject>| {
+            let notification = notification.as_ref();
+            let info: *mut AnyObject = msg_send![notification, userInfo];
+            if info.is_null() {
+                return;
+            }
+            let app: *mut AnyObject =
+                msg_send![info, objectForKey: ns_string!("NSWorkspaceApplicationKey")];
+            if app.is_null() {
+                return;
+            }
+            if let Some(target) = identity(&*app) {
+                if target.pid != std::process::id() as i32 {
+                    remember_foreign_frontmost(target);
+                }
+            }
+        });
+        let token: *mut AnyObject = msg_send![
+            center,
+            addObserverForName: ns_string!("NSWorkspaceDidActivateApplicationNotification"),
+            object: std::ptr::null::<AnyObject>(),
+            queue: std::ptr::null::<AnyObject>(),
+            usingBlock: &*handler
+        ];
+        if !token.is_null() {
+            // The tracker lives for the whole process; keeping the token
+            // retained avoids relying on autorelease lifetime.
+            std::mem::forget(Retained::retain(token));
+        }
+        // Seed the previous owner in case an external application was already
+        // frontmost when the tracker was installed.
+        if let Some(target) = workspace_frontmost_target() {
+            remember_foreign_frontmost(target);
+        }
+    });
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
     pid: i32,
     started: f64,
+    bundle: u64,
 }
 
 #[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
@@ -18,8 +102,45 @@ impl Target {
         Self {
             pid: -1,
             started: 0.0,
+            bundle: 0,
         }
     }
+
+    pub(crate) fn pid(&self) -> i32 {
+        self.pid
+    }
+}
+
+fn same_target(actual: Target, expected: Target) -> bool {
+    actual.pid == expected.pid
+        && (expected.started == 0.0 || actual.started == 0.0 || actual.started == expected.started)
+        && (expected.bundle == 0 || actual.bundle == 0 || actual.bundle == expected.bundle)
+}
+
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+pub fn test_self_target() -> Option<Target> {
+    unsafe {
+        let application: Option<Retained<AnyObject>> = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: std::process::id() as i32
+        ];
+        identity(application.as_deref()?)
+    }
+}
+
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+pub fn test_set_last_foreign(target: Option<Target>) {
+    if let Ok(mut last) = LAST_FOREIGN_FRONTMOST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *last = target;
+    }
+}
+
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+pub fn test_last_foreign() -> Option<Target> {
+    last_foreign_frontmost()
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -31,24 +152,6 @@ unsafe extern "C" {}
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
-    fn AXUIElementCreateApplication(pid: i32) -> *const c_void;
-    fn AXUIElementSetMessagingTimeout(element: *const c_void, timeout: f32) -> i32;
-    fn AXUIElementCopyAttributeValue(
-        element: *const c_void,
-        attribute: *const c_void,
-        value: *mut *const c_void,
-    ) -> i32;
-    fn AXUIElementGetTypeID() -> usize;
-    fn AXValueGetTypeID() -> usize;
-    fn AXValueGetType(value: *const c_void) -> u32;
-    fn AXValueGetValue(value: *const c_void, kind: u32, output: *mut c_void) -> bool;
-    fn AXUIElementGetPid(element: *const c_void, pid: *mut i32) -> i32;
-    fn AXUIElementCopyParameterizedAttributeValue(
-        element: *const c_void,
-        attribute: *const c_void,
-        parameter: *const c_void,
-        value: *mut *const c_void,
-    ) -> i32;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
     static kAXTrustedCheckOptionPrompt: *const c_void;
     fn CGEventCreateKeyboardEvent(source: *const c_void, key: u16, down: bool) -> *mut c_void;
@@ -56,6 +159,14 @@ unsafe extern "C" {
     fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
     fn CGEventPost(tap: u32, event: *const c_void);
     fn CGEventPostToPid(pid: i32, event: *const c_void);
+    fn AXUIElementCreateSystemWide() -> *const c_void;
+    fn AXUIElementSetMessagingTimeout(element: *const c_void, timeout: f32) -> i32;
+    fn AXUIElementCopyAttributeValue(
+        element: *const c_void,
+        attribute: *const c_void,
+        value: *mut *const c_void,
+    ) -> i32;
+    fn AXUIElementGetPid(element: *const c_void, pid: *mut i32) -> i32;
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -75,122 +186,6 @@ unsafe extern "C" {
         value_callbacks: *const c_void,
     ) -> *const c_void;
     fn CFRelease(value: *const c_void);
-    fn CFGetTypeID(value: *const c_void) -> usize;
-    fn CFStringGetTypeID() -> usize;
-    fn CFStringGetLength(value: *const c_void) -> isize;
-    fn CFStringGetCharacters(value: *const c_void, range: CFRange, buffer: *mut u16);
-}
-
-#[repr(C)]
-struct CFRange {
-    location: isize,
-    length: isize,
-}
-
-struct AXValue(*const c_void);
-
-impl Drop for AXValue {
-    fn drop(&mut self) {
-        unsafe { CFRelease(self.0) }
-    }
-}
-
-unsafe fn ax_attribute(element: *const c_void, name: &NSString) -> Option<AXValue> {
-    let mut value = std::ptr::null();
-    let status =
-        AXUIElementCopyAttributeValue(element, (name as *const NSString).cast(), &mut value);
-    if status == 0 && !value.is_null() {
-        Some(AXValue(value))
-    } else {
-        if !value.is_null() {
-            CFRelease(value);
-        }
-        None
-    }
-}
-
-unsafe fn ax_parameterized_string(
-    element: *const c_void,
-    name: &NSString,
-    parameter: &AXValue,
-) -> Option<String> {
-    let mut value = std::ptr::null();
-    let status = AXUIElementCopyParameterizedAttributeValue(
-        element,
-        (name as *const NSString).cast(),
-        parameter.0,
-        &mut value,
-    );
-    if value.is_null() {
-        return None;
-    }
-    let value = AXValue(value);
-    (status == 0).then(|| ax_string(&value)).flatten()
-}
-
-unsafe fn ax_string(value: &AXValue) -> Option<String> {
-    if CFGetTypeID(value.0) != CFStringGetTypeID() {
-        return None;
-    }
-    let length = CFStringGetLength(value.0);
-    let mut buffer = vec![0u16; length as usize];
-    CFStringGetCharacters(
-        value.0,
-        CFRange {
-            location: 0,
-            length,
-        },
-        buffer.as_mut_ptr(),
-    );
-    String::from_utf16(&buffer).ok()
-}
-
-fn selection_result(text: String) -> Result<String, &'static str> {
-    if text.trim().is_empty() {
-        Ok(String::new())
-    } else {
-        Ok(text)
-    }
-}
-
-unsafe fn ax_range_length(value: &AXValue) -> Option<isize> {
-    const CF_RANGE: u32 = 4;
-    if CFGetTypeID(value.0) != AXValueGetTypeID() || AXValueGetType(value.0) != CF_RANGE {
-        return None;
-    }
-    let mut range = CFRange {
-        location: 0,
-        length: 0,
-    };
-    (AXValueGetValue(value.0, CF_RANGE, (&mut range as *mut CFRange).cast())
-        && range.location >= 0
-        && range.length >= 0)
-        .then_some(range.length)
-}
-
-fn resolve_selection(
-    selected: Option<String>,
-    range_length: Option<isize>,
-    read_range: impl FnOnce() -> Option<String>,
-    read_marker: impl FnOnce() -> Option<String>,
-) -> Result<String, &'static str> {
-    if let Some(text) = selected.filter(|text| !text.trim().is_empty()) {
-        return Ok(text);
-    }
-    if range_length == Some(0) {
-        return Ok(String::new());
-    }
-    let ordinary = range_length
-        .filter(|&length| length > 0)
-        .and_then(|_| read_range());
-    match ordinary {
-        Some(text) if !text.trim().is_empty() => Ok(text),
-        ordinary => read_marker()
-            .filter(|text| !text.trim().is_empty())
-            .or(ordinary)
-            .ok_or("selection_unavailable")
-            .and_then(selection_result),
-    }
 }
 
 // Every AppKit call in this module runs on Tauri's main thread.
@@ -250,17 +245,111 @@ unsafe fn frontmost() -> Option<Retained<AnyObject>> {
 
 unsafe fn identity(application: &AnyObject) -> Option<Target> {
     let pid: i32 = msg_send![application, processIdentifier];
+    if pid <= 0 {
+        return None;
+    }
+    // launchDate is unavailable for some system-managed applications on
+    // current macOS versions; a missing value must not discard the target.
     let date: Option<Retained<AnyObject>> = msg_send![application, launchDate];
-    let started: f64 = msg_send![date.as_ref()?, timeIntervalSince1970];
-    Some(Target { pid, started })
+    let started = date
+        .as_ref()
+        .map_or(0.0, |date| msg_send![date, timeIntervalSince1970]);
+    let bundle: Option<Retained<NSString>> = msg_send![application, bundleIdentifier];
+    let bundle_url: Option<Retained<NSURL>> = msg_send![application, bundleURL];
+    let executable_url: Option<Retained<NSURL>> = msg_send![application, executableURL];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Some(bundle) = bundle {
+        bundle.to_string().hash(&mut hasher);
+    }
+    if let Some(url) = bundle_url.and_then(|url| url.path()) {
+        url.to_string().hash(&mut hasher);
+    }
+    if let Some(url) = executable_url.and_then(|url| url.path()) {
+        url.to_string().hash(&mut hasher);
+    }
+    Some(Target {
+        pid,
+        started,
+        bundle: hasher.finish(),
+    })
 }
 
+fn choose_clipboard_target(current: Option<Target>) -> Option<Target> {
+    current
+}
+
+fn choose_selection_target(
+    current: Option<Target>,
+    previous: Option<Target>,
+    ax: impl FnOnce() -> Option<Target>,
+) -> Option<Target> {
+    current.or(previous).or_else(ax)
+}
+
+/// Resolves the current external frontmost application for clipboard capture
+/// and paste targeting. Never falls back to a previously active application:
+/// pasting into an app the user has already left would be unsafe.
 pub fn capture_target() -> Option<Target> {
-    unsafe {
-        let application = frontmost()?;
-        let target = identity(&application)?;
-        (target.pid != std::process::id() as i32).then_some(target)
+    install_frontmost_tracker();
+    let target = choose_clipboard_target(unsafe { workspace_frontmost_target() });
+    if let Some(target) = target {
+        remember_foreign_frontmost(target);
     }
+    target
+}
+
+/// Resolves the application that owned the selection when the selection
+/// shortcut fired. The current external frontmost application wins; when Nami
+/// itself is frontmost, the most recent external activation is used. AX focus
+/// is only a fallback because it can lag behind the workspace or be
+/// unavailable. A missing target is allowed; callers then use the system-wide
+/// element and broadcast key events.
+pub fn capture_selection_target() -> Option<Target> {
+    install_frontmost_tracker();
+    let target = choose_selection_target(
+        unsafe { workspace_frontmost_target() },
+        last_foreign_frontmost(),
+        || unsafe { ax_focused_application() },
+    );
+    if let Some(target) = target {
+        remember_foreign_frontmost(target);
+    }
+    target
+}
+
+unsafe fn workspace_frontmost_target() -> Option<Target> {
+    let application = frontmost()?;
+    let target = identity(&application)?;
+    (target.pid != std::process::id() as i32).then_some(target)
+}
+
+unsafe fn ax_focused_application() -> Option<Target> {
+    let system = AXUIElementCreateSystemWide();
+    if system.is_null() {
+        return None;
+    }
+    let _ = AXUIElementSetMessagingTimeout(system, 0.25);
+    let mut value: *const c_void = std::ptr::null();
+    let status = AXUIElementCopyAttributeValue(
+        system,
+        (ns_string!("AXFocusedApplication") as *const NSString).cast(),
+        &mut value,
+    );
+    CFRelease(system);
+    if status != 0 || value.is_null() {
+        return None;
+    }
+    let mut pid: i32 = 0;
+    let valid = AXUIElementGetPid(value, &mut pid) == 0;
+    CFRelease(value);
+    if !valid || pid <= 0 || pid == std::process::id() as i32 {
+        return None;
+    }
+    let application: Option<Retained<AnyObject>> = msg_send![
+        class!(NSRunningApplication),
+        runningApplicationWithProcessIdentifier: pid
+    ];
+    identity(application.as_deref()?)
 }
 
 unsafe fn running(target: Target) -> Option<Retained<AnyObject>> {
@@ -268,7 +357,7 @@ unsafe fn running(target: Target) -> Option<Retained<AnyObject>> {
     let application = application?;
     let terminated: bool = msg_send![&*application, isTerminated];
     let actual = identity(&application)?;
-    (!terminated && actual.started == target.started).then_some(application)
+    (!terminated && same_target(actual, target)).then_some(application)
 }
 
 pub fn open_clipboard_target(
@@ -359,80 +448,12 @@ pub fn target_focused(target: Target) -> bool {
         let Some(actual) = frontmost().and_then(|app| identity(&app)) else {
             return false;
         };
-        actual.pid == target.pid && actual.started == target.started && target_alive(target)
+        same_target(actual, target) && target_alive(target)
     }
 }
 
 pub fn accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }
-}
-
-// AX reads may block; callers capture and revalidate the foreground target on the main thread.
-pub fn selected_text(target: Target) -> Result<String, &'static str> {
-    if !accessibility() {
-        return Err("permission_required");
-    }
-    if secure_input() {
-        return Err("selection_secure");
-    }
-    unsafe {
-        let application = AXUIElementCreateApplication(target.pid);
-        if application.is_null() {
-            return Err("selection_application_unavailable");
-        }
-        let application = AXValue(application);
-        if AXUIElementSetMessagingTimeout(application.0, 0.25) != 0 {
-            return Err("selection_application_timeout");
-        }
-        // Chromium exposes its accessibility tree lazily when the application role is read.
-        let _ = ax_attribute(application.0, ns_string!("AXRole"));
-        let focused = ax_attribute(application.0, ns_string!("AXFocusedUIElement"))
-            .ok_or("selection_focus_unavailable")?;
-        if CFGetTypeID(focused.0) != AXUIElementGetTypeID() {
-            return Err("selection_focus_invalid");
-        }
-        let mut focused_pid = 0;
-        if AXUIElementGetPid(focused.0, &mut focused_pid) != 0 || focused_pid != target.pid {
-            return Err("target_unavailable");
-        }
-        if AXUIElementSetMessagingTimeout(focused.0, 0.25) != 0 {
-            return Err("selection_focus_timeout");
-        }
-        let subrole =
-            ax_attribute(focused.0, ns_string!("AXSubrole")).and_then(|value| ax_string(&value));
-        if subrole.as_deref() == Some("AXSecureTextField") {
-            return Err("selection_secure");
-        }
-        let role =
-            ax_attribute(focused.0, ns_string!("AXRole")).and_then(|value| ax_string(&value));
-        if role.as_deref() == Some("AXImage") {
-            return Err("selection_non_text");
-        }
-        let selected = ax_attribute(focused.0, ns_string!("AXSelectedText"))
-            .and_then(|value| ax_string(&value));
-        if selected
-            .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            return Ok(selected.unwrap());
-        }
-        let range = ax_attribute(focused.0, ns_string!("AXSelectedTextRange"));
-        let range_length = range.as_ref().and_then(|value| ax_range_length(value));
-        resolve_selection(
-            selected,
-            range_length,
-            || ax_parameterized_string(focused.0, ns_string!("AXStringForRange"), range.as_ref()?),
-            || {
-                // SelectedTextKit's AX text-marker fallback (MIT; licenses/SelectedTextKit.txt).
-                let markers = ax_attribute(focused.0, ns_string!("AXSelectedTextMarkerRange"))?;
-                ax_parameterized_string(
-                    focused.0,
-                    ns_string!("AXStringForTextMarkerRange"),
-                    &markers,
-                )
-            },
-        )
-    }
 }
 
 pub(super) fn target_bundle_id(target: Target) -> Option<String> {
@@ -511,47 +532,6 @@ pub fn target_app_info(target: Target) -> Option<serde_json::Value> {
 
 pub fn secure_input() -> bool {
     unsafe { IsSecureEventInputEnabled() }
-}
-
-pub fn send_copy(target: Target) -> Result<(), &'static str> {
-    if !accessibility() {
-        return Err("permission_required");
-    }
-    if secure_input() {
-        return Err("selection_secure");
-    }
-    if !target_focused(target) {
-        return Err("target_unavailable");
-    }
-    unsafe {
-        let source = CGEventSourceCreate(-1);
-        if source.is_null() {
-            return Err("event_creation");
-        }
-        let keys = [
-            (55, true, 1 << 20),
-            (8, true, 1 << 20),
-            (8, false, 1 << 20),
-            (55, false, 0),
-        ];
-        let events: Vec<_> = keys
-            .iter()
-            .map(|(key, down, _)| CGEventCreateKeyboardEvent(source, *key, *down))
-            .collect();
-        CFRelease(source);
-        if events.iter().any(|event| event.is_null()) {
-            for event in events.into_iter().filter(|event| !event.is_null()) {
-                CFRelease(event);
-            }
-            return Err("event_creation");
-        }
-        for (event, (_, _, flags)) in events.iter().zip(keys) {
-            CGEventSetFlags(*event, flags);
-            CGEventPostToPid(target.pid, *event);
-            CFRelease(*event);
-        }
-    }
-    Ok(())
 }
 
 pub fn request_accessibility() -> bool {
@@ -766,9 +746,35 @@ fn png_data_url(data: &NSData) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ax_range_length, paste_chord, resolve_selection, selection_result, AXValue, CFRange,
-    };
+    use super::{choose_clipboard_target, choose_selection_target, paste_chord, Target};
+
+    fn target(pid: i32) -> Target {
+        Target {
+            pid,
+            started: 0.0,
+            bundle: 0,
+        }
+    }
+
+    #[test]
+    fn selection_target_falls_back_but_clipboard_target_does_not() {
+        assert_eq!(
+            choose_selection_target(Some(target(1)), Some(target(2)), || Some(target(3)))
+                .map(|target| target.pid),
+            Some(1)
+        );
+        assert_eq!(
+            choose_selection_target(None, Some(target(2)), || Some(target(3)))
+                .map(|target| target.pid),
+            Some(2)
+        );
+        assert_eq!(
+            choose_selection_target(None, None, || Some(target(3))).map(|target| target.pid),
+            Some(3)
+        );
+        assert!(choose_selection_target(None, None, || None).is_none());
+        assert!(choose_clipboard_target(None).is_none());
+    }
 
     #[test]
     fn image_paste_chord_matches_a_physical_command_v() {
@@ -781,111 +787,5 @@ mod tests {
         assert_eq!(chord[3].2, 0);
         assert!(chord[..2].iter().all(|(_, down, _)| *down));
         assert!(chord[2..].iter().all(|(_, down, _)| !*down));
-    }
-
-    #[test]
-    fn native_ax_range_distinguishes_empty_invalid_and_non_range_values() {
-        unsafe extern "C" {
-            fn AXValueCreate(kind: u32, value: *const std::ffi::c_void) -> *const std::ffi::c_void;
-        }
-        for (location, length, expected) in [
-            (0, 0, Some(0)),
-            (9, 3, Some(3)),
-            (-1, 0, None),
-            (0, -1, None),
-        ] {
-            let range = CFRange { location, length };
-            unsafe {
-                let value = AXValue(AXValueCreate(4, (&range as *const CFRange).cast()));
-                assert!(!value.0.is_null());
-                assert_eq!(ax_range_length(&value), expected);
-            }
-        }
-        let text = objc2_foundation::NSString::from_str("Synthetic non-range value");
-        unsafe {
-            let value = AXValue(objc2::rc::Retained::into_raw(text).cast());
-            assert_eq!(ax_range_length(&value), None);
-        }
-    }
-
-    #[test]
-    fn explicit_zero_range_skips_other_queries() {
-        assert_eq!(
-            resolve_selection(
-                None,
-                Some(0),
-                || panic!("read range"),
-                || panic!("read marker")
-            ),
-            Ok(String::new())
-        );
-    }
-
-    #[test]
-    fn nonempty_ordinary_selection_skips_marker() {
-        assert_eq!(
-            resolve_selection(
-                Some("  Selected text\n".into()),
-                None,
-                || panic!("read range"),
-                || panic!("read marker")
-            ),
-            Ok("  Selected text\n".into())
-        );
-        assert_eq!(
-            resolve_selection(
-                None,
-                Some(12),
-                || Some("Range text".into()),
-                || panic!("read marker")
-            ),
-            Ok("Range text".into())
-        );
-    }
-
-    #[test]
-    fn outlook_and_web_text_markers_recover_an_unavailable_or_empty_selection() {
-        for selected in [None, Some(String::new())] {
-            assert_eq!(
-                resolve_selection(
-                    selected,
-                    None,
-                    || panic!("no range"),
-                    || Some("  Selected 正文 🌊\n".into())
-                ),
-                Ok("  Selected 正文 🌊\n".into())
-            );
-        }
-        assert_eq!(
-            resolve_selection(None, Some(12), || None, || Some("Marker text".into())),
-            Ok("Marker text".into())
-        );
-    }
-
-    #[test]
-    fn failed_or_blank_marker_does_not_hide_an_unknown_selection() {
-        for marker in [None, Some(" \n".into())] {
-            assert_eq!(
-                resolve_selection(Some(String::new()), None, || panic!("no range"), || marker),
-                Err("selection_unavailable")
-            );
-        }
-        assert_eq!(
-            resolve_selection(None, Some(-1), || panic!("invalid range"), || None),
-            Err("selection_unavailable")
-        );
-        assert_eq!(
-            resolve_selection(None, Some(12), || Some(" \n".into()), || None),
-            Ok(String::new())
-        );
-    }
-
-    #[test]
-    fn selected_text_accepts_an_explicit_empty_selection() {
-        assert_eq!(selection_result(" \t\n\u{3000}".into()), Ok(String::new()));
-        assert_eq!(
-            selection_result("  Synthetic selection\n".into()),
-            Ok("  Synthetic selection\n".into())
-        );
     }
 }
