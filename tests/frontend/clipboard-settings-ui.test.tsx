@@ -5,18 +5,17 @@ import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
 
 describe('clipboard recording settings', () => {
-  it('stores separate preview limits and defaults both to three lines', async () => {
+  it('stores separate preview limits under General and defaults both to three lines', async () => {
     await mount('settings');
-    for (const [page, view, lines] of [['Clipboard', 'clipboard', 1], ['Translation', 'translation', 2]] as const) {
-      fireEvent.click(screen.getByRole('button', { name: page }));
-      fireEvent.click(screen.getByRole('button', { name: 'Preview Lines: 3' }));
+    for (const [label, view, lines] of [['Clipboard Preview Lines', 'clipboard', 1], ['Translation Preview Lines', 'translation', 2]] as const) {
+      fireEvent.click(screen.getByRole('button', { name: `${label}: 3` }));
       expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['1', '2', '3']);
       fireEvent.click(screen.getByRole('option', { name: String(lines) }));
-      await screen.findByRole('button', { name: `Preview Lines: ${lines}` });
+      await screen.findByRole('button', { name: `${label}: ${lines}` });
       expect(calls('records_preview_lines_set').at(-1)?.[1]).toEqual({ view, lines });
     }
-    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
-    expect(screen.getByRole('button', { name: 'Preview Lines: 1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Clipboard Preview Lines: 1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Translation Preview Lines: 2' })).toBeTruthy();
   });
 
   it('saves the shared opening focus from General', async () => {
@@ -76,15 +75,14 @@ describe('clipboard recording settings', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['General', 'Clipboard', 'Translation']);
     const general = within(screen.getByRole('group', { name: 'General' }));
     expect(general.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
-      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
+      'Focus Input', 'Switch Record View', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
-    expect(screen.queryByRole('checkbox', { name: 'Focus Record List' })).toBeNull();
-    const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
-    for (const [name, key] of [['Navigate Up', '↑'], ['Navigate Down', '↓'], ['Previous Category', '←'], ['Next Category', '→']]) {
-      expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
+    for (const retired of ['Focus Record List', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Paste (Context Menu)']) {
+      expect(screen.queryByRole('checkbox', { name: retired })).toBeNull();
     }
+    const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
     expect(general.getByRole('button', { name: 'Switch Record View shortcut' }).textContent).toBe('Tab');
-    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste (Context Menu)', 'Paste as Plain Text (Context Menu)', 'Save Image (Context Menu)'];
+    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste as Plain Text', 'Save Image'];
     expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
     for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
@@ -163,11 +161,11 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '↵'], ['Paste as Plain Text (Context Menu)', 'pastePlain', '⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
+  it.each([['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
-      const local = ['ocr', 'translate', 'pasteRecord', 'pastePlain', 'saveImage'].includes(action);
+      const local = ['ocr', 'translate', 'pastePlain', 'saveImage'].includes(action);
       const group = within(screen.getByRole('group', { name: local ? 'Clipboard' : 'General' }));
       const recorder = group.getByRole('button', { name: `${title} shortcut` });
       const toggle = group.getByRole<HTMLInputElement>('checkbox', { name: title });
@@ -239,7 +237,7 @@ describe('clipboard recording settings', () => {
       fireEvent.click(button);
       fireEvent.keyDown(window, key);
     };
-    const plain = group('Clipboard').getByRole('button', { name: 'Paste as Plain Text (Context Menu) shortcut' });
+    const plain = group('Clipboard').getByRole('button', { name: 'Paste as Plain Text shortcut' });
     const translate = group('Translation').getByRole('button', { name: 'Translate shortcut' });
     record(translate, { key: 'j', code: 'KeyJ', metaKey: true });
     await waitFor(() => expect(translate.textContent).toBe('⌘J'));
@@ -274,13 +272,15 @@ describe('clipboard recording settings', () => {
     expect(calls('clipboard_shortcut_set')).toHaveLength(0);
   });
 
-  it('offers no master switch and reports recording state from the menu bar', async () => {
+  it('syncs the capture switch with menu bar events and preserves recording types', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
     const capture = screen.getByRole('region', { name: 'Clipboard Recording' });
-    expect(within(capture).queryByRole('checkbox', { name: 'Clipboard Recording' })).toBeNull();
+    const master = within(capture).getByRole<HTMLInputElement>('checkbox', { name: 'Record Clipboard History' });
+    expect(master.checked).toBe(false);
     expect(within(capture).getByRole('status').textContent).toBe('Recording paused. Resume from the menu bar.');
     await emit('clipboard_capture_changed', true);
+    expect(master.checked).toBe(true);
     expect(within(capture).queryByRole('status')).toBeNull();
     expect(within(capture).getByRole('checkbox', { name: 'Images' }).getAttribute('aria-description')).toBe('Includes supported single image files.');
   });
@@ -656,27 +656,94 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('records_cleanup_apply')).toHaveLength(1);
   });
 
-  it('offers four mutually exclusive search rules and independently selected scopes', async () => {
+  it('offers four mutually exclusive search rules and keeps all scopes active without extra scope checkboxes', async () => {
     await openSettings();
-    const scopes = within(screen.getByRole('group', { name: 'Search Scope' }));
-    for (const name of ['Content', 'Notes', 'Image Text']) expect((scopes.getByRole('checkbox', { name }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByRole('group', { name: 'Search Scope' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Search Rule: Exact Match' }));
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Exact Match', 'Fuzzy Match', 'Regular Expression', 'Mixed Match']);
     fireEvent.click(screen.getByRole('option', { name: 'Fuzzy Match' }));
     const fuzzy = await screen.findByRole('button', { name: 'Search Rule: Fuzzy Match' });
     expect(calls('clipboard_search_set').at(-1)?.[1]).toEqual({ search: { mode: 'fuzzy', body: true, note: true, imageText: true } });
-    fireEvent.click(scopes.getByRole('checkbox', { name: 'Content' }));
-    await waitFor(() => expect((scopes.getByRole('checkbox', { name: 'Content' }) as HTMLInputElement).checked).toBe(false));
-    fireEvent.click(scopes.getByRole('checkbox', { name: 'Notes' }));
-    await waitFor(() => expect((scopes.getByRole('checkbox', { name: 'Image Text' }) as HTMLInputElement).disabled).toBe(true));
     fireEvent.click(fuzzy);
     fireEvent.click(screen.getByRole('option', { name: 'Regular Expression' }));
     await screen.findByRole('button', { name: 'Search Rule: Regular Expression' });
-    expect(calls('clipboard_search_set').at(-1)?.[1]).toEqual({ search: { mode: 'regex', body: false, note: false, imageText: true } });
+    expect(calls('clipboard_search_set').at(-1)?.[1]).toEqual({ search: { mode: 'regex', body: true, note: true, imageText: true } });
     fireEvent.click(screen.getByRole('button', { name: 'Search Rule: Regular Expression' }));
     fireEvent.click(screen.getByRole('option', { name: 'Mixed Match' }));
     await screen.findByRole('button', { name: 'Search Rule: Mixed Match' });
-    expect(calls('clipboard_search_set').at(-1)?.[1]).toEqual({ search: { mode: 'mixed', body: false, note: false, imageText: true } });
+    expect(calls('clipboard_search_set').at(-1)?.[1]).toEqual({ search: { mode: 'mixed', body: true, note: true, imageText: true } });
+  });
+
+  it('toggles clipboard recording in Settings, manages custom UTI/regex ignore rules, and configures launch at login and preview lines under General', async () => {
+    const types: string[] = [];
+    const regexps: string[] = [];
+    await openSettings();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_ignored_type_add') {
+        const value = (args as { pasteboardType: string }).pasteboardType;
+        if (value.includes(' ')) throw 'clipboard_invalid_pasteboard_type';
+        types.push(value);
+        return [...types];
+      }
+      if (name === 'clipboard_ignored_type_remove') {
+        const value = (args as { pasteboardType: string }).pasteboardType;
+        const idx = types.indexOf(value);
+        if (idx >= 0) types.splice(idx, 1);
+        return [...types];
+      }
+      if (name === 'clipboard_ignored_regex_add') {
+        const value = (args as { pattern: string }).pattern;
+        if (value === '[invalid') throw 'clipboard_invalid_regex';
+        regexps.push(value);
+        return [...regexps];
+      }
+      if (name === 'clipboard_ignored_regex_remove') {
+        const value = (args as { pattern: string }).pattern;
+        const idx = regexps.indexOf(value);
+        if (idx >= 0) regexps.splice(idx, 1);
+        return [...regexps];
+      }
+      return invoke(name, args);
+    });
+
+    const recordToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Record Clipboard History' });
+    expect(recordToggle.checked).toBe(false);
+    fireEvent.click(recordToggle);
+    await waitFor(() => expect(calls('clipboard_capture_set').at(-1)?.[1]).toEqual({ enabled: true }));
+    expect(recordToggle.checked).toBe(true);
+
+    const typeSection = within(screen.getByRole('region', { name: 'Ignored Pasteboard Types' }));
+    fireEvent.change(typeSection.getByRole('textbox', { name: 'Ignored Pasteboard Types' }), { target: { value: 'bad type' } });
+    fireEvent.click(typeSection.getByRole('button', { name: 'Add' }));
+    await typeSection.findByRole('alert');
+    fireEvent.change(typeSection.getByRole('textbox', { name: 'Ignored Pasteboard Types' }), { target: { value: 'org.example.SecretType' } });
+    fireEvent.click(typeSection.getByRole('button', { name: 'Add' }));
+    await typeSection.findByText('org.example.SecretType');
+    fireEvent.click(typeSection.getByRole('button', { name: 'Remove org.example.SecretType' }));
+    await waitFor(() => expect(typeSection.queryByText('org.example.SecretType')).toBeNull());
+
+    const regexSection = within(screen.getByRole('region', { name: 'Ignored Text Patterns' }));
+    fireEvent.change(regexSection.getByRole('textbox', { name: 'Ignored Text Patterns' }), { target: { value: '[invalid' } });
+    fireEvent.click(regexSection.getByRole('button', { name: 'Add' }));
+    await regexSection.findByRole('alert');
+    fireEvent.change(regexSection.getByRole('textbox', { name: 'Ignored Text Patterns' }), { target: { value: '^sk-[0-9]+$' } });
+    fireEvent.click(regexSection.getByRole('button', { name: 'Add' }));
+    await regexSection.findByText('^sk-[0-9]+$');
+    fireEvent.click(regexSection.getByRole('button', { name: 'Remove ^sk-[0-9]+$' }));
+    await waitFor(() => expect(regexSection.queryByText('^sk-[0-9]+$')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    const launch = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Launch at Login' });
+    expect(launch.checked).toBe(false);
+    fireEvent.click(launch);
+    await waitFor(() => expect(calls('launch_at_login_set').at(-1)?.[1]).toEqual({ enabled: true }));
+    expect(launch.checked).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clipboard Preview Lines: 3' }));
+    fireEvent.click(screen.getByRole('option', { name: '1' }));
+    await screen.findByRole('button', { name: 'Clipboard Preview Lines: 1' });
+    expect(calls('records_preview_lines_set').at(-1)?.[1]).toEqual({ view: 'clipboard', lines: 1 });
   });
 
   it('saves automatic paste format independently of the row activation behavior', async () => {

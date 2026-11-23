@@ -1,6 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react';
 import type { ViewProps } from '../App';
-import { clipboardMenuOnlyActions, clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardShortcutLabels, sharedRecordActions } from './clipboardShortcuts';
+import { clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardShortcutLabels, sharedRecordActions } from './clipboardShortcuts';
 import { translationShortcutEnabled } from './contracts';
 import { editsText, globalTranslationActions, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles, translationWindowActions } from './shortcuts';
 import type { ClipboardKind } from '../clipboard/useClipboard';
@@ -25,7 +25,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
   }, [open]);
   const { capabilities, translationPreferences: preferences, window: state } = snapshot;
   const localShortcuts = clipboardPanelShortcuts(snapshot).filter(({ action, enabled, globalConflict, binding }) =>
-    binding && enabled && !globalConflict && !clipboardMenuOnlyActions.some((entry) => entry === action) && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
+    binding && enabled && !globalConflict && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
   const shortcuts = recordWindowActions.flatMap((action) => {
     const binding = preferences.shortcuts[action];
     // Older clipboard bindings could overlap the translation window's pin shortcut.
@@ -77,6 +77,8 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     {open && <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label={t('hotKey')}>
       <strong>{t('hotKey')}</strong>
       <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
+      <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
+      <div><span>{t('switchCategory')}</span><span>← / →</span></div>
       {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘1–⌘5</span></div>}
       {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}

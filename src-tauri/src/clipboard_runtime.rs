@@ -324,7 +324,10 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
                     || {
                         if state.clipboard_recording_types.lock().unwrap().any() {
                             let options = state.clipboard_options.lock().unwrap();
-                            platform::read_clipboard(|bundle_id| options.excludes(bundle_id))
+                            platform::read_clipboard_filtered(
+                                |bundle_id| options.excludes(bundle_id),
+                                |kind| options.ignores_pasteboard_type(kind),
+                            )
                         } else {
                             Ok(None)
                         }
@@ -345,6 +348,13 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
             if !state.clipboard_enabled.load(Ordering::SeqCst)
                 || state.clipboard_version.load(Ordering::SeqCst) != baseline
             {
+                continue;
+            }
+            if payload_ignored_by_text_rules(&capture.payload, |text| {
+                state.clipboard_options.lock().unwrap().ignores_text(text)
+            }) {
+                acknowledge(&state.clipboard_version, baseline, capture.version);
+                failure = None;
                 continue;
             }
             let root = match image_root(&app) {
@@ -424,6 +434,17 @@ fn pending_image_index(
         .clipboard_ocr_text(&saved.id)?
         .is_none()
         .then_some(saved.id))
+}
+
+fn payload_ignored_by_text_rules(
+    payload: &platform::ClipboardPayload,
+    ignores: impl FnOnce(&str) -> bool,
+) -> bool {
+    match payload {
+        platform::ClipboardPayload::Text(text)
+        | platform::ClipboardPayload::RichText { text, .. } => ignores(text),
+        _ => false,
+    }
 }
 
 fn capture_error(app: &AppHandle, error: &str) {
@@ -1568,5 +1589,33 @@ mod tests {
             3
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_regex_ignore_skips_plain_and_rich_text_without_affecting_media() {
+        let regex = nami::clipboard::compile_ignored_regex("^tok-[0-9]{4}$").unwrap();
+        let matches = |text: &str| regex.is_match(text);
+        assert!(payload_ignored_by_text_rules(
+            &platform::ClipboardPayload::Text("tok-1234".into()),
+            matches
+        ));
+        assert!(payload_ignored_by_text_rules(
+            &platform::ClipboardPayload::RichText {
+                text: "tok-5678".into(),
+                formatting: ClipboardTextFormatting {
+                    html: Some(b"<b>tok-5678</b>".to_vec()),
+                    rtf: None,
+                },
+            },
+            matches
+        ));
+        assert!(!payload_ignored_by_text_rules(
+            &platform::ClipboardPayload::Text("hello".into()),
+            matches
+        ));
+        assert!(!payload_ignored_by_text_rules(
+            &platform::ClipboardPayload::Files(vec!["/tmp/tok-1234".into()]),
+            matches
+        ));
     }
 }

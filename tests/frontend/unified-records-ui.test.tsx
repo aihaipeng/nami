@@ -477,34 +477,26 @@ describe('unified records workspace', () => {
     expect(screen.getByTestId('r')).toBe(ordinaryRow);
   });
 
-  it('uses remapped navigation and category keys in both views and leaves typing alone', async () => {
-    const { shortcuts } = bridge.snapshot.clipboardControls;
-    shortcuts.navigateDown.binding = { code: 'F6', modifiers: [] };
-    shortcuts.navigateUp.binding = { code: 'KeyK', modifiers: [] };
-    shortcuts.nextCategory.binding = { code: 'F7', modifiers: ['shift'] };
-    shortcuts.previousCategory.binding = { code: 'F8', modifiers: [] };
+  it('uses standard arrow keys for navigation and category switching in both views without hijacking search typing', async () => {
     await mount('clipboard');
     for (const kind of ['clipboard', 'translation'] as const) {
       if (kind === 'translation') await switchView(kind);
       const input = search(kind);
       input.focus();
-      const key = (target: Element, key: string, code = key, shiftKey = false) => fireEvent.keyDown(target, { key, code, shiftKey });
+      const key = (target: Element, key: string, code = key) => fireEvent.keyDown(target, { key, code });
       const firstRow = panel(kind).querySelector<HTMLButtonElement>('.history-row-select')!;
       firstRow.focus();
-      expect(key(firstRow, 'ArrowDown')).toBe(true);
-      expect(key(firstRow, 'F6')).toBe(false);
+      expect(key(firstRow, 'ArrowDown')).toBe(false);
       expect(document.activeElement).not.toBe(firstRow);
-      expect(key(document.activeElement!, 'k', 'KeyK')).toBe(false);
+      expect(key(document.activeElement!, 'ArrowUp')).toBe(false);
       expect(document.activeElement).toBe(firstRow);
-      expect(key(firstRow, 'k', 'KeyK')).toBe(false);
+      expect(key(firstRow, 'ArrowUp')).toBe(false);
       expect(document.activeElement).toBe(input);
-      expect(key(input, 'k', 'KeyK')).toBe(true);
       const favorite = within(panel(kind)).getByRole('button', { name: /Favorite (clipboard records|history)/ });
-      expect(key(input, 'ArrowRight')).toBe(true);
       expect(favorite.getAttribute('aria-pressed')).toBe('false');
-      expect(key(input, 'F7', 'F7', true)).toBe(false);
+      expect(key(input, 'ArrowRight')).toBe(false);
       expect(favorite.getAttribute('aria-pressed')).toBe('true');
-      expect(key(input, 'F8')).toBe(false);
+      expect(key(input, 'ArrowLeft')).toBe(false);
       expect(favorite.getAttribute('aria-pressed')).toBe('false');
     }
   });
@@ -512,7 +504,6 @@ describe('unified records workspace', () => {
   it.each(['search', 'list'] as const)('opens both views with %s focus and hands off without changing the query', async (openingFocus) => {
     bridge.snapshot.clipboardControls.recordsOpenFocus = openingFocus;
     const { shortcuts } = bridge.snapshot.clipboardControls;
-    shortcuts.navigateDown.binding = { code: 'KeyJ', modifiers: [] };
     shortcuts.favorite.binding = { code: 'KeyF', modifiers: [] };
     await mount('clipboard');
     for (const kind of ['clipboard', 'translation'] as const) {
@@ -526,14 +517,11 @@ describe('unified records workspace', () => {
       expect(document.activeElement).toBe(openingFocus === 'list' ? row : input);
       fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
       expect(document.activeElement).toBe(input);
-      expect(fireEvent.keyDown(input, { key: 'j', code: 'KeyJ' })).toBe(true);
       expect(fireEvent.keyDown(input, { key: 'f', code: 'KeyF' })).toBe(true);
       expect(document.activeElement).toBe(input);
       const query = kind === 'clipboard' ? 'Saved' : row.getAttribute('aria-label')!.slice('Translation: '.length);
       fireEvent.change(input, { target: { value: query } });
       await waitFor(() => expect(panel(kind).hasAttribute('data-focus-ready')).toBe(true));
-      shortcuts.navigateDown.binding = { code: 'ArrowDown', modifiers: [] };
-      await emit('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
       expect(fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' })).toBe(false);
       expect(document.activeElement).toBe(row);
       expect(fireEvent.keyDown(row, { key: 'f', code: 'KeyF' })).toBe(false);

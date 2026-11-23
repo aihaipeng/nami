@@ -76,6 +76,10 @@ impl RecordPreviewLines {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
+    ignored_pasteboard_types: Vec<String>,
+    ignored_regexps: Vec<String>,
+    #[serde(skip)]
+    compiled_regexps: Vec<regex::Regex>,
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
     pub paste_as_plain_text: bool,
@@ -99,6 +103,9 @@ impl Default for ClipboardOptions {
                 icon_data_url: None,
             })
             .collect(),
+            ignored_pasteboard_types: Vec::new(),
+            ignored_regexps: Vec::new(),
+            compiled_regexps: Vec::new(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
             paste_as_plain_text: false,
@@ -119,6 +126,34 @@ impl ClipboardOptions {
             .filter(|apps| apps.len() <= 256 && apps.iter().all(valid_app))
         {
             options.excluded_apps = apps;
+        }
+        if let Some(types) = db
+            .preference("clipboard_ignored_pasteboard_types")?
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .filter(|types| {
+                types.len() <= nami::clipboard::MAX_IGNORED_PASTEBOARD_TYPES
+                    && types
+                        .iter()
+                        .all(|kind| nami::clipboard::valid_pasteboard_type(kind))
+            })
+        {
+            options.ignored_pasteboard_types = types;
+        }
+        if let Some(patterns) = db
+            .preference("clipboard_ignored_regexps")?
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .filter(|patterns| patterns.len() <= nami::clipboard::MAX_IGNORED_REGEXPS)
+        {
+            let mut valid = Vec::with_capacity(patterns.len());
+            let mut compiled = Vec::with_capacity(patterns.len());
+            for pattern in patterns {
+                if let Ok(regex) = nami::clipboard::compile_ignored_regex(&pattern) {
+                    valid.push(pattern);
+                    compiled.push(regex);
+                }
+            }
+            options.ignored_regexps = valid;
+            options.compiled_regexps = compiled;
         }
         options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
         options.activation = db
@@ -151,6 +186,18 @@ impl ClipboardOptions {
         self.excluded_apps
             .iter()
             .any(|app| app.bundle_id.eq_ignore_ascii_case(bundle_id))
+    }
+
+    pub(crate) fn ignores_pasteboard_type(&self, kind: &str) -> bool {
+        self.ignored_pasteboard_types
+            .iter()
+            .any(|entry| entry == kind)
+    }
+
+    pub(crate) fn ignores_text(&self, text: &str) -> bool {
+        self.compiled_regexps
+            .iter()
+            .any(|regex| regex.is_match(text))
     }
 }
 
@@ -232,7 +279,15 @@ pub async fn clipboard_excluded_app_pick(
     if !platform::capabilities().clipboard_write {
         return Err("platform_unavailable".into());
     }
-    let Some(selected) = on_main(&app, |_| platform::pick_excluded_app()).await?? else {
+    let parent = window.window();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    on_main(&app, move |_| {
+        platform::pick_excluded_app(&parent, move |result| {
+            let _ = sender.send(result);
+        })
+    })
+    .await??;
+    let Some(selected) = receiver.await.map_err(|_| "clipboard_manage_apps")?? else {
         return Ok(None);
     };
     if !valid_app(&selected) {
@@ -273,6 +328,166 @@ pub async fn clipboard_excluded_app_remove(
     })
     .await?;
     Ok(with_app_presentation(apps).await)
+}
+
+#[tauri::command]
+pub async fn clipboard_capture_set(
+    window: Webview,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    authorize(&window, &["settings", "clipboard", "translation"])?;
+    set_recording(&app, Some(enabled)).await
+}
+
+#[tauri::command]
+pub async fn clipboard_ignored_type_add(
+    window: Webview,
+    app: AppHandle,
+    pasteboard_type: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let kind = pasteboard_type.trim().to_owned();
+    if !nami::clipboard::valid_pasteboard_type(&kind) {
+        return Err("clipboard_invalid_pasteboard_type".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let mut types = state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types
+        .clone();
+    if !types.iter().any(|existing| existing == &kind) {
+        if types.len() >= nami::clipboard::MAX_IGNORED_PASTEBOARD_TYPES {
+            return Err("clipboard_exclusions_full".into());
+        }
+        types.push(kind);
+    }
+    let value = serde_json::to_string(&types).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignored_pasteboard_types", &value)
+    })
+    .await?;
+    state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types = types.clone();
+    Ok(types)
+}
+
+#[tauri::command]
+pub async fn clipboard_ignored_type_remove(
+    window: Webview,
+    app: AppHandle,
+    pasteboard_type: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let mut types = state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types
+        .clone();
+    types.retain(|existing| existing != &pasteboard_type);
+    let value = serde_json::to_string(&types).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignored_pasteboard_types", &value)
+    })
+    .await?;
+    state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types = types.clone();
+    Ok(types)
+}
+
+#[tauri::command]
+pub async fn clipboard_ignored_regex_add(
+    window: Webview,
+    app: AppHandle,
+    pattern: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let compiled = nami::clipboard::compile_ignored_regex(&pattern)?;
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let mut patterns = state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_regexps
+        .clone();
+    let added = !patterns.iter().any(|existing| existing == &pattern);
+    if added {
+        if patterns.len() >= nami::clipboard::MAX_IGNORED_REGEXPS {
+            return Err("clipboard_exclusions_full".into());
+        }
+        patterns.push(pattern);
+    }
+    let value = serde_json::to_string(&patterns).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignored_regexps", &value)
+    })
+    .await?;
+    {
+        let mut options = state.clipboard_options.lock().unwrap();
+        options.ignored_regexps = patterns.clone();
+        if added {
+            options.compiled_regexps.push(compiled);
+        }
+    }
+    Ok(patterns)
+}
+
+#[tauri::command]
+pub async fn clipboard_ignored_regex_remove(
+    window: Webview,
+    app: AppHandle,
+    pattern: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let mut patterns = state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_regexps
+        .clone();
+    patterns.retain(|existing| existing != &pattern);
+    let compiled = patterns
+        .iter()
+        .filter_map(|entry| nami::clipboard::compile_ignored_regex(entry).ok())
+        .collect::<Vec<_>>();
+    let value = serde_json::to_string(&patterns).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignored_regexps", &value)
+    })
+    .await?;
+    {
+        let mut options = state.clipboard_options.lock().unwrap();
+        options.ignored_regexps = patterns.clone();
+        options.compiled_regexps = compiled;
+    }
+    Ok(patterns)
 }
 
 #[derive(Clone, Serialize)]
@@ -727,5 +942,27 @@ mod tests {
             db.preference_set("records_open_focus", stored).unwrap();
             assert_eq!(focus(&db), expected, "stored {stored}");
         }
+    }
+
+    #[test]
+    fn loads_and_matches_custom_pasteboard_types_and_ignored_regexps() {
+        let mut db =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        db.preference_set(
+            "clipboard_ignored_pasteboard_types",
+            r#"["org.example.SecretType","com.vendor.token"]"#,
+        )
+        .unwrap();
+        db.preference_set(
+            "clipboard_ignored_regexps",
+            r#"["^sk-[A-Za-z0-9]{6,}$","[invalid"]"#,
+        )
+        .unwrap();
+        let options = ClipboardOptions::load(&db).unwrap();
+        assert!(options.ignores_pasteboard_type("org.example.SecretType"));
+        assert!(!options.ignores_pasteboard_type("org.example.Other"));
+        assert!(options.ignores_text("sk-abcdef12"));
+        assert!(!options.ignores_text("plain note"));
+        assert_eq!(options.ignored_regexps, vec!["^sk-[A-Za-z0-9]{6,}$"]);
     }
 }

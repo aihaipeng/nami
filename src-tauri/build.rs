@@ -1,4 +1,7 @@
 fn main() {
+    #[cfg(target_os = "macos")]
+    println!("cargo:rustc-link-lib=framework=ServiceManagement");
+
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "app_snapshot",
@@ -45,9 +48,15 @@ fn main() {
             "clipboard_options_get",
             "clipboard_excluded_app_pick",
             "clipboard_excluded_app_remove",
+            "clipboard_ignored_type_add",
+            "clipboard_ignored_type_remove",
+            "clipboard_ignored_regex_add",
+            "clipboard_ignored_regex_remove",
             "clipboard_behavior_set",
             "clipboard_search_set",
+            "records_open_focus_set",
             "records_preview_lines_set",
+            "clipboard_record_shortcut_set",
             "records_storage_info",
             "records_cleanup_preview",
             "records_cleanup_apply",
@@ -55,6 +64,7 @@ fn main() {
             "clipboard_image",
             "clipboard_files",
             "locale_set",
+            "launch_at_login_set",
             "permission_request",
         ]),
     ))

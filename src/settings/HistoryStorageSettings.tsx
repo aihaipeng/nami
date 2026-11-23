@@ -19,20 +19,9 @@ function storageSize(bytes: number, locale: string) {
   }
 }
 
-export function HistoryStorageSettings({ t, available, view, locale, previewLines }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string; previewLines: number }) {
+export function HistoryStorageSettings({ t, available, view, locale }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string }) {
   const id = useId();
   const [ageOpen, setAgeOpen] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
-  const savingPreview = useRef(false);
-  async function savePreviewLines(code: string) {
-    if (savingPreview.current || Number(code) === previewLines) return;
-    savingPreview.current = true;
-    setPreviewSaveFailed(false);
-    try { await invoke('records_preview_lines_set', { view, lines: Number(code) }); }
-    catch { setPreviewSaveFailed(true); }
-    finally { savingPreview.current = false; }
-  }
   const [storage, setStorage] = useState<Storage>();
   const [storageError, setStorageError] = useState(false);
   const [refresh, refreshStorage] = useState(0);
@@ -114,13 +103,6 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
         onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearRecords')}</button>
     </div>
     <div className="settings-group">
-      <div className="settings-field">
-        <label className="settings-field-content" htmlFor={`${id}-preview-lines`}>{t('recordPreviewLines')}</label>
-        {available ? <SearchableDropdown id={`${id}-preview-lines`} label={t('recordPreviewLines')} value={String(previewLines)}
-          items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={previewOpen} onOpenChange={setPreviewOpen}
-          onChange={(code) => void savePreviewLines(code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
-      </div>
-      {previewSaveFailed && <p className="settings-field-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       <form className="settings-field" onSubmit={(event) => { event.preventDefault(); if (canSave) preview({ limit, ...(storage?.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}) }); }}>
         <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
         {available && storage ? <div className="settings-history-limit">

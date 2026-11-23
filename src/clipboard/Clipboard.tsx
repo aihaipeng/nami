@@ -40,6 +40,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const [revealed, setRevealed] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ id: string } | null>(null);
   const [savingImage, setSavingImage] = useState(false);
+  const [resumingCapture, setResumingCapture] = useState(false);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
@@ -314,12 +315,14 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const rowButton = id ? rowRefs.current.get(id) : undefined;
     const action = clipboardKeyAction(shortcuts, key);
     const plain = !key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey;
-    if ((fromRecord || fromSearch || control?.matches('.history-toolbar, .history-footer')) && (action === 'previousCategory' || action === 'nextCategory')) {
+    const categoryDirection = plain && !action && (key.key === 'ArrowLeft' || key.key === 'ArrowRight') && (!fromSearch || !input?.value)
+      ? (key.key === 'ArrowRight' ? 1 : -1) : 0;
+    if ((fromRecord || fromSearch || control?.matches('.history-toolbar, .history-footer')) && categoryDirection) {
       if (key.repeat || control?.closest('.history-footer')?.querySelector('[role=dialog]')) return;
       event.preventDefault();
       const categories = [null, 'favorites', 'text', 'image', 'files'] as const;
       const index = categories.indexOf(favoritesOnly ? 'favorites' : kindFilter);
-      const next = categories[(index + (action === 'nextCategory' ? 1 : categories.length - 1)) % categories.length];
+      const next = categories[(index + (categoryDirection > 0 ? 1 : categories.length - 1)) % categories.length];
       remember(); setFavoritesOnly(next === 'favorites'); setKindFilter(next === 'favorites' ? null : next);
       search.current?.focus({ preventScroll: true });
       return;
@@ -330,17 +333,17 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const index = ordered.findIndex((record) => record.id === id);
     const record = ordered[index];
     if (!clipboard.displayReady || !record) return;
-    if ((fromSearch || fromRecord) && (action === 'navigateDown' || action === 'navigateUp')) {
+    if ((fromSearch || fromRecord) && plain && !action && (key.key === 'ArrowDown' || key.key === 'ArrowUp')) {
       event.preventDefault();
       if (fromSearch) {
-        if (action === 'navigateDown') focusRecordList(input?.closest('.history-panel'));
+        if (key.key === 'ArrowDown') focusRecordList(input?.closest('.history-panel'));
         return;
       }
-      const next = ordered[index + (action === 'navigateDown' ? 1 : -1)];
+      const next = ordered[index + (key.key === 'ArrowDown' ? 1 : -1)];
       if (next) {
         focusRow(next.id);
         previewRecord(next.id, true);
-      } else if (!fromSearch && action === 'navigateUp') input?.focus();
+      } else if (!fromSearch && key.key === 'ArrowUp') input?.focus();
       return;
     }
     if (activate) {
@@ -348,12 +351,14 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }
       return;
     }
-    if (!action || action === 'switchView' || action === 'navigateUp' || action === 'navigateDown' || action === 'previousCategory' || action === 'nextCategory') return;
+    if (!action || action === 'switchView') return;
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;
     if (action === 'preview') { void command('records_details_toggle', { recordId: record.id }); }
     else if (action === 'openTarget') { if (record.kind !== 'image') void openRecordTarget(record.id); }
+    else if (action === 'pastePlain') { if (record.kind === 'text') { previewRecord(record.id, true); void useRecord(record.id, 'pastePlain'); } }
+    else if (action === 'saveImage') { if (record.kind === 'image') void saveImage(record.id); }
     else if (action === 'note') setEditing({ id: record.id });
     else if (action === 'copyRecord') rowButton?.closest('article')?.querySelector<HTMLButtonElement>('[data-action=copy] button')?.click();
     else if (action === 'translate' || action === 'ocr') {
@@ -426,7 +431,16 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     </p>}
     <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={() => { remember(); clipboard.refreshDeferred(); }} list={list} pinnedList={pinnedList} pinnedCount={records.filter((record) => record.isPinned).length} pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
       {clipboard.retainedRecords.filter((record) => !record.isPinned).map(row)}
-      {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status"><p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : kindFilter ? t(kindFilter === 'text' ? 'clipboardTextEmpty' : kindFilter === 'image' ? 'clipboardImagesEmpty' : 'clipboardFilesEmpty') : !snapshot.capabilities.clipboardWrite ? t('platformUnavailable') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardRecordingPaused')}</p>{kindFilter && <button onClick={() => { remember(); setKindFilter(null); }}>{t('clearClipboardFilter')}</button>}</div>}
+      {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status">
+        <p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : kindFilter ? t(kindFilter === 'text' ? 'clipboardTextEmpty' : kindFilter === 'image' ? 'clipboardImagesEmpty' : 'clipboardFilesEmpty') : !snapshot.capabilities.clipboardWrite ? t('platformUnavailable') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardRecordingPaused')}</p>
+        {kindFilter && <button type="button" onClick={() => { remember(); setKindFilter(null); }}>{t('clearClipboardFilter')}</button>}
+        {!query && !favoritesOnly && !kindFilter && native && !snapshot.storageError && snapshot.capabilities.clipboardWrite && !snapshot.clipboardCaptureEnabled && <button type="button" disabled={resumingCapture} onClick={() => {
+          if (resumingCapture) return;
+          setResumingCapture(true);
+          setFeedback(null);
+          void invoke('clipboard_capture_set', { enabled: true }).catch(() => { if (mounted.current) setFeedback('clipboardSettingsSaveFailed'); }).finally(() => { if (mounted.current) setResumingCapture(false); });
+        }}>{t('clipboardResumeRecording')}</button>}
+      </div>}
     </HistoryList>
     <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
     {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} snapshot={snapshot} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canCopy={native && snapshot.capabilities.clipboardWrite} canSave={native && snapshot.capabilities.clipboardImageSave && !savingImage} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {

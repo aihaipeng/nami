@@ -67,6 +67,12 @@ pub fn save_history_width(_: f64) {}
 pub fn accessibility() -> bool {
     false
 }
+pub fn launch_at_login_enabled() -> bool {
+    false
+}
+pub fn set_launch_at_login(_: bool) -> Result<bool, String> {
+    Err(UNAVAILABLE.into())
+}
 pub fn request_accessibility() -> bool {
     false
 }
@@ -104,13 +110,22 @@ pub fn paste_keys_down(_: Target, _: i64) -> Result<(), &'static str> {
 pub fn paste_keys_up() -> Result<(), &'static str> {
     Err(UNAVAILABLE)
 }
+#[allow(dead_code)]
 pub fn read_clipboard(
+    excluded: impl Fn(&str) -> bool,
+) -> Result<Option<super::ClipboardCapture>, &'static str> {
+    read_clipboard_filtered(excluded, |_| false)
+}
+pub fn read_clipboard_filtered(
+    _: impl Fn(&str) -> bool,
     _: impl Fn(&str) -> bool,
 ) -> Result<Option<super::ClipboardCapture>, &'static str> {
     Err(UNAVAILABLE)
 }
 pub(crate) fn pick_excluded_app(
-) -> Result<Option<crate::clipboard_preferences::ExcludedApp>, String> {
+    _: &tauri::Window,
+    _: impl FnOnce(Result<Option<crate::clipboard_preferences::ExcludedApp>, String>) + 'static,
+) -> Result<(), String> {
     Err(UNAVAILABLE.into())
 }
 pub fn write_clipboard(_: &super::ClipboardPayload) -> Result<i64, (&'static str, Option<i64>)> {

@@ -1100,8 +1100,15 @@ fn wait_view_dom(
     script: &str,
 ) -> Result<serde_json::Value, String> {
     let mut last = serde_json::Value::Null;
-    for _ in 0..40 {
-        let value = evaluate_view_dom(app, label, script)?;
+    for _ in 0..80 {
+        let value = match evaluate_view_dom(app, label, script) {
+            Ok(value) => value,
+            Err(error) if error == "missing_test_webview" => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if value["ready"] == true {
             return Ok(value);
         }
@@ -2481,8 +2488,8 @@ return {ready:true,recordingRight};
 const section=document.querySelector('#clipboard-search-heading').closest('section');
 const trigger=section.querySelector('[aria-label="Search Rule: Exact Match"]');
 const scopes=[...section.querySelectorAll('fieldset input')];
-if(!trigger||scopes.length!==3||scopes.some(box=>!box.checked))return {ready:false};
-trigger.click();return {ready:true,exactAndAllScopesDefault:true};
+if(!trigger||scopes.length!==0)return {ready:false};
+trigger.click();return {ready:true,exactWithoutScopeCheckboxes:true};
 "#,
         )?);
         wait_view_dom(
@@ -2584,8 +2591,8 @@ return {ready:true,editableWhilePaused:!image.matches(':disabled'),opacity};
             let script = format!(
                 r#"
 const capture=document.querySelector('#clipboard-capture-heading').closest('section');
-const image=capture.querySelector('#clipboard-type-image'), paused=!!capture.querySelector('[role=status]');
-return {{ready:paused!=={enabled}&&!image.checked&&!image.matches(':disabled'),paused,imageEnabled:image.checked}};
+const master=capture.querySelector('#clipboard-capture-enabled'), image=capture.querySelector('#clipboard-type-image'), paused=!!capture.querySelector('[role=status]');
+return {{ready:master?.checked==={enabled}&&paused!=={enabled}&&!image.checked&&!image.matches(':disabled'),paused,imageEnabled:image.checked}};
 "#
             );
             samples.push(wait_view_dom(app, "settings", &script)?);
@@ -2738,11 +2745,11 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='15,7,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='11,6,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
-for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste (Context Menu)','↵'],['Paste as Plain Text (Context Menu)','⌘↵'],['Save Image (Context Menu)','⌘S']]) {
+for(const [name,key] of [['Paste as Plain Text','⌘↵'],['Save Image','⌘S']]) {
   if(rows.find(row=>row.querySelector('.settings-field-content')?.textContent===name)?.querySelector('.keycaps')?.textContent!==key)throw Error('missing editable default: '+name);
 }
 if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
@@ -2804,7 +2811,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts.preview.binding;
     if(saved.code!==code||saved.modifiers.length)throw Error('recorder did not keep a bare '+code);
   }
-  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pasteRecord','KeyL'],['pastePlain','KeyI'],['saveImage','KeyU']]) {
+  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pastePlain','KeyI'],['saveImage','KeyU']]) {
     await local(action,null,false);
     await local(action,{code,modifiers:['alt']});
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts[action];
@@ -2817,6 +2824,28 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   let retiredImageIndex=false;
   try {await invoke('clipboard_auto_image_index_set',{enabled:false});} catch (_) {retiredImageIndex=true;}
   if(!retiredImageIndex)throw Error('retired image index command is still callable');
+  await invoke('clipboard_capture_set',{enabled:true});
+  if(!(await invoke('app_snapshot')).clipboardCaptureEnabled)throw Error('clipboard_capture_set did not enable capture');
+  await invoke('clipboard_capture_set',{enabled:false});
+  if((await invoke('app_snapshot')).clipboardCaptureEnabled)throw Error('clipboard_capture_set did not disable capture');
+  let badType=false;
+  try {await invoke('clipboard_ignored_type_add',{pasteboardType:'has space'});} catch (_) {badType=true;}
+  if(!badType)throw Error('invalid pasteboard type was accepted');
+  const addedTypes=await invoke('clipboard_ignored_type_add',{pasteboardType:'org.example.SecretType'});
+  if(!addedTypes.includes('org.example.SecretType'))throw Error('custom pasteboard type was not saved');
+  const removedTypes=await invoke('clipboard_ignored_type_remove',{pasteboardType:'org.example.SecretType'});
+  if(removedTypes.includes('org.example.SecretType'))throw Error('custom pasteboard type was not removed');
+  let badRegex=false;
+  try {await invoke('clipboard_ignored_regex_add',{pattern:'[unclosed'});} catch (_) {badRegex=true;}
+  if(!badRegex)throw Error('invalid regex was accepted');
+  const addedRegex=await invoke('clipboard_ignored_regex_add',{pattern:'^sk-[0-9]{4}$'});
+  if(!addedRegex.includes('^sk-[0-9]{4}$'))throw Error('ignored regex was not saved');
+  const removedRegex=await invoke('clipboard_ignored_regex_remove',{pattern:'^sk-[0-9]{4}$'});
+  if(removedRegex.includes('^sk-[0-9]{4}$'))throw Error('ignored regex was not removed');
+  const loginOn=await invoke('launch_at_login_set',{enabled:true});
+  if(loginOn!==true||!(await invoke('app_snapshot')).launchAtLogin)throw Error('launch_at_login_set did not enable');
+  const loginOff=await invoke('launch_at_login_set',{enabled:false});
+  if(loginOff!==false||(await invoke('app_snapshot')).launchAtLogin)throw Error('launch_at_login_set did not disable');
   await invoke('clipboard_behavior_set',{activation:'copy'});
   if((await invoke('clipboard_options_get')).activation!=='copy')throw Error('copy preference did not update');
   const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
@@ -2860,6 +2889,70 @@ return {paused:true};
         {
             return Err(format!("settings IPC or shortcut probe failed: {probe}"));
         }
+        let was_visible = on_main(app, |app| {
+            let window = app.get_window("settings").ok_or("settings window")?;
+            let visible = window.is_visible().map_err(|error| error.to_string())?;
+            if !visible {
+                window.show().map_err(|error| error.to_string())?;
+            }
+            Ok(visible)
+        })?;
+        evaluate_view_dom(
+            app,
+            "settings",
+            r#"
+window.__excludePickResult='pending';
+window.__TAURI_INTERNALS__.invoke('clipboard_excluded_app_pick').then(v=>window.__excludePickResult=v,e=>window.__excludePickResult='err:'+String(e));
+return true;
+"#,
+        )?;
+        let mut sheet_dismissed = false;
+        for _ in 0..120 {
+            let dismissed = on_main(app, |app| {
+                let window = app.get_window("settings").ok_or("settings window")?;
+                let native = window
+                    .ns_window()
+                    .map_err(|_| "settings window")?
+                    .cast::<AnyObject>();
+                unsafe {
+                    let sheet: *mut AnyObject = objc2::msg_send![native, attachedSheet];
+                    if sheet.is_null() {
+                        return Ok(false);
+                    }
+                    let is_open: bool =
+                        objc2::msg_send![sheet, isKindOfClass: objc2::class!(NSOpenPanel)];
+                    if !is_open {
+                        return Err("excluded app sheet is not NSOpenPanel".into());
+                    }
+                    let _: () = objc2::msg_send![sheet, cancel: std::ptr::null::<AnyObject>()];
+                    Ok(true)
+                }
+            })?;
+            if dismissed {
+                sheet_dismissed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !sheet_dismissed {
+            let probe = evaluate_view_dom(app, "settings", "return window.__excludePickResult;")
+                .unwrap_or(serde_json::Value::Null);
+            return Err(format!("clipboard_excluded_app_pick did not attach an async sheet without blocking main thread: {probe}"));
+        }
+        wait_view_dom(
+            app,
+            "settings",
+            "if(typeof window.__excludePickResult==='string'&&window.__excludePickResult!=='pending')throw Error(window.__excludePickResult);return {ready:window.__excludePickResult===null};",
+        )?;
+        if !was_visible {
+            on_main(app, |app| {
+                if let Some(window) = app.get_window("settings") {
+                    let _ = window.hide();
+                }
+                Ok(())
+            })?;
+        }
+        samples.push(serde_json::json!({"excludedAppPickerAsyncSheet":true}));
         on_main(app, |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             let expected = crate::binding_shortcut(&nami::shortcuts::KeyBinding::new(
@@ -2988,7 +3081,7 @@ const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>i
 const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
 const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
 const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⌘T','⌘O','⇧⌘O','↵','⌘↵','⌘S'].join(),bindings,kept};
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⌘T','⌘O','⇧⌘O','⌘↵','⌘S'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -5829,9 +5922,9 @@ document.activeElement.dispatchEvent(new KeyboardEvent('keyup',{key:'Meta',code:
                             app,
                             r#"
 const items=[...document.querySelectorAll('[role=menuitem]')];
-const paste=items.find(item=>item.textContent==='Paste');
+const label=item=>item.querySelector('.record-menu-label')?.textContent??item.textContent;
+const paste=items.find(item=>label(item)==='Paste');
 if(!paste)return {ready:false};
-if(items.some(item=>item.textContent==='Paste as Plain Text'))throw Error('duplicate paste entry');
 paste.click();return {ready:true};
 "#,
                         )?;
@@ -6120,23 +6213,6 @@ return {ready:window.__focusShortcutSaved===true};
         samples.push(check("Down", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-first'&&keys.at(-1)?.trusted")?);
         press(126, 0, "\u{f700}", "\u{f700}")?;
         samples.push(check("Up", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted")?);
-        evaluate_view_dom(
-            app,
-            "settings",
-            r#"
-window.__navigationSaved=false;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_shortcut_set',{action:'navigateDown',binding:{code:'F6',modifiers:[]}}).then(()=>window.__navigationSaved=true,error=>window.__navigationSaved=String(error));
-return true;
-"#,
-        )?;
-        wait_view_dom(app,"settings", "if(typeof window.__navigationSaved==='string')throw Error(window.__navigationSaved);return {ready:window.__navigationSaved===true};")?;
-        press(97, 0, "\u{f709}", "\u{f709}")?;
-        samples.push(check("Navigate down after remapping to F6", "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-first'&&keys.at(-1)?.code==='F6'&&keys.at(-1)?.trusted")?);
-        press(126, 0, "\u{f700}", "\u{f700}")?;
-        check(
-            "Return to first record",
-            "document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted",
-        )?;
         press(124, 0, "\u{f703}", "\u{f703}")?;
         samples.push(check("Next category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='true'&&keys.at(-1)?.trusted")?);
         press(123, 0, "\u{f702}", "\u{f702}")?;
@@ -6228,9 +6304,9 @@ window.__TAURI_INTERNALS__.invoke('clipboard_record_shortcut_set',{action:'copyR
 "#,
         )?;
         wait_view_dom(app,"settings", "if(typeof window.__copyShortcutSaved==='string')throw Error(window.__copyShortcutSaved);return {ready:window.__copyShortcutSaved===true};")?;
-        press(97, 0, "\u{f709}", "\u{f709}")?;
+        press(125, 0, "\u{f701}", "\u{f701}")?;
         check(
-            "Enter the record list with the remapped F6 for Command-C",
+            "Enter the record list with ArrowDown for Command-C",
             "document.activeElement===row?.querySelector('.history-row-select')&&!row?.querySelector('.record-copied')",
         )?;
         samples.push(activate("Command-C copies focused record", Some(CMD))?);
@@ -8879,7 +8955,7 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
                 initial.history_width,
                 "detail reopen records width",
             )?;
-            samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail-text')?.textContent?.startsWith('Synthetic complete clipboard text')&&document.querySelector('.source-input')===window.__detailInput&&document.querySelector('.clipboard-detail')===window.__detailPane,sameTranslation:document.querySelector('.source-input')===window.__detailInput,sameDetails:document.querySelector('.clipboard-detail')===window.__detailPane};"#)?);
+            samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail-text')?.textContent==='Second synthetic detail'&&document.querySelector('.source-input')===window.__detailInput&&document.querySelector('.clipboard-detail')===window.__detailPane,sameTranslation:document.querySelector('.source-input')===window.__detailInput,sameDetails:document.querySelector('.clipboard-detail')===window.__detailPane};"#)?);
         }
         on_main(app, |app| {
             {

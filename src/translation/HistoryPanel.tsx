@@ -262,27 +262,28 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       return;
     }
     if (!row && !fromSearch && !target.closest('.history-toolbar, .history-footer')) return;
-    if (action === 'previousCategory' || action === 'nextCategory') {
+    const plain = !key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey;
+    if (plain && !action && (key.key === 'ArrowLeft' || key.key === 'ArrowRight') && (!fromSearch || !query)) {
       if (target.closest('.history-footer')?.querySelector('[role=dialog]')) return;
       event.preventDefault();
       if (!key.repeat) { toggleFavorites(); search.current?.focus({ preventScroll: true }); }
       return;
     }
-    if (action === 'navigateUp' || action === 'navigateDown') {
+    if (plain && !action && (key.key === 'ArrowUp' || key.key === 'ArrowDown')) {
       if (!fromSearch && !row) return;
       event.preventDefault();
       if (fromSearch) {
-        if (action === 'navigateDown') focusRecordList(search.current?.closest('.history-panel'));
+        if (key.key === 'ArrowDown') focusRecordList(search.current?.closest('.history-panel'));
         return;
       }
       const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row-select') ?? [])]);
       const index = buttons.findIndex((button) => button.closest('article') === row);
-      const next = buttons[index + (action === 'navigateDown' ? 1 : -1)];
+      const next = buttons[index + (key.key === 'ArrowDown' ? 1 : -1)];
       if (next) {
         next.focus();
         const record = records.find(({ id }) => id === next.closest<HTMLElement>('article')?.dataset.recordId);
         if (record) previewRecord(record, true);
-      } else if (row && action === 'navigateUp') search.current?.focus();
+      } else if (row && key.key === 'ArrowUp') search.current?.focus();
       return;
     }
     if (!action || action === 'switchView') return;

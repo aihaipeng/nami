@@ -271,23 +271,21 @@ pub enum ClipboardRecordAction {
     Pin,
     Delete,
     CopyRecord,
-    PasteRecord,
     PastePlain,
     SaveImage,
     SwitchView,
-    NavigateUp,
-    NavigateDown,
-    PreviousCategory,
-    NextCategory,
 }
 
 impl ClipboardRecordAction {
     pub fn shared_with_translation(self) -> bool {
-        !matches!(self, Self::Ocr | Self::OpenTarget | Self::Translate) && !self.menu_only()
+        !matches!(
+            self,
+            Self::Ocr | Self::OpenTarget | Self::Translate | Self::PastePlain | Self::SaveImage
+        )
     }
 
-    fn menu_only(self) -> bool {
-        matches!(self, Self::PasteRecord | Self::PastePlain | Self::SaveImage)
+    fn requires_safe_menu_key(self) -> bool {
+        matches!(self, Self::PastePlain | Self::SaveImage)
     }
 }
 
@@ -309,14 +307,9 @@ pub struct ClipboardRecordShortcuts {
     pin: RecordShortcut,
     delete: RecordShortcut,
     copy_record: RecordShortcut,
-    paste_record: RecordShortcut,
     paste_plain: RecordShortcut,
     save_image: RecordShortcut,
     switch_view: RecordShortcut,
-    navigate_up: RecordShortcut,
-    navigate_down: RecordShortcut,
-    previous_category: RecordShortcut,
-    next_category: RecordShortcut,
 }
 
 impl Default for ClipboardRecordShortcuts {
@@ -352,20 +345,15 @@ impl Default for ClipboardRecordShortcuts {
             pin: enabled("KeyP", &["alt"]),
             delete: enabled("Backspace", &[primary]),
             copy_record: enabled("KeyC", &shifted),
-            paste_record: enabled("Enter", &[]),
             paste_plain: enabled("Enter", &[primary]),
             save_image: enabled("KeyS", &[primary]),
             switch_view: enabled("Tab", &[]),
-            navigate_up: enabled("ArrowUp", &[]),
-            navigate_down: enabled("ArrowDown", &[]),
-            previous_category: enabled("ArrowLeft", &[]),
-            next_category: enabled("ArrowRight", &[]),
         }
     }
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 17] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 12] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -377,14 +365,9 @@ impl ClipboardRecordShortcuts {
             (Pin, &self.pin),
             (Delete, &self.delete),
             (CopyRecord, &self.copy_record),
-            (PasteRecord, &self.paste_record),
             (PastePlain, &self.paste_plain),
             (SaveImage, &self.save_image),
             (SwitchView, &self.switch_view),
-            (NavigateUp, &self.navigate_up),
-            (NavigateDown, &self.navigate_down),
-            (PreviousCategory, &self.previous_category),
-            (NextCategory, &self.next_category),
         ]
     }
 
@@ -431,7 +414,6 @@ impl ClipboardRecordShortcuts {
             ocr: defaults.ocr,
             open_target: defaults.open_target,
             translate: defaults.translate,
-            paste_record: defaults.paste_record,
             paste_plain: defaults.paste_plain,
             save_image: defaults.save_image,
             ..self.clone()
@@ -445,7 +427,6 @@ impl ClipboardRecordShortcuts {
             ocr: self.ocr.clone(),
             open_target: self.open_target.clone(),
             translate: self.translate.clone(),
-            paste_record: self.paste_record.clone(),
             paste_plain: self.paste_plain.clone(),
             save_image: self.save_image.clone(),
             ..Self::default()
@@ -515,14 +496,13 @@ impl ClipboardRecordShortcuts {
         {
             validate_window_reservation(value)?;
             validate_quick_paste_reservation(value)?;
-            if action.menu_only()
+            if action.requires_safe_menu_key()
                 && (matches!(value.code.as_str(), "Escape" | "Tab")
                     || value.modifiers.is_empty()
-                        && (matches!(
+                        && matches!(
                             value.code.as_str(),
-                            "Space" | "ArrowUp" | "ArrowDown" | "Home" | "End"
-                        ) || value.code == "Enter"
-                            && action != ClipboardRecordAction::PasteRecord)
+                            "Space" | "ArrowUp" | "ArrowDown" | "Home" | "End" | "Enter"
+                        )
                     || cfg!(target_os = "macos")
                         && value.code == "KeyV"
                         && (value.modifiers == ["meta"] || value.modifiers == ["shift", "meta"]))
@@ -548,14 +528,9 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::Pin => &mut self.pin,
             ClipboardRecordAction::Delete => &mut self.delete,
             ClipboardRecordAction::CopyRecord => &mut self.copy_record,
-            ClipboardRecordAction::PasteRecord => &mut self.paste_record,
             ClipboardRecordAction::PastePlain => &mut self.paste_plain,
             ClipboardRecordAction::SaveImage => &mut self.save_image,
             ClipboardRecordAction::SwitchView => &mut self.switch_view,
-            ClipboardRecordAction::NavigateUp => &mut self.navigate_up,
-            ClipboardRecordAction::NavigateDown => &mut self.navigate_down,
-            ClipboardRecordAction::PreviousCategory => &mut self.previous_category,
-            ClipboardRecordAction::NextCategory => &mut self.next_category,
         };
         if let Some(enabled) = enabled {
             current.enabled = enabled;
@@ -606,11 +581,6 @@ impl ClipboardRecordShortcuts {
                     ("translate", ClipboardRecordAction::Translate),
                     ("copyRecord", ClipboardRecordAction::CopyRecord),
                     ("switchView", ClipboardRecordAction::SwitchView),
-                    ("navigateUp", ClipboardRecordAction::NavigateUp),
-                    ("navigateDown", ClipboardRecordAction::NavigateDown),
-                    ("previousCategory", ClipboardRecordAction::PreviousCategory),
-                    ("nextCategory", ClipboardRecordAction::NextCategory),
-                    ("pasteRecord", ClipboardRecordAction::PasteRecord),
                     ("pastePlain", ClipboardRecordAction::PastePlain),
                     ("saveImage", ClipboardRecordAction::SaveImage),
                 ] {
@@ -626,28 +596,6 @@ impl ClipboardRecordShortcuts {
                         {
                             let _ = shortcuts.set(action, None, None, &[]);
                         }
-                    }
-                }
-                if value.get("pastePlain").is_none() {
-                    let primary = if cfg!(target_os = "macos") {
-                        "meta"
-                    } else {
-                        "control"
-                    };
-                    let previous = KeyBinding::new("Enter", &[primary, "shift"]);
-                    if shortcuts
-                        .paste_record
-                        .binding
-                        .as_ref()
-                        .is_some_and(|binding| same_binding(binding, &previous))
-                    {
-                        // Keep the old binding if Return was assigned to another action.
-                        let _ = shortcuts.set(
-                            ClipboardRecordAction::PasteRecord,
-                            Some(KeyBinding::new("Enter", &[])),
-                            None,
-                            &[],
-                        );
                     }
                 }
                 Some(shortcuts)
@@ -812,12 +760,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_menu_shortcuts_persist_and_new_defaults_yield_to_existing_bindings() {
+    fn image_and_plain_paste_shortcuts_persist_and_yield_to_existing_bindings() {
         use ClipboardRecordAction::*;
         let defaults = ClipboardRecordShortcuts::default();
         let mut legacy = serde_json::to_value(&defaults).unwrap();
         let legacy = legacy.as_object_mut().unwrap();
-        legacy.remove("pasteRecord");
         legacy.remove("saveImage");
         legacy.insert(
             "pin".into(),
@@ -827,23 +774,25 @@ mod tests {
             ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(legacy).unwrap()));
         assert_eq!(loaded.pin.binding, defaults.save_image.binding);
         assert_eq!(loaded.save_image.binding, None);
-        assert_eq!(loaded.paste_record.binding, defaults.paste_record.binding);
 
         let mut custom = ClipboardRecordShortcuts::default();
         let key = KeyBinding::new("KeyJ", &["alt"]);
         custom
-            .set(PasteRecord, Some(key.clone()), None, &[])
+            .set(PastePlain, Some(key.clone()), None, &[])
             .unwrap();
         custom.set(SaveImage, None, None, &[]).unwrap();
-        custom.set(PasteRecord, None, Some(false), &[]).unwrap();
+        custom.set(PastePlain, None, Some(false), &[]).unwrap();
         assert!(custom.set(SaveImage, Some(key.clone()), None, &[]).is_err());
         assert!(custom
             .set(SaveImage, Some(KeyBinding::new("Escape", &[])), None, &[])
             .is_err());
+        assert!(custom
+            .set(PastePlain, Some(KeyBinding::new("Enter", &[])), None, &[])
+            .is_err());
         let reopened =
             ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&custom).unwrap()));
-        assert_eq!(reopened.paste_record.binding, Some(key));
-        assert!(!reopened.paste_record.enabled);
+        assert_eq!(reopened.paste_plain.binding, Some(key));
+        assert!(!reopened.paste_plain.enabled);
         assert!(reopened.save_image.binding.is_none());
         assert_eq!(reopened.restore_general().unwrap().save_image.binding, None);
         assert_eq!(
@@ -894,43 +843,38 @@ mod tests {
     }
 
     #[test]
-    fn paste_menu_defaults_upgrade_without_overwriting_existing_assignments() {
+    fn paste_plain_defaults_upgrade_without_overwriting_existing_assignments() {
         use ClipboardRecordAction::*;
         let primary = if cfg!(target_os = "macos") {
             "meta"
         } else {
             "control"
         };
-        let old_key = KeyBinding::new("Enter", &[primary, "shift"]);
-        let paste = KeyBinding::new("Enter", &[]);
         let plain = KeyBinding::new("Enter", &[primary]);
         let defaults = ClipboardRecordShortcuts::default();
-        assert_eq!(defaults.paste_record.binding.as_ref(), Some(&paste));
         assert_eq!(defaults.paste_plain.binding.as_ref(), Some(&plain));
         assert!(!defaults.conflicts_with_translation(ShortcutAction::Translate, &plain));
 
         let mut legacy = serde_json::to_value(&defaults).unwrap();
         legacy.as_object_mut().unwrap().remove("pastePlain");
-        legacy["pasteRecord"] = serde_json::json!({"binding":old_key,"enabled":false});
+        legacy["pasteRecord"] =
+            serde_json::json!({"binding":{"code":"Enter","modifiers":[]},"enabled":false});
         let load = |value: &serde_json::Value| {
             ClipboardRecordShortcuts::from_store(Some(value.to_string()))
         };
         let migrated = load(&legacy);
-        assert_eq!(migrated.paste_record.binding.as_ref(), Some(&paste));
-        assert!(!migrated.paste_record.enabled);
         assert_eq!(migrated.paste_plain.binding.as_ref(), Some(&plain));
+        assert!(serde_json::to_value(&migrated)
+            .unwrap()
+            .get("pasteRecord")
+            .is_none());
 
-        legacy["preview"]["binding"] = serde_json::to_value(&paste).unwrap();
         legacy["pin"]["binding"] = serde_json::to_value(&plain).unwrap();
         let migrated = load(&legacy);
-        assert_eq!(migrated.preview.binding, Some(paste));
         assert_eq!(migrated.pin.binding, Some(plain.clone()));
-        assert_eq!(migrated.paste_record.binding, Some(old_key));
         assert!(migrated.paste_plain.binding.is_none());
 
         let mut custom = defaults;
-        custom.set(PasteRecord, None, Some(false), &[]).unwrap();
-        custom.set(PasteRecord, None, Some(true), &[]).unwrap();
         let key = KeyBinding::new("KeyJ", &["alt"]);
         custom
             .set(PastePlain, Some(key.clone()), None, &[])
@@ -1080,18 +1024,37 @@ mod tests {
     }
 
     #[test]
-    fn ignores_the_retired_record_list_focus_without_resetting_other_keys() {
+    fn ignores_retired_navigation_and_paste_record_without_resetting_other_keys() {
         let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
-        old["focusRecords"] = serde_json::json!({
-            "binding":{"code":"F8","modifiers":[]},"enabled":true
-        });
-        old["navigateUp"] = serde_json::json!({"binding":null,"enabled":true});
+        for retired in [
+            "focusRecords",
+            "pasteRecord",
+            "navigateUp",
+            "navigateDown",
+            "previousCategory",
+            "nextCategory",
+        ] {
+            old[retired] = serde_json::json!({
+                "binding":{"code":"F8","modifiers":[]},"enabled":true
+            });
+            assert!(serde_json::from_value::<ClipboardRecordAction>(retired.into()).is_err());
+        }
+        old["preview"] =
+            serde_json::json!({"binding":{"code":"KeyJ","modifiers":[]},"enabled":false});
         let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
-        assert!(restored.navigate_up.binding.is_none());
-        assert!(restored.navigate_down.binding.is_some());
+        assert_eq!(restored.preview.binding, Some(KeyBinding::new("KeyJ", &[])));
+        assert!(!restored.preview.enabled);
         let saved = serde_json::to_value(&restored).unwrap();
-        assert!(saved.get("focusRecords").is_none());
-        assert!(serde_json::from_value::<ClipboardRecordAction>("focusRecords".into()).is_err());
+        for retired in [
+            "focusRecords",
+            "pasteRecord",
+            "navigateUp",
+            "navigateDown",
+            "previousCategory",
+            "nextCategory",
+        ] {
+            assert!(saved.get(retired).is_none());
+        }
     }
 
     #[test]
@@ -1163,37 +1126,28 @@ mod tests {
     fn plain_and_shift_only_shortcuts_survive_reload_and_navigation_reset_is_scoped() {
         use ClipboardRecordAction::*;
         let mut shortcuts = ClipboardRecordShortcuts::default();
-        shortcuts.set(PasteRecord, None, None, &[]).unwrap();
         for (action, code, modifiers) in [
-            (NavigateUp, "KeyK", &[][..]),
-            (NavigateDown, "Space", &[][..]),
-            (PreviousCategory, "F6", &["shift"][..]),
-            (NextCategory, "ShiftRight", &[][..]),
             (Preview, "Enter", &[][..]),
             (Delete, "Backspace", &["alt"][..]),
+            (PastePlain, "KeyK", &["alt"][..]),
         ] {
             shortcuts
                 .set(action, Some(KeyBinding::new(code, modifiers)), None, &[])
                 .unwrap();
         }
-        shortcuts.set(NavigateUp, None, Some(false), &[]).unwrap();
+        shortcuts.set(Preview, None, Some(false), &[]).unwrap();
         let saved = serde_json::to_value(&shortcuts).unwrap();
         let restored = ClipboardRecordShortcuts::from_store(Some(saved.to_string()));
         assert_eq!(serde_json::to_value(&restored).unwrap(), saved);
         let reset = restored.restore_general().unwrap();
         assert_eq!(
-            reset.navigate_up.binding,
-            Some(KeyBinding::new("ArrowUp", &[]))
-        );
-        assert!(reset.navigate_up.enabled);
-        assert_eq!(
             reset.preview.binding,
             ClipboardRecordShortcuts::default().preview.binding
         );
-        assert!(reset.paste_record.binding.is_none());
+        assert!(reset.preview.enabled);
         assert_eq!(
-            restored.restore_clipboard().err().as_deref(),
-            Some("shortcut_clipboard_panel")
+            reset.paste_plain.binding,
+            Some(KeyBinding::new("KeyK", &["alt"]))
         );
         let mut restored = restored;
         let preview = KeyBinding::new("KeyJ", &[]);
@@ -1203,19 +1157,6 @@ mod tests {
         assert_eq!(
             restored.restore_clipboard().unwrap().preview.binding,
             Some(preview)
-        );
-    }
-
-    #[test]
-    fn new_navigation_defaults_do_not_override_existing_bindings() {
-        let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
-        old.as_object_mut().unwrap().remove("navigateUp");
-        old["preview"]["binding"] = serde_json::to_value(KeyBinding::new("ArrowUp", &[])).unwrap();
-        let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
-        assert!(restored.navigate_up.binding.is_none());
-        assert_eq!(
-            restored.preview.binding,
-            Some(KeyBinding::new("ArrowUp", &[]))
         );
     }
 

@@ -78,7 +78,7 @@ beforeEach(() => {
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
   bridge.snapshot.clipboardControls.shortcuts = defaultClipboardShortcuts('meta');
-  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.snapshot.translationEngine = 'edge';
   bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, selectionEnabled: true, disabledShortcuts: [], shortcuts: defaultTranslationShortcuts('meta') };
   bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null, totalRecords: historySamples.length, hasMore: false, generation: 0 };
@@ -106,7 +106,16 @@ beforeEach(() => {
       if (request.reuse?.focusHistory || request.clipboardSession !== undefined && request.clipboardSession === (window.recordsSession ?? 0) && window.historyVisible && window.recordView === 'translation' && window.translationVisible && !window.recordsBrowsing) deliver('history_refocus', record.id);
       return record;
     }
-    if (name === 'translation_focus_input') deliver('translation_focus_requested', null);
+    if (name === 'clipboard_capture_set') {
+      bridge.snapshot.clipboardCaptureEnabled = Boolean((args as { enabled: boolean }).enabled);
+      deliver('clipboard_capture_changed', bridge.snapshot.clipboardCaptureEnabled);
+      return;
+    }
+    if (name === 'launch_at_login_set') {
+      bridge.snapshot.launchAtLogin = Boolean((args as { enabled: boolean }).enabled);
+      deliver('launch_at_login_changed', bridge.snapshot.launchAtLogin);
+      return bridge.snapshot.launchAtLogin;
+    }
     if (name === 'history_snapshot') return historySnapshot();
     if (name === 'history_query') {
       const { query, favoritesOnly } = args as { query: string; favoritesOnly: boolean };

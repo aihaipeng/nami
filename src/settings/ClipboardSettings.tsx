@@ -5,7 +5,7 @@ import type { ViewProps } from '../App';
 import { resolveLanguage } from '../shared/i18n';
 import { defaultClipboardSearch } from '../shared/clipboardSearch';
 import { ClipboardSearchSettings } from './ClipboardSearchSettings';
-import { ClipboardExcludedApps, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
+import { ClipboardIgnoreRules, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
 
 import { HistoryStorageSettings } from './HistoryStorageSettings';
 
@@ -25,6 +25,13 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
   const types = snapshot.clipboardRecordingTypes;
   const captureStatus = !canCapture ? (snapshot.storageError ? null : 'platformUnavailable')
     : !enabled ? 'clipboardRecordingPaused' : Object.values(types).some(Boolean) ? null : 'clipboardNoTypes';
+  async function saveRecording(next: boolean) {
+    setSavingCapture(true);
+    setSaveError(null);
+    try { await invoke('clipboard_capture_set', { enabled: next }); }
+    catch { setSaveError('capture'); }
+    finally { setSavingCapture(false); }
+  }
   async function saveCapture(kind: typeof rows[number]['kind'], enabled: boolean) {
     setSavingCapture(true);
     setSaveError(null);
@@ -41,6 +48,10 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
         <h2 id="clipboard-capture-heading">{t('capture')}</h2>
       </div>
       <div className="settings-group">
+        <label className="settings-field">
+          <span className="settings-field-content"><span>{t('clipboardRecordingEnabled')}</span></span>
+          <input className="settings-checkbox" id="clipboard-capture-enabled" type="checkbox" aria-label={t('clipboardRecordingEnabled')} checked={enabled} disabled={!canCapture} aria-disabled={savingCapture || undefined} onChange={(event) => { if (!savingCapture) void saveRecording(event.target.checked); }} />
+        </label>
         <fieldset className="clipboard-recording-types" aria-label={t('clipboardRecordingTypes')} disabled={!canCapture}>
           {rows.map(({ kind, label, icon: Icon, ...row }) => <label key={kind} className="settings-field" title={'note' in row ? t(row.note) : undefined}>
             <Icon className="clipboard-setting-icon" aria-hidden="true" />
@@ -52,8 +63,8 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
         {saveError === 'capture' && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>
     </section>
-    <ClipboardExcludedApps t={t} state={options} available={canCapture} />
-    <HistoryStorageSettings t={t} available={canManage} view="clipboard" previewLines={snapshot.clipboardControls.previewLines?.clipboard ?? 3} locale={resolveLanguage(snapshot.locale)} />
+    <ClipboardIgnoreRules t={t} state={options} available={canCapture} />
+    <HistoryStorageSettings t={t} available={canManage} view="clipboard" locale={resolveLanguage(snapshot.locale)} />
     <ClipboardSearchSettings t={t} search={snapshot.clipboardControls.search ?? defaultClipboardSearch} available={canManage} />
     <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture}
       locale={resolveLanguage(snapshot.locale)} />

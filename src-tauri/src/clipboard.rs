@@ -8,6 +8,28 @@ pub const MAX_FILE_COUNT: usize = 4096;
 pub const MAX_RICH_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_IGNORED_PASTEBOARD_TYPES: usize = 256;
+pub const MAX_IGNORED_REGEXPS: usize = 128;
+pub const MAX_IGNORED_REGEX_BYTES: usize = 512;
+pub const MAX_IGNORED_REGEX_COMPILED_BYTES: usize = 256 * 1024;
+
+pub fn valid_pasteboard_type(kind: &str) -> bool {
+    !kind.is_empty()
+        && kind.len() <= 255
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-_:/".contains(&byte))
+}
+
+pub fn compile_ignored_regex(pattern: &str) -> Result<regex::Regex, String> {
+    if pattern.trim().is_empty() || pattern.len() > MAX_IGNORED_REGEX_BYTES {
+        return Err("clipboard_invalid_regex".into());
+    }
+    regex::RegexBuilder::new(pattern)
+        .size_limit(MAX_IGNORED_REGEX_COMPILED_BYTES)
+        .build()
+        .map_err(|_| "clipboard_invalid_regex".into())
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -602,6 +624,36 @@ mod file_display_tests {
         assert_eq!(
             file_entries(&serde_json::to_string(&paths).unwrap()).unwrap_err(),
             "storage_corrupt"
+        );
+    }
+
+    #[test]
+    fn validates_custom_pasteboard_types_and_ignored_regexps() {
+        assert!(valid_pasteboard_type("org.example.SecretType"));
+        assert!(valid_pasteboard_type("com.bitwarden.password:v1"));
+        assert!(!valid_pasteboard_type(""));
+        assert!(!valid_pasteboard_type("has space"));
+        assert!(!valid_pasteboard_type("line\nbreak"));
+        assert!(!valid_pasteboard_type(&"a".repeat(256)));
+
+        let compiled = compile_ignored_regex("^sk-[A-Za-z0-9]{8,}$").unwrap();
+        assert!(compiled.is_match("sk-12345678"));
+        assert!(!compiled.is_match("normal text"));
+        assert_eq!(
+            compile_ignored_regex("   ").unwrap_err(),
+            "clipboard_invalid_regex"
+        );
+        assert_eq!(
+            compile_ignored_regex("[unclosed").unwrap_err(),
+            "clipboard_invalid_regex"
+        );
+        assert_eq!(
+            compile_ignored_regex(&"a".repeat(MAX_IGNORED_REGEX_BYTES + 1)).unwrap_err(),
+            "clipboard_invalid_regex"
+        );
+        assert_eq!(
+            compile_ignored_regex("a{100000}").unwrap_err(),
+            "clipboard_invalid_regex"
         );
     }
 }

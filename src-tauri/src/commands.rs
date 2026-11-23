@@ -81,6 +81,7 @@ pub(crate) fn authorize(window: &Webview, labels: &[&str]) -> Result<(), String>
 pub struct Snapshot {
     capabilities: platform::Capabilities,
     locale: String,
+    launch_at_login: bool,
     accessibility: bool,
     shortcut_errors: Vec<String>,
     translation_engine: String,
@@ -105,6 +106,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
     let snapshot = Snapshot {
         capabilities: platform::capabilities(),
         locale: state.locale.lock().unwrap().clone(),
+        launch_at_login: platform::launch_at_login_enabled(),
         accessibility: platform::accessibility(),
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
         translation_engine: state.translation_engine.lock().unwrap().clone(),
@@ -118,6 +120,21 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         window: state.windows.lock().unwrap().clone(),
     };
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn launch_at_login_set(
+    window: Webview,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<bool, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().launch_at_login {
+        return Err("platform_unavailable".into());
+    }
+    let actual = on_main(&app, move |_| platform::set_launch_at_login(enabled)).await??;
+    let _ = app.emit("launch_at_login_changed", actual);
+    Ok(actual)
 }
 
 #[tauri::command]
@@ -390,24 +407,6 @@ pub fn records_navigation_resolve(
 ) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
     crate::records_runtime::resolve_navigation(&app, proceed)
-}
-
-#[tauri::command]
-pub fn translation_focus_input(window: Webview, app: AppHandle) -> Result<(), String> {
-    authorize(&window, &["clipboard", "history", "translation"])?;
-    let state = app.state::<AppState>();
-    let regions = state.windows.lock().unwrap();
-    if !regions.translation_visible
-        || regions.record_view != crate::model::RecordView::Translation
-        || regions.records_editor_open
-    {
-        return Ok(());
-    }
-    drop(regions);
-    let view = app.get_webview("translation").ok_or("window_unavailable")?;
-    view.set_focus().map_err(|_| "window_focus")?;
-    view.emit("translation_focus_requested", ())
-        .map_err(|_| "event_emit".into())
 }
 
 #[tauri::command]

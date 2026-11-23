@@ -1481,6 +1481,8 @@ impl HistoryDatabase {
             "clipboard_shortcut_enabled",
             "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
+            "clipboard_ignored_pasteboard_types",
+            "clipboard_ignored_regexps",
             "clipboard_activation",
             "clipboard_paste_as_plain_text",
             "clipboard_search_options",

@@ -22,13 +22,14 @@ unsafe fn version(board: *mut AnyObject) -> i64 {
     value as i64
 }
 
-unsafe fn private(board: *mut AnyObject) -> bool {
+unsafe fn private(board: *mut AnyObject, ignored_type: &impl Fn(&str) -> bool) -> bool {
     let types: Option<Retained<AnyObject>> = msg_send![board, types];
     let Some(types) = types else { return false };
     let count: usize = msg_send![&*types, count];
     for index in 0..count {
         let kind: Retained<NSString> = msg_send![&*types, objectAtIndex: index];
-        if PRIVATE_TYPES.contains(&kind.to_string().as_str()) {
+        let kind = kind.to_string();
+        if PRIVATE_TYPES.contains(&kind.as_str()) || ignored_type(kind.as_str()) {
             return true;
         }
     }
@@ -63,17 +64,18 @@ unsafe fn bounded_bytes(
 
 #[cfg(any(test, feature = "ui-tests"))]
 unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>, &'static str> {
-    read_version(board, version(board))
+    read_version(board, version(board), &|_| false)
 }
 
 unsafe fn read_version(
     board: *mut AnyObject,
     initial: i64,
+    ignored_type: &impl Fn(&str) -> bool,
 ) -> Result<Option<(i64, ClipboardPayload)>, &'static str> {
     if version(board) != initial {
         return Err("clipboard_changed");
     }
-    if private(board) {
+    if private(board, ignored_type) {
         return Ok(None);
     }
     let objects: Option<Retained<AnyObject>> = msg_send![board, pasteboardItems];
@@ -90,7 +92,7 @@ unsafe fn read_version(
             if count == 1 {
                 single_item = Some(item);
             }
-            if private(item) {
+            if private(item, ignored_type) {
                 return Ok(None);
             }
             let value: Option<Retained<NSString>> =
@@ -176,8 +178,16 @@ unsafe fn read_version(
 }
 
 // Main-thread callers own change-count suppression for app writes and selection restoration.
+#[cfg(feature = "ui-tests")]
 pub fn read_clipboard(
     excluded: impl Fn(&str) -> bool,
+) -> Result<Option<ClipboardCapture>, &'static str> {
+    read_clipboard_filtered(excluded, |_| false)
+}
+
+pub fn read_clipboard_filtered(
+    excluded: impl Fn(&str) -> bool,
+    ignored_type: impl Fn(&str) -> bool,
 ) -> Result<Option<ClipboardCapture>, &'static str> {
     if super::secure_input() {
         return Ok(None);
@@ -188,7 +198,7 @@ pub fn read_clipboard(
         let Some(source) = super::macos::clipboard_source(initial, excluded) else {
             return Ok(None);
         };
-        let captured = read_version(board, initial)?;
+        let captured = read_version(board, initial, &ignored_type)?;
         Ok(captured.map(|(version, payload)| ClipboardCapture {
             version,
             payload,
@@ -932,5 +942,42 @@ mod tests {
     #[test]
     fn synthetic_clipboard_roundtrips_and_protects_private_and_missing_files() {
         super::test_clipboard_history().unwrap();
+    }
+
+    #[test]
+    fn custom_ignored_pasteboard_types_skip_capture_without_weakening_builtin_private_types() {
+        unsafe {
+            let name = NSString::from_str(&format!(
+                "dev.local.nami.custom-uti.{}",
+                uuid::Uuid::new_v4()
+            ));
+            let board: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*name];
+            let _: isize = msg_send![board, clearContents];
+            let item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
+            let _: bool = msg_send![&*item, setString: ns_string!("secret payload"), forType: ns_string!("public.utf8-plain-text")];
+            let _: bool = msg_send![&*item, setString: ns_string!("1"), forType: ns_string!("com.example.custom-secret")];
+            let items: Retained<AnyObject> = msg_send![class!(NSArray), arrayWithObject: &*item];
+            let _: bool = msg_send![board, writeObjects: &*items];
+            let initial = version(board);
+            assert!(
+                read_version(board, initial, &|kind| kind == "com.example.custom-secret")
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                read_version(board, initial, &|_| false).unwrap().unwrap().1,
+                ClipboardPayload::Text("secret payload".into())
+            );
+            let _: isize = msg_send![board, clearContents];
+            let concealed: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
+            let _: bool = msg_send![&*concealed, setString: ns_string!("pw"), forType: ns_string!("public.utf8-plain-text")];
+            let _: bool = msg_send![&*concealed, setString: ns_string!(""), forType: ns_string!("org.nspasteboard.ConcealedType")];
+            let items: Retained<AnyObject> =
+                msg_send![class!(NSArray), arrayWithObject: &*concealed];
+            let _: bool = msg_send![board, writeObjects: &*items];
+            let initial = version(board);
+            assert!(read_version(board, initial, &|_| false).unwrap().is_none());
+            let _: () = msg_send![board, releaseGlobally];
+        }
     }
 }

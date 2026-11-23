@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Check, ClipboardList, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
 import type { ViewProps } from '../App';
 import type { RecordsOpenFocus } from '../shared/clipboardShortcuts';
@@ -19,8 +20,33 @@ const pages = [
 
 export function Settings({ t, snapshot, command, native }: ViewProps) {
   const [page, setPage] = useState<typeof pages[number]['value']>('general');
-  const [openDropdown, setOpenDropdown] = useState<'language' | 'recordsFocus' | null>(null);
-  useEffect(() => { setOpenDropdown(null); }, [page, snapshot.locale]);
+  const [openDropdown, setOpenDropdown] = useState<'language' | 'recordsFocus' | 'clipboardPreviewLines' | 'translationPreviewLines' | null>(null);
+  const [savingLaunch, setSavingLaunch] = useState(false);
+  const [launchError, setLaunchError] = useState(false);
+  const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
+  const savingPreview = useRef(false);
+  const canManageRecords = native && !snapshot.storageError;
+  useEffect(() => { setOpenDropdown(null); setLaunchError(false); setPreviewSaveFailed(false); }, [page, snapshot.locale]);
+
+  async function saveLaunchAtLogin(enabled: boolean) {
+    if (!native || !snapshot.capabilities.launchAtLogin || savingLaunch) return;
+    setSavingLaunch(true);
+    setLaunchError(false);
+    try { await invoke('launch_at_login_set', { enabled }); }
+    catch { setLaunchError(true); }
+    finally { setSavingLaunch(false); }
+  }
+
+  async function savePreviewLines(view: 'clipboard' | 'translation', code: string) {
+    const current = snapshot.clipboardControls.previewLines?.[view] ?? 3;
+    if (!canManageRecords || savingPreview.current || Number(code) === current) return;
+    savingPreview.current = true;
+    setPreviewSaveFailed(false);
+    try { await invoke('records_preview_lines_set', { view, lines: Number(code) }); }
+    catch { setPreviewSaveFailed(true); }
+    finally { savingPreview.current = false; }
+  }
+
   return <div className="settings-shell">
     <aside className="settings-sidebar">
       <div className="settings-brand" data-tauri-drag-region>{t('settings')}</div>
@@ -44,6 +70,13 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
                 open={openDropdown === 'language'} onOpenChange={(open) => setOpenDropdown(open ? 'language' : null)} t={t} side="bottom" searchable={false} settings />
             </div>
             <div className="settings-field">
+              <label className="settings-field-content" htmlFor="launch-at-login">{t('launchAtLogin')}</label>
+              {native && snapshot.capabilities.launchAtLogin
+                ? <input id="launch-at-login" type="checkbox" className="settings-checkbox" aria-label={t('launchAtLogin')} checked={snapshot.launchAtLogin} aria-disabled={savingLaunch || undefined} onChange={(event) => void saveLaunchAtLogin(event.target.checked)} />
+                : <span className="settings-badge">{t('platformUnavailable')}</span>}
+            </div>
+            {launchError && <p className="settings-field-note" role="alert">{t('launchAtLoginFailed')}</p>}
+            <div className="settings-field">
               <label className="settings-field-content" htmlFor="records-open-focus">{t('recordsOpenFocus')}</label>
               {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
                 <SearchableDropdown id="records-open-focus" value={snapshot.clipboardControls.recordsOpenFocus ?? 'list'}
@@ -51,6 +84,19 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
                   label={t('recordsOpenFocus')} items={[{ code: 'search', name: t('recordsFocusSearch') }, { code: 'list', name: t('recordsFocusList') }]}
                   open={openDropdown === 'recordsFocus'} onOpenChange={(open) => setOpenDropdown(open ? 'recordsFocus' : null)} t={t} side="bottom" searchable={false} settings />}
             </div>
+            <div className="settings-field">
+              <label className="settings-field-content" htmlFor="clipboard-preview-lines">{t('clipboardPreviewLines')}</label>
+              {canManageRecords ? <SearchableDropdown id="clipboard-preview-lines" label={t('clipboardPreviewLines')} value={String(snapshot.clipboardControls.previewLines?.clipboard ?? 3)}
+                items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={openDropdown === 'clipboardPreviewLines'} onOpenChange={(open) => setOpenDropdown(open ? 'clipboardPreviewLines' : null)}
+                onChange={(code) => void savePreviewLines('clipboard', code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
+            </div>
+            <div className="settings-field">
+              <label className="settings-field-content" htmlFor="translation-preview-lines">{t('translationPreviewLines')}</label>
+              {canManageRecords ? <SearchableDropdown id="translation-preview-lines" label={t('translationPreviewLines')} value={String(snapshot.clipboardControls.previewLines?.translation ?? 3)}
+                items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={openDropdown === 'translationPreviewLines'} onOpenChange={(open) => setOpenDropdown(open ? 'translationPreviewLines' : null)}
+                onChange={(code) => void savePreviewLines('translation', code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
+            </div>
+            {previewSaveFailed && <p className="settings-field-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
             <div className="settings-field"><span className="settings-field-content">{t('appearance')}</span><span className="settings-badge">{t('followSystem')}</span></div>
           </div>
         </section>}

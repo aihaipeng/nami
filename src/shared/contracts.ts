@@ -35,6 +35,7 @@ export interface PlatformCapabilities {
   autoPaste: boolean;
   clipboardOpenTarget: boolean;
   clipboardImageSave: boolean;
+  launchAtLogin: boolean;
   accessibilityPermission: boolean;
   primaryModifier: 'meta' | 'control';
 }
@@ -58,6 +59,7 @@ export function translationShortcutEnabled(preferences: TranslationPreferences, 
 export interface AppSnapshot {
   capabilities: PlatformCapabilities;
   locale: Locale;
+  launchAtLogin: boolean;
   translationEngine: 'edge' | 'google';
   translationPreferences: TranslationPreferences;
   storageError: string | null;
@@ -78,8 +80,9 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
+  launchAtLogin: false,
   translationEngine: 'edge',
   translationPreferences: {
     engine: 'edge',

@@ -591,6 +591,50 @@ pub fn accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
+#[cfg(feature = "ui-tests")]
+static TEST_LAUNCH_AT_LOGIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn launch_at_login_enabled() -> bool {
+    #[cfg(feature = "ui-tests")]
+    {
+        TEST_LAUNCH_AT_LOGIN.load(Ordering::SeqCst)
+    }
+    #[cfg(not(feature = "ui-tests"))]
+    unsafe {
+        let Some(cls) = objc2::runtime::AnyClass::get(c"SMAppService") else {
+            return false;
+        };
+        let service: Retained<AnyObject> = msg_send![cls, mainAppService];
+        let status: isize = msg_send![&*service, status];
+        status == 1
+    }
+}
+
+pub fn set_launch_at_login(enabled: bool) -> Result<bool, String> {
+    #[cfg(feature = "ui-tests")]
+    {
+        TEST_LAUNCH_AT_LOGIN.store(enabled, Ordering::SeqCst);
+        Ok(enabled)
+    }
+    #[cfg(not(feature = "ui-tests"))]
+    unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"SMAppService")
+            .ok_or_else(|| "platform_unavailable".to_string())?;
+        let service: Retained<AnyObject> = msg_send![cls, mainAppService];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: bool = if enabled {
+            msg_send![&*service, registerAndReturnError: &mut error]
+        } else {
+            msg_send![&*service, unregisterAndReturnError: &mut error]
+        };
+        if !ok {
+            return Err("launch_at_login_failed".into());
+        }
+        Ok(launch_at_login_enabled())
+    }
+}
+
 unsafe fn bundle_identifier(application: &AnyObject) -> Option<String> {
     let bundle: Option<Retained<NSString>> = msg_send![application, bundleIdentifier];
     bundle.map(|id| id.to_string())
@@ -663,8 +707,18 @@ pub(crate) fn write_image_export(
 }
 
 pub(crate) fn pick_excluded_app(
-) -> Result<Option<crate::clipboard_preferences::ExcludedApp>, String> {
+    window: &tauri::Window,
+    complete: impl FnOnce(Result<Option<crate::clipboard_preferences::ExcludedApp>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
     unsafe {
+        let parent = window.ns_window().map_err(|_| "clipboard_manage_apps")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("clipboard_manage_apps".into());
+        }
         let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
         let applications: Retained<AnyObject> =
             msg_send![class!(NSURL), fileURLWithPath: ns_string!("/Applications")];
@@ -678,34 +732,54 @@ pub(crate) fn pick_excluded_app(
         let _: () = msg_send![&*panel, setTreatsFilePackagesAsDirectories: false];
         let _: () = msg_send![&*panel, setMessage: ns_string!("Choose an application to exclude from clipboard recording.")];
         let _: () = msg_send![&*panel, setPrompt: ns_string!("Exclude")];
-        let result: isize = msg_send![&*panel, runModal];
-        if result != 1 {
-            return Ok(None);
-        }
-        let selected: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
-        let selected = selected.ok_or("clipboard_invalid_app")?;
-        let extension: Option<Retained<NSString>> = msg_send![&*selected, pathExtension];
-        if !extension.is_some_and(|value| value.to_string().eq_ignore_ascii_case("app")) {
-            return Err("clipboard_invalid_app".into());
-        }
-        let bundle: Option<Retained<AnyObject>> =
-            msg_send![class!(NSBundle), bundleWithURL: &*selected];
-        let bundle = bundle.ok_or("clipboard_invalid_app")?;
-        let identifier: Option<Retained<NSString>> = msg_send![&*bundle, bundleIdentifier];
-        let bundle_id = identifier.ok_or("clipboard_invalid_app")?.to_string();
-        // Select by Bundle ID; retain no app path and launch no selected app.
-        let name = application_bundle_name(&bundle)
-            .or_else(|| {
-                let filename: Option<Retained<NSString>> = msg_send![&*selected, lastPathComponent];
-                filename.map(|value| value.to_string().trim_end_matches(".app").to_owned())
-            })
-            .unwrap_or_else(|| bundle_id.clone());
-        Ok(Some(crate::clipboard_preferences::ExcludedApp {
-            bundle_id,
-            name,
-            icon_data_url: None,
-        }))
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            let outcome = match response {
+                1 => (|| {
+                    let selected: Option<Retained<AnyObject>> = msg_send![&*result_panel, URL];
+                    let selected = selected.ok_or_else(|| "clipboard_invalid_app".to_string())?;
+                    let extension: Option<Retained<NSString>> =
+                        msg_send![&*selected, pathExtension];
+                    if !extension.is_some_and(|value| value.to_string().eq_ignore_ascii_case("app"))
+                    {
+                        return Err("clipboard_invalid_app".into());
+                    }
+                    let bundle: Option<Retained<AnyObject>> =
+                        msg_send![class!(NSBundle), bundleWithURL: &*selected];
+                    let bundle = bundle.ok_or_else(|| "clipboard_invalid_app".to_string())?;
+                    let identifier: Option<Retained<NSString>> =
+                        msg_send![&*bundle, bundleIdentifier];
+                    let bundle_id = identifier
+                        .ok_or_else(|| "clipboard_invalid_app".to_string())?
+                        .to_string();
+                    // Select by Bundle ID; retain no app path and launch no selected app.
+                    let name = application_bundle_name(&bundle)
+                        .or_else(|| {
+                            let filename: Option<Retained<NSString>> =
+                                msg_send![&*selected, lastPathComponent];
+                            filename
+                                .map(|value| value.to_string().trim_end_matches(".app").to_owned())
+                        })
+                        .unwrap_or_else(|| bundle_id.clone());
+                    Ok(Some(crate::clipboard_preferences::ExcludedApp {
+                        bundle_id,
+                        name,
+                        icon_data_url: None,
+                    }))
+                })(),
+                0 => Ok(None),
+                _ => Err("clipboard_manage_apps".into()),
+            };
+            complete(outcome);
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
     }
+    Ok(())
 }
 
 pub fn target_app_info(target: Target) -> Option<serde_json::Value> {

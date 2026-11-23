@@ -189,16 +189,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [native]);
 
   useEffect(() => {
-    if (!native) return;
-    let disposed = false;
-    const remove = listen('translation_focus_requested', () => {
-      const window = currentWindow.current;
-      if (!disposed && window.translationVisible && window.recordView !== 'clipboard') focusInput();
-    });
-    return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
-  }, [native]);
-
-  useEffect(() => {
     if (state.translationVisible && !state.historyVisible && !clipboardDetails) input.current?.focus({ preventScroll: true });
   }, [state.translationVisible]);
 

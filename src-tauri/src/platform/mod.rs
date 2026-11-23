@@ -61,6 +61,7 @@ pub struct Capabilities {
     pub auto_paste: bool,
     pub clipboard_open_target: bool,
     pub clipboard_image_save: bool,
+    pub launch_at_login: bool,
     pub accessibility_permission: bool,
     pub primary_modifier: &'static str,
 }
@@ -87,6 +88,7 @@ pub fn capabilities() -> Capabilities {
         auto_paste: native,
         clipboard_open_target: native,
         clipboard_image_save: native,
+        launch_at_login: native,
         accessibility_permission: native,
         primary_modifier: if macos { "meta" } else { "control" },
     }
