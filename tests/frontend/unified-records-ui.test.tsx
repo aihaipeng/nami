@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import { createRef } from 'react';
+// @ts-expect-error Vitest runs in Node; the app's TypeScript configuration includes browser types only.
+import { readFileSync } from 'node:fs';
 import { HistoryList } from '../../src/shared/HistoryList';
 import { ActivityBeam } from '../../src/shared/ActivityBeam';
 import { RecordActions } from '../../src/shared/RecordActions';
@@ -571,6 +573,56 @@ describe('unified records workspace', () => {
       fireEvent.mouseMove(second, { clientX: 11, clientY: 100 });
       expect(targets()).toEqual([second.dataset.recordId]);
     }
+  });
+
+  // jsdom has no pointer, so the real hover selectors run against a stand-in attribute.
+  function actionStripRules() {
+    const lines = (readFileSync('src/styles.css', 'utf8') as string).split('\n').map((line) => line.trim());
+    const rules = lines.filter((line) => line.includes('.history-row-actions {') || /\.history-row:(hover|focus-within) \.history-row-actions/.test(line));
+    expect(rules.length).toBeGreaterThanOrEqual(3);
+    return rules.join('\n').replaceAll(':hover', '[data-hover]');
+  }
+
+  it.each(['clipboard', 'translation'] as const)('shows only the %s action strip of the keyboard record while the pointer rests on another', async (kind) => {
+    const style = document.createElement('style');
+    style.textContent = actionStripRules();
+    document.head.append(style);
+    try {
+      await mount('clipboard');
+      if (kind === 'translation') await switchView(kind);
+      const rows = () => [...panel(kind).querySelectorAll<HTMLElement>('.history-unpinned .history-row:not([hidden])')];
+      await waitFor(() => expect(rows().length).toBeGreaterThan(1));
+      const [first, second] = rows();
+      const button = (row: HTMLElement) => row.querySelector('.history-row-select')!;
+      const strip = (row: HTMLElement) => getComputedStyle(row.querySelector('.history-row-actions')!);
+      const shown = () => rows().filter((row) => strip(row).visibility === 'visible').map((row) => row.dataset.recordId);
+      const fade = (row: HTMLElement) => `${strip(row).transitionProperty} ${strip(row).transitionDuration}`;
+      await waitFor(() => expect(document.activeElement).toBe(button(first)));
+      expect(shown()).toEqual([first.dataset.recordId]);
+      // A record neither hovered nor focused keeps its ordinary fade-out.
+      expect(fade(second)).toBe('opacity, transform, visibility 0.15s, 0.15s, 0.15s');
+      second.dataset.hover = '';
+      fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
+      expect(shown()).toEqual([second.dataset.recordId]);
+      // The pointer stays on the second record: the keyboard record alone keeps its actions.
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+      expect(document.activeElement).toBe(button(first));
+      expect(shown()).toEqual([first.dataset.recordId]);
+      // The resting record gives way on the spot: a fading strip stays visible and clickable.
+      expect(fade(second)).toBe('none 0s');
+      expect(strip(first).transitionDuration).toBe('0.15s');
+      fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
+      expect(shown()).toEqual([first.dataset.recordId]);
+      fireEvent.mouseMove(second, { clientX: 11, clientY: 100 });
+      expect(shown()).toEqual([second.dataset.recordId]);
+      // No record holds focus: the resting pointer reveals its own record with its ordinary fade.
+      fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
+      expect(document.activeElement).toBe(search(kind));
+      expect(shown()).toEqual([second.dataset.recordId]);
+      expect(fade(second)).toBe('opacity, transform, visibility 0.15s');
+      delete second.dataset.hover;
+      expect(shown()).toEqual([]);
+    } finally { style.remove(); }
   });
 
   it('falls back to search when record-list focus is preferred but no records exist', async () => {

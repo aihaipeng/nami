@@ -220,6 +220,17 @@ unsafe extern "C" {
     fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
     fn CGEventPost(tap: u32, event: *const c_void);
     fn CGEventPostToPid(pid: i32, event: *const c_void);
+    #[cfg(feature = "ui-tests")]
+    fn CGEventCreate(source: *const c_void) -> *mut c_void;
+    #[cfg(feature = "ui-tests")]
+    fn CGEventGetLocation(event: *const c_void) -> NSPoint;
+    #[cfg(feature = "ui-tests")]
+    fn CGEventCreateMouseEvent(
+        source: *const c_void,
+        kind: u32,
+        position: NSPoint,
+        button: u32,
+    ) -> *mut c_void;
     fn AXUIElementCreateSystemWide() -> *const c_void;
     fn AXUIElementSetMessagingTimeout(element: *const c_void, timeout: f32) -> i32;
     fn AXUIElementCopyAttributeValue(
@@ -854,6 +865,53 @@ unsafe fn release_events(events: &[*mut c_void; 2]) {
             CFRelease(*event);
         }
     }
+}
+
+/// Pointer position in global screen points, measured from the top-left corner of the main display.
+#[cfg(feature = "ui-tests")]
+pub fn test_pointer_location() -> Result<(f64, f64), String> {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return Err("pointer_location".into());
+        }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        Ok((point.x, point.y))
+    }
+}
+
+/// Posts a real pointer move to the HID tap, so the view under it sees the hover a user's move produces.
+#[cfg(feature = "ui-tests")]
+pub fn test_move_pointer(x: f64, y: f64) -> Result<(), String> {
+    unsafe {
+        // HID system state, so the move is a user event rather than a private one.
+        let source = CGEventSourceCreate(1);
+        // kCGEventMouseMoved with kCGMouseButtonLeft.
+        let event = CGEventCreateMouseEvent(source, 5, NSPoint::new(x, y), 0);
+        if !source.is_null() {
+            CFRelease(source);
+        }
+        if event.is_null() {
+            return Err("pointer_move".into());
+        }
+        // Only the HID tap moves the pointer; the annotated tap that carries key chords does not.
+        CGEventPost(0, event);
+        CFRelease(event);
+    }
+    // The window server drops the event when the process is not trusted: never report a move that did not happen.
+    for _ in 0..50 {
+        if test_pointer_location()
+            .is_ok_and(|(now_x, now_y)| (now_x - x).abs() < 1.0 && (now_y - y).abs() < 1.0)
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Err(match test_pointer_location() {
+        Ok((now_x, now_y)) => format!("pointer_move: ({now_x}, {now_y}) instead of ({x}, {y})"),
+        Err(error) => format!("pointer_move: {error} instead of ({x}, {y})"),
+    })
 }
 
 // NSWorkspace file icons may be queried on a worker; no window/view API is touched.

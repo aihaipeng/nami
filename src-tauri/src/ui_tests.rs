@@ -138,6 +138,154 @@ fn view_frame(app: &AppHandle, label: &str) -> Result<objc2_foundation::NSRect, 
         .map_err(|_| "native frame read was unexpectedly deferred".into())
 }
 
+/// A point of the records WebView in CSS pixels, as the window and the pointer each see it.
+struct PointerTarget {
+    window: isize,
+    in_window: (f64, f64),
+    on_screen: (f64, f64),
+}
+
+/// Locates a point of the records WebView for its window and for the pointer.
+fn records_pointer_target(app: &AppHandle, x: f64, y: f64) -> Result<PointerTarget, String> {
+    on_main(app, move |app| {
+        let view = app.get_webview("clipboard").ok_or("missing_test_webview")?;
+        let (send, receive) = mpsc::sync_channel(1);
+        view.with_webview(move |view| unsafe {
+            let view = view.inner().cast::<AnyObject>();
+            let window: *mut AnyObject = objc2::msg_send![view, window];
+            let number: isize = objc2::msg_send![window, windowNumber];
+            let bounds: objc2_foundation::NSRect = objc2::msg_send![view, bounds];
+            // Only a window converts to the screen. AppKit measures the window and the screen from the
+            // bottom-left corner; the page and pointer events from the top-left.
+            let frame: objc2_foundation::NSRect = objc2::msg_send![
+                view,
+                convertRect: bounds,
+                toView: std::ptr::null_mut::<AnyObject>()
+            ];
+            let screen: objc2_foundation::NSRect =
+                objc2::msg_send![window, convertRectToScreen: frame];
+            let screens: *mut AnyObject = objc2::msg_send![objc2::class!(NSScreen), screens];
+            let primary: *mut AnyObject = objc2::msg_send![screens, firstObject];
+            let display: objc2_foundation::NSRect = objc2::msg_send![primary, frame];
+            let _ = send.send(PointerTarget {
+                window: number,
+                in_window: (frame.origin.x + x, frame.origin.y + frame.size.height - y),
+                on_screen: (
+                    screen.origin.x + x,
+                    display.size.height - screen.origin.y - screen.size.height + y,
+                ),
+            });
+        })
+        .map_err(|error| error.to_string())?;
+        // This function runs on the main thread; dispatch must have executed inline.
+        receive
+            .try_recv()
+            .map_err(|_| "native pointer target read was unexpectedly deferred".to_string())
+    })
+}
+
+/// Where the case last placed the pointer, so that it is put back only while nobody has moved it since.
+type Placed = std::sync::Mutex<Option<(f64, f64)>>;
+
+/// Moves the pointer to the center of an element of the records WebView, then delivers the mouse-moved event
+/// that a person's move produces. A pointer this process posts moves the cursor, but AppKit hands the window
+/// no mouseMoved for it. Returns where the pointer then is on the screen.
+fn move_pointer_to(app: &AppHandle, element: &str, placed: &Placed) -> Result<(f64, f64), String> {
+    let center = evaluate_view_dom(
+        app,
+        "clipboard",
+        &format!("const r=({element}).getBoundingClientRect();return {{x:r.left+r.width/2,y:r.top+r.height/2}};"),
+    )?;
+    let x = center["x"].as_f64().ok_or("pointer x")?;
+    let y = center["y"].as_f64().ok_or("pointer y")?;
+    let target = records_pointer_target(app, x, y)?;
+    crate::platform::test_move_pointer(target.on_screen.0, target.on_screen.1)?;
+    *placed.lock().unwrap() = Some(target.on_screen);
+    let on_screen = target.on_screen;
+    on_main(app, move |_| unsafe {
+        let application: *mut AnyObject =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        // NSEventTypeMouseMoved
+        let event: *mut AnyObject = objc2::msg_send![objc2::class!(NSEvent), mouseEventWithType: 5usize, location: objc2_foundation::NSPoint::new(target.in_window.0, target.in_window.1), modifierFlags: 0usize, timestamp: 0.0f64
+            , windowNumber: target.window, context: std::ptr::null_mut::<AnyObject>(), eventNumber: 0isize, clickCount: 0isize, pressure: 0.0f64];
+        if event.is_null() {
+            return Err("cannot create native mouse event".into());
+        }
+        let _: () = objc2::msg_send![application, postEvent: event, atStart: false];
+        Ok(())
+    })?;
+    Ok(on_screen)
+}
+
+/// The case borrows the pointer from the person at the machine: a check during which it was moved proves
+/// nothing.
+fn require_pointer_at(target: (f64, f64)) -> Result<(), String> {
+    let now = crate::platform::test_pointer_location()?;
+    same_place(now, target).then_some(()).ok_or_else(|| {
+        format!("the pointer left where the case put it: {now:?} instead of {target:?}")
+    })
+}
+
+fn same_place(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
+}
+
+/// What became of the pointer when the case ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerReturn {
+    /// Back where the case found it.
+    PutBack,
+    /// Moved since the case placed it: left where it is.
+    InUse,
+    /// The case never placed it, so there was nothing to put back.
+    NeverPlaced,
+}
+
+/// The pointer goes back only while it still rests where the case left it: one moved since is in use, and
+/// pulling it away would take over the person's own input.
+fn pointer_return(placed: Option<(f64, f64)>, now: (f64, f64)) -> PointerReturn {
+    match placed {
+        None => PointerReturn::NeverPlaced,
+        Some(placed) if same_place(now, placed) => PointerReturn::PutBack,
+        Some(_) => PointerReturn::InUse,
+    }
+}
+
+/// Puts the pointer back where the case found it, unless it was moved or never placed.
+fn return_pointer(start: (f64, f64), placed: Option<(f64, f64)>) -> Result<PointerReturn, String> {
+    let decided = pointer_return(placed, crate::platform::test_pointer_location()?);
+    if decided == PointerReturn::PutBack {
+        crate::platform::test_move_pointer(start.0, start.1)?;
+    }
+    Ok(decided)
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::{pointer_return, PointerReturn};
+
+    #[test]
+    fn puts_the_pointer_back_only_while_it_still_rests_where_the_case_left_it() {
+        let placed = Some((872.0, 458.0));
+        // The case never placed it: nothing to put back, and no event to post.
+        assert_eq!(
+            pointer_return(None, (0.0, 700.0)),
+            PointerReturn::NeverPlaced
+        );
+        // Still where the case left it, within a point.
+        assert_eq!(
+            pointer_return(placed, (872.75, 457.5)),
+            PointerReturn::PutBack
+        );
+        // Moved since, near or far: someone is using it.
+        assert_eq!(pointer_return(placed, (872.0, 459.0)), PointerReturn::InUse);
+        assert_eq!(
+            pointer_return(placed, (1497.25, 399.0)),
+            PointerReturn::InUse
+        );
+    }
+}
+
 fn view_layer(app: &AppHandle, label: &str) -> Result<Option<LayerSample>, String> {
     let label = if label == "history" {
         "clipboard"
@@ -6799,6 +6947,245 @@ window.__previewPreferences='pending';
     }
 }
 
+/// The real pointer rests on one record while the keyboard moves to another; each view keeps one action strip.
+fn run_records_pointer(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let mut original_database = None;
+    let result = (|| {
+        if app.config().identifier != "dev.local.nami.ui-tests"
+            || app.get_window("translation").is_some()
+        {
+            return Err("records-pointer requires a fresh isolated host process".into());
+        }
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        for index in 0..3 {
+            let text = format!("Synthetic pointer record {index}");
+            database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: format!("pointer-record-{index}"),
+                kind: "text".into(),
+                fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+                text,
+                // Distinct times keep the list order: equal times reorder when the list refreshes.
+                date: format!("2099-01-0{}T00:00:00Z", 3 - index),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: None,
+            })?;
+        }
+        original_database = Some(
+            app.state::<AppState>()
+                .database
+                .lock()
+                .unwrap()
+                .replace(database),
+        );
+        {
+            let state = app.state::<AppState>();
+            let mut regions = state.windows.lock().unwrap();
+            regions.dismiss();
+            regions.sync_records_session();
+        }
+        for index in 0..3 {
+            on_main(app, move |app| {
+                history_add(
+                    app,
+                    crate::model::HistoryRecord {
+                        title: String::new(),
+                        id: format!("pointer-translation-{index}"),
+                        text: format!("Synthetic pointer translation {index}"),
+                        source_language: "en".into(),
+                        translation: None,
+                        target_languages: vec!["fr".into()],
+                        translations: vec![format!("Traduction synthetique {index}")],
+                        date: format!("2099-01-0{}T00:00:00Z", index + 1),
+                        is_favorite: false,
+                        is_pinned: false,
+                        source_app: None,
+                    },
+                )
+            })?;
+        }
+        // The pointer belongs to the person at the machine. It goes back only while it still rests where the
+        // case put it: one moved since is in use.
+        let placed = Placed::default();
+        let pointer = crate::platform::test_pointer_location()?;
+        let outcome = (|| {
+            records_mode(app, "clipboard")?;
+            records_pointer_view(app, "clipboard", ".clipboard-panel", &mut samples, &placed)?;
+            records_mode(app, "translation")?;
+            records_pointer_view(
+                app,
+                "translation",
+                "#translation-history",
+                &mut samples,
+                &placed,
+            )
+        })();
+        let placed = *placed.lock().unwrap();
+        match (outcome, return_pointer(pointer, placed)) {
+            (Ok(()), Ok(PointerReturn::PutBack | PointerReturn::NeverPlaced)) => Ok(()),
+            (Ok(()), Ok(PointerReturn::InUse)) => {
+                samples.push(serde_json::json!({
+                    "phase": "pointer not put back",
+                    "reason": "it was moved after the case put it",
+                }));
+                Ok(())
+            }
+            (Err(error), Ok(PointerReturn::InUse)) => Err(format!(
+                "{error}; the pointer was moved after the case put it, so it was left where it is"
+            )),
+            (outcome, returned) => outcome.and(returned).map(|_| ()),
+        }
+    })();
+    if let Some(database) = original_database {
+        *app.state::<AppState>().database.lock().unwrap() = database;
+        let _ = crate::clipboard_runtime::changed(app);
+    }
+    DomCase {
+        name: "record pointer and keyboard action strip",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn records_pointer_view(
+    app: &AppHandle,
+    view: &'static str,
+    panel: &'static str,
+    samples: &mut Vec<serde_json::Value>,
+    placed: &Placed,
+) -> Result<(), String> {
+    const STATE: &str = r#"
+// On the frame focus enters a record, read the strip of the record the pointer rests on. A strip that fades
+// out stays visible and takes the click for the length of the fade.
+if(!window.__recordsPointerHandoffInstalled){window.__recordsPointerHandoffInstalled=true;addEventListener('focusin',event=>{window.__recordsPointerHandoff=event.target.closest?.('.history-row')?[...document.querySelectorAll('.history-row:hover:not(:focus-within) .history-row-actions')].map(strip=>{const style=getComputedStyle(strip),rect=strip.getBoundingClientRect(),hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);return {record:strip.closest('.history-row').dataset.recordId,visibility:style.visibility,opacity:style.opacity,duration:style.transitionDuration,clickable:strip.contains(hit)};}):null;},true);}
+const rows=[...p.querySelectorAll('.history-row:not([hidden])')];
+const shown=rows.filter(row=>{const style=getComputedStyle(row.querySelector('.history-row-actions'));return style.visibility==='visible'&&style.opacity!=='0';}).map(row=>row.dataset.recordId);
+const hovered=rows.filter(row=>row.matches(':hover')).map(row=>row.dataset.recordId);
+// Action strips fade over 150ms. A finished transition leaves getAnimations before its last frame is styled,
+// so the end values have to be reached as well.
+const idle=row=>row.getAnimations({subtree:true}).every(animation=>animation.playState!=='running'&&animation.playState!=='pending');
+const faded=row=>{const opacity=getComputedStyle(row.querySelector('.history-row-actions')).opacity;return opacity==='0'||opacity==='1';};
+const settled=rows.every(row=>idle(row)&&faded(row));
+const target=[...p.querySelectorAll('[data-record-target]')].map(row=>row.dataset.recordId);
+const focus=document.activeElement?.closest('.history-row')?.dataset.recordId??null;
+const focusReady=p.hasAttribute('data-focus-ready');
+const state={focusReady,handoff:window.__recordsPointerHandoff??null,order:rows.map(row=>row.dataset.recordId),target,shown,hovered,settled,focus};
+"#;
+    let mut read = |phase: &str, ready: &str| -> Result<serde_json::Value, String> {
+        let script = format!(
+            "const p=document.querySelector('{panel}');{STATE}return {{...state,ready:rows.length>=3&&({ready})}};"
+        );
+        let mut state = wait_records(app, &script)?;
+        if let Some(object) = state.as_object_mut() {
+            object.remove("ready");
+            object.insert("view".into(), view.into());
+            object.insert("phase".into(), phase.into());
+        }
+        samples.push(state.clone());
+        Ok(state)
+    };
+    let require = |condition: bool, state: &serde_json::Value, message: &str| {
+        condition
+            .then_some(())
+            .ok_or_else(|| format!("{message}: {state}"))
+    };
+    // Park the pointer off the records first, so the move onto a record is a real one.
+    let parked = move_pointer_to(
+        app,
+        &format!("document.querySelector('{panel} .history-search input')"),
+        placed,
+    )?;
+    read("pointer leaves the records", "hovered.length===0&&settled")?;
+    require_pointer_at(parked)?;
+    let resting = move_pointer_to(
+        app,
+        &format!("document.querySelectorAll('{panel} .history-row:not([hidden])')[1]"),
+        placed,
+    )?;
+    let state = read(
+        "pointer rests on the second record",
+        "hovered.length===1&&settled&&focusReady",
+    )?;
+    require_pointer_at(resting)?;
+    require(
+        state["focus"].is_null(),
+        &state,
+        "hover must leave the focus in the search field",
+    )?;
+    require(
+        state["shown"] == state["hovered"],
+        &state,
+        "hover alone must reveal one action strip",
+    )?;
+    let state = read(
+        "the record under the pointer takes the target",
+        "hovered.length===1&&target.length===1&&target[0]===hovered[0]&&settled",
+    )?;
+    require_pointer_at(resting)?;
+    let rested = state["hovered"].clone();
+    post_records_key(app, 125, 0, "\u{f701}", "\u{f701}", false)?;
+    let state = read(
+        "ArrowDown moves from search to the record under the pointer",
+        "focus!==null&&focus===hovered[0]&&settled",
+    )?;
+    require_pointer_at(resting)?;
+    require(
+        state["shown"] == state["hovered"],
+        &state,
+        "the record under the pointer must be the only action strip",
+    )?;
+    post_records_key(app, 125, 0, "\u{f701}", "\u{f701}", false)?;
+    let state = read(
+        "ArrowDown moves to the next record while the pointer rests",
+        "focus!==null&&focus!==hovered[0]&&settled",
+    )?;
+    require_pointer_at(resting)?;
+    require(
+        state["hovered"] == rested,
+        &state,
+        "the pointer must still rest on the previous record",
+    )?;
+    require(
+        state["shown"]
+            .as_array()
+            .is_some_and(|shown| shown.len() == 1)
+            && state["shown"][0] == state["focus"],
+        &state,
+        "the keyboard record must be the only action strip",
+    )?;
+    // Focus has just left the record the pointer rests on. Its strip must be gone on that frame, not fading.
+    let handoff = state["handoff"]
+        .as_array()
+        .filter(|strips| strips.len() == 1)
+        .ok_or_else(|| {
+            format!("the resting record must report its action strip as focus leaves it: {state}")
+        })?;
+    require(
+        handoff[0]["record"] == state["hovered"][0]
+            && handoff[0]["visibility"] == "hidden"
+            && handoff[0]["opacity"] == "0"
+            && handoff[0]["duration"] == "0s"
+            && handoff[0]["clickable"] == false,
+        &state,
+        "the resting record must hide its action strip at once when focus moves to another",
+    )?;
+    post_records_key(app, 126, 0, "\u{f700}", "\u{f700}", false)?;
+    let state = read(
+        "ArrowUp returns to the record under the pointer",
+        "focus!==null&&focus===hovered[0]&&settled",
+    )?;
+    require_pointer_at(resting)?;
+    require(
+        state["shown"] == state["hovered"],
+        &state,
+        "the record under the pointer must be the only action strip",
+    )
+}
+
 fn run_records_open(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let mut original_database = None;
@@ -9577,6 +9964,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "records-pinned",
             "records-pagination",
             "records-open",
+            "records-pointer",
             "selection-open",
             "cross-app",
         ]
@@ -9592,6 +9980,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_cross_app(&app)
             } else if case == "records-open" {
                 run_records_open(&app)
+            } else if case == "records-pointer" {
+                run_records_pointer(&app)
             } else if case == "clipboard-quick-paste" {
                 run_clipboard_quick_paste(&app)
             } else if case == "clipboard-capture-burst" {
