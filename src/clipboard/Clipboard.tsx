@@ -194,8 +194,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     await command('records_details_toggle');
   }
 
-  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'activate') {
-    if (!native || (action === 'paste' ? !snapshot.capabilities.autoPaste : !snapshot.capabilities.clipboardWrite)) return false;
+  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'pastePlain' | 'pastePaths' | 'activate') {
+    if (!native || (action === 'copy' || action === 'activate' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return false;
     const current = ++operation.current;
     setSelected(recordId); setFeedback(null);
     try {
@@ -407,7 +407,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
     {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} snapshot={snapshot} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canCopy={native && snapshot.capabilities.clipboardWrite} canSave={native && snapshot.capabilities.clipboardImageSave && !savingImage} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
-      if (action === 'paste' || action === 'copy') void useRecord(menuRecord.id, action);
+      if (action === 'paste' || action === 'pastePlain' || action === 'pastePaths' || action === 'copy') void useRecord(menuRecord.id, action);
       else if (action === 'save') void saveImage(menuRecord.id);
       else if (action === 'translate' || action === 'ocr') void processRecord(menuRecord.id, action);
       else if (action === 'openTarget') void openRecordTarget(menuRecord.id);

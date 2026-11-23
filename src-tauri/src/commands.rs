@@ -684,19 +684,24 @@ pub async fn clipboard_record_use(
 ) -> Result<OperationResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
     use crate::clipboard_preferences::Activation;
-    let (action, plain_text) = {
+    use crate::clipboard_runtime::PayloadMode;
+    let (action, mode) = {
         let state = app.state::<AppState>();
         let options = state.clipboard_options.lock().unwrap();
-        let action = match action.as_str() {
+        let activation = match action.as_str() {
             "copy" => Activation::Copy,
-            "paste" => Activation::Paste,
+            "paste" | "pastePlain" | "pastePaths" => Activation::Paste,
             "activate" => options.activation,
             _ => return Err("invalid_argument".into()),
         };
-        (
-            action,
-            matches!(action, Activation::Paste) && options.paste_as_plain_text,
-        )
+        let mode = match action.as_str() {
+            "pastePlain" => PayloadMode::PlainText,
+            "pastePaths" => PayloadMode::FilePaths,
+            _ => PayloadMode::Restore {
+                plain_text: matches!(activation, Activation::Paste) && options.paste_as_plain_text,
+            },
+        };
+        (activation, mode)
     };
     let operation = on_main(&app, |app| {
         app.state::<AppState>()
@@ -708,7 +713,7 @@ pub async fn clipboard_record_use(
     let state = app.state::<AppState>();
     let write = state.clipboard_writes.lock().await;
     let used_id = record_id.clone();
-    let payload = crate::clipboard_runtime::payload(&app, record_id, true, plain_text).await?;
+    let payload = crate::clipboard_runtime::payload(&app, record_id, mode).await?;
     // Transcode TIFF before taking the main thread. PNG bytes are left unchanged.
     let payload =
         tauri::async_runtime::spawn_blocking(move || platform::prepare_image_paste(payload))
@@ -2166,7 +2171,12 @@ pub async fn clipboard_image(
     let payload = {
         let state = app.state::<AppState>();
         let _write = state.clipboard_writes.lock().await;
-        crate::clipboard_runtime::payload(&app, record_id, false, false).await?
+        crate::clipboard_runtime::payload(
+            &app,
+            record_id,
+            crate::clipboard_runtime::PayloadMode::Stored,
+        )
+        .await?
     };
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let bytes = match payload {

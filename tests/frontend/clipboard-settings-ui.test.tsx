@@ -83,7 +83,7 @@ describe('clipboard recording settings', () => {
       expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
     }
     expect(general.getByRole('button', { name: 'Switch Record View shortcut' }).textContent).toBe('Tab');
-    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste Image (Context Menu)', 'Save Image (Context Menu)'];
+    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste (Context Menu)', 'Save Image (Context Menu)'];
     expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
     for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
@@ -163,7 +163,7 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⇧⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste Image (Context Menu)', 'pasteRecord', '⇧⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
+  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⇧⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '⇧⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));

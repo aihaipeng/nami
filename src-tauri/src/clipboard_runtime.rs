@@ -55,22 +55,31 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PayloadMode {
+    Stored,
+    Restore { plain_text: bool },
+    PlainText,
+    FilePaths,
+}
+
 // Caller holds clipboard_writes while reading the record and its image files.
 pub(crate) async fn payload(
     app: &AppHandle,
     id: String,
-    restore_formats: bool,
-    plain_text: bool,
+    mode: PayloadMode,
 ) -> Result<platform::ClipboardPayload, String> {
     let root = image_root(app)?;
     let (record, files, formatting) = database(app, move |database| {
         let record = database.clipboard_record(&id)?;
-        let files = if restore_formats && record.kind != "text" {
+        let files = if matches!(mode, PayloadMode::Restore { .. }) && record.kind != "text" {
             database.clipboard_file_representation(&id)?
         } else {
             None
         };
-        let formatting = if restore_formats && !plain_text && record.kind == "text" {
+        let formatting = if matches!(mode, PayloadMode::Restore { plain_text: false })
+            && record.kind == "text"
+        {
             database.clipboard_text_formatting(&id)?
         } else {
             None
@@ -78,6 +87,26 @@ pub(crate) async fn payload(
         Ok((record, files, formatting))
     })
     .await?;
+    match mode {
+        PayloadMode::PlainText if record.kind == "text" => {
+            return Ok(platform::ClipboardPayload::Text(record.text));
+        }
+        PayloadMode::FilePaths if record.kind == "files" => {
+            let paths: Vec<String> =
+                serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?;
+            if paths.is_empty()
+                || paths.len() > clipboard::MAX_FILE_COUNT
+                || paths
+                    .iter()
+                    .any(|path| !Path::new(path).is_absolute() || path.contains('\0'))
+            {
+                return Err("storage_corrupt".into());
+            }
+            return Ok(platform::ClipboardPayload::Text(paths.join("\n")));
+        }
+        PayloadMode::PlainText | PayloadMode::FilePaths => return Err("invalid_argument".into()),
+        _ => (),
+    }
     if let Some(formatting) = formatting {
         return Ok(platform::ClipboardPayload::RichText {
             text: record.text,
@@ -93,7 +122,7 @@ pub(crate) async fn image_export_png(app: &AppHandle, id: String) -> Result<Vec<
     let payload = {
         let state = app.state::<AppState>();
         let _write = state.clipboard_writes.lock().await;
-        payload(app, id, false, false).await?
+        payload(app, id, PayloadMode::Stored).await?
     };
     tauri::async_runtime::spawn_blocking(move || export_png(payload))
         .await

@@ -2592,7 +2592,7 @@ if(groups.map(group=>group.children.length).join()!=='16,6,6')throw Error('short
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
-for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste Image (Context Menu)','⇧⌘↵'],['Save Image (Context Menu)','⌘S']]) {
+for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste (Context Menu)','⇧⌘↵'],['Save Image (Context Menu)','⌘S']]) {
   if(rows.find(row=>row.querySelector('.settings-field-content')?.textContent===name)?.querySelector('.keycaps')?.textContent!==key)throw Error('missing editable default: '+name);
 }
 if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
@@ -3196,7 +3196,7 @@ return {ready:rows.length===2&&rows.some(row=>row.dataset.recordId==='action-fee
             evaluate_view_dom(app,"clipboard","document.querySelector('[data-record-id=action-feedback]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));return true;")?;
             let menu = wait_records(
                 app,
-                r#"const b=[...document.querySelectorAll('[role=menuitem]')].find(b=>b.textContent==='Remove favorite'),i=b?.querySelector('.history-symbol'),color=i&&getComputedStyle(i).color,warning=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(216, 150, 20)':'rgb(250, 173, 20)';return {ready:!!i&&color===warning,symbol:i?.dataset.symbol,color};"#,
+                r#"const b=[...document.querySelectorAll('[role=menuitem]')].find(b=>b.querySelector('.record-menu-label')?.textContent==='Unfavorite'),i=b?.querySelector('.history-symbol'),color=i&&getComputedStyle(i).color,warning=matchMedia('(prefers-color-scheme: dark)').matches?'rgb(216, 150, 20)':'rgb(250, 173, 20)';return {ready:!!i&&color===warning,symbol:i?.dataset.symbol,color};"#,
             )?;
             if menu["symbol"] != "star" {
                 return Err(format!("menu favorite: {menu}"));
@@ -3464,7 +3464,7 @@ fn run_clipboard_editor_layout(app: &AppHandle) -> DomCase {
                 r#"
 const row=document.querySelector('[data-record-id="editor-layout"]');if(!row)return {ready:false};
 const card=document.querySelector('.clipboard-editor');
-if(!card){const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');if(note)note.click();else row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:60}));return {ready:false};}
+if(!card){const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.querySelector('.record-menu-label')?.textContent==='Note');if(note)note.click();else row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:60}));return {ready:false};}
 const input=card.querySelector('input'),content=card.querySelector('textarea');if(!content||input.disabled)return {ready:false};
 const labels=[...card.querySelectorAll('.clipboard-editor-label')],style=getComputedStyle(content);
 return {ready:true,headings:card.querySelectorAll('h1,h2,h3').length,hints:card.querySelectorAll('.clipboard-editor-hint').length,labels:labels.map(label=>label.textContent),keys:[...card.querySelectorAll('.clipboard-editor-actions kbd')].map(key=>key.textContent),weights:labels.map(label=>getComputedStyle(label).fontWeight),fontStyle:style.fontStyle,contentWeight:style.fontWeight,labelStyle:getComputedStyle(labels[1]).fontStyle,value:content.value,disabled:content.disabled,readonly:content.readOnly,color:style.color,editableColor:getComputedStyle(input).color,resize:style.resize,alignment:labels.map((label,index)=>{const a=label.getBoundingClientRect(),b=[input,content][index].getBoundingClientRect();return {left:Math.abs(a.left-b.left),right:Math.abs(a.right-b.right)};})};
@@ -4594,7 +4594,7 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             )?;
             let menu = wait_records(
                 app,
-                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu);return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:[...menu.querySelectorAll('button')].map(b=>b.textContent),background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin record','Delete'].includes(b.textContent)).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:b.textContent,color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
+                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu), label=b=>b.querySelector('.record-menu-label').textContent;return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:[...menu.querySelectorAll('[role=menuitem],[role=separator]')].map(b=>b.getAttribute('role')==='separator'?'/':label(b)),background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin','Pin record','Delete'].includes(label(b))).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:label(b)==='Pin record'?'Pin':label(b),color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
             )?;
             if menu["contextTarget"] != true {
                 return Err(format!(
@@ -4602,14 +4602,20 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
                 ));
             }
             if mode == "clipboard"
-                && menu["labels"].as_array().is_none_or(|labels| {
-                    labels.iter().any(|label| label == "Copy")
-                        || !labels.iter().any(|label| label == "Translate")
-                })
+                && menu["labels"]
+                    != serde_json::json!([
+                        "Paste",
+                        "Paste as Plain Text",
+                        "Copy",
+                        "/",
+                        "Favorite",
+                        "Pin",
+                        "Note",
+                        "/",
+                        "Delete"
+                    ])
             {
-                return Err(format!(
-                    "clipboard menu must offer Translate without Copy: {menu}"
-                ));
+                return Err(format!("clipboard text menu order: {menu}"));
             }
             samples.push(
                 serde_json::json!({"mode":mode,"menuLabels":menu["labels"],"contextTarget":true}),
@@ -4892,7 +4898,7 @@ const row=document.querySelector('[data-record-id="unified-clipboard-one"]');
 if(!row)return false;
 const card=document.querySelector('.clipboard-editor');
 if(card)return !card.querySelector('input').disabled;
-const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==='Note');
+const note=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.querySelector('.record-menu-label')?.textContent==='Note');
 if(note)note.click();else row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:60}));
 return false;
 "#,
@@ -6129,6 +6135,23 @@ return true;
         }
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
         samples.push(check("Open with record list focus", "document.hasFocus()&&!!row&&document.activeElement===row.querySelector('.history-row-select')&&!focused")?);
+
+        Ok(())
+    })();
+    if let Some(path) = owned_image {
+        let _ = std::fs::remove_file(path);
+    }
+    DomCase {
+        name: "clipboard shortcut smoke through macOS and WebView",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
+fn run_clipboard_menu_paste(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
         on_main(app, |_| crate::platform::test_rich_text_capture_limit())?;
         let rich = crate::platform::ClipboardPayload::RichText {
             text: "Synthetic rich clipboard smoke".into(),
@@ -6165,48 +6188,54 @@ return true;
                 .ok_or("rich capture not searchable as plaintext")?
                 .id
         };
+        records_mode(app, "clipboard")?;
         *app.state::<AppState>().target.lock().unwrap() = None;
-        for (plain, expected) in [
-            (false, rich),
-            (
-                true,
-                crate::platform::ClipboardPayload::Text("Synthetic rich clipboard smoke".into()),
-            ),
-        ] {
-            if plain {
-                set_test_paste_format(app, true)?;
-            }
+        let paste_record = |id: &str, action: &str| {
             evaluate_view_dom(
                 app,
                 "clipboard",
                 &format!(
                     r#"
-window.__richPaste=null;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{rich_id:?},action:'paste'}})
-  .then(result=>window.__richPaste=result,error=>window.__richPaste={{error:String(error)}});
+window.__smokePaste=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{id:?},action:{action:?}}})
+  .then(result=>window.__smokePaste=result,error=>window.__smokePaste={{error:String(error)}});
 return true;
 "#
                 ),
             )?;
-            let result = wait_records(
+            wait_records(
                 app,
-                "return {ready:!!window.__richPaste,...window.__richPaste};",
-            )?;
+                "return {ready:!!window.__smokePaste,...window.__smokePaste};",
+            )
+        };
+        let check_paste = |id: &str, action: &str, expected| {
+            let result = paste_record(id, action)?;
             if result["code"] != "target_unavailable" || result["copyStatus"] != "current" {
-                return Err(format!(
-                    "rich paste safety boundary (plain={plain}): {result}"
-                ));
+                return Err(format!("{action} safety boundary: {result}"));
             }
             let actual = on_main(app, |_| {
                 Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
             })?;
             if actual != Some(expected) {
-                return Err(format!("isolated pasteboard did not match plain={plain}"));
+                return Err(format!("isolated pasteboard did not match {action}"));
             }
+            Ok(())
+        };
+        set_test_paste_format(app, false)?;
+        for (action, plain) in [("pastePlain", true), ("paste", false), ("paste", true)] {
+            if action == "paste" && plain {
+                set_test_paste_format(app, true)?;
+            }
+            let expected = if plain {
+                crate::platform::ClipboardPayload::Text("Synthetic rich clipboard smoke".into())
+            } else {
+                rich.clone()
+            };
+            check_paste(&rich_id, action, expected)?;
             on_main(app, move |_| {
                 crate::platform::test_paste_into_editor("Synthetic rich clipboard smoke", !plain)
             })?;
-            samples.push(serde_json::json!({"plainPaste":plain,"noTarget":true,"bytesMatch":true,"nativeEditorReceived":true}));
+            samples.push(serde_json::json!({"pasteAction":action,"plainPaste":plain,"noTarget":true,"bytesMatch":true,"nativeEditorReceived":true}));
         }
         set_test_paste_format(app, false)?;
         samples.push(serde_json::json!({"oversizedHtmlFallsBack":true}));
@@ -6273,12 +6302,34 @@ return true;
                     database.clipboard_edit(id, title, None)?;
                 }
             }
-            let menu = |id: &str, query: &str, label: &str| {
-                search_for(query)?;
-                check(
-                    "Open target fixture found",
-                    &format!("row?.dataset.recordId==={id:?}&&count==='1 record'"),
+            for (id, query, paths) in [
+                ("smoke-open-file", "Open smoke single", vec![&first]),
+                (
+                    "smoke-open-files",
+                    "Open smoke group",
+                    vec![&first, &second],
+                ),
+            ] {
+                let paths: Vec<_> = paths
+                    .iter()
+                    .map(|path| path.to_str().unwrap().to_owned())
+                    .collect();
+                check_paste(
+                    id,
+                    "pastePaths",
+                    crate::platform::ClipboardPayload::Text(paths.join("\n")),
                 )?;
+                check_paste(id, "paste", crate::platform::ClipboardPayload::Files(paths))?;
+                evaluate_view_dom(
+                    app,
+                    "clipboard",
+                    &format!(
+                        r#"
+const search=document.querySelector('.clipboard-panel input[type=search]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(search,{query:?});search.dispatchEvent(new Event('input',{{bubbles:true}}));return true;
+"#
+                    ),
+                )?;
+                wait_records(app, &format!("return {{ready:document.querySelector('.clipboard-panel [data-keyboard-current]')?.dataset.recordId==={id:?}&&document.querySelector('.clipboard-panel .history-record-count')?.textContent==='1 record'}};"))?;
                 evaluate_view_dom(
                     app,
                     "clipboard",
@@ -6288,40 +6339,38 @@ const row=document.querySelector('[data-record-id='+{id:?}+']');row.dispatchEven
 "#
                     ),
                 )?;
-                let sample = wait_records(
-                    app,
-                    &format!(
-                        r#"
-const item=[...document.querySelectorAll('.clipboard-context-menu button')].find(button=>button.textContent==={label:?});return {{ready:!!item,record:{id:?},action:item?.textContent}};
-"#
-                    ),
-                )?;
-                evaluate_view_dom(app, "clipboard", "document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));return true;")?;
-                Ok::<_, String>(sample)
-            };
-            samples.push(menu("smoke-open-url", "Open smoke web", "Open Link")?);
-            samples.push(menu("smoke-open-mail", "Open smoke mail", "Compose Email")?);
-            samples.push(menu(
-                "smoke-open-file",
-                "Open smoke single",
-                "Show in Finder",
-            )?);
-            samples.push(menu(
-                "smoke-open-files",
-                "Open smoke group",
-                "Choose File to Reveal",
-            )?);
+                samples.push(wait_records(app, r#"
+const menu=document.querySelector('.clipboard-context-menu');if(!menu)return {ready:false};
+const items=[...menu.querySelectorAll('[role=menuitem],[role=separator]')].map(el=>el.getAttribute('role')==='separator'?'/':el.querySelector('.record-menu-label').textContent);
+const expected=['Paste','Paste as Path','Copy','/','Show in Finder','/','Favorite','Pin','Note','/','Delete'];
+if(JSON.stringify(items)!==JSON.stringify(expected))throw Error('file menu order: '+items);
+return {ready:true,fileMenu:items,pathPaste:true,ordinaryFilePaste:true};
+"#)?);
+                if id == "smoke-open-files" {
+                    evaluate_view_dom(app, "clipboard", "[...document.querySelectorAll('.clipboard-context-menu .record-menu-label')].find(el=>el.textContent==='Show in Finder').closest('button').click();return true;")?;
+                } else {
+                    evaluate_view_dom(app, "clipboard", "document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));return true;")?;
+                }
+            }
+            let before = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+            if paste_record(&rich_id, "pastePaths")?["error"] != "invalid_argument"
+                || paste_record("smoke-open-files", "pastePlain")?["error"] != "invalid_argument"
+                || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != before
+            {
+                return Err(
+                    "wrong-kind paste must be rejected without changing the pasteboard".into(),
+                );
+            }
+            samples.push(serde_json::json!({"wrongKindPasteRejected":true}));
             evaluate_view_dom(
                 app,
                 "clipboard",
                 r#"
-window.__openPlain='pending';window.__TAURI_INTERNALS__.invoke('clipboard_open_target',{recordId:'smoke-open-plain',execute:true}).then(value=>window.__openPlain=value,error=>window.__openPlain=String(error));return true;
+const invoke=window.__TAURI_INTERNALS__.invoke;
+window.__openTypes=null;Promise.all(['web','mail','plain'].map(id=>invoke('clipboard_open_target',{recordId:'smoke-open-'+(id==='web'?'url':id),execute:false}))).then(value=>window.__openTypes=value,error=>window.__openTypes=String(error));return true;
 "#,
             )?;
-            samples.push(wait_records(app, r#"return {ready:window.__openPlain===null,action:'Reject multiline text even when its summary starts with a URL',result:window.__openPlain};"#)?);
-            evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-panel input[type=search]').focus();return true;")?;
-            press(31, CMD, "o", "o")?;
-            samples.push(check("Command-O from search", "keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted&&row?.dataset.recordId==='smoke-open-files'")?);
+            samples.push(wait_records(app, r#"return {ready:JSON.stringify(window.__openTypes)===JSON.stringify(['link','email',null]),openTypes:window.__openTypes};"#)?);
             let choose = r#"
 const buttons=[...document.querySelectorAll('.clipboard-detail button.clipboard-file')];return {ready:buttons.length===2&&buttons[1].getAttribute('aria-label')==='Show in Finder: second file.txt'&&!buttons[1].disabled,action:'Choose either file in details'};
 "#;
@@ -6347,11 +6396,8 @@ window.__finderDispatch='pending';window.__TAURI_INTERNALS__.invoke('clipboard_o
 
         Ok(())
     })();
-    if let Some(path) = owned_image {
-        let _ = std::fs::remove_file(path);
-    }
     DomCase {
-        name: "clipboard shortcut smoke through macOS and WebView",
+        name: "clipboard menu formats and file reveal",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -8910,16 +8956,18 @@ return true;
 "#,
         )?;
         samples.push(wait_records(app, r#"
-const nodes=[...document.querySelectorAll('.record-context-menu [role=menuitem],.record-context-menu [role=separator]')];
+const panel=document.querySelector('.record-context-menu');if(!panel)return {ready:false};
+const nodes=[...panel.querySelectorAll('[role=menuitem],[role=separator]')];
+const width=panel.getBoundingClientRect().width;
 const menu=nodes.map(el=>el.getAttribute('role')==='separator'?'/':`${el.querySelector('.record-menu-label')?.textContent.trim()} ${el.querySelector('kbd')?.textContent}`);
-const expected=['Copy ⇧⌘C','Paste ⇧⌘↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⇧⌘T','OCR ⇧⌘O','/','Delete ⌘⌫'];
+const expected=['Copy ⇧⌘C','Paste ⇧⌘↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⇧⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
 const pinned=document.querySelector('.clipboard-panel .history-pinned');
 if(!pinned)return {ready:false};
 const empty=pinned.classList.contains('empty');pinned.classList.remove('empty');
 const style=getComputedStyle(pinned,'::after'),gradient=style.backgroundImage,height=style.height;
 pinned.classList.toggle('empty',empty);
 const separators=nodes.filter(el=>el.getAttribute('role')==='separator').map(el=>{const css=getComputedStyle(el);return [css.backgroundImage,css.height]});
-return {ready:JSON.stringify(menu)===JSON.stringify(expected)&&height==='1px'&&gradient.startsWith('linear-gradient(to right,')&&separators.length===3&&separators.every(([background,size])=>background===gradient&&size===height),imageMenu:menu,dividerGradient:gradient,separators};
+return {ready:width===220&&JSON.stringify(menu)===JSON.stringify(expected)&&height==='1px'&&gradient.startsWith('linear-gradient(to right,')&&separators.length===3&&separators.every(([background,size])=>background===gradient&&size===height),imageMenu:menu,menuWidth:width,dividerGradient:gradient,separators};
 "#)?);
         // With no external target, Paste can write only the isolated named pasteboard.
         *app.state::<AppState>().target.lock().unwrap() = None;
@@ -9247,6 +9295,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         if ![
             "clipboard-actions",
             "clipboard-shortcuts",
+            "clipboard-menu-paste",
             "clipboard-quick-paste",
             "record-display-shortcuts",
             "clipboard-settings",
@@ -9312,6 +9361,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_record_display_shortcuts(&app)
             } else if case == "clipboard-shortcuts" {
                 run_clipboard_shortcuts_smoke(&app)
+            } else if case == "clipboard-menu-paste" {
+                run_clipboard_menu_paste(&app)
             } else if case == "clipboard-actions" {
                 run_clipboard_action_timing(&app)
             } else if case == "clipboard-media" {

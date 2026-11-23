@@ -322,7 +322,7 @@ describe('clipboard text processing', () => {
     expect(within(row('text-image')).getByRole('button', { name: 'Extract text' }).getAttribute('aria-description')).toBe(local);
     expect(within(row('text-image')).getByRole('button', { name: 'Translate' }).getAttribute('aria-description')).toBe(online);
     fireEvent.contextMenu(row('text-image'));
-    expect(screen.getByRole('menuitem', { name: 'OCR' }).getAttribute('aria-description')).toBe(local);
+    expect(screen.getByRole('menuitem', { name: 'Extract Text' }).getAttribute('aria-description')).toBe(local);
     expect(screen.getByRole('menuitem', { name: 'Translate' }).getAttribute('aria-description')).toBe(online);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
@@ -395,7 +395,7 @@ describe('clipboard text processing', () => {
     expect(calls('clipboard_record_has_text')).toHaveLength(0);
   });
 
-  it.each([['OCR', 'ocr'], ['Translate', 'translate']])('offers explicit %s on unknown images without probing and reports empty results', async (label, action) => {
+  it.each([['Extract Text', 'ocr'], ['Translate', 'translate']])('offers explicit %s on unknown images without probing and reports empty results', async (label, action) => {
     records = [{ ...records[0], id: 'picture', kind: 'image' }];
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => {
@@ -583,7 +583,8 @@ describe('database clipboard history', () => {
     await mount('clipboard'); await waitFor(()=>expect(row('first')).toBeTruthy());
     fireEvent.contextMenu(row('first'));
     expect(screen.getByRole('menuitem',{name:'Paste'})).toHaveProperty('disabled',true);
-    expect(screen.queryByRole('menuitem',{name:'Copy'})).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Paste as Plain Text' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('menuitem', { name: 'Copy' })).toHaveProperty('disabled', true);
     expect(screen.queryByRole('menuitem',{name:'Extract text'})).toBeNull();
     fireEvent.click(screen.getByRole('menuitem',{name:'Paste'}));
     expect(calls('clipboard_record_use')).toHaveLength(0);
@@ -605,7 +606,7 @@ describe('database clipboard history', () => {
     records = [{ ...records[0], kind: 'image' }];
     await mount('clipboard');
     await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
-    for (const [label, action] of [['Translate', 'translate'], ['OCR', 'ocr']]) {
+    for (const [label, action] of [['Translate', 'translate'], ['Extract Text', 'ocr']]) {
       fireEvent.contextMenu(row('first'));
       fireEvent.click(screen.getByRole('menuitem', { name: label }));
       await waitFor(() => expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'first', action }));
@@ -618,8 +619,13 @@ describe('database clipboard history', () => {
     fireEvent.contextMenu(row('first'), { clientX: 190, clientY: 200 });
     const menu = screen.getByRole('menu');
     const items = within(menu).getAllByRole('menuitem');
-    expect(items.map((item) => item.textContent)).toEqual(['Paste', 'Translate', 'Favorite', 'Pin record', 'Note', 'Delete']);
-    expect(items.every((item) => item.children.length === 2)).toBe(true);
+    const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
+      item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
+    expect(layout).toEqual([
+      ['Paste', '⇧⌘↵'], ['Paste as Plain Text', '—'], ['Copy', '⇧⌘C'], '/',
+      ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
+    ]);
+    expect(items.every((item) => item.children.length === 3)).toBe(true);
     expect(items.at(-1)?.classList.contains('clipboard-menu-delete')).toBe(true);
     expect(calls('clipboard_record_use')).toHaveLength(0);
     expect(document.activeElement).toBe(items[0]);
@@ -640,9 +646,14 @@ describe('database clipboard history', () => {
   it('pastes by menu record ID and dismisses on outside pointer or scroll', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     fireEvent.contextMenu(row('first'));
-    expect(screen.queryByRole('menuitem', { name: 'Paste as Plain Text' })).toBeNull();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Paste' }));
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'paste' }));
+    fireEvent.contextMenu(row('first'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Paste as Plain Text' }));
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'pastePlain' }));
+    fireEvent.contextMenu(row('first'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy' }));
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
     fireEvent.contextMenu(row('first'));
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
@@ -659,12 +670,13 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('picture')).toBeTruthy());
     const open = () => { fireEvent.contextMenu(row('picture')); return screen.getByRole('menu'); };
     const menu = open();
+    expect(menu.style.width).toBe('220px');
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
       ['Copy', '⇧⌘C'], ['Paste', '⇧⌘↵'], ['Save', '⌘S'], '/',
       ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/',
-      ['Translate', '⇧⌘T'], ['OCR', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
+      ['Translate', '⇧⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(within(menu).getByRole('menuitem', { name: 'Save' }).getAttribute('aria-keyshortcuts')).toBe('Meta+S');
     fireEvent.scroll(menu);
@@ -713,13 +725,15 @@ describe('database clipboard history', () => {
   });
 
   it.each([
-    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }],
-    ['saveImage', 'Save', 'clipboard_image_save', { key: 's', code: 'KeyS', metaKey: true }],
-  ] as const)('updates %s and its actual key handler while the right-click menu is open', async (action, label, command, oldKey) => {
-    records[0] = { ...records[0], id: 'picture', kind: 'image' };
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'image'],
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'text'],
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'files'],
+    ['saveImage', 'Save', 'clipboard_image_save', { key: 's', code: 'KeyS', metaKey: true }, 'image'],
+  ] as const)('updates %s and its actual key handler while the right-click menu is open', async (action, label, command, oldKey, kind) => {
+    records[0] = { ...records[0], kind };
     await mount('clipboard');
-    await waitFor(() => expect(row('picture')).toBeTruthy());
-    fireEvent.contextMenu(row('picture'));
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    fireEvent.contextMenu(row('first'));
     const menu = screen.getByRole('menu');
     const item = within(menu).getByRole('menuitem', { name: label });
     const save = async (change: object) => {
@@ -741,7 +755,7 @@ describe('database clipboard history', () => {
     await save({ binding: { code: 'KeyJ', modifiers: ['alt'] } });
     expect(screen.getByRole('menu')).toBe(menu);
     fireEvent.keyDown(document.activeElement!, key);
-    const expected = action === 'pasteRecord' ? { recordId: 'picture', action: 'paste' } : { recordId: 'picture' };
+    const expected = action === 'pasteRecord' ? { recordId: 'first', action: 'paste' } : { recordId: 'first' };
     await waitFor(() => expect(calls(command).at(-1)?.[1]).toEqual(expected));
   });
 
@@ -1446,7 +1460,7 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
     fireEvent.contextMenu(row('first'));
-    expect(within(screen.getByRole('menu')).queryByRole('menuitem', { name: 'Copy' })).toBeNull();
+    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Copy' }).getAttribute('aria-keyshortcuts')).toBe('Meta+Shift+C');
   });
 
   it('deletes a searched record with Command-Delete without editing the query', async () => {
@@ -2465,7 +2479,7 @@ describe('database clipboard history', () => {
 });
 
 describe('clipboard open target', () => {
-  it('uses the current record for Command-O and the context row for Open Link, passing only the record ID', async () => {
+  it('keeps Command-O for links without showing link actions in the text menu', async () => {
     records = records.map((record) => ({ ...record, kind: 'text', text: `https://example.test/${record.id}` }));
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'link' : original(name, args));
@@ -2476,20 +2490,46 @@ describe('clipboard open target', () => {
     fireEvent.keyDown(search, { key: 'o', code: 'KeyO', metaKey: true });
     expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'first', execute: true });
     fireEvent.contextMenu(row('pinned'));
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open Link' }));
-    expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'pinned', execute: true, fileIndex: undefined });
+    expect(screen.queryByRole('menuitem', { name: 'Open Link' })).toBeNull();
+    expect(calls('clipboard_open_target')).toHaveLength(1);
     expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
-  it('keeps a disabled shortcut inactive without removing the context action', async () => {
+  it('groups file actions and sends only the context row ID for path paste or reveal', async () => {
+    bridge.snapshot.window.translationVisible = false;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'files' : original(name, args));
+    await mount('clipboard');
+    await waitFor(() => expect(row('pinned')).toBeTruthy());
+    fireEvent.contextMenu(row('pinned'));
+    const menu = screen.getByRole('menu');
+    const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
+      item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
+    expect(layout).toEqual([
+      ['Paste', '⇧⌘↵'], ['Paste as Path', '—'], ['Copy', '⇧⌘C'], '/', ['Show in Finder', '⌘O'], '/',
+      ['Unfavorite', '⌥F'], ['Unpin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
+    ]);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Paste as Path' }));
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pastePaths' }));
+    expect(calls('clipboard_open_target')).toHaveLength(0);
+    fireEvent.contextMenu(row('pinned'));
+    fireEvent.keyDown(document.activeElement!, { key: 'o', code: 'KeyO', metaKey: true });
+    expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'pinned', execute: true, fileIndex: undefined });
+    await waitFor(() => expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'pinned' }));
+  });
+
+  it('keeps a disabled shortcut inactive without removing the file reveal action', async () => {
     bridge.snapshot.clipboardControls.shortcuts.openTarget.enabled = false;
     const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'email' : original(name, args));
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'file' : original(name, args));
     await mount('clipboard');
-    await waitFor(() => expect(row('first')).toBeTruthy());
-    fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'o', code: 'KeyO', metaKey: true });
+    await waitFor(() => expect(row('pinned')).toBeTruthy());
+    fireEvent.contextMenu(row('pinned'));
+    const reveal = screen.getByRole('menuitem', { name: 'Show in Finder' });
+    expect(reveal.querySelector('kbd')?.textContent).toBe('—');
+    fireEvent.keyDown(reveal, { key: 'o', code: 'KeyO', metaKey: true });
     expect(calls('clipboard_open_target')).toHaveLength(0);
-    fireEvent.contextMenu(row('first'));
-    expect(await screen.findByRole('menuitem', { name: 'Compose Email' })).toBeTruthy();
+    fireEvent.click(reveal);
+    expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'pinned', execute: true });
   });
 });

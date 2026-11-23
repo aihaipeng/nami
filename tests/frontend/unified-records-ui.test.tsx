@@ -236,7 +236,7 @@ describe('unified records workspace', () => {
       expect(element).toBeTruthy(); return element!;
     });
     fireEvent.contextMenu(row);
-    const favorite = screen.getByRole('menuitem', { name: 'Remove favorite' });
+    const favorite = screen.getByRole('menuitem', { name: kind === 'clipboard' ? 'Unfavorite' : 'Remove favorite' });
     expect(favorite.querySelector('[data-symbol="star"]')).toBeTruthy();
     expect(favorite.classList.contains('record-favorite')).toBe(true);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });

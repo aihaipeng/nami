@@ -18,7 +18,7 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
   const showKeys = items.some((item) => item.shortcut !== undefined);
   return <>
     <span ref={anchor} tabIndex={-1} onFocus={onReturnFocus} className="record-menu-anchor" style={{ left: x, top: y }} />
-    <FloatingPanel anchor={anchor} onClose={onClose} label="Actions" role="menu" width={showKeys ? 192 : 176} side="bottom" className={`record-context-menu clipboard-context-menu${showKeys ? ' record-context-menu-keys' : ''}`}>
+    <FloatingPanel anchor={anchor} onClose={onClose} label="Actions" role="menu" width={showKeys ? 220 : 176} side="bottom" className={`record-context-menu clipboard-context-menu${showKeys ? ' record-context-menu-keys' : ''}`}>
       <div onKeyDown={(event) => {
         if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.key === 'Dead') return;
         const item = items.find((item) => !item.disabled && item.shortcut && matchesBinding(item.shortcut.binding, event));
