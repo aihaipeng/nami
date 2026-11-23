@@ -1,6 +1,6 @@
 import { clipboardOpenError, clipboardOpenTarget } from './openTarget';
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { ViewProps } from '../App';
@@ -16,7 +16,7 @@ import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
 import { HistoryList } from '../shared/HistoryList';
-import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable } from '../shared/clipboardShortcuts';
+import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
 import { matchesBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
@@ -31,6 +31,7 @@ function isQuickPasteModifier(event: KeyboardEvent) {
 }
 
 export function Clipboard({ t, snapshot, command, native, active = true }: ViewProps & { active?: boolean }) {
+  const composing = useRef(false);
   const [session, setSession] = useState(0);
   const [showQuickPasteHints, setShowQuickPasteHints] = useState(false);
   const [kindFilter, setKindFilter] = useState<ClipboardKind | null>(null);
@@ -369,6 +370,29 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       void clipboard.update(record.id, action);
     }
   }
+  const translateFromLaunchKey = useEffectEvent(() => {
+    if (!active || !document.hasFocus() || editing || composing.current || !clipboard.displayReady || clipboard.error) return;
+    const shortcut = shortcuts.find(({ action }) => action === 'translate');
+    if (!shortcut?.enabled || shortcut.globalConflict || !shortcut.binding || !isClipboardTranslateLaunchKey(shortcut.binding) || !usableShortcut('translate')) return;
+    const record = menu ? menuRecord : ordered.find(({ id }) => id === keyboardId);
+    if (!record || !canTranslateRecord(record) || processing !== null) return;
+    setMenu(null);
+    void processRecord(record.id, 'translate');
+  });
+  useEffect(() => {
+    if (!native || !active) return;
+    let disposed = false;
+    const subscription = listen('clipboard_translate_requested', () => { if (!disposed) translateFromLaunchKey(); });
+    const resetComposition = () => { composing.current = false; };
+    window.addEventListener('blur', resetComposition);
+    return () => {
+      disposed = true;
+      resetComposition();
+      window.removeEventListener('blur', resetComposition);
+      void subscription.then((remove) => remove());
+    };
+  }, [native, active]);
+
   function loadNearEnd(element: HTMLDivElement) {
     if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 180) void clipboard.loadMore();
   }
@@ -393,7 +417,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         onUpdate={(action) => { void clipboard.update(record.id, action); }} />
     </article>;
   }
-  return <section data-focus-ready={clipboard.displayReady || undefined} inert={editing !== null} onKeyDown={recordKeyDown} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
+  return <section data-focus-ready={clipboard.displayReady || undefined} inert={editing !== null} onKeyDown={recordKeyDown} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
     <ActivityBeam label={t('working')} active={active && clipboard.showActivity} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="clipboard" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />

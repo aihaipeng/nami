@@ -1748,7 +1748,7 @@ fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value
                 result,
                 "edge".into(),
                 revision,
-                Some(origin),
+                Some(crate::history_runtime::TranslationFocus::History(origin)),
             )
             .await,
         );
@@ -2588,11 +2588,11 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='16,6,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='16,7,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
-for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste (Context Menu)','⇧⌘↵'],['Save Image (Context Menu)','⌘S']]) {
+for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste (Context Menu)','↵'],['Paste as Plain Text (Context Menu)','⌘↵'],['Save Image (Context Menu)','⌘S']]) {
   if(rows.find(row=>row.querySelector('.settings-field-content')?.textContent===name)?.querySelector('.keycaps')?.textContent!==key)throw Error('missing editable default: '+name);
 }
 if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
@@ -2654,7 +2654,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts.preview.binding;
     if(saved.code!==code||saved.modifiers.length)throw Error('recorder did not keep a bare '+code);
   }
-  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pasteRecord','KeyL'],['saveImage','KeyU']]) {
+  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pasteRecord','KeyL'],['pastePlain','KeyI'],['saveImage','KeyU']]) {
     await local(action,null,false);
     await local(action,{code,modifiers:['alt']});
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts[action];
@@ -2838,7 +2838,7 @@ const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>i
 const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
 const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
 const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⌘O','⇧⌘O','⇧⌘↵','⌘S'].join(),bindings,kept};
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⌘T','⌘O','⇧⌘O','↵','⌘↵','⌘S'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -2950,10 +2950,20 @@ window.__groupRestore=null;
 (async()=>{
   const local=(action,binding,enabled)=>invoke('clipboard_record_shortcut_set',{action,binding,enabled});
   const set=(action,binding,enabled)=>invoke('translation_shortcut_set',{action,binding,enabled});
-  const rejected=async request=>{try{await request();}catch(error){if(String(error)==='shortcut_clipboard_panel')return;throw error;}throw Error('shared preview/retranslate conflict accepted');};
+  const rejected=async request=>{try{await request();}catch(error){if(String(error)==='shortcut_clipboard_panel')return;throw error;}throw Error('same-scope record shortcut conflict accepted');};
   const initial=await invoke('app_snapshot');
   await rejected(()=>set('translate',initial.clipboardControls.shortcuts.preview.binding));
   await rejected(()=>local('preview',initial.translationPreferences.shortcuts.translate));
+  const reuse={code:'KeyB',modifiers:['alt']};
+  await set('copyPrimary',reuse);
+  await local('ocr',reuse);
+  await rejected(()=>local('preview',reuse));
+  await rejected(()=>set('focusSearch',reuse));
+  await rejected(()=>set('copySecondary',initial.clipboardControls.shortcuts.preview.binding));
+  await local('ocr',initial.clipboardControls.shortcuts.ocr.binding);
+  await set('copyPrimary',initial.translationPreferences.shortcuts.copyPrimary);
+  await set('translate',initial.clipboardControls.shortcuts.pastePlain.binding);
+  await local('pastePlain',initial.translationPreferences.shortcuts.translate);
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
   await set('openTranslation',{code:'F8',modifiers:[]});
   await set('openTranslation',null,false);
@@ -4594,7 +4604,10 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             )?;
             let menu = wait_records(
                 app,
-                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};const style=getComputedStyle(menu), label=b=>b.querySelector('.record-menu-label').textContent;return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:[...menu.querySelectorAll('[role=menuitem],[role=separator]')].map(b=>b.getAttribute('role')==='separator'?'/':label(b)),background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin','Pin record','Delete'].includes(label(b))).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:label(b)==='Pin record'?'Pin':label(b),color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
+                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};
+const style=getComputedStyle(menu),label=b=>b.querySelector('.record-menu-label').textContent;
+const nodes=[...menu.querySelectorAll('[role=menuitem],[role=separator]')],separator=menu.querySelector('[role=separator]');
+return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:nodes.map(b=>b.getAttribute('role')==='separator'?'/':label(b)),keys:nodes.filter(b=>b.getAttribute('role')==='menuitem').map(b=>b.querySelector('kbd')?.textContent),width:menu.getBoundingClientRect().width,divider:separator&&[getComputedStyle(separator).height,getComputedStyle(separator).backgroundImage],background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin','Delete'].includes(label(b))).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:label(b),color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
             )?;
             if menu["contextTarget"] != true {
                 return Err(format!(
@@ -4617,11 +4630,31 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             {
                 return Err(format!("clipboard text menu order: {menu}"));
             }
+            if mode == "translation"
+                && (menu["labels"]
+                    != serde_json::json!([
+                        "Copy source text",
+                        "Copy Primary Text",
+                        "/",
+                        "Translate",
+                        "/",
+                        "Favorite",
+                        "Pin",
+                        "Note",
+                        "/",
+                        "Delete"
+                    ])
+                    || menu["keys"]
+                        != serde_json::json!(["⇧⌘C", "⌘1", "⌘↵", "⌥F", "⌥P", "⇧⌘N", "⌘⌫"]))
+            {
+                return Err(format!("single-result translation menu: {menu}"));
+            }
             samples.push(
                 serde_json::json!({"mode":mode,"menuLabels":menu["labels"],"contextTarget":true}),
             );
             let mut common = menu;
             common.as_object_mut().unwrap().remove("labels");
+            common.as_object_mut().unwrap().remove("keys");
             menus.push(common);
             evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
             wait_records(app, "return {ready:!document.querySelector('.record-context-menu')&&!document.querySelector('.record-view:not([hidden]) .history-row.context-target')};")?;
@@ -4630,6 +4663,38 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             return Err(format!("record menus differ: {menus:?}"));
         }
         samples.push(serde_json::json!({"sharedMenus":menus}));
+        let before_copy = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('#translation-history [data-record-id=unified-translation]');
+row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;
+"#,
+        )?;
+        wait_records(app, "return {ready:!!document.querySelector('#translation-history .context-target[data-record-id=unified-translation]')&&!!document.querySelector('[role=menu]')};")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+[...document.querySelectorAll('[role=menu] .record-menu-label')].find(item=>item.textContent==='Copy Primary Text').closest('button').click();return true;
+"#,
+        )?;
+        let mut copied_primary = false;
+        for _ in 0..80 {
+            copied_primary = on_main(app, move |_| {
+                Ok(crate::platform::clipboard_version() != before_copy
+                    && crate::platform::read_clipboard(|_| false)?.is_some_and(|capture| matches!(capture.payload, crate::platform::ClipboardPayload::Text(text) if text == "Synthetic shared output")))
+            })?;
+            if copied_primary {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !copied_primary {
+            return Err("translation menu did not copy the saved primary text".into());
+        }
+        samples.push(serde_json::json!({"contextPrimaryCopied":true}));
         for mode in ["clipboard", "translation"] {
             records_mode(app, mode)?;
             for width in [280.0, 320.0, 454.0, 380.0] {
@@ -5682,6 +5747,87 @@ return true;
     }
 }
 
+fn run_clipboard_translate_shortcut(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        let record = nami::clipboard::ClipboardRecord {
+            id: "translate-hotkey".into(),
+            kind: "text".into(),
+            text: "Synthetic clipboard Command-T".into(),
+            date: "2099-01-01T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: "translate-hotkey".into(),
+        };
+        app.state::<AppState>()
+            .database
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("isolated test database")?
+            .clipboard_insert(&record)?;
+        on_main(app, |app| {
+            crate::sync_global_shortcuts(app);
+            show(app, "clipboard")
+        })?;
+        wait_records(
+            app,
+            r#"const row=document.querySelector('[data-keyboard-current]');return {ready:document.hasFocus()&&row?.dataset.recordId==='translate-hotkey',focused:document.hasFocus(),record:row?.dataset.recordId};"#,
+        )?;
+        let command_t = || {
+            on_main(app, |app| {
+                for event in [5, 6] {
+                    send_registered_hotkey(
+                        app,
+                        nami::shortcuts::KeyBinding::new("KeyT", &["meta"]),
+                        event,
+                    )?;
+                }
+                Ok(())
+            })
+        };
+        command_t()?;
+        samples.push(wait_dom(app, r#"
+const input=document.querySelector('.source-input');return {ready:input?.value==='Synthetic clipboard Command-T',action:'Command-T translated the clipboard record'};
+"#)?);
+        samples.push(wait_records(app, r#"
+const row=document.querySelector('#translation-history .history-items .history-row');
+const button=row?.querySelector('.history-row-select');
+return {ready:document.hasFocus()&&document.activeElement===button&&button?.getAttribute('aria-pressed')==='true'&&row?.hasAttribute('data-keyboard-current')&&button.textContent.includes('Synthetic clipboard Command-T'),action:'New translation record selected and focused',record:row?.dataset.recordId,focused:document.hasFocus(),activeId:document.activeElement?.closest('[data-record-id]')?.dataset.recordId,activeTag:document.activeElement?.tagName,selected:button?.getAttribute('aria-pressed'),current:row?.hasAttribute('data-keyboard-current')};
+"#)?);
+        samples.push(wait_dom(app, r#"
+return {ready:document.querySelector('.source-input')?.value==='Synthetic clipboard Command-T'&&document.body.textContent.includes('Synthetic translation en'),action:'Focused row matches the completed translation'};
+"#)?);
+        // Verify the global fallback without capturing selection from another app.
+        on_main(app, |app| {
+            app.state::<AppState>()
+                .translation_preferences
+                .lock()
+                .unwrap()
+                .selection_enabled = false;
+            app.get_webview("translation")
+                .ok_or("translation webview")?
+                .set_focus()
+                .map_err(|_| "translation focus")?;
+            Ok(())
+        })?;
+        wait_dom(app, "return {ready:document.hasFocus()};")?;
+        command_t()?;
+        samples.push(wait_dom(app, r#"
+const input=document.querySelector('.source-input');return {ready:input?.value==='',action:'Command-T with right pane focused opened blank translation'};
+"#)?);
+        Ok::<(), String>(())
+    })();
+    DomCase {
+        name: "clipboard Command-T focus routing",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let mut owned_image = None;
@@ -6102,7 +6248,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
             "Translate text ready",
             "focused&&row?.dataset.recordId==='smoke-keep'&&count==='1 record'",
         )?;
-        press(17, CMD | SHIFT, "T", "T")?;
+        press(17, CMD, "t", "t")?;
         samples.push(wait_dom(app, r#"
 const input=document.querySelector('.source-input');return {ready:input?.value==='Synthetic shortcut smoke keep',action:'Translate'};
 "#)?);
@@ -6231,7 +6377,42 @@ return true;
             } else {
                 rich.clone()
             };
-            check_paste(&rich_id, action, expected)?;
+            if action == "paste" && plain {
+                check_paste(&rich_id, action, expected)?;
+            } else {
+                wait_records(
+                    app,
+                    &format!(
+                        r#"
+const row=document.querySelector('.clipboard-panel [data-record-id='+CSS.escape({rich_id:?})+']');
+if(!row||!document.hasFocus())return {{ready:false}};
+row.dispatchEvent(new MouseEvent('contextmenu',{{bubbles:true,cancelable:true,clientX:100,clientY:100}}));
+return {{ready:true}};
+"#
+                    ),
+                )?;
+                wait_records(app, "return {ready:!!document.activeElement?.closest('.record-context-menu-keys')};")?;
+                let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+                post_records_key(app, 36, if plain { 1 << 20 } else { 0 }, "\r", "\r", false)?;
+                samples.push(wait_records(
+                    app,
+                    r#"
+const menuOpen=!!document.querySelector('.record-context-menu');
+const message=document.querySelector('.clipboard-panel .record-feedback')?.textContent;
+return {ready:!menuOpen&&message==='Content copied. Press ⌘V to paste manually.',message,menuOpen};
+"#,
+                )?);
+                let matched = on_main(app, move |_| {
+                    Ok(crate::platform::clipboard_version() != version
+                        && crate::platform::read_clipboard(|_| false)?
+                            .is_some_and(|capture| capture.payload == expected))
+                })?;
+                if !matched {
+                    return Err(format!(
+                        "menu shortcut did not write the expected {action} payload"
+                    ));
+                }
+            }
             on_main(app, move |_| {
                 crate::platform::test_paste_into_editor("Synthetic rich clipboard smoke", !plain)
             })?;
@@ -8960,7 +9141,7 @@ const panel=document.querySelector('.record-context-menu');if(!panel)return {rea
 const nodes=[...panel.querySelectorAll('[role=menuitem],[role=separator]')];
 const width=panel.getBoundingClientRect().width;
 const menu=nodes.map(el=>el.getAttribute('role')==='separator'?'/':`${el.querySelector('.record-menu-label')?.textContent.trim()} ${el.querySelector('kbd')?.textContent}`);
-const expected=['Copy ⇧⌘C','Paste ⇧⌘↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⇧⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
+const expected=['Copy ⇧⌘C','Paste ↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
 const pinned=document.querySelector('.clipboard-panel .history-pinned');
 if(!pinned)return {ready:false};
 const empty=pinned.classList.contains('empty');pinned.classList.remove('empty');
@@ -8981,7 +9162,7 @@ window.addEventListener('keydown',e=>{window.__imageMenuKey=[e.code,e.key,e.meta
 return true;
 "#,
         )?;
-        post_records_key(app, 36, (1 << 20) | (1 << 17), "\r", "\r", false)?;
+        post_records_key(app, 36, 0, "\r", "\r", false)?;
         samples.push(wait_records(app, r#"
 const message=document.querySelector('.clipboard-panel .record-feedback')?.textContent;
 const menuOpen=!!document.querySelector('.record-context-menu');
@@ -9295,6 +9476,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         if ![
             "clipboard-actions",
             "clipboard-shortcuts",
+            "clipboard-translate-shortcut",
             "clipboard-menu-paste",
             "clipboard-quick-paste",
             "record-display-shortcuts",
@@ -9359,6 +9541,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_clipboard_capture_setting(&app)
             } else if case == "record-display-shortcuts" {
                 run_record_display_shortcuts(&app)
+            } else if case == "clipboard-translate-shortcut" {
+                run_clipboard_translate_shortcut(&app)
             } else if case == "clipboard-shortcuts" {
                 run_clipboard_shortcuts_smoke(&app)
             } else if case == "clipboard-menu-paste" {

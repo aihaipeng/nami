@@ -21,7 +21,7 @@ import { useNativeChrome } from './useNativeChrome';
 type Popup = 'source' | 'primary' | 'secondary';
 type Engine = 'edge' | 'google';
 type TranslationReuse = { recordId: string; focusHistory?: boolean; targetIndex?: number };
-type TranslationRequest = { text: string; source: string; targets: string[]; fromSelection: boolean };
+type TranslationRequest = { text: string; source: string; targets: string[]; fromSelection: boolean; clipboardSession?: number };
 type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 
 let sourceMeasure: CanvasRenderingContext2D | null | undefined;
@@ -54,7 +54,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const [partialEngine, setPartialEngine] = useState<Engine | null>(null);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
   const fromSelection = useRef(false);
-  const receiveSelection = useRef<(context: { text: string; error: string | null }) => void>(() => {});
+  const receiveSelection = useRef<(context: { text: string; error: string | null }, clipboardSession?: number) => void>(() => {});
   const [popup, setPopup] = useState<Popup | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cachedResults, setCachedResults] = useState<string[]>([]);
@@ -166,7 +166,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       const revision = requestRevision.current;
       const session = currentWindow.current.recordsSession;
       const context = await invoke<{ text: string; error: string | null } | null>('clipboard_translation_take');
-      if (!disposed && context && requestRevision.current === revision && currentWindow.current.recordsSession === session && currentWindow.current.translationVisible) receiveSelection.current(context);
+      if (!disposed && context && requestRevision.current === revision && currentWindow.current.recordsSession === session && currentWindow.current.translationVisible) receiveSelection.current(context, session ?? 0);
     };
     const remove = listen('clipboard_translation_ready', () => { void take().catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); }); });
     void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); });
@@ -291,7 +291,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
   }
 
-  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false) {
+  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false, clipboardSession?: number) {
     const origin = reuse ?? completedRecord.current;
     cancelRequest();
     const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation && (reuse.translation.targetEngines?.[index] ?? reuse.translation.engine) === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
@@ -302,7 +302,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     const revision = requestRevision.current;
     await cancellation.current;
     if (requestRevision.current !== revision) return;
-    await runTranslation({ text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured }, revision,
+    await runTranslation({ text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(clipboardSession !== undefined ? { clipboardSession } : {}) }, revision,
       origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {});
   }
 
@@ -366,7 +366,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (!focusHistory) input.current?.focus({ preventScroll: true });
   }
 
-  receiveSelection.current = (context) => {
+  receiveSelection.current = (context, clipboardSession) => {
     completedRecord.current = null;
     cancelRequest(); normalizedCaret.current = null;
     const preferred = preferencesRef.current;
@@ -375,7 +375,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     fromSelection.current = true;
     setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error === 'selection_copy_no_change' ? t('selectionCopyDisabled') : context.error ? 'Selected text is unavailable in this application.' : null);
     const targets = [preferred.primaryLanguage, ...(preferred.secondaryLanguage === 'none' ? [] : [preferred.secondaryLanguage])];
-    if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true);
+    if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true, undefined, undefined, false, clipboardSession);
     input.current?.focus({ preventScroll: true });
   };
 

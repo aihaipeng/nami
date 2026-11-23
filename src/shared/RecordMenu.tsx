@@ -1,13 +1,27 @@
 import { Fragment, useRef, type ReactNode } from 'react';
-import { matchesBinding, type KeyBinding } from './shortcuts';
+import { keycapLabels, matchesBinding, modifierKey, type KeyBinding } from './shortcuts';
+import type { Translate } from './i18n';
 import { FloatingPanel } from './FloatingPanel';
 
 export interface RecordMenuItem { action: string; label: string; icon: ReactNode; description?: string; disabled?: boolean; destructive?: boolean; active?: boolean; separatorBefore?: boolean; shortcut?: { binding: KeyBinding; label: string; aria?: string } | null }
 
 const navigation = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
 
-export function recordMenuAllowsBinding({ code, modifiers }: KeyBinding) {
-  return code !== 'Escape' && code !== 'Tab' && (modifiers.length > 0 || ![...navigation, 'Enter', 'Space'].includes(code));
+function recordMenuAllowsBinding(action: string, { code, modifiers }: KeyBinding) {
+  return code !== 'Escape' && code !== 'Tab' && (modifiers.length > 0 || (code === 'Enter' ? action === 'paste' : code !== 'Space' && !navigation.includes(code)));
+}
+
+export function recordMenuItems(groups: readonly (readonly RecordMenuItem[])[], mac: boolean, t: Translate, bindingFor: (action: string) => KeyBinding | null | undefined) {
+  return groups.filter((group) => group.length).flatMap((group, index) => group.map((item, row) => {
+    const binding = !item.disabled && bindingFor(item.action);
+    const separatorBefore = index > 0 && row === 0;
+    if (!binding || !recordMenuAllowsBinding(item.action, binding)) return { ...item, separatorBefore, shortcut: null };
+    const keys = keycapLabels(binding, mac, t);
+    const symbol = keys.at(-1) ?? '';
+    const ariaKey = /^[!-~]$/.test(symbol) ? symbol : binding.code;
+    const aria = modifierKey(binding.code) ? undefined : [...binding.modifiers.map((modifier) => modifier[0].toUpperCase() + modifier.slice(1)), ariaKey].join('+');
+    return { ...item, separatorBefore, shortcut: { binding, label: keys.join(mac ? '' : '+'), aria } };
+  }));
 }
 
 export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
@@ -25,6 +39,11 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
         if (item) {
           event.preventDefault(); event.stopPropagation();
           if (!event.repeat) { onReturnFocus(); onAction(item.action); }
+          return;
+        }
+        // An unbound modified Return is not the focused button's activation key.
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)) {
+          event.preventDefault();
           return;
         }
         if (!navigation.includes(event.key)) return;

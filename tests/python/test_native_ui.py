@@ -19,6 +19,7 @@ CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor'
 CASE_NAMES['record-display-shortcuts'] = 'record previews and macOS window shortcuts'
 CASE_NAMES['clipboard-quick-paste'] = 'scoped numbered clipboard paste'
 CASE_NAMES['clipboard-menu-paste'] = 'clipboard menu formats and file reveal'
+CASE_NAMES['clipboard-translate-shortcut'] = 'clipboard Command-T focus routing'
 CASE_NAMES['clipboard-shortcuts'] = 'clipboard shortcut smoke through macOS and WebView'
 CASE_NAMES['records-pinned'] = 'shared pinned boundary coverage'
 CASE_NAMES['translation-controls'] = 'real WK + native controls: anchors, long source, narrow menus and native action bridge'
@@ -30,7 +31,7 @@ CASE_NAMES['clipboard-image-index'] = 'clipboard local image indexing and perfor
 CASE_NAMES['clipboard-details'] = 'clipboard full details and hover navigation'
 CASE_NAMES['cross-app'] = 'cross-process selection and clipboard safety'
 SMOKE_CASES = (
-    ('clipboard-shortcuts', True), ('clipboard-menu-paste', False), ('selection-open', True),
+    ('clipboard-shortcuts', True), ('clipboard-translate-shortcut', False), ('clipboard-menu-paste', False), ('selection-open', True),
     # This case measures layout and native chrome, not visible presentation frames.
     ('translation-controls', False), ('translation-partial', False), ('record-display-shortcuts', True),
     ('clipboard-settings', False), ('clipboard-kind-text', False), ('clipboard-image-index', False),
@@ -212,6 +213,7 @@ def test_smoke_builds_once_and_runs_each_case_in_a_separate_report(tmp_path, mon
     assert calls[0][:4] == ['npm', 'run', 'tauri', '--']
     expected = [
         ('native-ui-smoke-clipboard-shortcuts-report.json', True, 'clipboard-shortcuts'),
+        ('native-ui-smoke-clipboard-translate-shortcut-report.json', False, 'clipboard-translate-shortcut'),
         ('native-ui-smoke-clipboard-menu-paste-report.json', False, 'clipboard-menu-paste'),
         ('native-ui-smoke-selection-open-report.json', True, 'selection-open'),
         ('native-ui-smoke-translation-controls-report.json', False, 'translation-controls'),
@@ -315,7 +317,7 @@ def valid_report():
 
 
 @pytest.mark.dfx_diagnostics
-@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'clipboard-menu-paste', 'record-display-shortcuts', 'clipboard-kind-text', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
+@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'clipboard-translate-shortcut', 'clipboard-menu-paste', 'record-display-shortcuts', 'clipboard-kind-text', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
 def test_selected_report_accepts_only_its_current_complete_case(selected):
     name = CASE_NAMES[selected]
     result = {'runId': 'current', 'testCase': selected, 'passed': True,

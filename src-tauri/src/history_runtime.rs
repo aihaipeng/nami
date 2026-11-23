@@ -218,12 +218,18 @@ pub(crate) async fn cleanup_translations(
     Ok(count)
 }
 
+#[derive(Clone)]
+pub(crate) enum TranslationFocus {
+    History(String),
+    Clipboard(u64),
+}
+
 pub(crate) async fn commit_translation(
     app: &AppHandle,
     record: HistoryRecord,
     engine: String,
     revision: u64,
-    focus_origin: Option<String>,
+    focus_origin: Option<TranslationFocus>,
 ) -> Result<HistoryRecord, String> {
     let state = app.state::<AppState>();
     let _write = state.history_writes.lock().await;
@@ -260,7 +266,7 @@ pub(crate) async fn commit_translation(
             .translation_revision
             .load(std::sync::atomic::Ordering::SeqCst)
             == revision;
-        let (can_refocus, browsing) = {
+        let (can_refocus, browsing, session) = {
             let window = state.windows.lock().unwrap();
             (
                 focus_origin.is_some()
@@ -270,6 +276,7 @@ pub(crate) async fn commit_translation(
                     && window.record_view == crate::model::RecordView::Translation
                     && !window.records_editor_open,
                 window.records_browsing,
+                window.records_session,
             )
         };
         let query = {
@@ -279,7 +286,20 @@ pub(crate) async fn commit_translation(
         };
         let refocus = {
             let mut history = state.history.lock().unwrap();
-            let refocus = can_refocus && history.selected_id() == focus_origin.as_deref();
+            let refocus = can_refocus
+                && match &focus_origin {
+                    Some(TranslationFocus::History(id)) => {
+                        history.selected_id() == Some(id.as_str())
+                    }
+                    Some(TranslationFocus::Clipboard(started)) => {
+                        session == *started
+                            && !browsing
+                            && app
+                                .get_window("translation")
+                                .is_some_and(|window| window.is_focused().unwrap_or(false))
+                    }
+                    None => false,
+                };
             history.add_completed(record.clone(), current && (!browsing || refocus), &query)?;
             refocus
         };

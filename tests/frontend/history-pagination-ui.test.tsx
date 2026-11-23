@@ -63,7 +63,7 @@ describe('paged database history', () => {
     const row = document.querySelector<HTMLElement>('#translation-history [data-record-id="page-1"]')!;
     expect(row).toBeTruthy();
     const command = action === 'copy' ? 'translation_sample_copy' : action === 'favorite' || action === 'delete' ? 'history_record_update' : 'history_sample_select';
-    if (action === 'retranslate') { fireEvent.contextMenu(row); fireEvent.click(screen.getByRole('menuitem', { name: 'Retranslate' })); }
+    if (action === 'retranslate') { fireEvent.contextMenu(row); fireEvent.click(screen.getByRole('menuitem', { name: 'Translate' })); }
     else fireEvent.click(within(row).getByRole('button', { name: action === 'select' ? 'Translation: Synthetic record 1' : action === 'copy' ? 'Copy source text' : action === 'favorite' ? 'Favorite' : 'Delete history record' }));
     expect(calls(command)).toHaveLength(0);
     await act(async () => pending.resolve({ ...bridge.history, revision: bridge.history.revision + 1, generation: bridge.history.generation + 1, totalRecords: 3, hasMore: false }));

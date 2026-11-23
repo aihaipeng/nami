@@ -321,12 +321,7 @@ pub async fn clipboard_record_shortcut_set(
         .shortcuts
         .clone();
     let reserved = std::iter::once(clipboard.as_ref())
-        .chain(preferences.general_bindings().map(Some))
-        .chain(
-            action
-                .shared_with_translation()
-                .then_some(preferences.translate.as_ref()),
-        )
+        .chain(preferences.bindings_for_record(action).map(Some))
         .collect::<Vec<_>>();
     let mut shortcuts = state
         .clipboard_options

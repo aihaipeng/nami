@@ -1,9 +1,8 @@
 import type { Translate } from '../shared/i18n';
 import { ClipboardPaste, FolderOpen, Save } from 'lucide-react';
-import { RecordMenu, recordMenuAllowsBinding, type RecordMenuItem } from '../shared/RecordMenu';
+import { RecordMenu, recordMenuItems, type RecordMenuItem } from '../shared/RecordMenu';
 import type { AppSnapshot } from '../shared/contracts';
-import { clipboardPanelShortcuts, type ClipboardRecordAction } from '../shared/clipboardShortcuts';
-import { keycapLabels, modifierKey } from '../shared/shortcuts';
+import { clipboardPanelShortcuts } from '../shared/clipboardShortcuts';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import type { ClipboardRecord } from './useClipboard';
 
@@ -40,17 +39,10 @@ export function ClipboardMenu({ record, snapshot, x, y, canPaste, canCopy, canSa
     [paste, { action: 'pastePlain', label: t('clipboardPastePlain'), icon: pasteIcon, disabled: !canPaste }, copy],
     marks, remove,
   ];
-  const configured = clipboardPanelShortcuts(snapshot).filter(({ enabled, binding, globalConflict }) => enabled && binding && !globalConflict && recordMenuAllowsBinding(binding));
-  const items = groups.filter((group) => group.length).flatMap((group, index) => group.map((item, row) => {
-    const action: ClipboardRecordAction | 'pastePlain' | 'pastePaths' = item.action === 'copy' ? 'copyRecord' : item.action === 'paste' ? 'pasteRecord' : item.action === 'save' ? 'saveImage' : item.action;
-    const binding = !item.disabled && !snapshot.storageError && configured.find((shortcut) => shortcut.action === action)?.binding;
-    const separatorBefore = index > 0 && row === 0;
-    if (!binding) return { ...item, separatorBefore, shortcut: null };
-    const keys = keycapLabels(binding, mac, t);
-    const symbol = keys.at(-1) ?? '';
-    const ariaKey = /^[!-~]$/.test(symbol) ? symbol : binding.code;
-    const aria = modifierKey(binding.code) ? undefined : [...binding.modifiers.map((modifier) => modifier[0].toUpperCase() + modifier.slice(1)), ariaKey].join('+');
-    return { ...item, separatorBefore, shortcut: { binding, label: keys.join(mac ? '' : '+'), aria } };
-  }));
+  const configured = clipboardPanelShortcuts(snapshot);
+  const items = recordMenuItems(groups, mac, t, (action) => {
+    const shortcutAction = action === 'copy' ? 'copyRecord' : action === 'paste' ? 'pasteRecord' : action === 'save' ? 'saveImage' : action;
+    return snapshot.storageError ? null : configured.find(({ action, enabled, globalConflict }) => action === shortcutAction && enabled && !globalConflict)?.binding;
+  });
   return <RecordMenu x={x} y={y} items={items} onClose={onClose} onReturnFocus={onReturnFocus} onAction={(action) => onAction(action as Action)} />;
 }

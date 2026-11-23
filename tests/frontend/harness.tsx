@@ -2,7 +2,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import type { HistorySnapshot } from '../../src/translation/history';
 import { initialSnapshot, type AppSnapshot, type TranslationPreferences, type WindowState } from '../../src/shared/contracts';
-import { clipboardOnlyActions, defaultClipboardShortcuts, sameClipboardBinding, sharedRecordActions, type ClipboardRecordAction } from '../../src/shared/clipboardShortcuts';
+import { clipboardOnlyActions, defaultClipboardShortcuts, isClipboardTranslateLaunchKey, sameClipboardBinding, sharedRecordActions, type ClipboardRecordAction } from '../../src/shared/clipboardShortcuts';
 import { defaultClipboardBinding, defaultTranslationShortcuts, generalShortcutActions, globalTranslationActions, normalizeBinding, recordWindowActions, shortcutError, translationWindowActions, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from '../../src/shared/shortcuts';
 
 const bridge = vi.hoisted(() => ({
@@ -94,7 +94,7 @@ beforeEach(() => {
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
     if (name === 'translation_run') {
-      const request = args as { text: string; source: string; targets: string[]; reuse?: { recordId: string; targetIndex?: number; focusHistory?: boolean } };
+      const request = args as { text: string; source: string; targets: string[]; clipboardSession?: number; reuse?: { recordId: string; targetIndex?: number; focusHistory?: boolean } };
       const previous = bridge.history.records.find(({ id }) => id === request.reuse?.recordId);
       const count = bridge.invoke.mock.calls.filter(([name]) => name === 'translation_run').length;
       const record = { ...historySamples[0], id: count === 1 ? 'translation-test' : `translation-test-${count}`, text: request.text, sourceLanguage: request.source, translation: { requestedSource: request.source, engine: bridge.snapshot.translationEngine, strategyVersion: 1, detections: [] }, targetLanguages: request.targets, translations: request.targets.map((target, index) => request.reuse?.targetIndex !== undefined && index !== request.reuse.targetIndex && previous?.text === request.text && previous.sourceLanguage === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false, sourceApp: previous?.text === request.text ? previous.sourceApp : undefined };
@@ -102,7 +102,8 @@ beforeEach(() => {
       if (!bridge.snapshot.window.recordsBrowsing || request.reuse?.focusHistory) bridge.history.selectedId = record.id;
       ++bridge.history.revision;
       deliver('history_changed', historySnapshot());
-      if (request.reuse?.focusHistory) deliver('history_refocus', record.id);
+      const window = bridge.snapshot.window;
+      if (request.reuse?.focusHistory || request.clipboardSession !== undefined && request.clipboardSession === (window.recordsSession ?? 0) && window.historyVisible && window.recordView === 'translation' && window.translationVisible && !window.recordsBrowsing) deliver('history_refocus', record.id);
       return record;
     }
     if (name === 'translation_focus_input') deliver('translation_focus_requested', null);
@@ -178,13 +179,15 @@ beforeEach(() => {
     if (name === 'translation_shortcut_set') {
       const { action, binding, enabled } = args as { action: ShortcutAction; binding: TranslationShortcuts[ShortcutAction]; enabled?: boolean };
       const preferences = bridge.snapshot.translationPreferences;
+      const candidate = enabled === true ? preferences.shortcuts[action] : binding;
+      if (candidate && Object.entries(bridge.snapshot.clipboardControls.shortcuts).some(([recordAction, shortcut]) =>
+        (generalShortcutActions.some((entry) => entry === action) || sharedRecordActions.some((entry) => entry === recordAction))
+        && !(bridge.snapshot.capabilities.platform === 'macos' && recordAction === 'translate' && globalTranslationActions.some((entry) => entry === action) && isClipboardTranslateLaunchKey(candidate))
+        && shortcut.binding && sameClipboardBinding(shortcut.binding, candidate))) throw new Error('shortcut_clipboard_panel');
       if (enabled !== undefined) {
         if (action === 'selection') preferences.selectionEnabled = enabled;
         else preferences.disabledShortcuts = enabled ? preferences.disabledShortcuts.filter((item) => item !== action) : [...new Set([...preferences.disabledShortcuts, action])];
       } else {
-        if (binding && Object.entries(bridge.snapshot.clipboardControls.shortcuts).some(([recordAction, shortcut]) =>
-          ((generalShortcutActions as readonly ShortcutAction[]).includes(action) || action === 'translate' && recordAction !== 'ocr' && recordAction !== 'translate')
-          && shortcut.binding && sameClipboardBinding(shortcut.binding, binding))) throw new Error('shortcut_clipboard_panel');
         const error = shortcutError(action, binding, preferences.shortcuts, bridge.snapshot.clipboardBinding);
         if (error) throw new Error(error);
         preferences.shortcuts = { ...preferences.shortcuts, [action]: binding ? normalizeBinding(binding) : null };
@@ -218,8 +221,11 @@ beforeEach(() => {
     if (name === 'clipboard_record_shortcut_set') {
       const { action, enabled, binding } = args as { action: ClipboardRecordAction; enabled?: boolean; binding?: KeyBinding | null };
       const shortcuts = bridge.snapshot.clipboardControls.shortcuts;
-      if (binding && [...Object.entries(shortcuts).flatMap(([key, shortcut]) => key === action ? [] : [shortcut.binding]), bridge.snapshot.clipboardBinding, ...generalShortcutActions.map((action) => bridge.snapshot.translationPreferences.shortcuts[action]), ...(clipboardOnlyActions.some((entry) => entry === action) ? [] : [bridge.snapshot.translationPreferences.shortcuts.translate])]
-        .some((current) => current && sameClipboardBinding(current, binding))) throw new Error('shortcut_clipboard_panel');
+      const candidate = enabled === true ? shortcuts[action].binding : binding;
+      const reserved = sharedRecordActions.some((entry) => entry === action)
+        ? [...generalShortcutActions, ...translationWindowActions] : generalShortcutActions;
+      if (candidate && [...Object.entries(shortcuts).flatMap(([key, shortcut]) => key === action ? [] : [shortcut.binding]), bridge.snapshot.clipboardBinding, ...reserved.filter((entry) => !(bridge.snapshot.capabilities.platform === 'macos' && action === 'translate' && isClipboardTranslateLaunchKey(candidate) && globalTranslationActions.some((launch) => launch === entry))).map((entry) => bridge.snapshot.translationPreferences.shortcuts[entry])]
+        .some((current) => current && sameClipboardBinding(current, candidate))) throw new Error('shortcut_clipboard_panel');
       if (enabled !== undefined) shortcuts[action].enabled = enabled;
       else shortcuts[action].binding = binding ?? null;
       deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));

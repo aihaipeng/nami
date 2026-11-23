@@ -5,7 +5,7 @@ import { bindingFromEvent, editsText, globalTranslationActions, recordWindowActi
 
 export const recordNavigationActions = ['navigateUp', 'navigateDown', 'previousCategory', 'nextCategory'] as const;
 export const sharedRecordActions = [...recordNavigationActions, 'switchView', 'focusRecords', 'preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
-export const clipboardMenuOnlyActions = ['pasteRecord', 'saveImage'] as const;
+export const clipboardMenuOnlyActions = ['pasteRecord', 'pastePlain', 'saveImage'] as const;
 export const clipboardOnlyActions = ['openTarget', 'ocr', 'translate', ...clipboardMenuOnlyActions] as const;
 export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyActions] as const;
 export type ClipboardRecordAction = typeof clipboardRecordActions[number];
@@ -17,9 +17,9 @@ export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
   const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = ['alt']) => ({ enabled: true, binding: { code, modifiers } });
   return {
     openTarget: shortcut('KeyO', [primary]),
-    pasteRecord: shortcut('Enter', [primary, 'shift']), saveImage: shortcut('KeyS', [primary]),
+    pasteRecord: shortcut('Enter', []), pastePlain: shortcut('Enter', [primary]), saveImage: shortcut('KeyS', [primary]),
     preview: shortcut('KeyY', [primary]),
-    note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', [primary, 'shift']),
+    note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
     navigateUp: shortcut('ArrowUp', []), navigateDown: shortcut('ArrowDown', []),
     previousCategory: shortcut('ArrowLeft', []), nextCategory: shortcut('ArrowRight', []),
     switchView: shortcut('Tab', []), focusRecords: { binding: null, enabled: true }, copyRecord: shortcut('KeyC', [primary, 'shift']),
@@ -32,18 +32,20 @@ export function sameClipboardBinding(left: KeyBinding, right: KeyBinding) {
 }
 
 export const clipboardShortcutLabels = {
-  pasteRecord: 'clipboardShortcutPasteRecord', saveImage: 'clipboardShortcutSaveImage',
+  pasteRecord: 'clipboardShortcutPasteRecord', pastePlain: 'clipboardShortcutPastePlain', saveImage: 'clipboardShortcutSaveImage',
   openTarget: 'clipboardShortcutOpenTarget', preview: 'clipboardShortcutPreview', note: 'toggleRecordNote', ocr: 'clipboardShortcutOcr', translate: 'translation',
   navigateUp: 'navigateUp', navigateDown: 'navigateDown', previousCategory: 'previousCategory', nextCategory: 'nextCategory',
   switchView: 'switchRecordView', focusRecords: 'focusRecords', copyRecord: 'copy',
   favorite: 'clipboardShortcutFavorite', pin: 'clipboardShortcutPin', delete: 'clipboardShortcutDelete',
 } as const satisfies Record<ClipboardRecordAction, MessageKey>;
 
-export function clipboardGlobalBindings(snapshot: AppSnapshot) {
+export const isClipboardTranslateLaunchKey = (binding: KeyBinding) => binding.code === 'KeyT' && binding.modifiers.length === 1 && binding.modifiers[0] === 'meta';
+
+export function clipboardGlobalBindings(snapshot: AppSnapshot, includeTranslationLaunch = true) {
   const { translationPreferences: preferences } = snapshot;
   return [
     snapshot.clipboardShortcutEnabled ? snapshot.clipboardBinding : null,
-    ...([...globalTranslationActions, 'toggleHistory', 'openSettings'] as const)
+    ...([...(includeTranslationLaunch ? globalTranslationActions : []), 'toggleHistory', 'openSettings'] as const)
       .filter((action) => translationShortcutEnabled(preferences, action)).map((action) => preferences.shortcuts[action]),
   ];
 }
@@ -53,8 +55,9 @@ export function clipboardPanelShortcuts(snapshot: AppSnapshot, actions: readonly
   return actions.map((action) => {
     const shortcut = snapshot.clipboardControls.shortcuts[action] ?? defaultClipboardShortcuts(snapshot.capabilities.primaryModifier)[action];
     const { binding } = shortcut;
+    const contextual = action === 'translate' && snapshot.capabilities.platform === 'macos' && binding && isClipboardTranslateLaunchKey(binding);
     const globalConflict = !!binding && [
-      ...globals,
+      ...(contextual ? clipboardGlobalBindings(snapshot, false) : globals),
       ...recordWindowActions.filter((candidate) => candidate !== 'openSettings' && (action === 'copyRecord' || action === 'focusRecords') && translationShortcutEnabled(snapshot.translationPreferences, candidate)).map((candidate) => snapshot.translationPreferences.shortcuts[candidate]),
     ].some((global) => global && sameBinding(global, binding));
     return { action, ...shortcut, globalConflict };
@@ -66,14 +69,14 @@ export function clipboardShortcutAvailable(snapshot: AppSnapshot, native: boolea
     && (action !== 'ocr' || snapshot.capabilities.imageOcr && snapshot.capabilities.clipboardWrite)
     && (action !== 'openTarget' || snapshot.capabilities.clipboardOpenTarget)
     && (action !== 'copyRecord' || snapshot.capabilities.clipboardWrite)
-    && (action !== 'pasteRecord' || snapshot.capabilities.autoPaste)
+    && (action !== 'pasteRecord' && action !== 'pastePlain' || snapshot.capabilities.autoPaste)
     && (action !== 'saveImage' || snapshot.capabilities.clipboardImageSave));
 }
 
 export function clipboardKeyAction(shortcuts: ReturnType<typeof clipboardPanelShortcuts>, event: KeyboardEvent) {
   const key = bindingFromEvent(event);
   const action = key && shortcuts.find(({ binding, enabled, globalConflict }) => enabled && !globalConflict && binding && sameClipboardBinding(binding, key))?.action;
-  if (action === 'pasteRecord' || action === 'saveImage') return;
+  if (action === 'pasteRecord' || action === 'pastePlain' || action === 'saveImage') return;
   if (!editsText(event)) return action;
   const search = event.target instanceof HTMLInputElement && event.target.type === 'search' ? event.target : null;
   if (!search) return;

@@ -1110,26 +1110,35 @@ pub async fn translation_shortcut_set(
     let _write = state.shortcut_writes.lock().await;
     let mut preferences = state.translation_preferences.lock().unwrap().clone();
     let shortcut_action = crate::shortcuts::ShortcutAction::parse(&action)?;
-    if let Some(enabled) = enabled {
-        if binding.is_some() {
-            return Err("invalid_argument".into());
-        }
-        preferences.set_shortcut_enabled(&action, enabled)?;
+    if enabled.is_some() && binding.is_some() {
+        return Err("invalid_argument".into());
+    }
+    let candidate = if enabled == Some(true) {
+        preferences.shortcuts.get(shortcut_action)
     } else {
-        if binding.as_ref().is_some_and(|binding| {
-            let options = state.clipboard_options.lock().unwrap();
-            let records = &options.record_shortcuts;
-            if shortcut_action == crate::shortcuts::ShortcutAction::Translate {
-                records.conflicts_with_translation(binding)
-            } else {
-                crate::shortcuts::GENERAL_SHORTCUT_ACTIONS.contains(&shortcut_action)
-                    && records.conflicts(binding, None)
-            }
-        }) {
-            return Err("shortcut_clipboard_panel".into());
-        }
+        binding.as_ref()
+    };
+    if candidate.is_some_and(|binding| {
+        state
+            .clipboard_options
+            .lock()
+            .unwrap()
+            .record_shortcuts
+            .conflicts_with_translation(shortcut_action, binding)
+    }) {
+        return Err("shortcut_clipboard_panel".into());
+    }
+    if enabled != Some(false) {
+        let binding = if enabled.is_some() {
+            candidate.cloned()
+        } else {
+            binding
+        };
         let clipboard = state.clipboard_shortcut.lock().unwrap().binding.clone();
         preferences.set_shortcut(&action, binding, clipboard.as_ref())?;
+    }
+    if let Some(enabled) = enabled {
+        preferences.set_shortcut_enabled(&action, enabled)?;
     }
     if !shortcut_action.is_global() || !platform::capabilities().selection {
         return commit_preferences(&app, preferences, false).await;
@@ -1193,18 +1202,10 @@ pub async fn translation_shortcuts_restore(
         preferences.selection_enabled = true;
     }
     let next_records = records.as_ref().unwrap_or(&current_records);
-    if preferences
-        .shortcuts
-        .general_bindings()
-        .any(|binding| next_records.conflicts(binding, None))
+    if preferences.shortcuts.conflicts_with_records(next_records)
         || clipboard
             .as_ref()
             .is_some_and(|binding| next_records.conflicts(binding, None))
-        || preferences
-            .shortcuts
-            .translate
-            .as_ref()
-            .is_some_and(|binding| next_records.conflicts_with_translation(binding))
     {
         return Err("shortcut_clipboard_panel".into());
     }
@@ -1325,7 +1326,7 @@ pub struct PartialTranslationView {
 pub(crate) struct PendingTranslation {
     record: crate::model::HistoryRecord,
     errors: Vec<Option<String>>,
-    focus_origin: Option<String>,
+    focus_origin: Option<crate::history_runtime::TranslationFocus>,
     revision: u64,
     pub(crate) retrying: bool,
 }
@@ -1353,6 +1354,7 @@ pub(crate) enum TranslationRunMode {
         reuse: Option<crate::translation::TranslationReuse>,
         retry_id: Option<String>,
         retry_engine: Option<String>,
+        clipboard_session: Option<u64>,
     },
     Background {
         revision: u64,
@@ -1371,9 +1373,12 @@ pub async fn translation_run(
     reuse: Option<crate::translation::TranslationReuse>,
     retry_id: Option<String>,
     retry_engine: Option<String>,
+    clipboard_session: Option<u64>,
 ) -> Result<TranslationRunOutput, String> {
     authorize(&window, &["translation"])?;
-    if retry_id.is_some() && reuse.is_some() {
+    if (retry_id.is_some() || clipboard_session.is_some()) && reuse.is_some()
+        || clipboard_session.is_some() && !from_selection
+    {
         return Err("invalid_argument".into());
     }
     let captured = if from_selection {
@@ -1395,6 +1400,7 @@ pub async fn translation_run(
             reuse,
             retry_id,
             retry_engine,
+            clipboard_session,
         },
     )
     .await
@@ -1421,13 +1427,14 @@ pub(crate) async fn run_translation(
     captured: Option<serde_json::Value>,
     mode: TranslationRunMode,
 ) -> Result<TranslationRunOutput, String> {
-    let (reuse, retry_id, retry_engine, expected_revision) = match mode {
+    let (reuse, retry_id, retry_engine, clipboard_session, expected_revision) = match mode {
         TranslationRunMode::Foreground {
             reuse,
             retry_id,
             retry_engine,
-        } => (reuse, retry_id, retry_engine, None),
-        TranslationRunMode::Background { revision } => (None, None, None, Some(revision)),
+            clipboard_session,
+        } => (reuse, retry_id, retry_engine, clipboard_session, None),
+        TranslationRunMode::Background { revision } => (None, None, None, None, Some(revision)),
     };
     if let Some(error) = app
         .state::<AppState>()
@@ -1442,7 +1449,10 @@ pub(crate) async fn run_translation(
     #[cfg(feature = "ui-tests")]
     let local_fixture = if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
         if app.config().identifier != "dev.local.nami.ui-tests"
-            || std::env::var("NAMI_UI_TEST_CASE").as_deref() != Ok("translation-partial")
+            || !matches!(
+                std::env::var("NAMI_UI_TEST_CASE").as_deref(),
+                Ok("translation-partial" | "clipboard-translate-shortcut")
+            )
         {
             return Err("translation_network_disabled_in_tests".into());
         }
@@ -1498,7 +1508,8 @@ pub(crate) async fn run_translation(
         reuse
             .as_ref()
             .filter(|reuse| reuse.focus_history)
-            .map(|reuse| reuse.record_id.clone())
+            .map(|reuse| crate::history_runtime::TranslationFocus::History(reuse.record_id.clone()))
+            .or_else(|| clipboard_session.map(crate::history_runtime::TranslationFocus::Clipboard))
     };
     let previous_history = reuse
         .as_ref()
@@ -1701,7 +1712,7 @@ async fn partial_translation_fixture(
     let failed = match text {
         "Synthetic split primary" | "Synthetic held retry" => Some("ja"),
         "Synthetic split secondary" => Some("en"),
-        "Synthetic split total failure" => None,
+        "Synthetic split total failure" | "Synthetic clipboard Command-T" => None,
         _ => return Err("unexpected_fixture_request".into()),
     };
     if targets.len() == 1 && failed.is_some() {
@@ -1716,7 +1727,8 @@ async fn partial_translation_fixture(
         .iter()
         .map(|target| {
             if engine == "edge"
-                && (failed.is_none() || (targets.len() == 2 && Some(target.as_str()) == failed))
+                && (text == "Synthetic split total failure"
+                    || (targets.len() == 2 && Some(target.as_str()) == failed))
             {
                 (String::new(), Some("Synthetic service unavailable".into()))
             } else {
@@ -2036,6 +2048,20 @@ pub async fn clipboard_shortcut_set(
         if binding.is_some() {
             return Err("invalid_argument".into());
         }
+        if let Some(binding) = shortcut.binding.as_ref().filter(|_| enabled) {
+            let preferences = state.translation_preferences.lock().unwrap();
+            validate_clipboard_binding(binding.clone(), &preferences.shortcuts)?;
+            crate::shortcuts::validate_quick_paste_reservation(binding)?;
+            if state
+                .clipboard_options
+                .lock()
+                .unwrap()
+                .record_shortcuts
+                .conflicts(binding, None)
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+        }
         shortcut.enabled = enabled;
         ("clipboard_shortcut_enabled", enabled.to_string())
     } else {
@@ -2056,11 +2082,7 @@ pub async fn clipboard_shortcut_set(
             .binding
             .as_ref()
             .is_some_and(|binding| records.conflicts(binding, None))
-            || defaults.is_some()
-                && preferences
-                    .shortcuts
-                    .general_bindings()
-                    .any(|binding| records.conflicts(binding, None))
+            || defaults.is_some() && preferences.shortcuts.conflicts_with_records(records)
         {
             return Err("shortcut_clipboard_panel".into());
         }

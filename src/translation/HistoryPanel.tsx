@@ -12,15 +12,15 @@ import { RecordActions } from '../shared/RecordActions';
 import { useHistory } from './useHistory';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryList } from '../shared/HistoryList';
-import { RecordMenu } from '../shared/RecordMenu';
+import { RecordMenu, recordMenuItems } from '../shared/RecordMenu';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { translationShortcutEnabled } from '../shared/contracts';
-import { editsText, matchesBinding } from '../shared/shortcuts';
+import { editsText, matchesBinding, sameBinding } from '../shared/shortcuts';
 import { ClipboardEditor } from '../clipboard/ClipboardEditor';
-import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, sharedRecordActions } from '../shared/clipboardShortcuts';
+import { clipboardGlobalBindings, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, sharedRecordActions } from '../shared/clipboardShortcuts';
 
 interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> {
   selectedId: string | null;
@@ -104,11 +104,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   useRecordsOpenFocus(search, active, state.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
     focusReady, !history.loading, setTarget);
   useEffect(() => {
-    if (!native || !active || !state.historyVisible) return;
+    if (!native) return;
     let disposed = false;
+    // A fast clipboard translation can finish while this mounted panel is becoming visible.
     const remove = listen<string>('history_refocus', ({ payload }) => { if (!disposed) setRefocus(payload); });
     return () => { disposed = true; void remove.then((unlisten) => unlisten()); };
-  }, [native, active, state.historyVisible, state.recordsSession]);
+  }, [native]);
   useLayoutEffect(() => {
     if (!refocus) return;
     if (!active || !state.historyVisible || !state.translationVisible || editing || menu || history.error) {
@@ -135,7 +136,9 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }, [active, selection]);
   useEffect(() => {
-    const close = () => setMenu(null);
+    const close = (event: Event) => {
+      if (!(event.target instanceof Element && event.target.closest('.record-context-menu-keys'))) setMenu(null);
+    };
     window.addEventListener('scroll', close, true);
     return () => window.removeEventListener('scroll', close, true);
   }, []);
@@ -331,6 +334,42 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     </article>;
   }
 
+  function menuItems(record: HistoryRecord) {
+    const canCopy = native && snapshot.capabilities.clipboardWrite;
+    const copyIcon = <HistoryIcon name="doc.on.doc" />;
+    const preferences = snapshot.translationPreferences;
+    const globals = clipboardGlobalBindings(snapshot);
+    const translationBinding = (action: 'copyPrimary' | 'copySecondary' | 'translate') => {
+      const binding = preferences.shortcuts[action];
+      return binding && translationShortcutEnabled(preferences, action) && !globals.some((key) => key && sameBinding(key, binding)) ? binding : null;
+    };
+    const primary = translationBinding('copyPrimary');
+    const secondary = translationBinding('copySecondary');
+    const shared = clipboardPanelShortcuts(snapshot, sharedRecordActions);
+    return recordMenuItems([
+      [
+        { action: 'source', label: t('copySource'), icon: copyIcon, disabled: !canCopy },
+        { action: 'primary', label: t('copyPrimaryText'), icon: copyIcon, disabled: !canCopy || !record.translations[0]?.trim() },
+        ...(record.translations[1]?.trim() ? [{ action: 'secondary', label: t('copySecondaryText'), icon: copyIcon, disabled: !canCopy }] : []),
+      ],
+      [{ action: 'translate', label: t('translation'), icon: <HistoryIcon name="languages" /> }],
+      [
+        { action: 'favorite', label: record.isFavorite ? 'Unfavorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: record.isFavorite, disabled: !native },
+        { action: 'pin', label: record.isPinned ? 'Unpin' : 'Pin', icon: <HistoryIcon name={record.isPinned ? 'pin.fill' : 'pin'} />, disabled: !native },
+        { action: 'note', label: 'Note', icon: <HistoryIcon name="note" />, disabled: !native },
+      ],
+      [{ action: 'delete', label: 'Delete', icon: <HistoryIcon name="trash" />, destructive: true, disabled: !native || record.isFavorite || record.isPinned }],
+    ], snapshot.capabilities.platform === 'macos', t, (action) => {
+      if (snapshot.storageError) return null;
+      if (action === 'primary') return primary;
+      if (action === 'secondary') return secondary;
+      if (action === 'translate') return translationBinding('translate');
+      const key = shared.find((shortcut) => shortcut.action === (action === 'source' ? 'copyRecord' : action) && shortcut.enabled && !shortcut.globalConflict)?.binding;
+      // Copy-result chords take precedence over shared record chords in the list too.
+      return key && !(canCopy && [primary, secondary].some((binding) => binding && sameBinding(key, binding))) ? key : null;
+    });
+  }
+
   return <aside ref={panel} data-focus-ready={focusReady || undefined} id="translation-history" className="history-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.translation } as CSSProperties} aria-label={t('history')} inert={editing !== null} onKeyDown={recordKeyDown}>
     <ActivityBeam label={t('working')} active={active && history.showLoading} />
     <div className="drag-strip" data-tauri-drag-region />
@@ -341,20 +380,13 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>
     <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} t={t} snapshot={snapshot} command={command} native={native} active={active && state.historyVisible && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={displayed.totalRecords} />
-    {menu && menuRecord && <RecordMenu key={menuRecord.id} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => { document.querySelector<HTMLButtonElement>(`#translation-history [data-record-id="${menuRecord.id}"] .history-row-select`)?.focus(); }} items={[
-      { action: 'retranslate', label: 'Retranslate', icon: <HistoryIcon name="languages" /> },
-      { action: 'copy', label: 'Copy source text', icon: <HistoryIcon name="doc.on.doc" />, disabled: !native || !snapshot.capabilities.clipboardWrite },
-      { action: 'note', label: 'Note', icon: <HistoryIcon name="note" />, disabled: !native },
-      { action: 'favorite', label: menuRecord.isFavorite ? 'Remove favorite' : 'Favorite', icon: <HistoryIcon name="star" />, active: menuRecord.isFavorite, disabled: !native },
-      { action: 'pin', label: menuRecord.isPinned ? 'Unpin record' : 'Pin record', icon: <HistoryIcon name={menuRecord.isPinned ? 'pin.fill' : 'pin'} />, disabled: !native },
-      { action: 'delete', label: 'Delete', icon: <HistoryIcon name="trash" />, destructive: true, disabled: !native || menuRecord.isFavorite || menuRecord.isPinned },
-    ]} onAction={(action) => {
+    {menu && menuRecord && <RecordMenu key={menuRecord.id} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id, true)} items={menuItems(menuRecord)} onAction={(action) => {
       setMenu(null);
+      if (action === 'source' || action === 'primary' || action === 'secondary') { void copyRecord(menuRecord.id, action); return; }
       whenReady(menuRecord.id, () => {
-        if (action === 'retranslate') onSelect(menuRecord, true);
-        else if (action === 'copy') void copyRecord(menuRecord.id);
+        if (action === 'translate') onSelect(menuRecord, true);
         else if (action === 'note') setEditing(menuRecord.id);
-        else void updateRecord(menuRecord.id, action as 'favorite' | 'pin' | 'delete');
+        else if (action === 'favorite' || action === 'pin' || action === 'delete') void updateRecord(menuRecord.id, action);
       });
     }} />}
     {editing && <ClipboardEditor recordId={editing} onClose={() => setEditing(null)} saveTitle={(title) => history.update(editing, 'note', title)} onReturnFocus={() => { requestAnimationFrame(() => focusRow(editing)); }} />}

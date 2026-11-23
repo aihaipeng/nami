@@ -316,7 +316,7 @@ describe('history list and session actions', () => {
     fireEvent.click(within(row(targetId)).getByRole('button', { name: /^Translation:/ }));
     if (entry === 'menu') {
       fireEvent.contextMenu(row(targetId));
-      fireEvent.click(screen.getByRole('menuitem', { name: action === 'favorite' ? 'Remove favorite' : 'Delete' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: action === 'favorite' ? 'Unfavorite' : 'Delete' }));
     } else {
       const button = within(row(targetId)).getByRole('button', { name: action === 'favorite' ? 'Remove favorite' : 'Delete history record' });
       fireEvent.click(button);
@@ -407,15 +407,76 @@ describe('history list and session actions', () => {
     const before = calls('history_sample_select').length;
     fireEvent.contextMenu(row('sample-03'), { clientX: 100, clientY: 180 });
     const menu = screen.getByRole('menu');
-    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Retranslate', 'Copy source text', 'Note', 'Favorite', 'Pin record', 'Delete']);
+    const layout = [...menu.querySelectorAll('[role=menuitem],[role=separator]')].map((item) =>
+      item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
+    expect(layout).toEqual([
+      ['Copy source text', '⇧⌘C'], ['Copy Primary Text', '⌘1'], ['Copy Secondary Text', '⌘2'], '/',
+      ['Translate', '⌘↵'], '/', ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
+    ]);
+    expect(menu.style.width).toBe('220px');
+    fireEvent.scroll(menu);
+    expect(screen.getByRole('menu')).toBe(menu);
     expect(within(menu).getByRole('menuitem', { name: 'Delete' }).classList.contains('clipboard-menu-delete')).toBe(true);
-    expect(within(menu).getAllByRole('menuitem').every((item) => item.children.length === 2)).toBe(true);
+    expect(within(menu).getAllByRole('menuitem').every((item) => item.children.length === 3)).toBe(true);
     expect(calls('history_sample_select')).toHaveLength(before);
     fireEvent.keyDown(document.activeElement!, { key: 'End' });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Delete' }));
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('copies the three saved parts of the context record without opening details', async () => {
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'none';
+    await mount('history');
+    await windowState({ translationVisible: false, translationExtent: 0 });
+    for (const [name, part] of [['Copy source text', 'source'], ['Copy Primary Text', 'primary'], ['Copy Secondary Text', 'secondary']]) {
+      fireEvent.contextMenu(row('sample-03'));
+      fireEvent.click(screen.getByRole('menuitem', { name }));
+      expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', part });
+      expect(screen.queryByRole('menu')).toBeNull();
+    }
+    expect(calls('history_sample_select')).toHaveLength(0);
+    expect(bridge.snapshot.window.translationVisible).toBe(false);
+  });
+
+  it.each([false, true])('omits secondary copy when the saved result is absent or blank (blank=%s)', async (blank) => {
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'ja';
+    const record = bridge.history.records.find(({ id }) => id === 'sample-07')!;
+    if (blank) record.translations.push(' ');
+    await mount('history');
+    fireEvent.contextMenu(row(record.id));
+    expect(screen.getByRole('menuitem', { name: 'Copy source text' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Copy Primary Text' })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: 'Copy Secondary Text' })).toBeNull();
+    expect(within(screen.getByRole('menu')).getAllByRole('separator')).toHaveLength(3);
+  });
+
+  it('updates copy key hints and dispatch while the menu is open, without duplicate chords', async () => {
+    await mount('history');
+    fireEvent.contextMenu(row('sample-03'));
+    const source = screen.getByRole('menuitem', { name: 'Copy source text' });
+    const primary = screen.getByRole('menuitem', { name: 'Copy Primary Text' });
+    const save = (change: object) => act(async () => { await bridge.invoke('translation_shortcut_set', { action: 'copyPrimary', ...change }); });
+    const duplicate = { code: 'KeyC', modifiers: ['meta', 'shift'] } as const;
+    await expect(save({ binding: duplicate })).rejects.toThrow('shortcut_clipboard_panel');
+    // Existing preferences could contain this collision before scope validation.
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.copyPrimary = { ...duplicate, modifiers: [...duplicate.modifiers] };
+    await emit('translation_preferences_changed', preferences);
+    expect(primary.querySelector('kbd')?.textContent).toBe('⇧⌘C');
+    expect(source.querySelector('kbd')?.textContent).toBe('—');
+    fireEvent.keyDown(primary, { code: 'Digit1', key: '1', metaKey: true });
+    expect(calls('translation_sample_copy')).toHaveLength(0);
+    await save({ enabled: false });
+    expect(primary.querySelector('kbd')?.textContent).toBe('—');
+    expect(source.querySelector('kbd')?.textContent).toBe('⇧⌘C');
+    await expect(save({ enabled: true })).rejects.toThrow('shortcut_clipboard_panel');
+    await save({ binding: { code: 'KeyJ', modifiers: ['alt'] } });
+    await save({ enabled: true });
+    expect(primary.querySelector('kbd')?.textContent).toBe('⌥J');
+    fireEvent.keyDown(primary, { code: 'KeyJ', key: 'j', altKey: true });
+    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'sample-03', part: 'primary' });
   });
 
   it('dispatches context actions by record ID and preserves protected delete', async () => {
@@ -439,7 +500,9 @@ describe('history list and session actions', () => {
     bridge.snapshot.capabilities.clipboardWrite = false;
     await mount('history');
     fireEvent.contextMenu(row('sample-03'));
-    expect((screen.getByRole('menuitem', { name: 'Copy source text' }) as HTMLButtonElement).disabled).toBe(true);
+    for (const name of ['Copy source text', 'Copy Primary Text', 'Copy Secondary Text']) {
+      expect(screen.getByRole('menuitem', { name })).toHaveProperty('disabled', true);
+    }
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
   });
@@ -539,7 +602,7 @@ describe('history list and session actions', () => {
     expect([...target.querySelectorAll('.history-row-actions button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Copy source text', 'Note', 'Favorite', 'Pin record', 'Delete history record']);
     expect(target.style.getPropertyValue('--history-actions-width')).toBe('124px');
     fireEvent.contextMenu(target);
-    const button = screen.getByRole('menuitem', { name: 'Retranslate' });
+    const button = screen.getByRole('menuitem', { name: 'Translate' });
     const icon = button.querySelector<HTMLElement>('.history-symbol')!;
     expect(icon.dataset.symbol).toBe('languages');
     expect(icon.style.getPropertyValue('--symbol-url')).toContain('reference-languages.png');
@@ -616,7 +679,7 @@ describe('history list and session actions', () => {
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: false }]);
     expect(within(row('sample-03')).getByRole('button', { name: /^Translation:/ }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.contextMenu(row('sample-03'));
-    await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Translate' }));
     expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: 'sample-03', retranslate: true }]);
     await user.click(within(row('sample-03')).getByRole('button', { name: 'Copy source text' }));
     expect(calls('translation_sample_copy').at(-1)).toEqual(['translation_sample_copy', { sampleId: 'sample-03', part: 'source' }]);

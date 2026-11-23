@@ -371,6 +371,10 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
     emit_state(app)
 }
 
+pub fn clipboard_has_focus(_app: &AppHandle) -> bool {
+    false
+}
+
 pub fn focus_records_editor(app: &AppHandle) -> Result<(), String> {
     let view = app
         .get_webview("clipboard")

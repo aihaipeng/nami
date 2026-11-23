@@ -133,6 +133,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         {localRow('openTarget')}
         {localRow('ocr')}
         {localRow('pasteRecord')}
+        {localRow('pastePlain')}
         {localRow('saveImage')}
       </div>
       {clipboardError?.group === 'clipboard' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}

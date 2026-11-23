@@ -83,7 +83,7 @@ describe('clipboard recording settings', () => {
       expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
     }
     expect(general.getByRole('button', { name: 'Switch Record View shortcut' }).textContent).toBe('Tab');
-    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste (Context Menu)', 'Save Image (Context Menu)'];
+    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste (Context Menu)', 'Paste as Plain Text (Context Menu)', 'Save Image (Context Menu)'];
     expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
     for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
@@ -163,11 +163,11 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⇧⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '⇧⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
+  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '↵'], ['Paste as Plain Text (Context Menu)', 'pastePlain', '⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
-      const local = ['ocr', 'translate', 'pasteRecord', 'saveImage'].includes(action);
+      const local = ['ocr', 'translate', 'pasteRecord', 'pastePlain', 'saveImage'].includes(action);
       const group = within(screen.getByRole('group', { name: local ? 'Clipboard' : 'General' }));
       const recorder = group.getByRole('button', { name: `${title} shortcut` });
       const toggle = group.getByRole<HTMLInputElement>('checkbox', { name: title });
@@ -231,6 +231,31 @@ describe('clipboard recording settings', () => {
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(3);
   });
 
+  it('reuses a chord across Clipboard and Translation, but rejects it for a General action', async () => {
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    const group = (name: string) => within(screen.getByRole('group', { name }));
+    const record = (button: HTMLElement, key: { key: string; code: string; metaKey: boolean }) => {
+      fireEvent.click(button);
+      fireEvent.keyDown(window, key);
+    };
+    const plain = group('Clipboard').getByRole('button', { name: 'Paste as Plain Text (Context Menu) shortcut' });
+    const translate = group('Translation').getByRole('button', { name: 'Translate shortcut' });
+    record(translate, { key: 'j', code: 'KeyJ', metaKey: true });
+    await waitFor(() => expect(translate.textContent).toBe('⌘J'));
+    record(translate, { key: 'Enter', code: 'Enter', metaKey: true });
+    await waitFor(() => expect(translate.textContent).toBe('⌘↵'));
+    expect(plain.textContent).toBe('⌘↵');
+    record(plain, { key: 'i', code: 'KeyI', metaKey: true });
+    await waitFor(() => expect(plain.textContent).toBe('⌘I'));
+    record(plain, { key: 'Enter', code: 'Enter', metaKey: true });
+    await waitFor(() => expect(plain.textContent).toBe('⌘↵'));
+    const preview = group('General').getByRole('button', { name: 'Preview shortcut' });
+    record(preview, { key: 'Enter', code: 'Enter', metaKey: true });
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(preview.textContent).toBe('⌘Y');
+  });
+
   it('keeps panel shortcut changes separate and rejects a collision with another panel action', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
@@ -239,7 +264,7 @@ describe('clipboard recording settings', () => {
     await user.click(toggle);
     await user.click(pin);
     fireEvent.keyDown(window, { key: 'f', code: 'KeyF', altKey: true });
-    expect(await screen.findByText('This key combination is already assigned in Clipboard History or globally.')).toBeTruthy();
+    expect(await screen.findByText('This key combination is already assigned to a shortcut in the same scope.')).toBeTruthy();
     expect(pin.textContent).toBe('⌥P');
     await user.click(pin);
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', altKey: true });

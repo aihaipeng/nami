@@ -32,7 +32,7 @@ use std::sync::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Manager,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -70,6 +70,7 @@ pub struct AppState {
     translation_engine: Mutex<String>,
     translation_preferences: Mutex<translation::Preferences>,
     shortcuts_suspended: AtomicBool,
+    clipboard_translate_hotkey: AtomicBool,
     shortcut_writes: tokio::sync::Mutex<()>,
     registered_shortcuts: Mutex<Vec<Shortcut>>,
     selection: Mutex<Option<selection::SelectionContext>>,
@@ -126,6 +127,7 @@ impl Default for AppState {
                 platform::capabilities().primary_modifier,
             )),
             shortcuts_suspended: AtomicBool::new(false),
+            clipboard_translate_hotkey: AtomicBool::new(false),
             shortcut_writes: tokio::sync::Mutex::new(()),
             registered_shortcuts: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
@@ -292,6 +294,19 @@ fn main() {
                     let owned = app.clone();
                     let _ = app.run_on_main_thread(move || {
                         let state = owned.state::<AppState>();
+                        use std::sync::atomic::Ordering::SeqCst;
+                        let contextual = cfg!(target_os = "macos")
+                            && key == Code::KeyT
+                            && modifiers == Modifiers::SUPER;
+                        if contextual
+                            && (if pressed {
+                                state.clipboard_translate_hotkey.load(SeqCst)
+                            } else {
+                                state.clipboard_translate_hotkey.swap(false, SeqCst)
+                            })
+                        {
+                            return;
+                        }
                         if state
                             .shortcuts_suspended
                             .load(std::sync::atomic::Ordering::SeqCst)
@@ -319,6 +334,24 @@ fn main() {
                                 matched(ToggleHistory),
                             )
                         };
+                        if contextual
+                            && pressed
+                            && (selection || open)
+                            && state
+                                .clipboard_options
+                                .lock()
+                                .unwrap()
+                                .record_shortcuts
+                                .uses_translate_launch_key()
+                            && windows::clipboard_has_focus(&owned)
+                        {
+                            // Own the release too, even if translating moves focus to another pane.
+                            state.clipboard_translate_hotkey.store(true, SeqCst);
+                            if let Some(view) = owned.get_webview("clipboard") {
+                                let _ = view.emit("clipboard_translate_requested", ());
+                            }
+                            return;
+                        }
                         let result = if clipboard_shortcut(&state).as_ref().is_some_and(matches) {
                             if pressed {
                                 windows::show(&owned, "clipboard")
@@ -490,7 +523,8 @@ fn main() {
                     .preference("clipboard_recording_types")?
                     .and_then(|value| serde_json::from_str::<RecordingTypes>(&value).ok())
                     .unwrap_or_default();
-                let clipboard_options = clipboard_preferences::ClipboardOptions::load(&database)?;
+                let mut clipboard_options =
+                    clipboard_preferences::ClipboardOptions::load(&database)?;
                 let clipboard_shortcut = ClipboardShortcut {
                     binding: load_clipboard_binding(
                         database.preference("clipboard_shortcut")?.as_deref(),
@@ -501,6 +535,12 @@ fn main() {
                         .as_deref()
                         != Some("false"),
                 };
+                clipboard_options
+                    .record_shortcuts
+                    .upgrade_translate_binding(
+                        &preferences.shortcuts,
+                        clipboard_shortcut.binding.as_ref(),
+                    );
                 Ok((
                     database,
                     page,

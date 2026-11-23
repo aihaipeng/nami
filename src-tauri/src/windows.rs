@@ -1407,6 +1407,35 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
     emit_state(app)
 }
 
+pub fn clipboard_has_focus(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let regions = state.windows.lock().unwrap();
+    if !regions.history_visible || regions.record_view != RecordView::Clipboard {
+        return false;
+    }
+    drop(regions);
+    let Some(window) = app.get_window("translation") else {
+        return false;
+    };
+    let (Ok(native), Ok(stage)) = (window.ns_window(), translation_stage(&window)) else {
+        return false;
+    };
+    let view = stage.ivars().clipboard_view.get() as *mut AnyObject;
+    unsafe {
+        let native = native.cast::<AnyObject>();
+        let application: *mut AnyObject =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let active: bool = objc2::msg_send![application, isActive];
+        let key: bool = objc2::msg_send![native, isKeyWindow];
+        if !active || !key || view.is_null() {
+            return false;
+        }
+        let responder: *mut AnyObject = objc2::msg_send![native, firstResponder];
+        let is_view: bool = objc2::msg_send![responder, isKindOfClass: objc2::class!(NSView)];
+        is_view && objc2::msg_send![responder, isDescendantOf: view]
+    }
+}
+
 pub fn focus_records_editor(app: &AppHandle) -> Result<(), String> {
     let view = app
         .get_webview("clipboard")

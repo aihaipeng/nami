@@ -182,7 +182,7 @@ describe('clipboard type filters', () => {
     expect(within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('HotKey')).toBeTruthy();
     const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
       (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
-    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Up': '↑', 'Open Clipboard History': '⌃ `', 'Extract Text': '⇧ ⌘ O', Translate: '⇧ ⌘ T' });
+    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Up': '↑', 'Open Clipboard History': '⌃ `', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T' });
     expect(entries()).not.toHaveProperty('Open Translation');
     expect(entries()).not.toHaveProperty('Copy Primary Translation');
 
@@ -422,7 +422,7 @@ describe('clipboard text processing', () => {
     fireEvent.keyDown(search, { key: 'N', code: 'KeyN', metaKey: true, shiftKey: true });
     const editor = await screen.findByRole('dialog', { name: 'Note' });
     expect(calls('clipboard_record_detail').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
-    fireEvent.keyDown(within(editor).getByRole('textbox', { name: 'Title' }), { key: 'T', code: 'KeyT', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(within(editor).getByRole('textbox', { name: 'Title' }), { key: 't', code: 'KeyT', metaKey: true });
     expect(calls('clipboard_record_process')).toHaveLength(0);
   });
 
@@ -437,7 +437,7 @@ describe('clipboard text processing', () => {
     await mount('clipboard');
     const search = screen.getByRole('searchbox');
     await waitFor(() => expect(within(row('picture')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
-    const press = (key: string, options = {}) => fireEvent.keyDown(search, { key, code: `Key${key}`, metaKey: true, shiftKey: true, ...options });
+    const press = (key: string, options = {}) => fireEvent.keyDown(search, { key, code: `Key${key}`, metaKey: true, shiftKey: key === 'O', ...options });
     press('O');
     press('T', { isComposing: true });
     expect(calls('clipboard_record_process')).toHaveLength(0);
@@ -459,6 +459,26 @@ describe('clipboard text processing', () => {
     press('T');
     expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'translate' });
     await act(async () => finish());
+  });
+
+  it('routes the global Translate key to the current menu record, but never while composing or out of focus', async () => {
+    records = [{ ...records[0] }, { ...records[0], id: 'picture', kind: 'image' }];
+    await mount('clipboard');
+    const search = screen.getByRole('searchbox');
+    await waitFor(() => expect(row('picture')).toBeTruthy());
+    search.focus();
+    fireEvent.compositionStart(search);
+    await emit('clipboard_translate_requested', null);
+    fireEvent.compositionEnd(search);
+    const focused = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    try { await emit('clipboard_translate_requested', null); }
+    finally { focused.mockRestore(); }
+    expect(calls('clipboard_record_process')).toHaveLength(0);
+    fireEvent.contextMenu(row('picture'));
+    expect(screen.getByRole('menuitem', { name: 'Translate' }).querySelector('kbd')?.textContent).toBe('⌘T');
+    await emit('clipboard_translate_requested', null);
+    expect(calls('clipboard_record_process')[0]?.[1]).toEqual({ recordId: 'picture', action: 'translate' });
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it('dispatches text/image translation and OCR by record ID without invoking copy or paste', async () => {
@@ -622,7 +642,7 @@ describe('database clipboard history', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Paste', '⇧⌘↵'], ['Paste as Plain Text', '—'], ['Copy', '⇧⌘C'], '/',
+      ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⇧⌘C'], '/',
       ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(items.every((item) => item.children.length === 3)).toBe(true);
@@ -662,6 +682,26 @@ describe('database clipboard history', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('uses Command-Return for plain text only in the text menu, without activating the focused item', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    const key = { key: 'Enter', code: 'Enter', metaKey: true };
+    fireEvent.contextMenu(row('pinned'));
+    expect(fireEvent.keyDown(document.activeElement!, key)).toBe(false);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    fireEvent.keyDown(row('first').querySelector('button')!, key);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    fireEvent.contextMenu(row('first'));
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.keyDown(document.activeElement!, { ...key, repeat: true });
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    fireEvent.keyDown(document.activeElement!, key);
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'pastePlain' }));
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+  });
+
   it('groups and labels every image menu action and executes its displayed shortcut', async () => {
     records[0] = { ...records[0], id: 'picture', kind: 'image' };
     const invoke = bridge.invoke.getMockImplementation()!;
@@ -674,9 +714,9 @@ describe('database clipboard history', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Copy', '⇧⌘C'], ['Paste', '⇧⌘↵'], ['Save', '⌘S'], '/',
+      ['Copy', '⇧⌘C'], ['Paste', '↵'], ['Save', '⌘S'], '/',
       ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/',
-      ['Translate', '⇧⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
+      ['Translate', '⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(within(menu).getByRole('menuitem', { name: 'Save' }).getAttribute('aria-keyshortcuts')).toBe('Meta+S');
     fireEvent.scroll(menu);
@@ -688,7 +728,7 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'copy' }));
     open();
-    fireEvent.keyDown(document.activeElement!, { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(document.activeElement!, { key: 'Enter', code: 'Enter' });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'paste' }));
     open();
     fireEvent.keyDown(document.activeElement!, { key: 's', code: 'KeyS', metaKey: true });
@@ -725,9 +765,10 @@ describe('database clipboard history', () => {
   });
 
   it.each([
-    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'image'],
-    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'text'],
-    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true, shiftKey: true }, 'files'],
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter' }, 'image'],
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter' }, 'text'],
+    ['pasteRecord', 'Paste', 'clipboard_record_use', { key: 'Enter', code: 'Enter' }, 'files'],
+    ['pastePlain', 'Paste as Plain Text', 'clipboard_record_use', { key: 'Enter', code: 'Enter', metaKey: true }, 'text'],
     ['saveImage', 'Save', 'clipboard_image_save', { key: 's', code: 'KeyS', metaKey: true }, 'image'],
   ] as const)('updates %s and its actual key handler while the right-click menu is open', async (action, label, command, oldKey, kind) => {
     records[0] = { ...records[0], kind };
@@ -755,7 +796,7 @@ describe('database clipboard history', () => {
     await save({ binding: { code: 'KeyJ', modifiers: ['alt'] } });
     expect(screen.getByRole('menu')).toBe(menu);
     fireEvent.keyDown(document.activeElement!, key);
-    const expected = action === 'pasteRecord' ? { recordId: 'first', action: 'paste' } : { recordId: 'first' };
+    const expected = action === 'saveImage' ? { recordId: 'first' } : { recordId: 'first', action: action === 'pasteRecord' ? 'paste' : 'pastePlain' };
     await waitFor(() => expect(calls(command).at(-1)?.[1]).toEqual(expected));
   });
 
@@ -2506,7 +2547,7 @@ describe('clipboard open target', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Paste', '⇧⌘↵'], ['Paste as Path', '—'], ['Copy', '⇧⌘C'], '/', ['Show in Finder', '⌘O'], '/',
+      ['Paste', '↵'], ['Paste as Path', '—'], ['Copy', '⇧⌘C'], '/', ['Show in Finder', '⌘O'], '/',
       ['Unfavorite', '⌥F'], ['Unpin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Paste as Path' }));

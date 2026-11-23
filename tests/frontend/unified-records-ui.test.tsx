@@ -129,6 +129,7 @@ describe('unified records workspace', () => {
     const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
     await waitFor(() => expect(source().value).toBe(bridge.history.records.find(({ id }) => id === 'sample-01')!.text));
     await switchView('clipboard');
+    expect(bridge.listeners.get('history_refocus')?.size).toBe(1);
     pending = { text: 'Synthetic image OCR content. Please translate this image.', error: null };
     await windowState({ recordView: 'translation', translationVisible: true, recordsBrowsing: false });
     await emit('clipboard_translation_ready', null);
@@ -143,6 +144,10 @@ describe('unified records workspace', () => {
     expect(source().value).toBe('Synthetic image OCR content. Please translate this image.');
     await act(async () => finish());
     await waitFor(() => expect(bridge.history.records.some(({ text }) => text === source().value)).toBe(true));
+    const newest = panel('translation').querySelector('[data-record-id="translation-test"] .history-row-select');
+    expect(document.activeElement).toBe(newest);
+    expect(newest?.getAttribute('aria-pressed')).toBe('true');
+    expect(newest?.closest('[data-record-id]')?.hasAttribute('data-keyboard-current')).toBe(true);
     expect(source().value).toBe('Synthetic image OCR content. Please translate this image.');
     fireEvent.mouseMove(panel('translation').querySelector('[data-record-id="sample-01"]')!);
     expect(source().value).toBe('Synthetic image OCR content. Please translate this image.');
@@ -150,6 +155,38 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(source().value).toBe(bridge.history.records.find(({ id }) => id === 'sample-01')!.text));
     fireEvent.mouseMove(panel('translation').querySelector('[data-record-id="sample-03"]')!, { clientY: 90 });
     await waitFor(() => expect(source().value).toBe(bridge.history.records.find(({ id }) => id === 'sample-03')!.text));
+  });
+
+  it('saves a clipboard translation without stealing focus from a record opened while waiting', async () => {
+    const text = 'Clipboard translation that finishes after browsing.';
+    let pending = false;
+    let finish!: () => void;
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_translation_take') {
+        if (!pending) return null;
+        pending = false;
+        return { text, error: null };
+      }
+      if (name === 'translation_run') await new Promise<void>((resolve) => { finish = resolve; });
+      return original(name, args);
+    });
+    await mount('translation');
+    await switchView('clipboard');
+    await windowState({ recordView: 'translation', translationVisible: true, recordsBrowsing: false });
+    pending = true;
+    await emit('clipboard_translation_ready', null);
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
+    const old = panel('translation').querySelector<HTMLButtonElement>('[data-record-id="sample-03"] .history-row-select')!;
+    old.focus(); fireEvent.click(old);
+    const originalText = bridge.history.records.find(({ id }) => id === 'sample-03')!.text;
+    const source = screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Source text' });
+    await waitFor(() => expect(source.value).toBe(originalText));
+    await act(async () => finish());
+    await waitFor(() => expect(bridge.history.records.some((record) => record.text === text)).toBe(true));
+    expect(document.activeElement).toBe(old);
+    expect(bridge.history.selectedId).toBe('sample-03');
+    expect(source.value).toBe(originalText);
   });
 
   it('creates a new image translation after deleting its previous result without restoring an unrelated record', async () => {
@@ -236,7 +273,7 @@ describe('unified records workspace', () => {
       expect(element).toBeTruthy(); return element!;
     });
     fireEvent.contextMenu(row);
-    const favorite = screen.getByRole('menuitem', { name: kind === 'clipboard' ? 'Unfavorite' : 'Remove favorite' });
+    const favorite = screen.getByRole('menuitem', { name: 'Unfavorite' });
     expect(favorite.querySelector('[data-symbol="star"]')).toBeTruthy();
     expect(favorite.classList.contains('record-favorite')).toBe(true);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
@@ -767,7 +804,7 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(button);
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
     fireEvent.contextMenu(row);
-    await user.click(screen.getByRole('menuitem', { name: 'Retranslate' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Translate' }));
     await waitFor(() => expect(document.activeElement?.closest('[data-record-id]')?.getAttribute('data-record-id')).toBe('translation-test'));
   });
 
