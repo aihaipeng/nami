@@ -6,7 +6,7 @@ import { bridge, calls, emit, mount, windowState } from './harness';
 import { createRef } from 'react';
 // @ts-expect-error Vitest runs in Node; the app's TypeScript configuration includes browser types only.
 import { readFileSync } from 'node:fs';
-import { HistoryList } from '../../src/shared/HistoryList';
+import { HistoryList, type HistoryListHandle } from '../../src/shared/HistoryList';
 import { ActivityBeam } from '../../src/shared/ActivityBeam';
 import { RecordActions } from '../../src/shared/RecordActions';
 import { translator } from '../../src/shared/i18n';
@@ -1158,5 +1158,130 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(within(screen.getByRole('alertdialog')).getByRole('alert').textContent).toContain('preserved'));
     expect(calls('records_navigation_resolve')).toHaveLength(0);
     expect((screen.getByRole('textbox', { name: 'Content', hidden: true }) as HTMLTextAreaElement).value).toBe('Retained edit');
+  });
+
+  it('virtualizes deep pages in HistoryList while keeping pinned rows, scroll padding, and scrollToId accurate', () => {
+    const listRef = createRef<HTMLDivElement>();
+    const pinnedRef = createRef<HTMLDivElement>();
+    const handleRef = createRef<HistoryListHandle>();
+    const items = Array.from({ length: 240 }, (_, index) => ({ id: `row-${index}`, text: `Deep record ${index}` }));
+    const pinned = [<article key="pin-0" data-record-id="pin-0" className="history-row pinned">Pinned 0</article>];
+    const renderItem = (item: { id: string; text: string }) => (
+      <article key={item.id} data-record-id={item.id} className="history-row">
+        <button type="button" className="history-row-select">{item.text}</button>
+      </article>
+    );
+    const view = render(
+      <HistoryList
+        list={listRef}
+        pinnedList={pinnedRef}
+        handleRef={handleRef}
+        pinned={pinned}
+        virtualItems={{ items, itemKey: (item) => item.id, renderItem }}
+        onNearEnd={() => {}}
+      />,
+    );
+    const scroller = view.container.querySelector<HTMLElement>('.history-list')!;
+    const itemsBox = view.container.querySelector<HTMLElement>('.history-items')!;
+    // Viewport height 0 in JSDOM does not virtualize yet.
+    expect(itemsBox.dataset.virtualized).toBeUndefined();
+    expect(itemsBox.querySelectorAll('.history-row')).toHaveLength(240);
+
+    // Give the scroller a real viewport height and full content height so deep-page virtualization activates.
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 240 * 72 },
+    });
+    fireEvent.scroll(scroller);
+
+    expect(itemsBox.dataset.virtualized).toBe('true');
+    const mountedAtTop = itemsBox.querySelectorAll('.history-row').length;
+    expect(mountedAtTop).toBeGreaterThan(0);
+    expect(mountedAtTop).toBeLessThan(60);
+    expect(view.container.querySelector('[data-record-id="pin-0"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-record-id="row-0"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-record-id="row-200"]')).toBeNull();
+    expect(parseFloat(itemsBox.style.paddingTop)).toBe(0);
+    expect(parseFloat(itemsBox.style.paddingBottom)).toBeGreaterThan(10000);
+
+    // Scroll deep to row 180: row 180 mounts, row 0 unmounts, paddingTop grows.
+    scroller.scrollTop = 180 * 72;
+    fireEvent.scroll(scroller);
+    expect(itemsBox.querySelectorAll('.history-row').length).toBeLessThan(60);
+    expect(view.container.querySelector('[data-record-id="row-180"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-record-id="row-0"]')).toBeNull();
+    expect(parseFloat(itemsBox.style.paddingTop)).toBeGreaterThan(10000);
+
+    // Programmatic scrollToId jumps to an off-screen row and mounts it into the virtual window.
+    act(() => {
+      expect(handleRef.current?.scrollToId('row-20')).toBe(true);
+    });
+    expect(view.container.querySelector('[data-record-id="row-20"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-record-id="row-180"]')).toBeNull();
+  });
+
+  it('virtualizes deep pages in both Clipboard and HistoryPanel views and jumps to off-screen selection', async () => {
+    const deepClipboard = [
+      { id: 'clip-pin', kind: 'text', title: '', text: 'Pinned clip', date: '2026-11-15T12:00:00Z', isFavorite: false, isPinned: true, sourceAppId: null },
+      ...Array.from({ length: 220 }, (_, i) => ({
+        id: `clip-${i}`, kind: 'text', title: '', text: `Deep clip ${i}`, date: '2026-11-15T11:00:00Z', isFavorite: false, isPinned: false, sourceAppId: null,
+      })),
+    ];
+    const deepHistory = [
+      { id: 'hist-pin', text: 'Pinned hist', title: '', sourceLanguage: 'en', targetLanguages: ['zh-CN'], translations: ['置顶'], date: '2026-11-15T12:00:00Z', isFavorite: false, isPinned: true, sourceApp: null, targetEngines: ['edge'] },
+      ...Array.from({ length: 220 }, (_, i) => ({
+        id: `hist-${i}`, text: `Deep hist ${i}`, title: '', sourceLanguage: 'en', targetLanguages: ['zh-CN'], translations: [`译文 ${i}`], date: '2026-11-15T11:00:00Z', isFavorite: false, isPinned: false, sourceApp: null, targetEngines: ['edge'],
+      })),
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_query') {
+        const page = { records: deepClipboard, sources: {}, totalRecords: deepClipboard.length, hasMore: false, cursor: null };
+        return { page, alternate: { records: [], sources: {}, totalRecords: 0, hasMore: false, cursor: null } };
+      }
+      if (name === 'history_snapshot') {
+        return { revision: 10, records: deepHistory, sources: {}, totalRecords: deepHistory.length, hasMore: false, selectedId: null };
+      }
+      return original(name, args);
+    });
+
+    await mount('translation');
+    await waitFor(() => expect(panel('clipboard').querySelector('[data-record-id="clip-0"]')).not.toBeNull());
+    const clipList = panel('clipboard').querySelector<HTMLElement>('.history-list')!;
+    const clipItems = panel('clipboard').querySelector<HTMLElement>('.history-items')!;
+    Object.defineProperties(clipList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 220 * 72 },
+    });
+    fireEvent.scroll(clipList);
+    expect(clipItems.dataset.virtualized).toBe('true');
+    expect(clipItems.querySelectorAll('.history-row').length).toBeLessThan(60);
+    expect(panel('clipboard').querySelector('[data-record-id="clip-pin"]')).not.toBeNull();
+    clipList.scrollTop = 160 * 72;
+    fireEvent.scroll(clipList);
+    expect(panel('clipboard').querySelector('[data-record-id="clip-160"]')).not.toBeNull();
+    expect(panel('clipboard').querySelector('[data-record-id="clip-0"]')).toBeNull();
+
+    await switchView('translation');
+    await waitFor(() => expect(panel('translation').querySelector('[data-record-id="hist-0"]')).not.toBeNull());
+    const histList = panel('translation').querySelector<HTMLElement>('.history-list')!;
+    const histItems = panel('translation').querySelector<HTMLElement>('.history-items')!;
+    Object.defineProperties(histList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 220 * 72 },
+    });
+    fireEvent.scroll(histList);
+    expect(histItems.dataset.virtualized).toBe('true');
+    expect(histItems.querySelectorAll('.history-row').length).toBeLessThan(60);
+    expect(panel('translation').querySelector('[data-record-id="hist-pin"]')).not.toBeNull();
+    histList.scrollTop = 160 * 72;
+    fireEvent.scroll(histList);
+    expect(panel('translation').querySelector('[data-record-id="hist-160"]')).not.toBeNull();
+    expect(panel('translation').querySelector('[data-record-id="hist-0"]')).toBeNull();
+
+    // Selecting an off-screen translation record scrolls it back into the virtual window.
+    await windowState({ translationVisible: true, translationExtent: 560 });
+    await emit('history_changed', { revision: 11, records: deepHistory, sources: {}, totalRecords: deepHistory.length, hasMore: false, selectedId: 'hist-10' });
+    await waitFor(() => expect(panel('translation').querySelector('[data-record-id="hist-10"]')).not.toBeNull());
   });
 });

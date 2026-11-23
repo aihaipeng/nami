@@ -208,6 +208,13 @@ fn binding_shortcut(binding: &KeyBinding) -> Result<Shortcut, String> {
     Ok(Shortcut::new(Some(modifiers), code))
 }
 
+fn parse_ui_locale(stored: Option<&str>) -> String {
+    match stored {
+        Some(locale @ ("system" | "zh-CN" | "en")) => locale.to_owned(),
+        _ => "en".to_owned(),
+    }
+}
+
 fn load_clipboard_binding(
     stored: Option<&str>,
     translation: &shortcuts::TranslationShortcuts,
@@ -509,6 +516,7 @@ fn main() {
                     None,
                     database::PAGE_SIZE,
                 )?;
+                let ui_locale = parse_ui_locale(database.preference("ui_locale")?.as_deref());
                 let capture = database.clipboard_capture_enabled()?;
                 let preferences = translation::Preferences::from_store(
                     |key| database.preference(key).ok().flatten(),
@@ -549,6 +557,7 @@ fn main() {
                 Ok((
                     database,
                     page,
+                    ui_locale,
                     capture,
                     preferences,
                     recording_types,
@@ -563,12 +572,14 @@ fn main() {
                 Ok((
                     database,
                     page,
+                    ui_locale,
                     capture,
                     preferences,
                     recording_types,
                     clipboard_shortcut,
                     clipboard_options,
                 )) => {
+                    *app.state::<AppState>().locale.lock().unwrap() = ui_locale;
                     *app.state::<AppState>().clipboard_options.lock().unwrap() = clipboard_options;
                     *app.state::<AppState>()
                         .clipboard_recording_types
@@ -777,5 +788,39 @@ mod shortcut_tests {
         assert_eq!(clipboard.mods, Modifiers::CONTROL);
         let selection = binding_shortcut(&KeyBinding::new("KeyT", &["meta"])).unwrap();
         assert_eq!(selection, Shortcut::new(Some(Modifiers::SUPER), Code::KeyT));
+    }
+
+    #[test]
+    fn ui_locale_persists_across_reopen_and_defaults_safely() {
+        let directory =
+            std::env::temp_dir().join(format!("nami-ui-locale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.sqlite3");
+
+        let mut database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(database.preference("ui_locale").unwrap(), None);
+        assert_eq!(parse_ui_locale(None), "en");
+        assert_eq!(parse_ui_locale(Some("invalid")), "en");
+
+        database.preference_set("ui_locale", "zh-CN").unwrap();
+        drop(database);
+
+        let mut database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            parse_ui_locale(database.preference("ui_locale").unwrap().as_deref()),
+            "zh-CN"
+        );
+        assert!(!database.clipboard_capture_enabled().unwrap());
+
+        database.preference_set("ui_locale", "system").unwrap();
+        drop(database);
+
+        let database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            parse_ui_locale(database.preference("ui_locale").unwrap().as_deref()),
+            "system"
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

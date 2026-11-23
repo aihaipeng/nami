@@ -65,9 +65,10 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
           <div className="settings-group">
             <div className="settings-field">
               <label className="settings-field-content" htmlFor="interface-language">{t('interfaceLanguage')}</label>
-              <SearchableDropdown id="interface-language" value={snapshot.locale} onChange={(locale) => void command('locale_set', { locale: locale as Locale })}
-                label={t('interfaceLanguage')} items={[{ code: 'system', name: t('followSystem') }, { code: 'zh-CN', name: 'Chinese (Simplified)' }, { code: 'en', name: 'English' }]}
-                open={openDropdown === 'language'} onOpenChange={(open) => setOpenDropdown(open ? 'language' : null)} t={t} side="bottom" searchable={false} settings />
+              {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
+                <SearchableDropdown id="interface-language" value={snapshot.locale} onChange={(locale) => void command('locale_set', { locale: locale as Locale })}
+                  label={t('interfaceLanguage')} items={[{ code: 'system', name: t('followSystem') }, { code: 'zh-CN', name: 'Chinese (Simplified)' }, { code: 'en', name: 'English' }]}
+                  open={openDropdown === 'language'} onOpenChange={(open) => setOpenDropdown(open ? 'language' : null)} t={t} side="bottom" searchable={false} settings />}
             </div>
             <div className="settings-field">
               <label className="settings-field-content" htmlFor="launch-at-login">{t('launchAtLogin')}</label>

@@ -57,4 +57,21 @@ describe('Settings', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
   });
+
+  it('restores persisted locale from snapshot, sends locale_set, and guards on storageError', async () => {
+    bridge.snapshot.locale = 'zh-CN';
+    const view = await mount('settings');
+    const picker = screen.getByRole('button', { name: /^界面语言:/i });
+    expect(picker.textContent).toContain('Chinese (Simplified)');
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'English' }));
+    expect(calls('locale_set').at(-1)?.[1]).toEqual({ locale: 'en' });
+    await emit('locale_changed', 'en');
+    expect(screen.getByRole('button', { name: /^Interface language:/i }).textContent).toContain('English');
+    view.unmount();
+
+    bridge.snapshot.storageError = 'storage_unavailable';
+    await mount('settings');
+    expect(screen.queryByRole('button', { name: /^Interface language:/i })).toBeNull();
+  });
 });

@@ -1284,11 +1284,18 @@ describe('database clipboard history', () => {
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `deep-${index}`, text: `Deep text ${index}`, isFavorite: index === 101 }));
     queryHandler = async ({ cursor: next }) => ({ records: next ? records.slice(100) : records.slice(0, 100), cursor: next ? null : cursor, hasMore: !next, totalRecords: records.length });
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
-    scrollNearEnd(); await waitFor(() => expect(listRows()).toHaveLength(102));
+    const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
+    scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
+    expect(items.dataset.virtualized).toBe('true');
+    expect(listRows().length).toBeLessThan(60);
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 102 * 72 } });
+    list.scrollTop = 101 * 72; fireEvent.scroll(list);
+    expect(row('deep-101')).toBeTruthy();
     const favorite = screen.getByRole('button', { name: 'Favorite clipboard records' });
     fireEvent.click(favorite); expect(listRows()).toHaveLength(1);
-    fireEvent.click(favorite); expect(listRows()).toHaveLength(102);
-    expect(document.querySelector('.history-list')!.scrollTop).toBe(400);
+    fireEvent.click(favorite); expect(items.dataset.loadedCount).toBe('102');
+    expect(list.scrollTop).toBe(101 * 72);
     expect(row('deep-101')).toBeTruthy();
   });
 
@@ -1297,7 +1304,11 @@ describe('database clipboard history', () => {
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `note-${index}`, text: `Deep note ${index}`, isFavorite: index === 101 }));
     queryHandler = async ({ cursor: next, favoritesOnly }) => ({ records: favoritesOnly ? records.filter((record) => record.isFavorite) : next ? records.slice(100) : records.slice(0, 100), cursor: favoritesOnly || next ? null : cursor, hasMore: !favoritesOnly && !next, totalRecords: favoritesOnly ? 1 : records.length });
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
-    scrollNearEnd(); await waitFor(() => expect(listRows()).toHaveLength(102));
+    const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
+    scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 102 * 72 } });
+    list.scrollTop = 101 * 72; fireEvent.scroll(list);
     fireEvent.mouseEnter(row('note-101'));
     fireEvent.contextMenu(row('note-101'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Note' }));
@@ -1307,18 +1318,18 @@ describe('database clipboard history', () => {
     const queried = calls('clipboard_query').length;
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Note' })).toBeNull());
-    expect(listRows()).toHaveLength(102);
+    expect(items.dataset.loadedCount).toBe('102');
     expect(within(row('note-101')).getByText('Updated deep title')).toBeTruthy();
     fireEvent.mouseEnter(row('note-101'));
     await waitFor(() => expect(within(row('note-101')).getByText('Updated full note content')).toBeTruthy());
     expect(calls('clipboard_query')).toHaveLength(queried);
-    expect(document.querySelector('.history-list')!.scrollTop).toBe(400);
+    expect(list.scrollTop).toBe(101 * 72);
     const favorite = screen.getByRole('button', { name: 'Favorite clipboard records' });
     fireEvent.click(favorite);
     expect(within(row('note-101')).getByText('Updated deep title')).toBeTruthy();
     fireEvent.click(favorite);
-    expect(listRows()).toHaveLength(102);
-    expect(document.querySelector('.history-list')!.scrollTop).toBe(400);
+    expect(items.dataset.loadedCount).toBe('102');
+    expect(list.scrollTop).toBe(101 * 72);
   });
 
   it('removes an edited record from cached search results and updates the matching count without replacing browsed pages', async () => {
@@ -1370,22 +1381,24 @@ describe('database clipboard history', () => {
         : { page: wire(request.cursor ? records.slice(100) : records.slice(0, 100), !request.cursor), alternate: null };
     });
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
-    scrollNearEnd(); await waitFor(() => expect(listRows()).toHaveLength(102));
     const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
+    scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
     let physicalTop = 400;
     Object.defineProperties(list, {
-      scrollHeight: { configurable: true, get: () => list.querySelectorAll('.history-row:not([hidden])').length * 20 },
+      scrollHeight: { configurable: true, get: () => Number(items.dataset.loadedCount ?? 0) * 72 },
       scrollTop: { configurable: true, get: () => Math.max(0, Math.min(physicalTop, list.scrollHeight - list.clientHeight)), set: (value: number) => { physicalTop = Math.max(0, Math.min(value, list.scrollHeight - list.clientHeight)); } },
     });
-    list.scrollTop = 1920; fireEvent.scroll(list);
+    const deepTop = 101 * 72 - 100;
+    list.scrollTop = deepTop; fireEvent.scroll(list);
     fireEvent.click(within(row('deep-101')).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(row('deep-101')).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
     const favorite = screen.getByRole('button', { name: 'Favorite clipboard records' });
     fireEvent.click(favorite); await waitFor(() => expect(listRows()).toHaveLength(1));
     fireEvent.click(favorite);
-    expect(listRows()).toHaveLength(102);
+    expect(items.dataset.loadedCount).toBe('102');
     expect(row('deep-101')).toBeTruthy();
-    expect(list.scrollTop).toBe(1920);
+    expect(list.scrollTop).toBe(deepTop);
     expect(records[101].isFavorite).toBe(true);
   });
 
@@ -1408,13 +1421,17 @@ describe('database clipboard history', () => {
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `deep-${index}`, text: `Deep text ${index}` }));
     queryHandler = async ({ cursor: next }) => ({ records: next ? records.slice(100) : records.slice(0, 100), cursor: next ? null : cursor, hasMore: !next, totalRecords: records.length });
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
-    scrollNearEnd(); await waitFor(() => expect(listRows()).toHaveLength(102));
+    const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
+    scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 102 * 72 } });
+    list.scrollTop = 101 * 72; fireEvent.scroll(list);
     const before = calls('clipboard_query').length;
     fireEvent.click(within(row('deep-101')).getByRole('button', { name: 'Favorite' }));
     await waitFor(() => expect(within(row('deep-101')).getByRole('button', { name: 'Remove favorite' })).toBeTruthy());
-    expect(listRows()).toHaveLength(102);
+    expect(items.dataset.loadedCount).toBe('102');
     expect(calls('clipboard_query')).toHaveLength(before);
-    expect(document.querySelector('.history-list')!.scrollTop).toBe(400);
+    expect(list.scrollTop).toBe(101 * 72);
   });
 
   it('defers external clipboard refresh while browsing and refreshes on return to the top', async () => {

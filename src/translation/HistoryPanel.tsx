@@ -11,7 +11,7 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
 import { useHistory } from './useHistory';
 import { ActivityBeam } from '../shared/ActivityBeam';
-import { HistoryList } from '../shared/HistoryList';
+import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
 import { RecordMenu, recordMenuItems } from '../shared/RecordMenu';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { RecordFeedback } from '../shared/RecordFeedback';
@@ -30,6 +30,8 @@ interface Props extends Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'>
   activity?: ViewProps['activity'];
 }
 
+const historyRecordKey = (record: HistoryRecord) => record.id;
+
 export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelect, onKeyDown, active = true }: Props) {
   const history = useHistory(native);
   const [editing, setEditing] = useState<string | null>(null);
@@ -47,6 +49,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
+  const listHandle = useRef<HistoryListHandle>(null);
+  const pendingFocus = useRef<{ id: string; scroll: boolean } | null>(null);
   const state = snapshot.window;
   const lastQuery = useRef({ query: '', favoritesOnly: false });
   const [followQuery, setFollowQuery] = useState<{ query: string; favoritesOnly: boolean; selectedId: string | null; selectionRevision: number } | null>(null);
@@ -64,6 +68,8 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const allFiltered = useMemo(() => native ? records.filter((record) => !favoritesOnly || record.isFavorite) : filterHistory(records, query, favoritesOnly), [records, query, favoritesOnly, native]);
   const deleting = history.deletingIds;
   const filtered = useMemo(() => deleting.size ? allFiltered.filter((record) => !deleting.has(record.id)) : allFiltered, [allFiltered, deleting]);
+  const visibleUnpinned = useMemo(() => filtered.filter((record) => !record.isPinned), [filtered]);
+  const allUnpinned = useMemo(() => allFiltered.filter((record) => !record.isPinned), [allFiltered]);
   const pendingDeleteCount = allFiltered.length - filtered.length;
   const visibleTotal = Math.max(0, displayed.totalRecords - pendingDeleteCount);
   const name = languageName;
@@ -134,10 +140,15 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     if (!active || !selection) return;
     const row = [...(pinnedList.current?.querySelectorAll<HTMLElement>('.history-row') ?? []), ...(list.current?.querySelectorAll<HTMLElement>('.history-row') ?? [])].find((row) => row.dataset.recordId === selection);
     const scroller = list.current;
-    if (!row || !scroller || !scroller.contains(row)) return;
+    const behavior: ScrollBehavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+    if (!row) {
+      listHandle.current?.scrollToId(selection, behavior);
+      return;
+    }
+    if (!scroller || !scroller.contains(row)) return;
     const viewport = scroller.getBoundingClientRect();
     const top = historyScrollTarget(scroller.scrollTop, { top: viewport.top + 4, bottom: viewport.bottom - 4 }, row.getBoundingClientRect());
-    if (top !== null) scroller.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    if (top !== null) scroller.scrollTo({ top, behavior });
   }, [active, selection]);
   useEffect(() => {
     const close = (event: Event) => {
@@ -257,8 +268,28 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   function focusRow(id: string, scroll = false) {
     const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select') ?? [])]);
     const button = buttons.find((button) => button.closest<HTMLElement>('article')?.dataset.recordId === id);
-    (button ?? search.current)?.focus({ preventScroll: !scroll });
+    if (button) {
+      pendingFocus.current = null;
+      button.focus({ preventScroll: !scroll });
+      return;
+    }
+    if (listHandle.current?.scrollToId(id, 'instant')) {
+      pendingFocus.current = { id, scroll };
+      return;
+    }
+    search.current?.focus({ preventScroll: !scroll });
   }
+  useLayoutEffect(() => {
+    const pending = pendingFocus.current;
+    if (!pending) return;
+    if (!active || !filtered.some(({ id }) => id === pending.id)) { pendingFocus.current = null; return; }
+    const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select') ?? [])]);
+    const button = buttons.find((button) => button.closest<HTMLElement>('article')?.dataset.recordId === pending.id);
+    if (button) {
+      pendingFocus.current = null;
+      button.focus({ preventScroll: !pending.scroll });
+    }
+  });
 
   function recordKeyDown(event: KeyboardEvent<HTMLElement>) {
     onKeyDown(event);
@@ -397,8 +428,24 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} view="translation" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />
     {history.error && <p role="alert" className="history-error">{t('nativeError')} <button onClick={() => history.refresh(query, favoritesOnly)}>{t('retry')}</button></p>}
-    <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={remember} list={list} pinnedList={pinnedList} pinnedCount={filtered.filter((record) => record.isPinned).length} pinned={allFiltered.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
-      {allFiltered.filter((record) => !record.isPinned).map(row)}
+    <HistoryList
+      onScrollOwnerChange={restoreScroll}
+      active={active}
+      onScroll={remember}
+      list={list}
+      pinnedList={pinnedList}
+      handleRef={listHandle}
+      pinnedCount={filtered.filter((record) => record.isPinned).length}
+      pinned={allFiltered.filter((record) => record.isPinned).map(row)}
+      virtualItems={{
+        items: visibleUnpinned,
+        allItems: allUnpinned,
+        itemKey: historyRecordKey,
+        renderItem: row,
+        resetKey: snapshot.clipboardControls.previewLines?.translation,
+      }}
+      onNearEnd={loadNearEnd}
+    >
       {!history.loading && !history.error && filtered.length === 0 && <div className="history-empty" role="status">{query ? t('historyNoMatches') : favoritesOnly ? t('historyFavoritesEmpty') : t('historyEmpty')}</div>}
     </HistoryList>
     <HistoryFooter key={`${state.recordsSession ?? 0}:${session}`} t={t} snapshot={snapshot} command={command} native={native} active={active && state.historyVisible && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={toggleFavorites} total={visibleTotal} />

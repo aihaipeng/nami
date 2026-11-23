@@ -637,12 +637,19 @@ pub fn translation_columns_set(
 }
 
 #[tauri::command]
-pub fn locale_set(window: Webview, app: AppHandle, locale: String) -> Result<(), String> {
+pub async fn locale_set(window: Webview, app: AppHandle, locale: String) -> Result<(), String> {
     authorize(&window, &["settings"])?;
     if !["system", "zh-CN", "en"].contains(&locale.as_str()) {
         return Err("invalid_argument".into());
     }
-    *app.state::<AppState>().locale.lock().unwrap() = locale.clone();
+    let state = app.state::<AppState>();
+    let _write = state.shortcut_writes.lock().await;
+    let stored = locale.clone();
+    crate::clipboard_runtime::database(&app, move |database| {
+        database.preference_set("ui_locale", &stored)
+    })
+    .await?;
+    *state.locale.lock().unwrap() = locale.clone();
     for label in ["translation", "history", "clipboard", "settings"] {
         if let Some(window) = app.get_webview(label) {
             window

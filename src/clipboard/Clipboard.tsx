@@ -1,6 +1,6 @@
 import { clipboardOpenError, clipboardOpenTarget } from './openTarget';
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { ViewProps } from '../App';
@@ -15,7 +15,7 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
-import { HistoryList } from '../shared/HistoryList';
+import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
 import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
 import { matchesBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
@@ -25,6 +25,8 @@ import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
 import './clipboard.css';
+
+const clipboardRecordKey = (record: ClipboardRecord) => record.id;
 
 function isQuickPasteModifier(event: KeyboardEvent) {
   return event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
@@ -55,6 +57,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const pinnedList = useRef<HTMLDivElement>(null);
+  const listHandle = useRef<HistoryListHandle>(null);
+  const pendingFocus = useRef<string | null>(null);
   const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, () => clipboard.displayReady, () => clipboard.page.records, kindFilter);
   const { query, setQuery, favoritesOnly, setFavoritesOnly, remember, restoreScroll } = browser;
   const searchOptions = snapshot.clipboardControls.search;
@@ -76,7 +80,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const canOcrRecord = (record: ClipboardRecord) => record.kind !== 'text' && canTranslateRecord(record) && snapshot.capabilities.clipboardWrite;
   const selection = snapshot.window.translationVisible ? snapshot.window.clipboardDetailId : selected;
   const visibleIds = new Set(records.map(({ id }) => id));
-  const ordinary = records.filter((record) => !record.isPinned);
+  const ordinary = useMemo(() => records.filter((record) => !record.isPinned), [records]);
+  const allUnpinned = useMemo(() => clipboard.retainedRecords.filter((record) => !record.isPinned), [clipboard.retainedRecords]);
   const ordered = [...records.filter((record) => record.isPinned), ...ordinary];
   const quickPasteCandidates = ordinary.slice(0, 5);
   const quickPaste = native && snapshot.capabilities.platform === 'macos' && snapshot.capabilities.autoPaste && !snapshot.storageError;
@@ -179,10 +184,13 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   function scrollToRecord(id: string) {
     const element = rowRefs.current.get(id)?.closest<HTMLElement>('.history-row');
     const scroller = element?.closest<HTMLElement>('.history-list');
-    if (!element || !scroller) return;
-    const bounds = scroller.getBoundingClientRect();
-    const top = historyScrollTarget(scroller.scrollTop, { top: bounds.top, bottom: bounds.bottom }, element.getBoundingClientRect());
-    if (top !== null) scroller.scrollTo({ top, behavior: 'instant' });
+    if (element && scroller) {
+      const bounds = scroller.getBoundingClientRect();
+      const top = historyScrollTarget(scroller.scrollTop, { top: bounds.top, bottom: bounds.bottom }, element.getBoundingClientRect());
+      if (top !== null) scroller.scrollTo({ top, behavior: 'instant' });
+      return;
+    }
+    listHandle.current?.scrollToId(id, 'instant');
   }
   useEffect(() => {
     if (!active || !snapshot.window.translationVisible || clipboard.loading || !clipboard.displayReady || reveal.current) return;
@@ -258,7 +266,23 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
   }, [snapshot.capabilities.primaryModifier, command, editing, active]);
-  function focusRow(id: string) { setSelected(id); rowRefs.current.get(id)?.focus(); }
+  function focusRow(id: string) {
+    setSelected(id);
+    const button = rowRefs.current.get(id);
+    if (button) {
+      pendingFocus.current = null;
+      button.focus();
+      return;
+    }
+    if (listHandle.current?.scrollToId(id, 'instant')) pendingFocus.current = id;
+  }
+  useLayoutEffect(() => {
+    const id = pendingFocus.current;
+    if (!id) return;
+    if (!active || !visibleIds.has(id)) { pendingFocus.current = null; return; }
+    const button = rowRefs.current.get(id);
+    if (button) { pendingFocus.current = null; button.focus({ preventScroll: true }); }
+  });
   useLayoutEffect(() => {
     const pending = refocus.current;
     if (!pending) return;
@@ -449,8 +473,24 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     {clipboard.error && <p role="alert" className="history-error">{t(clipboard.searchError === 'invalidRegex' ? 'clipboardSearchInvalidRegex' : clipboard.searchError === 'tooBroad' ? 'clipboardSearchTooBroad' : 'nativeError')}
       {!clipboard.searchError && <> <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></>}
     </p>}
-    <HistoryList onScrollOwnerChange={restoreScroll} active={active} onScroll={() => { remember(); clipboard.refreshDeferred(); }} list={list} pinnedList={pinnedList} pinnedCount={records.filter((record) => record.isPinned).length} pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)} onNearEnd={loadNearEnd}>
-      {clipboard.retainedRecords.filter((record) => !record.isPinned).map(row)}
+    <HistoryList
+      onScrollOwnerChange={restoreScroll}
+      active={active}
+      onScroll={() => { remember(); clipboard.refreshDeferred(); }}
+      list={list}
+      pinnedList={pinnedList}
+      handleRef={listHandle}
+      pinnedCount={records.filter((record) => record.isPinned).length}
+      pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)}
+      virtualItems={{
+        items: ordinary,
+        allItems: allUnpinned,
+        itemKey: clipboardRecordKey,
+        renderItem: row,
+        resetKey: snapshot.clipboardControls.previewLines?.clipboard,
+      }}
+      onNearEnd={loadNearEnd}
+    >
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status">
         <p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : kindFilter ? t(kindFilter === 'text' ? 'clipboardTextEmpty' : kindFilter === 'image' ? 'clipboardImagesEmpty' : 'clipboardFilesEmpty') : !snapshot.capabilities.clipboardWrite ? t('platformUnavailable') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardRecordingPaused')}</p>
         {kindFilter && <button type="button" onClick={() => { remember(); setKindFilter(null); }}>{t('clearClipboardFilter')}</button>}

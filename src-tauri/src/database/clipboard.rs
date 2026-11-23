@@ -1476,6 +1476,7 @@ impl HistoryDatabase {
 
     pub fn preference_set(&mut self, key: &str, value: &str) -> Result<(), String> {
         const KEYS: &[&str] = &[
+            "ui_locale",
             "clipboard_recording_types",
             "clipboard_shortcut",
             "clipboard_shortcut_enabled",

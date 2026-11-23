@@ -150,13 +150,13 @@ export default function App() {
       if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
       return;
     }
-    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
+    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'locale_set', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, launchAtLogin: refreshed.launchAtLogin, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, translationEngine: refreshed.translationEngine, translationPreferences: refreshed.translationPreferences, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, launchAtLogin: refreshed.launchAtLogin, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, locale: refreshed.locale, translationEngine: refreshed.translationEngine, translationPreferences: refreshed.translationPreferences, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
       }
     } catch {
       setError(true);

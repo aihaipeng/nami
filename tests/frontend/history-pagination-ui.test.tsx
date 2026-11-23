@@ -128,9 +128,12 @@ describe('paged database history', () => {
   it('restores an already browsed all page immediately while its authoritative query is still pending', async () => {
     populate(); await mount('history');
     const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
     bottom(list);
-    await waitFor(() => expect(rows()).toHaveLength(200));
-    const allRecords = rows().map((row) => bridge.history.records.find((record) => record.id === row.closest('article')!.dataset.recordId)!);
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('200'));
+    expect(items.dataset.virtualized).toBe('true');
+    expect(rows().length).toBeLessThan(60);
+    const allRecords = bridge.history.records.slice(-200).reverse();
     const favorite = screen.getByRole('button', { name: 'Favorite history' });
     fireEvent.click(favorite);
     await waitFor(() => expect(rows()).toHaveLength(1));
@@ -138,14 +141,17 @@ describe('paged database history', () => {
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation((name: string, args?: { query: string; favoritesOnly: boolean }) => name === 'history_query' && !args?.favoritesOnly ? pending.promise : original(name, args));
     fireEvent.click(favorite);
-    expect(rows()).toHaveLength(200);
+    expect(items.dataset.loadedCount).toBe('200');
+    expect(items.dataset.virtualized).toBe('true');
+    expect(rows().length).toBeLessThan(60);
     expect(screen.getByText('240 records')).toBeTruthy();
     expect(screen.queryByRole('progressbar')).toBeNull();
     const loaded = calls('history_load_more').length;
     bottom(list);
     expect(calls('history_load_more')).toHaveLength(loaded);
     await act(async () => pending.resolve({ ...bridge.history, records: allRecords, revision: bridge.history.revision + 1, generation: bridge.history.generation + 1, totalRecords: 240, hasMore: true }));
-    expect(rows()).toHaveLength(200);
+    expect(items.dataset.loadedCount).toBe('200');
+    expect(rows().length).toBeLessThan(60);
   });
 
   it('invalidates alternate pages when a new record is excluded from an unchanged favorite snapshot', async () => {
@@ -203,15 +209,26 @@ describe('paged database history', () => {
 
   it('renders only the first page and requests older records near the scroll boundary', async () => {
     populate(); await mount('history');
+    const list = document.querySelector<HTMLElement>('.history-list')!;
+    const items = document.querySelector<HTMLElement>('.history-items')!;
     expect(rows()).toHaveLength(100);
+    expect(items.dataset.loadedCount).toBe('100');
     expect(screen.queryByRole('button', { name: 'Translation: Synthetic record 0' })).toBeNull();
-    bottom(document.querySelector('.history-list')!);
-    await waitFor(() => expect(rows()).toHaveLength(200));
+    bottom(list);
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('200'));
+    expect(items.dataset.virtualized).toBe('true');
+    expect(rows().length).toBeLessThan(60);
     expect(calls('history_load_more')).toHaveLength(1);
-    bottom(document.querySelector('.history-list')!);
-    await waitFor(() => expect(rows()).toHaveLength(240));
-    bottom(document.querySelector('.history-list')!);
+    bottom(list);
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('240'));
+    expect(rows().length).toBeLessThan(60);
+    bottom(list);
     expect(calls('history_load_more')).toHaveLength(2);
+    // Scrolling to the end of the virtualized list mounts the oldest loaded record.
+    Object.defineProperties(list, { clientHeight: { configurable: true, value: 300 }, scrollHeight: { configurable: true, value: 240 * 72 } });
+    list.scrollTop = 239 * 72;
+    fireEvent.scroll(list);
+    expect(screen.getByRole('button', { name: 'Translation: Synthetic record 0' })).toBeTruthy();
   });
 
   it('preserves backend order for records with identical timestamps', async () => {
