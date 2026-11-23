@@ -6,9 +6,9 @@ import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { SettingsDialog } from './SettingsDialog';
 import { errorCode } from './ShortcutCapture';
 
-type Policy = { limit: number };
-type Storage = { bytes: number; limit: number };
-type Preview = { count: number; token: string; categories?: [number, number, number] };
+type Policy = { limit: number; maxAgeDays?: number };
+type Storage = Policy & { bytes: number };
+type Preview = { count: number; token: string; categories?: [number, number, number]; recentSince?: number };
 const categories = ['clipboardCleanupOrdinary', 'clipboardCleanupFavorites', 'clipboardCleanupPinned'] as const;
 
 function storageSize(bytes: number, locale: string) {
@@ -21,6 +21,7 @@ function storageSize(bytes: number, locale: string) {
 
 export function HistoryStorageSettings({ t, available, view, locale, previewLines }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string; previewLines: number }) {
   const id = useId();
+  const [ageOpen, setAgeOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
   const savingPreview = useRef(false);
@@ -70,22 +71,23 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
     } finally { pending.current = false; setBusy(false); }
   }
 
-  async function apply({ policy, token }: Preview & { policy: Policy | null }, selected?: number) {
-    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { view, policy, token, ...(selected === undefined ? {} : { categories: selected }) });
+  async function apply({ policy, token, recentSince }: Preview & { policy: Policy | null }, selected?: number) {
+    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { view, policy, token, ...(selected === undefined ? {} : { categories: selected }), ...(recentSince === undefined ? {} : { recentSince }) });
     if (policy) {
-      setStorage((previous) => previous && { ...previous, limit: policy.limit });
+      setStorage((previous) => previous && { bytes: previous.bytes, ...policy });
       setDraft(null);
     }
     if (result.mediaCleanupFailed) setFeedback({ message: 'clipboardCleanupMediaFailed', error: true });
     reload();
   }
 
-  function preview(policy: Policy | null) {
+  function preview(policy: Policy | null, recent = false) {
     if (!available || cleanup) return;
     void perform(async () => {
-      const result = await invoke<Preview>('records_cleanup_preview', { view, policy });
+      const result = await invoke<Preview>('records_cleanup_preview', { view, policy, ...(recent ? { recent: true } : {}) });
       if (!mounted.current) return;
       const candidate = { ...result, policy };
+      if (recent && result.recentSince === undefined) throw new Error();
       if (!policy || candidate.count) { setMask(0); setCleanup(candidate); }
       else await apply(candidate);
     });
@@ -98,9 +100,9 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
   }
 
   function confirm() {
-    if (!cleanup || (!cleanup.policy && !mask)) return;
+    if (!cleanup || (cleanup.recentSince !== undefined ? !cleanup.count : !cleanup.policy && !mask)) return;
     void perform(async () => {
-      try { await apply(cleanup, cleanup.policy ? undefined : mask); }
+      try { await apply(cleanup, cleanup.policy || cleanup.recentSince !== undefined ? undefined : mask); }
       finally { setCleanup(undefined); }
     });
   }
@@ -119,7 +121,7 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
           onChange={(code) => void savePreviewLines(code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
       </div>
       {previewSaveFailed && <p className="settings-field-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
-      <form className="settings-field" onSubmit={(event) => { event.preventDefault(); if (canSave) preview({ limit }); }}>
+      <form className="settings-field" onSubmit={(event) => { event.preventDefault(); if (canSave) preview({ limit, ...(storage?.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}) }); }}>
         <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
         {available && storage ? <div className="settings-history-limit">
           <input id={`${id}-limit`} type="text" inputMode="numeric" pattern="[0-9]+" maxLength={7} className="settings-text-input"
@@ -128,6 +130,19 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
           {canSave && <button type="submit" className="settings-action" aria-disabled={busy || undefined}>{t('shortcutManualSave')}</button>}
         </div> : <span className="settings-badge">—</span>}
       </form>
+      {view === 'clipboard' && <>
+        <div className="settings-field">
+          <label className="settings-field-content" htmlFor={`${id}-retention`}>{t('clipboardHistoryAge')}</label>
+          {available && storage ? <SearchableDropdown id={`${id}-retention`} label={t('clipboardHistoryAge')} value={String(storage.maxAgeDays ?? 0)}
+            items={['0', '1', '7', '30'].map((code) => ({ code, name: code === '0' ? t('clipboardHistoryNoExpiry') : code === '1' ? t('clipboardHistoryOneDay') : t('clipboardHistoryDays').replace('{count}', number.format(Number(code))) }))}
+            open={ageOpen} onOpenChange={setAgeOpen} onChange={(code) => { const days = Number(code); if (days !== (storage.maxAgeDays ?? 0)) preview({ limit: storage.limit, ...(days ? { maxAgeDays: days } : {}) }); }}
+            t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
+        </div>
+        <div className="settings-field">
+          <span className="settings-field-content">{t('clipboardCleanupRecentScope')}</span>
+          <button type="button" className="settings-action" aria-haspopup="dialog" disabled={!available} aria-disabled={busy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null, true); }}>{t('clipboardCleanupReview')}</button>
+        </div>
+      </>}
       <div className="settings-field">
         <span className="settings-field-content">{t('clipboardStorageUsed')}</span>
         <div className="clipboard-storage-value">
@@ -138,8 +153,8 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
       </div>
       {feedback && <p className="settings-field-note" role={feedback.error ? 'alert' : 'status'}>{t(feedback.message)}</p>}
     </div>
-    {cleanup && <SettingsDialog className="settings-cleanup-dialog" title={t(cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardCleanupClear')}
-      description={cleanup.policy ? t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count)) : undefined} onClose={close} onKeyDown={(event) => {
+    {cleanup && <SettingsDialog className="settings-cleanup-dialog" title={t(cleanup.recentSince !== undefined ? 'clipboardCleanupRecentHeading' : cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardCleanupClear')}
+      description={cleanup.recentSince !== undefined && !cleanup.count ? t('clipboardCleanupRecentEmpty') : cleanup.policy || cleanup.recentSince !== undefined ? t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count)) : undefined} onClose={close} onKeyDown={(event) => {
         if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'Escape' || event.key === 'Enter') {
           event.preventDefault();
@@ -158,7 +173,7 @@ export function HistoryStorageSettings({ t, available, view, locale, previewLine
           <button type="button" data-initial-focus className="settings-action" aria-keyshortcuts="Escape" aria-disabled={busy || undefined} onClick={close}>
             {t('clipboardCancel')}<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span>
           </button>
-          <button type="submit" className="settings-action clipboard-confirm-action" aria-keyshortcuts="Enter" disabled={!cleanup.policy && !mask} aria-disabled={busy || undefined}>
+          <button type="submit" className="settings-action clipboard-confirm-action" aria-keyshortcuts="Enter" disabled={cleanup.recentSince !== undefined ? !cleanup.count : !cleanup.policy && !mask} aria-disabled={busy || undefined}>
             {t(cleanup.policy ? 'clipboardCleanupApply' : 'clipboardCleanupClear')}<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span>
           </button>
         </div>

@@ -17,12 +17,14 @@ from test_cross_app_fixture import build_cross_app_fixture
 ROOT = Path(__file__).resolve().parents[2]
 CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'selection empty summon and clipboard protection'}
 CASE_NAMES['record-display-shortcuts'] = 'record previews and macOS window shortcuts'
+CASE_NAMES['clipboard-quick-paste'] = 'scoped numbered clipboard paste'
 CASE_NAMES['clipboard-shortcuts'] = 'clipboard shortcut smoke through macOS and WebView'
 CASE_NAMES['records-pinned'] = 'shared pinned boundary coverage'
 CASE_NAMES['translation-controls'] = 'real WK + native controls: anchors, long source, narrow menus and native action bridge'
 CASE_NAMES['translation-partial'] = 'translation partial columns and retry through WKWebView IPC'
 CASE_NAMES['clipboard-settings'] = 'clipboard settings: recording, shortcuts, storage and protected cleanup through real WebView IPC'
 CASE_NAMES['translation-settings'] = 'translation settings: proxy validation and shortcut capture in WKWebView'
+CASE_NAMES['clipboard-capture-burst'] = 'clipboard burst sampling and idle cost'
 CASE_NAMES['clipboard-image-index'] = 'clipboard local image indexing and performance'
 CASE_NAMES['clipboard-details'] = 'clipboard full details and hover navigation'
 CASE_NAMES['cross-app'] = 'cross-process selection and clipboard safety'
@@ -85,8 +87,9 @@ def test_native_ui():
     for selected, case_visible in cases:
         if smoke:
             report = target / f'native-ui-smoke-{selected}-report.json'
-        elif selected == 'clipboard-image-index':
-            report = target / 'native-ui-clipboard-image-index-report.json'
+        elif selected in {'clipboard-capture-burst', 'clipboard-image-index'}:
+            baseline = '-baseline' if os.environ.get('NAMI_UI_TEST_CAPTURE_BASELINE') == '1' else ''
+            report = target / f'native-ui-{selected}{baseline}-report.json'
         elif selected == 'cross-app':
             mode = os.environ.get('NAMI_UI_TEST_CROSS_APP')
             assert mode in {'selection', 'full', 'denied', 'denied-fresh'}, 'Explicit cross-app mode required'

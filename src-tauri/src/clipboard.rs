@@ -49,14 +49,19 @@ impl RecordingTypes {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HistoryPolicy {
     pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_days: Option<u32>,
 }
 
 impl Default for HistoryPolicy {
     fn default() -> Self {
-        Self { limit: 500 }
+        Self {
+            limit: 500,
+            max_age_days: None,
+        }
     }
 }
 
@@ -66,22 +71,33 @@ pub struct CleanupPreview {
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub categories: Option<[usize; 3]>,
+    #[serde(rename = "recentSince", skip_serializing_if = "Option::is_none")]
+    pub recent_since: Option<i64>,
 }
 
 impl HistoryPolicy {
     pub fn valid(self) -> bool {
         (1..=1_000_000).contains(&self.limit)
+            && self
+                .max_age_days
+                .is_none_or(|days| [1, 7, 30].contains(&days))
     }
 
     pub fn from_store(value: Option<String>) -> Self {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Saved {
             limit: Option<u32>,
+            max_age_days: Option<u32>,
         }
         value
             .and_then(|value| serde_json::from_str::<Saved>(&value).ok())
-            .and_then(|value| value.limit)
-            .map(|limit| Self { limit })
+            .and_then(|value| {
+                value.limit.map(|limit| Self {
+                    limit,
+                    max_age_days: value.max_age_days.filter(|days| [1, 7, 30].contains(days)),
+                })
+            })
             .filter(|policy| policy.valid())
             .unwrap_or_default()
     }
@@ -146,6 +162,42 @@ pub struct ClipboardCursor {
     pub sequence: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipboardSearchMode {
+    #[default]
+    Exact,
+    Fuzzy,
+    Regex,
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClipboardSearchOptions {
+    pub mode: ClipboardSearchMode,
+    pub body: bool,
+    pub note: bool,
+    pub image_text: bool,
+}
+
+impl Default for ClipboardSearchOptions {
+    fn default() -> Self {
+        Self {
+            mode: ClipboardSearchMode::Exact,
+            body: true,
+            note: true,
+            image_text: true,
+        }
+    }
+}
+
+impl ClipboardSearchOptions {
+    pub fn has_scope(self) -> bool {
+        self.body || self.note || self.image_text
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardSummary {
@@ -157,6 +209,8 @@ pub struct ClipboardSummary {
     pub is_favorite: bool,
     pub is_pinned: bool,
     pub source_app_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_text_match: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

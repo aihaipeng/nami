@@ -42,7 +42,30 @@ fn paste_release_result(focused: bool, version_matches: bool) -> Result<(), &'st
 
 enum PasteAttempt {
     Wait(Duration),
-    Posted,
+    Posted(u64),
+}
+
+fn pinned_clipboard_session(window: &WindowState) -> Option<u64> {
+    (window.history_visible
+        && window.history_pinned
+        && window.record_view == nami::model::RecordView::Clipboard
+        && !window.records_editor_open)
+        .then_some(window.records_session)
+}
+
+#[derive(Clone, Copy)]
+struct PasteFocusReturn {
+    session: u64,
+    operation: u64,
+    activation: u64,
+}
+
+impl PasteFocusReturn {
+    fn still_owned(self, window: &WindowState, operation: u64, activation: u64) -> bool {
+        pinned_clipboard_session(window) == Some(self.session)
+            && self.operation == operation
+            && self.activation == activation
+    }
 }
 
 pub(crate) fn authorize(window: &Webview, labels: &[&str]) -> Result<(), String> {
@@ -660,18 +683,20 @@ pub async fn clipboard_record_use(
     action: String,
 ) -> Result<OperationResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
-    let plain_text = action == "pastePlain";
-    let action = match action.as_str() {
-        "copy" => crate::clipboard_preferences::Activation::Copy,
-        "paste" | "pastePlain" => crate::clipboard_preferences::Activation::Paste,
-        "activate" => {
-            app.state::<AppState>()
-                .clipboard_options
-                .lock()
-                .unwrap()
-                .activation
-        }
-        _ => return Err("invalid_argument".into()),
+    use crate::clipboard_preferences::Activation;
+    let (action, plain_text) = {
+        let state = app.state::<AppState>();
+        let options = state.clipboard_options.lock().unwrap();
+        let action = match action.as_str() {
+            "copy" => Activation::Copy,
+            "paste" => Activation::Paste,
+            "activate" => options.activation,
+            _ => return Err("invalid_argument".into()),
+        };
+        (
+            action,
+            matches!(action, Activation::Paste) && options.paste_as_plain_text,
+        )
     };
     let operation = on_main(&app, |app| {
         app.state::<AppState>()
@@ -710,7 +735,7 @@ pub async fn clipboard_record_use(
             }
         };
         state.clipboard_version.store(version, Ordering::SeqCst);
-        if matches!(action, crate::clipboard_preferences::Activation::Copy) {
+        if matches!(action, Activation::Copy) {
             return Err(OperationResult::copied());
         }
         let written_at = std::time::Instant::now();
@@ -735,6 +760,13 @@ pub async fn clipboard_record_use(
                 platform::clipboard_version(),
             ));
         }
+        let return_session = if platform::capabilities().native_history
+            && window.window().is_focused().unwrap_or(false)
+        {
+            pinned_clipboard_session(&state.windows.lock().unwrap())
+        } else {
+            None
+        };
         if !state.windows.lock().unwrap().history_pinned {
             let _ = windows::hide_after_clipboard_use(&app);
         }
@@ -745,10 +777,10 @@ pub async fn clipboard_record_use(
                 platform::clipboard_version(),
             ));
         }
-        Ok((target, version, written_at))
+        Ok((target, version, written_at, return_session))
     })
     .await?;
-    let (target, version, written_at) = match initial {
+    let (target, version, written_at, return_session) = match initial {
         Ok(values) => {
             // Clicking a row writes the clipboard before it pastes. That write is the same copy.
             save_record_use(&app, used_id, false).await?;
@@ -764,7 +796,7 @@ pub async fn clipboard_record_use(
         }
     };
     drop(write);
-    let mut keys_down = false;
+    let mut activation = None;
     for _ in 0..30 {
         let attempt = on_main(&app, move |app| {
             let state = app.state::<AppState>();
@@ -791,7 +823,7 @@ pub async fn clipboard_record_use(
                 return Some(Ok(PasteAttempt::Wait(settle)));
             }
             Some(match platform::paste_keys_down(target, version) {
-                Ok(()) => Ok(PasteAttempt::Posted),
+                Ok(()) => Ok(PasteAttempt::Posted(platform::activation_epoch())),
                 Err(code) => Err(OperationResult::failed(
                     code,
                     Some(version),
@@ -807,13 +839,13 @@ pub async fn clipboard_record_use(
                 return Ok(result);
             }
             Some(Ok(PasteAttempt::Wait(delay))) => tokio::time::sleep(delay).await,
-            Some(Ok(PasteAttempt::Posted)) => {
-                keys_down = true;
+            Some(Ok(PasteAttempt::Posted(epoch))) => {
+                activation = Some(epoch);
                 break;
             }
         }
     }
-    if !keys_down {
+    let Some(activation) = activation else {
         let result = on_main(&app, move |_| {
             OperationResult::failed(
                 "focus_timeout",
@@ -824,7 +856,7 @@ pub async fn clipboard_record_use(
         .await?;
         reveal_failure(&app, operation, &result).await?;
         return Ok(result);
-    }
+    };
     // The gap stays off the main thread. Keyup runs even if focus or the
     // clipboard changed while it was waiting.
     tokio::time::sleep(PASTE_KEY_GAP).await;
@@ -848,6 +880,30 @@ pub async fn clipboard_record_use(
             Err(code) => OperationResult::failed(code, Some(version), current),
         }
     };
+    if let Some(session) = return_session.filter(|_| result.status == "dispatched") {
+        let handoff = PasteFocusReturn {
+            session,
+            operation,
+            activation,
+        };
+        // Yield the key-up turn before reclaiming focus, then check ownership again.
+        on_main(&app, move |app| {
+            let state = app.state::<AppState>();
+            let owns_focus = handoff.still_owned(
+                &state.windows.lock().unwrap(),
+                state.operation.load(Ordering::SeqCst),
+                platform::activation_epoch(),
+            );
+            if owns_focus
+                && platform::target_focused(target)
+                && platform::clipboard_version() == version
+            {
+                let _ = windows::focus_records_editor(&app)
+                    .inspect_err(|error| eprintln!("Nami clipboard focus return: {error}"));
+            }
+        })
+        .await?;
+    }
     reveal_failure(&app, operation, &result).await?;
     Ok(result)
 }
@@ -1687,21 +1743,32 @@ pub async fn clipboard_query(
     cursor: Option<nami::clipboard::ClipboardCursor>,
 ) -> Result<nami::clipboard::ClipboardQueryResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
+    let search = app
+        .state::<AppState>()
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .search;
     crate::clipboard_runtime::database(&app, move |database| {
-        let page = database.clipboard_page_filtered(
+        let page = database.clipboard_page_with_search(
             &query,
             favorites_only,
             kind.as_deref(),
             cursor.as_ref(),
             crate::database::PAGE_SIZE,
+            search,
         )?;
-        let alternate = if cursor.is_none() {
-            Some(database.clipboard_page_filtered(
+        let alternate = if cursor.is_none()
+            && (query.trim().is_empty()
+                || search.mode == nami::clipboard::ClipboardSearchMode::Exact)
+        {
+            Some(database.clipboard_page_with_search(
                 &query,
                 !favorites_only,
                 kind.as_deref(),
                 None,
                 crate::database::PAGE_SIZE,
+                search,
             )?)
         } else {
             None
@@ -1742,6 +1809,40 @@ pub async fn clipboard_record_detail(
     })
     .await
     .map_err(|_| "storage_worker")?
+}
+
+#[tauri::command]
+pub async fn clipboard_image_save(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<bool, String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_image_save {
+        return Err("platform_unavailable".into());
+    }
+    let png = crate::clipboard_runtime::image_export_png(&app, record_id).await?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "storage_unavailable")?;
+    let parent = window.window();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    on_main(&app, move |_| {
+        platform::pick_image_save_path(&parent, move |result| {
+            let _ = sender.send(result);
+        })
+    })
+    .await??;
+    let Some(destination) = receiver.await.map_err(|_| "clipboard_save_dialog")?? else {
+        return Ok(false);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::clipboard_runtime::save_image_export(&app_data, &destination, png)
+    })
+    .await
+    .map_err(|_| "storage_worker")??;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1798,16 +1899,6 @@ pub async fn clipboard_record_has_text(
 }
 
 #[tauri::command]
-pub async fn clipboard_record_ocr_text(
-    window: Webview,
-    app: AppHandle,
-    record_id: String,
-) -> Result<String, String> {
-    authorize(&window, &["clipboard", "translation"])?;
-    crate::clipboard_text::correction_text(&app, record_id).await
-}
-
-#[tauri::command]
 pub async fn clipboard_record_process(
     window: Webview,
     app: AppHandle,
@@ -1842,13 +1933,6 @@ pub async fn clipboard_record_update(
     text: Option<String>,
 ) -> Result<(), String> {
     authorize(&window, &["clipboard", "translation"])?;
-    if action == "correct_ocr" {
-        if title.is_some() {
-            return Err("invalid_argument".into());
-        }
-        return crate::clipboard_text::correct(&app, record_id, text.ok_or("invalid_argument")?)
-            .await;
-    }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let root = crate::clipboard_runtime::image_root(&app)?;
@@ -1955,7 +2039,11 @@ pub async fn clipboard_shortcut_set(
             .as_ref()
             .map(|_| clipboard_binding())
             .or(binding)
-            .map(|binding| validate_clipboard_binding(binding, &preferences.shortcuts))
+            .map(|binding| {
+                let binding = validate_clipboard_binding(binding, &preferences.shortcuts)?;
+                crate::shortcuts::validate_quick_paste_reservation(&binding)?;
+                Ok::<_, String>(binding)
+            })
             .transpose()?;
         let options = state.clipboard_options.lock().unwrap();
         let records = defaults.as_ref().unwrap_or(&options.record_shortcuts);
@@ -2108,7 +2196,10 @@ pub async fn clipboard_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{image_history_paste, paste_release_result, remaining_image_settle, PASTE_KEY_GAP};
+    use super::{
+        image_history_paste, paste_release_result, remaining_image_settle, PasteFocusReturn,
+        WindowState, PASTE_KEY_GAP,
+    };
     use crate::platform::ClipboardPayload;
     use std::time::Duration;
 
@@ -2212,6 +2303,48 @@ mod tests {
             Duration::ZERO
         );
         assert_eq!(PASTE_KEY_GAP, Duration::from_millis(15));
+    }
+
+    #[test]
+    fn paste_focus_return_requires_the_original_pinned_clipboard_session() {
+        let window = WindowState {
+            history_visible: true,
+            history_pinned: true,
+            records_session: 3,
+            ..WindowState::default()
+        };
+        let handoff = PasteFocusReturn {
+            session: 3,
+            operation: 7,
+            activation: 9,
+        };
+        assert!(handoff.still_owned(&window, 7, 9));
+        assert!(!handoff.still_owned(&window, 8, 9));
+        assert!(!handoff.still_owned(&window, 7, 10));
+        for changed in [
+            WindowState {
+                history_visible: false,
+                ..window.clone()
+            },
+            WindowState {
+                history_pinned: false,
+                ..window.clone()
+            },
+            WindowState {
+                records_editor_open: true,
+                ..window.clone()
+            },
+            WindowState {
+                record_view: nami::model::RecordView::Translation,
+                ..window.clone()
+            },
+            WindowState {
+                records_session: 4,
+                ..window.clone()
+            },
+        ] {
+            assert!(!handoff.still_owned(&changed, 7, 9));
+        }
     }
 
     #[test]

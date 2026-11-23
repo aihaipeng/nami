@@ -34,6 +34,7 @@ export interface PlatformCapabilities {
   clipboardWrite: boolean;
   autoPaste: boolean;
   clipboardOpenTarget: boolean;
+  clipboardImageSave: boolean;
   accessibilityPermission: boolean;
   primaryModifier: 'meta' | 'control';
 }
@@ -77,7 +78,7 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   translationEngine: 'edge',
   translationPreferences: {

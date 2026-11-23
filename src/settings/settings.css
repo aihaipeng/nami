@@ -98,8 +98,9 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .settings-clear svg { width: 11px; height: 11px; }
 
 .clipboard-setting-icon { width: 14px; height: 14px; flex: none; color: var(--settings-secondary); }
-.clipboard-recording-types { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
-.clipboard-recording-types .settings-field { min-height: 34px; }
+.clipboard-recording-types, .clipboard-search-scopes { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
+.clipboard-recording-types .settings-field, .clipboard-search-scopes .settings-field { min-height: 34px; }
+.clipboard-search-scopes legend { padding: 8px 0 0; color: var(--settings-secondary); font-size: 12px; }
 .clipboard-setting-note { margin: 0; padding: 7px 0; color: var(--settings-secondary); font-size: 12px; }
 .clipboard-picker { max-width: 58%; }
 .settings-shell .clipboard-picker .settings-dropdown { max-width: 100%; }

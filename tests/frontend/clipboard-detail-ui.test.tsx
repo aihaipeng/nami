@@ -56,28 +56,35 @@ function direct() {
 }
 
 describe('clipboard details', () => {
-  it('shows index status, retries one image and never calls extract or copy', async () => {
+  it('hides passive index status and keeps indexing and retry actions without extracting or copying', async () => {
     records[1] = { ...first(), kind: 'image', imageIndexStatus: 'unindexed' };
     const invoke = bridge.invoke.getMockImplementation()!;
     let finish!: () => void;
     bridge.invoke.mockImplementation((name, args) => name === 'clipboard_record_process'
       ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
     direct();
-    fireEvent.click(await within(pane()).findByRole('button', { name: 'Index image text' }));
-    expect(within(pane()).getByText('Indexing image text…')).toBeTruthy();
+    const index = await within(pane()).findByRole('button', { name: 'Index image text' });
+    expect(within(pane()).queryByText('Image text not indexed')).toBeNull();
+    fireEvent.click(index);
+    expect(index.isConnected).toBe(false);
+    expect(within(pane()).queryByText('Indexing image text…')).toBeNull();
     expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'index' });
     first().imageIndexStatus = 'failed';
     await act(async () => finish());
     await emit('clipboard_changed', 30);
-    expect(await within(pane()).findByText('Could not index image text')).toBeTruthy();
-    fireEvent.click(within(pane()).getByRole('button', { name: 'Retry' }));
+    const retry = await within(pane()).findByRole('button', { name: 'Retry' });
+    expect(within(pane()).queryByText('Could not index image text')).toBeNull();
+    fireEvent.click(retry);
     first().imageIndexStatus = 'empty';
     await act(async () => finish());
     await emit('clipboard_changed', 31);
-    expect(await within(pane()).findByText('No text recognized')).toBeTruthy();
+    await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull());
+    expect(within(pane()).queryByText('No text recognized')).toBeNull();
     first().imageIndexStatus = 'indexed';
     await emit('clipboard_changed', 32);
-    expect(await within(pane()).findByText('Image text is searchable')).toBeTruthy();
+    expect(await within(pane()).findByRole('button', { name: 'Extract text' })).toBeTruthy();
+    expect(within(pane()).queryByText('Image text is searchable')).toBeNull();
+    expect(pane().querySelector('.clipboard-image-index-action')).toBeNull();
     expect(calls('clipboard_record_use')).toHaveLength(0);
   });
   it('retains an OCR result during pointer movement and automatic focus until explicit keyboard browsing', async () => {

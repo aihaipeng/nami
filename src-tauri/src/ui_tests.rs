@@ -2324,6 +2324,70 @@ return {ready:true,recordingRight};
                 })?;
             }
         }
+        samples.push(wait_view_dom(
+            app,
+            "settings",
+            r#"
+const section=document.querySelector('#clipboard-search-heading').closest('section');
+const trigger=section.querySelector('[aria-label="Search Rule: Exact Match"]');
+const scopes=[...section.querySelectorAll('fieldset input')];
+if(!trigger||scopes.length!==3||scopes.some(box=>!box.checked))return {ready:false};
+trigger.click();return {ready:true,exactAndAllScopesDefault:true};
+"#,
+        )?);
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const options=[...document.querySelectorAll('[role=option]')];
+const mixed=options.find(option=>option.textContent==='Mixed Match');
+if(!mixed||options.length!==4)return {ready:false};
+mixed.click();return {ready:true};
+"#,
+        )?;
+        samples.push(wait_view_dom(
+            app,
+            "settings",
+            r#"
+const section=document.querySelector('#clipboard-search-heading').closest('section');
+return {ready:!!section.querySelector('[aria-label="Search Rule: Mixed Match"]'),ruleSaved:true};
+"#,
+        )?);
+        {
+            let database = state.database.lock().unwrap();
+            if crate::clipboard_preferences::ClipboardOptions::load(
+                database.as_ref().ok_or("missing_test_database")?,
+            )?
+            .search
+            .mode
+                != nami::clipboard::ClipboardSearchMode::Mixed
+            {
+                return Err("clipboard search rule did not persist".into());
+            }
+        }
+        wait_dom(app, "return {ready:!!window.__TAURI_INTERNALS__};")?;
+        evaluate_dom(
+            app,
+            r#"
+window.__clipboardSearchProbe=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_query',{query:'stngs-fvrt',favoritesOnly:true,kind:'text',cursor:null})
+  .then(result=>window.__clipboardSearchProbe={ids:result.page.records.map(record=>record.id),total:result.page.totalRecords,noAlternate:result.alternate===null},error=>window.__clipboardSearchProbe={error:String(error)});
+return true;
+"#,
+        )?;
+        let search_probe = wait_dom(
+            app,
+            "return {ready:!!window.__clipboardSearchProbe,...window.__clipboardSearchProbe};",
+        )?;
+        if search_probe["ids"] != serde_json::json!(["settings-favorite"])
+            || search_probe["total"] != 1
+            || search_probe["noAlternate"] != true
+        {
+            return Err(format!(
+                "clipboard query did not use the saved search rule: {search_probe}"
+            ));
+        }
+        samples.push(search_probe);
         let set_recording = |enabled| {
             tauri::async_runtime::block_on(crate::clipboard_preferences::set_recording(
                 app,
@@ -2524,11 +2588,11 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='16,4,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='16,6,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
-for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→']]) {
+for(const [name,key] of [['Navigate Up','↑'],['Navigate Down','↓'],['Previous Category','←'],['Next Category','→'],['Paste Image (Context Menu)','⇧⌘↵'],['Save Image (Context Menu)','⌘S']]) {
   if(rows.find(row=>row.querySelector('.settings-field-content')?.textContent===name)?.querySelector('.keycaps')?.textContent!==key)throw Error('missing editable default: '+name);
 }
 if(rows.some(row=>!row.querySelector('.settings-recorder')||!row.querySelector('input[type=checkbox]:checked')))throw Error('each shortcut needs an available recorder and an enabled checkbox');
@@ -2590,7 +2654,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts.preview.binding;
     if(saved.code!==code||saved.modifiers.length)throw Error('recorder did not keep a bare '+code);
   }
-  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM']]) {
+  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pasteRecord','KeyL'],['saveImage','KeyU']]) {
     await local(action,null,false);
     await local(action,{code,modifiers:['alt']});
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts[action];
@@ -2774,7 +2838,7 @@ const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>i
 const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
 const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
 const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⌘O','⇧⌘O'].join(),bindings,kept};
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⇧⌘T','⌘O','⇧⌘O','⇧⌘↵','⌘S'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -5360,6 +5424,258 @@ fn send_registered_hotkey(
     Ok(())
 }
 
+fn set_test_paste_format(app: &AppHandle, plain: bool) -> Result<(), String> {
+    on_main(app, |app| {
+        create(app, "settings")?;
+        Ok(())
+    })?;
+    wait_view_dom(
+        app,
+        "settings",
+        "return {ready:!!window.__TAURI_INTERNALS__};",
+    )?;
+    evaluate_view_dom(
+        app,
+        "settings",
+        &format!(
+            r#"
+window.__pasteFormat=null;
+const invoke=window.__TAURI_INTERNALS__.invoke;
+invoke('clipboard_behavior_set',{{pasteAsPlainText:{plain}}}).then(async()=>{{
+  const options=await invoke('clipboard_options_get');
+  return options.pasteAsPlainText;
+}}).then(value=>window.__pasteFormat={{value}},error=>window.__pasteFormat={{error:String(error)}});
+return true;
+"#
+        ),
+    )?;
+    let result = wait_view_dom(
+        app,
+        "settings",
+        "return {ready:!!window.__pasteFormat,...window.__pasteFormat};",
+    )?;
+    if result["value"] != plain {
+        return Err(format!("could not save paste format: {result}"));
+    }
+    let state = app.state::<AppState>();
+    let database = state.database.lock().unwrap();
+    if crate::clipboard_preferences::ClipboardOptions::load(
+        database.as_ref().ok_or("missing_test_database")?,
+    )?
+    .paste_as_plain_text
+        != plain
+    {
+        return Err("paste format was not restored from the database".into());
+    }
+    Ok(())
+}
+
+fn run_clipboard_quick_paste(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| -> Result<(), String> {
+        let state = app.state::<AppState>();
+        *state.target.lock().unwrap() = None;
+        let now = chrono::Utc::now().to_rfc3339();
+        let formatting = nami::clipboard::ClipboardTextFormatting {
+            html: Some(b"<b>Synthetic p1-favorite</b>".to_vec()),
+            rtf: Some(br"{\rtf1\b Synthetic p1-favorite}".to_vec()),
+        };
+        let plain = "Synthetic p1-favorite";
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        {
+            let mut database = state.database.lock().unwrap();
+            let db = database.as_mut().ok_or("isolated test database")?;
+            for (id, pinned, favorite, bundle) in [
+                ("p1-favorite", false, true, "test.browser"),
+                ("p1-pinned", true, true, "test.browser"),
+                ("p1-other", false, false, "test.other"),
+            ] {
+                db.clipboard_insert_capture(
+                    &nami::clipboard::ClipboardRecord {
+                        id: id.into(),
+                        kind: if id == "p1-other" { "files" } else { "text" }.into(),
+                        text: if id == "p1-other" {
+                            serde_json::json!([path]).to_string()
+                        } else {
+                            format!("Synthetic {id}")
+                        },
+                        date: now.clone(),
+                        is_favorite: favorite,
+                        is_pinned: pinned,
+                        image_path: None,
+                        fingerprint: id.into(),
+                        source_app: Some(serde_json::json!({"bundleId": bundle, "name": bundle})),
+                    },
+                    None,
+                    (id == "p1-favorite").then_some(&formatting),
+                )?;
+            }
+        }
+        records_mode(app, "clipboard")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const panel=document.querySelector('.clipboard-panel');
+panel.querySelector('.history-favorites').click();
+panel.querySelector('input[type=search]').focus();
+return true;
+"#,
+        )?;
+        samples.push(wait_records(app, r#"
+const panel=document.querySelector('.clipboard-panel'), rows=[...panel.querySelectorAll('.history-row:not([hidden])')];
+return {ready:rows.length===2&&rows.some(row=>row.dataset.recordId==='p1-pinned'&&!row.querySelector('[aria-keyshortcuts]'))&&rows.some(row=>row.dataset.recordId==='p1-favorite'&&row.querySelector('[aria-keyshortcuts="Meta+1"]')), action:'Favorites group real IPC', rows:rows.map(row=>row.dataset.recordId)};
+"#)?);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const heading=document.querySelector('[data-record-id="p1-favorite"] .history-row-heading');
+window.__quickPasteIconWidth=heading.querySelector('.history-origin').getBoundingClientRect().width;
+document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Meta',code:'MetaLeft',metaKey:true,bubbles:true}));
+return true;
+"#,
+        )?;
+        samples.push(wait_records(app, r#"
+const hint=document.querySelector('.clipboard-quick-paste-hint'), hints=document.querySelectorAll('.clipboard-quick-paste-hint');
+return {ready:hints.length===1&&hint.textContent==='1'&&hint.closest('[data-record-id]').dataset.recordId==='p1-favorite'&&hint.getBoundingClientRect().width===window.__quickPasteIconWidth, action:'Command badge identifies the correct row without changing width'};
+"#)?);
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+document.activeElement.dispatchEvent(new KeyboardEvent('keyup',{key:'Meta',code:'MetaLeft',bubbles:true}));return true;
+"#,
+        )?;
+        samples.push(wait_records(app, r#"return {ready:!document.querySelector('.clipboard-quick-paste-hint'),action:'Command release restores source icon'};"#)?);
+        for plain_mode in [false, true] {
+            if plain_mode {
+                set_test_paste_format(app, true)?;
+            }
+            let expected = if plain_mode {
+                crate::platform::ClipboardPayload::Text(plain.into())
+            } else {
+                crate::platform::ClipboardPayload::RichText {
+                    text: plain.into(),
+                    formatting: formatting.clone(),
+                }
+            };
+            for entry in ["number", "menu", "click"] {
+                let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+                match entry {
+                    "number" => {
+                        evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-panel input[type=search]').focus();return true;")?;
+                        post_records_key(app, 18, 1 << 20, "1", "1", false)?;
+                    }
+                    "menu" => {
+                        evaluate_view_dom(
+                            app,
+                            "clipboard",
+                            r#"document.querySelector('[data-record-id="p1-favorite"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));return true;"#,
+                        )?;
+                        wait_records(
+                            app,
+                            r#"
+const items=[...document.querySelectorAll('[role=menuitem]')];
+const paste=items.find(item=>item.textContent==='Paste');
+if(!paste)return {ready:false};
+if(items.some(item=>item.textContent==='Paste as Plain Text'))throw Error('duplicate paste entry');
+paste.click();return {ready:true};
+"#,
+                        )?;
+                    }
+                    _ => {
+                        evaluate_view_dom(
+                            app,
+                            "clipboard",
+                            r#"document.querySelector('[data-record-id="p1-favorite"] .history-row-select').click();return true;"#,
+                        )?;
+                    }
+                }
+                let mut actual = None;
+                for _ in 0..40 {
+                    actual = on_main(app, move |_| {
+                        Ok(crate::platform::read_clipboard(|_| false)?
+                            .filter(|capture| capture.version != version)
+                            .map(|capture| capture.payload))
+                    })?;
+                    if actual.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if actual.as_ref() != Some(&expected) {
+                    return Err(format!("{entry} did not write the expected format (plain={plain_mode}): {actual:?}"));
+                }
+                samples.push(wait_records(app, &format!(r#"return {{ready:document.querySelector('.clipboard-panel .record-feedback')?.textContent.includes('Press ⌘V to paste manually'),entry:{entry:?},plain:{plain_mode}}};"#))?);
+            }
+            on_main(app, move |_| {
+                crate::platform::test_paste_into_editor(plain, !plain_mode)
+            })?;
+            samples.push(serde_json::json!({"nativeEditorReceived":true,"plain":plain_mode}));
+        }
+        for (id, action, expected, status) in [
+            (
+                "p1-favorite",
+                "copy",
+                crate::platform::ClipboardPayload::RichText {
+                    text: plain.into(),
+                    formatting,
+                },
+                "copied",
+            ),
+            (
+                "p1-other",
+                "paste",
+                crate::platform::ClipboardPayload::Files(vec![path]),
+                "failed",
+            ),
+        ] {
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                &format!(
+                    r#"
+window.__pasteFormatUse=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{id:?},action:{action:?}}})
+  .then(result=>window.__pasteFormatUse=result,error=>window.__pasteFormatUse={{error:String(error)}});
+return true;
+"#
+                ),
+            )?;
+            let result = wait_records(
+                app,
+                "return {ready:!!window.__pasteFormatUse,...window.__pasteFormatUse};",
+            )?;
+            let actual = on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })?;
+            if result["status"] != status
+                || result["copyStatus"] != "current"
+                || actual != Some(expected)
+            {
+                return Err(format!(
+                    "plain-paste preference affected {id} / {action}: {result}, {actual:?}"
+                ));
+            }
+            samples.push(
+                serde_json::json!({"record":id,"action":action,"originalFormatPreserved":true}),
+            );
+        }
+        Ok(())
+    })();
+    DomCase {
+        name: "scoped numbered clipboard paste",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let mut owned_image = None;
@@ -5850,20 +6166,23 @@ return true;
                 .id
         };
         *app.state::<AppState>().target.lock().unwrap() = None;
-        for (action, expected) in [
-            ("paste", rich),
+        for (plain, expected) in [
+            (false, rich),
             (
-                "pastePlain",
+                true,
                 crate::platform::ClipboardPayload::Text("Synthetic rich clipboard smoke".into()),
             ),
         ] {
+            if plain {
+                set_test_paste_format(app, true)?;
+            }
             evaluate_view_dom(
                 app,
                 "clipboard",
                 &format!(
                     r#"
 window.__richPaste=null;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{rich_id:?},action:{action:?}}})
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{{recordId:{rich_id:?},action:'paste'}})
   .then(result=>window.__richPaste=result,error=>window.__richPaste={{error:String(error)}});
 return true;
 "#
@@ -5874,43 +6193,23 @@ return true;
                 "return {ready:!!window.__richPaste,...window.__richPaste};",
             )?;
             if result["code"] != "target_unavailable" || result["copyStatus"] != "current" {
-                return Err(format!("rich paste safety boundary ({action}): {result}"));
+                return Err(format!(
+                    "rich paste safety boundary (plain={plain}): {result}"
+                ));
             }
             let actual = on_main(app, |_| {
                 Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
             })?;
             if actual != Some(expected) {
-                return Err(format!("isolated pasteboard did not match {action}"));
+                return Err(format!("isolated pasteboard did not match plain={plain}"));
             }
-            samples.push(
-                serde_json::json!({"clipboardFormat":action,"noTarget":true,"bytesMatch":true}),
-            );
+            on_main(app, move |_| {
+                crate::platform::test_paste_into_editor("Synthetic rich clipboard smoke", !plain)
+            })?;
+            samples.push(serde_json::json!({"plainPaste":plain,"noTarget":true,"bytesMatch":true,"nativeEditorReceived":true}));
         }
-        let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-window.__richInvalid=null;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{recordId:'smoke-ocr',action:'pastePlain'})
-  .then(()=>window.__richInvalid='unexpected_success',error=>window.__richInvalid=String(error));
-return true;
-"#,
-        )?;
-        let invalid = wait_records(
-            app,
-            "return {ready:window.__richInvalid!==null,error:window.__richInvalid};",
-        )?;
-        if invalid["error"] != "invalid_argument"
-            || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version
-        {
-            return Err(
-                "plain paste of an image was not rejected before clipboard mutation".into(),
-            );
-        }
-        samples.push(
-            serde_json::json!({"oversizedHtmlFallsBack":true,"imagePlainPasteRejected":true}),
-        );
+        set_test_paste_format(app, false)?;
+        samples.push(serde_json::json!({"oversizedHtmlFallsBack":true}));
         let fixture =
             std::env::temp_dir().join(format!("nami-open-smoke-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
@@ -6640,6 +6939,52 @@ return {{ready:input?.value==={expected:?}&&!input.closest('[inert]')&&({trusted
             samples.push(serde_json::json!({"process":fixture_mode,"axAuthorized":trusted,"clipboardPreserved":true,"copyReceived":matches!(fixture_mode, "copy" | "copy-delayed"),"elapsedMs":elapsed}));
             previous = Some(target);
         }
+        if trusted {
+            const EXCLUDED: &str = "dev.local.nami.cross-app-fixture";
+            let fixture = CrossAppFixture::start(app, path, "copy")?;
+            let target = fixture.focused(app)?;
+            on_main(app, move |_| {
+                Ok(crate::platform::test_copy_from_fixture(target)?)
+            })?;
+            fixture.expect(&format!("COPY {TEXT}"))?;
+            on_main(app, |app| {
+                crate::windows::resume_navigation(app, "clipboard")
+            })?;
+            let host = crate::platform::test_self_target().ok_or("isolated host identity")?;
+            for _ in 0..50 {
+                if on_main(app, move |_| Ok(crate::platform::target_focused(host)))? {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            on_main(app, move |_| {
+                if !crate::platform::target_focused(host) {
+                    return Err("isolated host did not take focus from excluded fixture".into());
+                }
+                if crate::platform::read_clipboard(|bundle| bundle == EXCLUDED)?.is_some() {
+                    return Err(
+                        "unmarked copy from the excluded fixture was accepted after switching apps"
+                            .into(),
+                    );
+                }
+                let allowed =
+                    crate::platform::read_clipboard(|_| false)?.ok_or("missing control copy")?;
+                if allowed.source_app.is_some()
+                    || allowed.payload != crate::platform::ClipboardPayload::Text(TEXT.into())
+                {
+                    return Err("ambiguous control copy was lost or assigned a source".into());
+                }
+                crate::platform::write_text(MARKER).map_err(|(code, _)| code)?;
+                let fresh = crate::platform::read_clipboard(|bundle| bundle == EXCLUDED)?;
+                if fresh.map(|capture| capture.payload)
+                    != Some(crate::platform::ClipboardPayload::Text(MARKER.into()))
+                {
+                    return Err("old exclusion suppressed the next clipboard version".into());
+                }
+                Ok(())
+            })?;
+            samples.push(serde_json::json!({"excludedCopyAfterFocusSwitchRejected":true,"ambiguousAllowedCopyUnlabelled":true,"freshCopyAllowed":true}));
+        }
         let previous = previous.ok_or("no synthetic target ran")?;
         for _ in 0..100 {
             if !on_main(app, move |_| Ok(crate::platform::target_alive(previous)))? {
@@ -6970,6 +7315,107 @@ fn clipboard_text_image(
     }
 }
 
+// The probe uses the same named pasteboard and production capture loop as the OCR case.
+fn run_clipboard_capture_burst(app: &AppHandle) -> DomCase {
+    use std::time::Instant;
+
+    unsafe extern "C" {
+        fn clock() -> std::ffi::c_ulong;
+    }
+    let mut samples = Vec::new();
+    let result = (|| -> Result<(), String> {
+        if app.config().identifier != "dev.local.nami.ui-tests" {
+            return Err("capture burst requires the isolated native host".into());
+        }
+        let baseline = std::env::var("NAMI_UI_TEST_CAPTURE_BASELINE").as_deref() == Ok("1");
+        let state = app.state::<AppState>();
+        *state.database.lock().unwrap() = Some(crate::database::HistoryDatabase::open(
+            std::path::Path::new(":memory:"),
+        )?);
+        on_main(app, move |app| {
+            if baseline {
+                crate::clipboard_runtime::start_with_poll_interval(app, Duration::from_millis(350));
+            } else {
+                crate::clipboard_runtime::start(app);
+            }
+            app.state::<AppState>()
+                .clipboard_enabled
+                .store(true, Ordering::SeqCst);
+            Ok(())
+        })?;
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        let cpu_started = unsafe { clock() };
+        std::thread::sleep(Duration::from_secs(4));
+        let cpu_ms = unsafe { clock() }.saturating_sub(cpu_started) as f64 / 1000.0;
+        samples.push(serde_json::json!({"phase":"idle", "baseline":baseline, "wallMs":started.elapsed().as_millis(), "processCpuMs":cpu_ms}));
+
+        let nonce = uuid::Uuid::new_v4();
+        let mut observed = std::collections::HashMap::new();
+        let observe =
+            |observed: &mut std::collections::HashMap<String, Instant>| -> Result<(), String> {
+                let database = state.database.lock().unwrap();
+                let page = database
+                    .as_ref()
+                    .ok_or("test database")?
+                    .clipboard_page("", false, None, 100)?;
+                for record in page.records {
+                    observed.entry(record.text).or_insert_with(Instant::now);
+                }
+                Ok(())
+            };
+        for spacing in [70, 220, 450] {
+            let mut writes = Vec::new();
+            for index in 0..10 {
+                let text = format!(
+                    "Synthetic capture {nonce} {spacing} {} {index}",
+                    if index % 2 == 0 { "alpha" } else { "beta" }
+                );
+                let payload = text.clone();
+                let started = on_main(app, move |_| {
+                    crate::platform::write_text(&payload).map_err(|(code, _)| code)?;
+                    Ok(Instant::now())
+                })?;
+                writes.push((text, started));
+                let dwell = if index == 9 { 650 } else { spacing };
+                while started.elapsed() < Duration::from_millis(dwell) {
+                    observe(&mut observed)?;
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+            }
+            let latencies: Vec<_> = writes
+                .iter()
+                .map(|(text, started)| {
+                    observed
+                        .get(text)
+                        .map(|time| time.duration_since(*started).as_millis())
+                })
+                .collect();
+            let captured = latencies.iter().flatten().count();
+            let gaps = writes
+                .windows(2)
+                .map(|pair| pair[1].1.duration_since(pair[0].1).as_millis())
+                .collect::<Vec<_>>();
+            samples.push(serde_json::json!({"phase":"capture-to-queryable", "requestedSpacingMs":spacing,"actualSpacingMs":gaps,"captured":captured,"written":writes.len(),"latencyMs":latencies}));
+            if latencies.last().is_none_or(Option::is_none) || (spacing == 450 && captured < 9) {
+                return Err(
+                    "sustained capture missed its final settled write or lost spaced copies".into(),
+                );
+            }
+        }
+        Ok(())
+    })();
+    app.state::<AppState>()
+        .clipboard_enabled
+        .store(false, Ordering::SeqCst);
+    DomCase {
+        name: "clipboard burst sampling and idle cost",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
     use std::time::Instant;
 
@@ -6983,8 +7429,13 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         let path = directory.join("history.sqlite3");
         let database = crate::database::HistoryDatabase::open(&path)?;
         *state.database.lock().unwrap() = Some(database);
-        on_main(app, |app| {
-            crate::clipboard_runtime::start(app);
+        let baseline = std::env::var("NAMI_UI_TEST_CAPTURE_BASELINE").as_deref() == Ok("1");
+        on_main(app, move |app| {
+            if baseline {
+                crate::clipboard_runtime::start_with_poll_interval(app, Duration::from_millis(350));
+            } else {
+                crate::clipboard_runtime::start(app);
+            }
             app.state::<AppState>()
                 .clipboard_enabled
                 .store(true, Ordering::SeqCst);
@@ -7326,13 +7777,6 @@ window.__indexProbe=null;
             }
             samples.push(serde_json::json!({"phase":"single-image-retry-through-ipc","retryVisionCalls":1,"clipboardPreserved":true,"noDerivedRecord":true}));
         }
-        state
-            .database
-            .lock()
-            .unwrap()
-            .as_mut()
-            .ok_or("test database")?
-            .clipboard_correct_image_text(&retry.id, "Corrected retry fixture")?;
         let recopy_bytes = fixture(
             "Nami Error E247 海浪 Recopy".into(),
             format!("{nonce} recopy"),
@@ -7364,17 +7808,20 @@ window.__indexProbe=null;
             state.clipboard_enabled.store(true, Ordering::SeqCst);
             Ok(())
         })?;
-        let retry = state
-            .database
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or("test database")?
-            .clipboard_record(&retry.id)?;
+        let (retry, retry_text) = {
+            let database = state.database.lock().unwrap();
+            let database = database.as_ref().ok_or("test database")?;
+            (
+                database.clipboard_record(&retry.id)?,
+                database
+                    .clipboard_ocr_text(&retry.id)?
+                    .ok_or("missing retry OCR text")?,
+            )
+        };
         for (record, expected, additional_calls) in [
             (recopy, "E247", 1),
             (blank, "", 0),
-            (retry, "Corrected retry fixture", 0),
+            (retry, retry_text.as_str(), 0),
         ] {
             let path = record.image_path.as_deref().ok_or("missing recopy image")?;
             let bytes = nami::clipboard::read_image(&root, path)?;
@@ -7416,7 +7863,7 @@ window.__indexProbe=null;
                 std::thread::sleep(Duration::from_millis(8));
             }
         }
-        samples.push(serde_json::json!({"phase":"recopy-image-index","additionalVisionCalls":1,"noDuplicates":true,"preservedEmptyAndCorrected":true}));
+        samples.push(serde_json::json!({"phase":"recopy-image-index","additionalVisionCalls":1,"noDuplicates":true,"preservedEmptyAndIndexed":true}));
         Ok(())
     })();
     let state = app.state::<AppState>();
@@ -8042,10 +8489,7 @@ return {ready:rows.length===5&&image.includes('ocr'),text,image,blank,files,icon
             return Err(format!("record icon sizing: {actions}"));
         }
         samples.push(actions);
-        for (id, expected_status, action_visible) in [
-            ("kind-image-text", "Image text not indexed", true),
-            ("kind-image-blank", "No text recognized", false),
-        ] {
+        for (id, action_visible) in [("kind-image-text", true), ("kind-image-blank", false)] {
             evaluate_view_dom(
                 app,
                 "clipboard",
@@ -8063,9 +8507,10 @@ return true;
                 app,
                 &format!(
                     r#"
-const pane=document.querySelector('.clipboard-detail'),status=pane?.querySelector('.clipboard-image-index-status [role=status]')?.textContent;
-const ocr=!!pane?.querySelector('[data-action=ocr]:not([aria-hidden=true]) button:not(:disabled)');
-return {{ready:status==={expected_status:?}&&ocr==={action_visible},status,ocr}};
+const pane=document.querySelector('.clipboard-detail'),image=!!pane?.querySelector('.clipboard-detail-content .clipboard-image-preview');
+const index=!!pane?.querySelector('.clipboard-image-index-action button:not(:disabled)'),ocr=!!pane?.querySelector('[data-action=ocr]:not([aria-hidden=true]) button:not(:disabled)');
+const status=['Image text not indexed','No text recognized','Image text is searchable'].find(text=>pane?.textContent.includes(text));
+return {{ready:image&&!status&&index==={action_visible}&&ocr==={action_visible},image,status,index,ocr}};
 "#
                 ),
             )?;
@@ -8455,7 +8900,6 @@ return true;
             return Err("explicit OCR must find both originals without duplicating the extracted text record".into());
         }
         samples.push(serde_json::json!({"backgroundOcrSaved":true,"browsedRecordRetained":true,"originalImageAndFileSearchable":true,"extractedTextDeduplicated":true}));
-        let version_before_edit = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
         evaluate_view_dom(
             app,
             "clipboard",
@@ -8465,56 +8909,117 @@ row?.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,cl
 return true;
 "#,
         )?;
-        wait_records(
+        samples.push(wait_records(app, r#"
+const nodes=[...document.querySelectorAll('.record-context-menu [role=menuitem],.record-context-menu [role=separator]')];
+const menu=nodes.map(el=>el.getAttribute('role')==='separator'?'/':`${el.querySelector('.record-menu-label')?.textContent.trim()} ${el.querySelector('kbd')?.textContent}`);
+const expected=['Copy ⇧⌘C','Paste ⇧⌘↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⇧⌘T','OCR ⇧⌘O','/','Delete ⌘⌫'];
+const pinned=document.querySelector('.clipboard-panel .history-pinned');
+if(!pinned)return {ready:false};
+const empty=pinned.classList.contains('empty');pinned.classList.remove('empty');
+const style=getComputedStyle(pinned,'::after'),gradient=style.backgroundImage,height=style.height;
+pinned.classList.toggle('empty',empty);
+const separators=nodes.filter(el=>el.getAttribute('role')==='separator').map(el=>{const css=getComputedStyle(el);return [css.backgroundImage,css.height]});
+return {ready:JSON.stringify(menu)===JSON.stringify(expected)&&height==='1px'&&gradient.startsWith('linear-gradient(to right,')&&separators.length===3&&separators.every(([background,size])=>background===gradient&&size===height),imageMenu:menu,dividerGradient:gradient,separators};
+"#)?);
+        // With no external target, Paste can write only the isolated named pasteboard.
+        *app.state::<AppState>().target.lock().unwrap() = None;
+        let before_paste = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        evaluate_view_dom(
             app,
+            "clipboard",
             r#"
-const item=[...document.querySelectorAll('[role=menuitem]')].find(el=>el.textContent.trim()==='Correct Recognized Text');
-item?.click(); return {ready:!!item};
+window.__imageMenuKey=null;
+window.addEventListener('keydown',e=>{window.__imageMenuKey=[e.code,e.key,e.metaKey,e.shiftKey];},{capture:true,once:true});
+return true;
 "#,
         )?;
+        post_records_key(app, 36, (1 << 20) | (1 << 17), "\r", "\r", false)?;
         samples.push(wait_records(app, r#"
-const area=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] textarea');
-return {ready:area?.value==='HELLO NAMI'&&document.activeElement===area, prefilled:area?.value==='HELLO NAMI'};
+const message=document.querySelector('.clipboard-panel .record-feedback')?.textContent;
+const menuOpen=!!document.querySelector('.record-context-menu');
+return {ready:message==='Content copied. Press ⌘V to paste manually.'&&!menuOpen,message,menuOpen,key:window.__imageMenuKey,pasteMenuShortcutWithoutExternalTarget:true};
+"#)?);
+        if on_main(app, |_| Ok(crate::platform::clipboard_version()))? == before_paste {
+            return Err("menu Paste did not write the named pasteboard".into());
+        }
+        records_mode(app, "clipboard")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"
+const row=document.querySelector('.clipboard-panel [data-record-id="kind-image-text"]');
+row?.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:100}));
+return true;
+"#,
+        )?;
+        wait_records(app, "return {ready:document.hasFocus()&&!!document.activeElement?.closest('.record-context-menu-keys')};")?;
+        let before_save = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
+        post_records_key(app, 1, 1 << 20, "s", "s", false)?;
+        let mut cancelled = false;
+        for _ in 0..120 {
+            cancelled = on_main(app, |app| unsafe {
+                use objc2::{class, msg_send, runtime::AnyObject};
+                let parent = app.get_window("translation").ok_or("translation window")?;
+                let native = parent
+                    .ns_window()
+                    .map_err(|_| "save sheet parent")?
+                    .cast::<AnyObject>();
+                let sheet: *mut AnyObject = msg_send![native, attachedSheet];
+                if sheet.is_null() {
+                    return Ok(false);
+                }
+                let is_save: bool = msg_send![sheet, isKindOfClass: class!(NSSavePanel)];
+                let visible: bool = msg_send![native, isVisible];
+                if !is_save || !visible {
+                    return Err("system save panel is not attached to visible records".into());
+                }
+                let name: objc2::rc::Retained<objc2_foundation::NSString> =
+                    msg_send![sheet, nameFieldStringValue];
+                let _: () = msg_send![sheet, cancel: std::ptr::null::<AnyObject>()];
+                let name = name.to_string();
+                let stem = name.strip_suffix(".png").unwrap_or(&name);
+                let timestamp = stem
+                    .strip_prefix("Nami_")
+                    .ok_or("missing Nami file prefix")?;
+                let format = "%Y-%m-%d_%H-%M-%S";
+                let time = chrono::NaiveDateTime::parse_from_str(timestamp, format)
+                    .map_err(|_| "invalid save filename timestamp")?;
+                if time.format(format).to_string() != timestamp
+                    || (chrono::Local::now().naive_local() - time)
+                        .num_seconds()
+                        .abs()
+                        > 15
+                {
+                    return Err("save filename does not use the local time when opened".into());
+                }
+                Ok(true)
+            })?;
+            if cancelled {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !cancelled || on_main(app, |_| Ok(crate::platform::clipboard_version()))? != before_save
+        {
+            return Err(
+                "image save did not present a cancellable native sheet or changed the clipboard"
+                    .into(),
+            );
+        }
+        samples.push(wait_records(app, r#"
+const p=document.querySelector('.clipboard-panel');
+return {ready:!!p?.getClientRects().length&&!p.querySelector('.record-feedback'),saveCancelledWithoutFeedback:true,defaultSaveNameMatchesLocalTime:true};
 "#)?);
         evaluate_view_dom(
             app,
             "clipboard",
             r#"
-const area=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] textarea');
-Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(area,'Corrected E247\n已核对');
-area.dispatchEvent(new Event('input',{bubbles:true}));
+window.__removedOcrEdit=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_update',{recordId:'kind-image-text',action:'correct_ocr',text:'synthetic replacement'}).then(()=>window.__removedOcrEdit=false,()=>window.__removedOcrEdit=true);
 return true;
 "#,
         )?;
-        wait_records(
-            app,
-            r#"
-const save=document.querySelector('[role=dialog][aria-label="Correct Recognized Text"] button[type=submit]:not(:disabled)');
-save?.click();return {ready:!!save};
-"#,
-        )?;
-        wait_records(
-            app,
-            r#"return {ready:!document.querySelector('[role=dialog][aria-label="Correct Recognized Text"]')};"#,
-        )?;
-        if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version_before_edit {
-            return Err("saving OCR correction modified the pasteboard".into());
-        }
-        {
-            let state = app.state::<AppState>();
-            let lock = state.database.lock().unwrap();
-            let db = lock.as_ref().ok_or("test database")?;
-            let old = db.clipboard_page_filtered("HELLO NAMI", false, Some("image"), None, 10)?;
-            let corrected = db.clipboard_page("已核对", false, None, 10)?;
-            if old.total_records != 0
-                || corrected.total_records != 1
-                || corrected.records[0].id != "kind-image-text"
-            {
-                return Err(
-                    "corrected keywords did not replace the old image search projection".into(),
-                );
-            }
-        }
+        samples.push(wait_records(app, "return {ready:window.__removedOcrEdit===true,removedOcrEditRejected:window.__removedOcrEdit};")?);
         let calls = crate::clipboard_text::VISION_CALLS.load(Ordering::SeqCst);
         tauri::async_runtime::block_on(crate::clipboard_text::process(
             app,
@@ -8523,10 +9028,9 @@ save?.click();return {ready:!!save};
         ))?;
         let captured = on_main(app, |_| Ok(crate::platform::read_clipboard(|_| false)?))?;
         if !captured.is_some_and(|capture| {
-            capture.payload
-                == crate::platform::ClipboardPayload::Text("Corrected E247\n已核对".into())
+            capture.payload == crate::platform::ClipboardPayload::Text("HELLO NAMI".into())
         }) {
-            return Err("Extract text did not use the corrected text".into());
+            return Err("Extract text did not use the cached OCR text".into());
         }
         records_mode(app, "clipboard")?;
         wait_records(
@@ -8541,13 +9045,13 @@ action?.click(); return {ready:!!action};
             r#"
 const source=document.querySelector('.source-input')?.value;
 const dispatched=document.querySelector('.translation-status [role=alert]')?.textContent==='translation_network_disabled_in_tests';
-return {ready:source==='Corrected E247 已核对'&&dispatched,correctedTranslationSource:source,translationAttempted:dispatched};
+return {ready:source==='HELLO NAMI'&&dispatched,cachedTranslationSource:source,translationAttempted:dispatched};
 "#,
         )?);
         if crate::clipboard_text::VISION_CALLS.load(Ordering::SeqCst) != calls {
-            return Err("copying or translating corrected text reran Vision".into());
+            return Err("copying or translating cached text reran Vision".into());
         }
-        samples.push(serde_json::json!({"correctedIndex":true,"saveDidNotWritePasteboard":true,"extractedCorrectedText":true,"additionalVisionCalls":0}));
+        samples.push(serde_json::json!({"extractedIndexedText":true,"additionalVisionCalls":0}));
         Ok(())
     })();
     if let Some(database) = original_database {
@@ -8743,12 +9247,14 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         if ![
             "clipboard-actions",
             "clipboard-shortcuts",
+            "clipboard-quick-paste",
             "record-display-shortcuts",
             "clipboard-settings",
             "clipboard-editor",
             "clipboard-media",
             "clipboard-kind-text",
             "clipboard-image-index",
+            "clipboard-capture-burst",
             "clipboard-details",
             "translation-actions",
             "translation-controls",
@@ -8774,6 +9280,10 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_cross_app(&app)
             } else if case == "records-open" {
                 run_records_open(&app)
+            } else if case == "clipboard-quick-paste" {
+                run_clipboard_quick_paste(&app)
+            } else if case == "clipboard-capture-burst" {
+                run_clipboard_capture_burst(&app)
             } else if case == "clipboard-image-index" {
                 run_clipboard_image_index(&app)
             } else if case == "clipboard-kind-text" {

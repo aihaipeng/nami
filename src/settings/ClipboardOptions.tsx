@@ -7,7 +7,7 @@ import type { Translate } from '../shared/i18n';
 
 type ExcludedApp = { bundleId: string; name: string; iconDataUrl?: string };
 type Activation = 'paste' | 'copy';
-type Options = { excludedApps: ExcludedApp[]; activation: Activation };
+type Options = { excludedApps: ExcludedApp[]; activation: Activation; pasteAsPlainText: boolean };
 
 function Setting({ label, children }: { label: string; children: ReactNode }) {
   return <div className="settings-field clipboard-option-row">
@@ -114,36 +114,45 @@ export function ClipboardSettingTip({ label, text }: { label: string; text: stri
 export function ClipboardReuseSettings({ t, state, platformAvailable, locale }: {
   t: Translate; state: OptionsState; platformAvailable: boolean; locale: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<'activation' | 'pasteFormat' | null>(null);
   const [behaviorBusy, setBehaviorBusy] = useState(false);
   const [behaviorError, setBehaviorError] = useState(false);
   const behaviorPending = useRef(false);
-  const activation = state.options?.activation;
-  useEffect(() => { setOpen(false); }, [locale]);
+  const options = state.options;
+  useEffect(() => { setOpen(null); }, [locale]);
 
-  async function changeBehavior(next: Activation) {
-    if (!activation || next === activation || behaviorPending.current) return;
+  async function changeBehavior(next: { activation: Activation } | { pasteAsPlainText: boolean }) {
+    if (!options || behaviorPending.current || ('activation' in next ? next.activation === options.activation : next.pasteAsPlainText === options.pasteAsPlainText)) return;
     behaviorPending.current = true;
     setBehaviorBusy(true);
     setBehaviorError(false);
     try {
-      await invoke('clipboard_behavior_set', { activation: next });
-      state.setOptions((previous) => previous && { ...previous, activation: next });
+      await invoke('clipboard_behavior_set', next);
+      state.setOptions((previous) => previous && { ...previous, ...next });
     } catch { setBehaviorError(true); }
     finally { behaviorPending.current = false; setBehaviorBusy(false); }
   }
 
   const activations = [{ code: 'copy', name: t('clipboardActivationCopy') }, { code: 'paste', name: t('clipboardActivationPaste') }];
+  const pasteFormats = [{ code: 'original', name: t('clipboardPasteOriginal') }, { code: 'plain', name: t('clipboardPastePlain') }];
+  const unavailable = <span className="settings-badge">{platformAvailable ? '—' : t('platformUnavailable')}</span>;
 
   return <section aria-labelledby="clipboard-behavior-heading">
       <h2 id="clipboard-behavior-heading">{t('clipboardBehavior')}</h2>
       <div className="settings-group">
         <Setting label={t('clipboardActivation')}>
-          {platformAvailable && activation ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
-            <SearchableDropdown value={activation} label={t('clipboardActivation')} items={activations} t={t} settings searchable={false} description={t('clipboardActivationHelp')} side="top" menuWidth={218}
-              open={open} onOpenChange={(next) => { if (!next || !behaviorPending.current) setOpen(next); }}
-              onChange={(value) => void changeBehavior(value as Activation)} />
-          </div> : <span className="settings-badge">{platformAvailable ? '—' : t('platformUnavailable')}</span>}
+          {platformAvailable && options ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
+            <SearchableDropdown value={options.activation} label={t('clipboardActivation')} items={activations} t={t} settings searchable={false} description={t('clipboardActivationHelp')} side="top" menuWidth={218}
+              open={open === 'activation'} onOpenChange={(next) => { if (!next || !behaviorPending.current) setOpen(next ? 'activation' : null); }}
+              onChange={(value) => void changeBehavior({ activation: value as Activation })} />
+          </div> : unavailable}
+        </Setting>
+        <Setting label={t('clipboardPasteFormat')}>
+          {platformAvailable && options ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
+            <SearchableDropdown value={options.pasteAsPlainText ? 'plain' : 'original'} label={t('clipboardPasteFormat')} items={pasteFormats} t={t} settings searchable={false} description={t('clipboardPasteFormatHelp')} side="top" menuWidth={218}
+              open={open === 'pasteFormat'} onOpenChange={(next) => { if (!next || !behaviorPending.current) setOpen(next ? 'pasteFormat' : null); }}
+              onChange={(value) => void changeBehavior({ pasteAsPlainText: value === 'plain' })} />
+          </div> : unavailable}
         </Setting>
         {behaviorError && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>

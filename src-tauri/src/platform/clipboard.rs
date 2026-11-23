@@ -61,8 +61,18 @@ unsafe fn bounded_bytes(
     }))
 }
 
+#[cfg(any(test, feature = "ui-tests"))]
 unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>, &'static str> {
-    let initial = version(board);
+    read_version(board, version(board))
+}
+
+unsafe fn read_version(
+    board: *mut AnyObject,
+    initial: i64,
+) -> Result<Option<(i64, ClipboardPayload)>, &'static str> {
+    if version(board) != initial {
+        return Err("clipboard_changed");
+    }
     if private(board) {
         return Ok(None);
     }
@@ -167,22 +177,18 @@ unsafe fn read(board: *mut AnyObject) -> Result<Option<(i64, ClipboardPayload)>,
 
 // Main-thread callers own change-count suppression for app writes and selection restoration.
 pub fn read_clipboard(
-    excluded: impl FnOnce(&str) -> bool,
+    excluded: impl Fn(&str) -> bool,
 ) -> Result<Option<ClipboardCapture>, &'static str> {
     if super::secure_input() {
         return Ok(None);
     }
-    let source = super::capture_target();
-    if source
-        .and_then(super::macos::target_bundle_id)
-        .as_deref()
-        .is_some_and(excluded)
-    {
-        return Ok(None);
-    }
     unsafe {
         let board = super::macos::runtime_pasteboard();
-        let captured = read(board)?;
+        let initial = version(board);
+        let Some(source) = super::macos::clipboard_source(initial, excluded) else {
+            return Ok(None);
+        };
+        let captured = read_version(board, initial)?;
         Ok(captured.map(|(version, payload)| ClipboardCapture {
             version,
             payload,
@@ -525,6 +531,36 @@ pub fn clipboard_image_preview(bytes: &[u8], max_pixels: u32) -> Result<Vec<u8>,
             return Err("clipboard_image_invalid");
         }
         Ok(std::slice::from_raw_parts(pointer, length).to_vec())
+    }
+}
+
+#[cfg(feature = "ui-tests")]
+pub fn test_paste_into_editor(text: &str, expect_bold: bool) -> Result<(), String> {
+    use objc2_foundation::{NSRange, NSRect};
+
+    unsafe {
+        let editor: Allocated<AnyObject> = msg_send![class!(NSTextView), alloc];
+        let editor: Retained<AnyObject> = msg_send![editor, initWithFrame: NSRect::ZERO];
+        let _: () = msg_send![&*editor, setRichText: true];
+        let _: () = msg_send![&*editor, setString: ns_string!("[]")];
+        let _: () = msg_send![&*editor, setSelectedRange: NSRange::new(1, 0)];
+        let board = super::macos::runtime_pasteboard();
+        let received: bool = msg_send![&*editor, readSelectionFromPasteboard: board];
+        let result: Retained<NSString> = msg_send![&*editor, string];
+        if !received || result != NSString::from_str(&format!("[{text}]")) {
+            return Err("native editor did not receive the text at the selection".into());
+        }
+        let storage: Retained<AnyObject> = msg_send![&*editor, textStorage];
+        let font: Option<Retained<AnyObject>> = msg_send![&*storage, attribute: ns_string!("NSFont"), atIndex: 1usize, effectiveRange: std::ptr::null_mut::<NSRange>()];
+        let manager: Retained<AnyObject> = msg_send![class!(NSFontManager), sharedFontManager];
+        let bold = font.as_deref().is_some_and(|font| {
+            let traits: usize = msg_send![&*manager, traitsOfFont: font];
+            traits & 2 != 0 // NSBoldFontMask
+        });
+        if bold != expect_bold {
+            return Err("native editor did not receive the expected font weight".into());
+        }
+        Ok(())
     }
 }
 

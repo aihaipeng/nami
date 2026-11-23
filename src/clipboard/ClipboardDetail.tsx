@@ -20,13 +20,8 @@ export interface ClipboardDetailData extends ClipboardRecord {
   size: number | null;
   characterCount: number | null;
   files: FileEntry[];
-  imageIndexStatus?: keyof typeof imageIndexLabels;
+  imageIndexStatus?: 'unindexed' | 'pending' | 'failed' | 'empty' | 'indexed';
 }
-
-const imageIndexLabels = {
-  unindexed: 'clipboardImageUnindexed', pending: 'clipboardImageIndexPending',
-  failed: 'clipboardImageIndexFailed', empty: 'clipboardImageIndexEmpty', indexed: 'clipboardImageIndexed',
-} as const;
 
 function formatSize(bytes: number) {
   return bytes < 1024 * 1024 ? `${(bytes / 1024).toLocaleString('en', { maximumFractionDigits: 1 })} KB` : `${(bytes / (1024 * 1024)).toLocaleString('en', { maximumFractionDigits: 1 })} MB`;
@@ -143,8 +138,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         {current.kind === 'text' ? <div className="clipboard-detail-text" data-tauri-drag-region="false">{current.text}</div> : singleImage ? <ImagePreview key={current.id} recordId={current.id} native={native} /> : <FileList entries={current.files} onReveal={snapshot.capabilities.clipboardOpenTarget && current.files.length > 1 ? (index) => { void revealFile(index); } : undefined} revealLabel={t('clipboardRevealFile')} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
-    {current && indexStatus && <div className="clipboard-image-index-status"><span role="status">{t(imageIndexLabels[indexStatus])}</span>
-      {(indexStatus === 'unindexed' || indexStatus === 'failed') && <button type="button" disabled={loading || busy} onClick={() => { void indexImage(current.id); }}>{t(indexStatus === 'failed' ? 'retry' : 'clipboardIndexImage')}</button>}
+    {current && (indexStatus === 'unindexed' || indexStatus === 'failed') && <div className="clipboard-image-index-action">
+      <button type="button" disabled={loading || busy} onClick={() => { void indexImage(current.id); }}>{t(indexStatus === 'failed' ? 'retry' : 'clipboardIndexImage')}</button>
     </div>}
     {current && <footer className="clipboard-detail-metadata">
       <div><span>Application</span><RecordHeading date={current.date} label={current.sourceApp?.name ?? 'Nami'} sourceApp={current.sourceApp} /></div>

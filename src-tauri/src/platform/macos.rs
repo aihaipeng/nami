@@ -8,6 +8,7 @@ use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSSt
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 
 mod selection;
@@ -21,6 +22,52 @@ pub use selection::{
 /// the application the user was working in before.
 static LAST_FOREIGN_FRONTMOST: OnceLock<Mutex<Option<Target>>> = OnceLock::new();
 static FRONTMOST_TRACKER: Once = Once::new();
+static ACTIVATION_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn activation_epoch() -> u64 {
+    ACTIVATION_EPOCH.load(Ordering::SeqCst)
+}
+
+const MAX_CLIPBOARD_FOCUS_SOURCES: usize = 32;
+
+#[derive(Default)]
+struct ClipboardFocus {
+    active: Option<String>,
+    boundary: Option<i64>,
+    outgoing: Vec<String>,
+}
+
+impl ClipboardFocus {
+    fn observe(&mut self, active: Option<String>, version: i64) {
+        if self.active == active {
+            return;
+        }
+        if self.boundary != Some(version) {
+            self.boundary = Some(version);
+            self.outgoing.clear();
+        }
+        if let Some(previous) = std::mem::replace(&mut self.active, active) {
+            if self.outgoing.len() < MAX_CLIPBOARD_FOCUS_SOURCES
+                && !self.outgoing.contains(&previous)
+            {
+                self.outgoing.push(previous);
+            }
+        }
+    }
+
+    fn blocks(&self, version: i64, excluded: impl Fn(&str) -> bool) -> bool {
+        self.active.as_deref().is_some_and(&excluded)
+            || (self.boundary == Some(version)
+                && (self.outgoing.len() == MAX_CLIPBOARD_FOCUS_SOURCES
+                    || self.outgoing.iter().any(|bundle| excluded(bundle))))
+    }
+}
+
+static CLIPBOARD_FOCUS: Mutex<ClipboardFocus> = Mutex::new(ClipboardFocus {
+    active: None,
+    boundary: None,
+    outgoing: Vec::new(),
+});
 
 fn last_foreign_frontmost() -> Option<Target> {
     (*LAST_FOREIGN_FRONTMOST
@@ -63,17 +110,23 @@ pub fn install_frontmost_tracker() {
             if app.is_null() {
                 return;
             }
+            ACTIVATION_EPOCH.fetch_add(1, Ordering::SeqCst);
+            CLIPBOARD_FOCUS
+                .lock()
+                .unwrap()
+                .observe(bundle_identifier(&*app), clipboard_version());
             if let Some(target) = identity(&*app) {
                 if target.pid != std::process::id() as i32 {
                     remember_foreign_frontmost(target);
                 }
             }
         });
+        let main_queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
         let token: *mut AnyObject = msg_send![
             center,
             addObserverForName: ns_string!("NSWorkspaceDidActivateApplicationNotification"),
             object: std::ptr::null::<AnyObject>(),
-            queue: std::ptr::null::<AnyObject>(),
+            queue: main_queue,
             usingBlock: &*handler
         ];
         if !token.is_null() {
@@ -81,6 +134,9 @@ pub fn install_frontmost_tracker() {
             // retained avoids relying on autorelease lifetime.
             std::mem::forget(Retained::retain(token));
         }
+        CLIPBOARD_FOCUS.lock().unwrap().active = frontmost()
+            .as_deref()
+            .and_then(|app| bundle_identifier(app));
         // Seed the previous owner in case an external application was already
         // frontmost when the tracker was installed.
         if let Some(target) = workspace_frontmost_target() {
@@ -126,6 +182,11 @@ pub fn test_self_target() -> Option<Target> {
         ];
         identity(application.as_deref()?)
     }
+}
+
+#[cfg(feature = "ui-tests")]
+pub fn test_copy_from_fixture(target: Target) -> Result<(), &'static str> {
+    selection::send_copy(Some(target))
 }
 
 #[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
@@ -286,9 +347,7 @@ fn choose_selection_target(
     current.or(previous).or_else(ax)
 }
 
-/// Resolves the current external frontmost application for clipboard capture
-/// and paste targeting. Never falls back to a previously active application:
-/// pasting into an app the user has already left would be unsafe.
+/// Uses only the current external app for paste; the user may have left any previous target.
 pub fn capture_target() -> Option<Target> {
     install_frontmost_tracker();
     let target = choose_clipboard_target(unsafe { workspace_frontmost_target() });
@@ -296,6 +355,35 @@ pub fn capture_target() -> Option<Target> {
         remember_foreign_frontmost(target);
     }
     target
+}
+
+/// None means skip the capture. A transition version can be kept without an
+/// app label if none of its possible foreground sources is excluded.
+pub(super) fn clipboard_source(
+    version: i64,
+    excluded: impl Fn(&str) -> bool,
+) -> Option<Option<Target>> {
+    install_frontmost_tracker();
+    let application = unsafe { frontmost() };
+    let mut focus = CLIPBOARD_FOCUS.lock().unwrap();
+    // AppKit's frontmost value can change before its activation notification arrives.
+    focus.observe(
+        application
+            .as_deref()
+            .and_then(|app| unsafe { bundle_identifier(app) }),
+        version,
+    );
+    if focus.blocks(version, excluded) {
+        return None;
+    }
+    Some(if focus.boundary == Some(version) {
+        None
+    } else {
+        application
+            .as_deref()
+            .and_then(|app| unsafe { identity(app) })
+            .filter(|target| target.pid != std::process::id() as i32)
+    })
 }
 
 /// Resolves the application that owned the selection when the selection
@@ -456,12 +544,75 @@ pub fn accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
+unsafe fn bundle_identifier(application: &AnyObject) -> Option<String> {
+    let bundle: Option<Retained<NSString>> = msg_send![application, bundleIdentifier];
+    bundle.map(|id| id.to_string())
+}
+
+#[cfg(feature = "ui-tests")]
 pub(super) fn target_bundle_id(target: Target) -> Option<String> {
+    unsafe { bundle_identifier(&*running(target)?) }
+}
+
+pub(crate) fn pick_image_save_path(
+    window: &tauri::Window,
+    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
     unsafe {
-        let application = running(target)?;
-        let bundle: Option<Retained<NSString>> = msg_send![&*application, bundleIdentifier];
-        bundle.map(|id| id.to_string())
+        let parent = window.ns_window().map_err(|_| "clipboard_save_dialog")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("clipboard_save_dialog".into());
+        }
+        let panel: Retained<AnyObject> = msg_send![class!(NSSavePanel), savePanel];
+        let png: Retained<AnyObject> =
+            msg_send![class!(UTType), typeWithIdentifier: ns_string!("public.png")];
+        let types = NSArray::from_retained_slice(&[png]);
+        let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        let _: () = msg_send![&*panel, setAllowsOtherFileTypes: false];
+        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
+        let name = chrono::Local::now()
+            .format("Nami_%Y-%m-%d_%H-%M-%S.png")
+            .to_string();
+        let _: () = msg_send![&*panel, setNameFieldStringValue: &*NSString::from_str(&name)];
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            complete(match response {
+                1 => {
+                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
+                    url.and_then(|url| url.path())
+                        .map(|path| Some(path.to_string().into()))
+                        .ok_or_else(|| "clipboard_save_dialog".into())
+                }
+                0 => Ok(None),
+                _ => Err("clipboard_save_dialog".into()),
+            });
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
     }
+    Ok(())
+}
+
+pub(crate) fn write_image_export(
+    destination: &std::path::Path,
+    png: Vec<u8>,
+) -> Result<(), String> {
+    let filename = destination.to_str().ok_or("clipboard_save_failed")?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(filename));
+    // The save panel confirms replacement. Foundation commits atomically so a failed write
+    // cannot leave a partly written destination or truncate the prior file.
+    NSData::from_vec(png)
+        .writeToURL_atomically(&url, true)
+        .then_some(())
+        .ok_or_else(|| "clipboard_save_failed".into())
 }
 
 pub(crate) fn pick_excluded_app(
@@ -774,6 +925,20 @@ mod tests {
         );
         assert!(choose_selection_target(None, None, || None).is_none());
         assert!(choose_clipboard_target(None).is_none());
+    }
+
+    #[test]
+    fn clipboard_exclusion_follows_one_version_across_multiple_activations() {
+        let mut focus = super::ClipboardFocus::default();
+        let excluded = |bundle: &str| bundle == "excluded";
+        focus.observe(Some("excluded".into()), 20);
+        assert!(focus.blocks(21, excluded));
+        focus.observe(Some("other".into()), 21);
+        focus.observe(Some("third".into()), 21);
+        assert!(focus.blocks(21, excluded));
+        assert!(!focus.blocks(22, excluded));
+        focus.observe(None, 22);
+        assert!(!focus.blocks(22, excluded));
     }
 
     #[test]

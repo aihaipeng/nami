@@ -2,10 +2,21 @@ use super::retention::{candidates, check_cleanup, cleanup_parameters, persist_li
 use super::{storage_error, HistoryDatabase};
 use crate::clipboard::{
     valid_image_name, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage, ClipboardRecord,
-    ClipboardTextFormatting, HistoryPolicy, MAX_FILE_COUNT, MAX_RICH_TEXT_BYTES, MAX_TEXT_BYTES,
+    ClipboardSearchMode, ClipboardSearchOptions, ClipboardTextFormatting, HistoryPolicy,
+    MAX_FILE_COUNT, MAX_RICH_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::model::RecordView;
-use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{
+    functions::FunctionFlags, params, Connection, OptionalExtension, Row, TransactionBehavior,
+};
+use std::{
+    cell::OnceCell,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 pub(super) fn migrate(connection: &mut rusqlite::Connection) -> Result<(), String> {
     let transaction = connection
@@ -349,21 +360,76 @@ pub(super) fn ensure_filter_indexes(connection: &rusqlite::Connection) -> Result
         CREATE INDEX IF NOT EXISTS clipboard_kind_favorites ON clipboard_records(kind,is_favorite,is_pinned DESC,created_at DESC,sequence DESC);").map_err(storage_error)
 }
 
-const SEARCH_CANDIDATES: &str =
-    "SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH :match
-    UNION ALL SELECT rowid FROM clipboard_title_search WHERE clipboard_title_search MATCH :match
-    UNION ALL SELECT rowid FROM clipboard_ocr_search WHERE clipboard_ocr_search MATCH :match";
-const SEARCH_LITERAL: &str = " AND (EXISTS (SELECT 1 FROM clipboard_contents c WHERE c.sequence=clipboard_records.sequence AND instr(c.search_folded,:needle)>0)
-    OR EXISTS (SELECT 1 FROM clipboard_titles t WHERE t.sequence=clipboard_records.sequence AND instr(t.search_folded,:needle)>0)
-    OR EXISTS (SELECT 1 FROM clipboard_ocr o WHERE o.sequence=clipboard_records.sequence AND instr(o.search_folded,:needle)>0))";
-// Count across the three projections once, without reading unrelated large bodies for OCR hits.
-const SEARCH_INDEXED_COUNT: &str = "SELECT c.sequence FROM clipboard_search JOIN clipboard_contents c ON c.sequence=clipboard_search.rowid WHERE clipboard_search MATCH :match AND instr(c.search_folded,:needle)>0
-    UNION ALL SELECT t.sequence FROM clipboard_title_search JOIN clipboard_titles t ON t.sequence=clipboard_title_search.rowid WHERE clipboard_title_search MATCH :match AND instr(t.search_folded,:needle)>0
-    UNION ALL SELECT o.sequence FROM clipboard_ocr_search JOIN clipboard_ocr o ON o.sequence=clipboard_ocr_search.rowid WHERE clipboard_ocr_search MATCH :match AND instr(o.search_folded,:needle)>0";
-const SEARCH_SCAN_COUNT: &str =
-    "SELECT sequence FROM clipboard_contents WHERE instr(search_folded,:needle)>0
-    UNION ALL SELECT sequence FROM clipboard_titles WHERE instr(search_folded,:needle)>0
-    UNION ALL SELECT sequence FROM clipboard_ocr WHERE instr(search_folded,:needle)>0";
+// Non-indexed modes use a bounded query-local matcher without retaining user input in the DB.
+const ADVANCED_MATCH: &str = "clipboard_advanced_match";
+
+enum AdvancedMatch {
+    Fuzzy(Vec<char>),
+    Regex(regex::Regex),
+}
+
+impl AdvancedMatch {
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Self::Fuzzy(needle) => {
+                let mut chars = text.chars();
+                needle.iter().all(|&wanted| chars.any(|ch| ch == wanted))
+            }
+            Self::Regex(regex) => regex.is_match(text),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClipboardPageScope<'a> {
+    favorites_only: bool,
+    kind: Option<&'a str>,
+    cursor: Option<&'a ClipboardCursor>,
+    limit: usize,
+    pinned: Option<bool>,
+}
+
+struct AdvancedSearchBudget {
+    remaining: AtomicUsize,
+    deadline: Instant,
+    exhausted: AtomicBool,
+}
+
+impl Default for AdvancedSearchBudget {
+    fn default() -> Self {
+        Self {
+            remaining: AtomicUsize::new(128 * 1024 * 1024),
+            deadline: Instant::now() + Duration::from_secs(2),
+            exhausted: AtomicBool::new(false),
+        }
+    }
+}
+
+struct ClipboardSearch<'a> {
+    needle: &'a str,
+    options: ClipboardSearchOptions,
+    advanced: bool,
+}
+
+impl ClipboardSearch<'_> {
+    // These identifiers and expressions are internal SQL, never user input.
+    fn projections(&self) -> impl Iterator<Item = (&'static str, &'static str, &'static str)> {
+        [
+            (self.options.body, "clipboard_contents", "clipboard_search", "CASE WHEN EXISTS (SELECT 1 FROM clipboard_records b WHERE b.sequence=p.sequence AND b.kind='text') THEN p.text ELSE p.search_folded END"),
+            (self.options.note, "clipboard_titles", "clipboard_title_search", "(SELECT n.title FROM clipboard_records n WHERE n.sequence=p.sequence)"),
+            (self.options.image_text, "clipboard_ocr", "clipboard_ocr_search", "COALESCE(p.original_text,p.search_folded)"),
+        ].into_iter().filter_map(|(enabled, table, index, original)| enabled.then_some((table, index, original)))
+    }
+
+    fn predicate(&self, original: &str) -> String {
+        match self.options.mode {
+            ClipboardSearchMode::Exact => "instr(p.search_folded,:needle)>0".into(),
+            ClipboardSearchMode::Fuzzy => format!("{ADVANCED_MATCH}(p.search_folded)"),
+            ClipboardSearchMode::Regex => format!("{ADVANCED_MATCH}({original})"),
+            ClipboardSearchMode::Mixed => unreachable!(),
+        }
+    }
+}
 
 impl HistoryDatabase {
     pub fn clipboard_page(
@@ -384,29 +450,214 @@ impl HistoryDatabase {
         cursor: Option<&ClipboardCursor>,
         limit: usize,
     ) -> Result<ClipboardPage, String> {
-        if query.chars().count() > 4096 || !(1..=200).contains(&limit) {
+        self.clipboard_page_with_search(
+            query,
+            favorites_only,
+            kind,
+            cursor,
+            limit,
+            ClipboardSearchOptions::default(),
+        )
+    }
+
+    pub fn clipboard_page_with_search(
+        &self,
+        query: &str,
+        favorites_only: bool,
+        kind: Option<&str>,
+        cursor: Option<&ClipboardCursor>,
+        limit: usize,
+        options: ClipboardSearchOptions,
+    ) -> Result<ClipboardPage, String> {
+        if query.chars().count() > 4096 || !(1..=200).contains(&limit) || !options.has_scope() {
             return Err("invalid_argument".into());
         }
         if kind.is_some_and(|kind| !["text", "image", "files"].contains(&kind)) {
             return Err("invalid_argument".into());
         }
+        let query = query.trim();
+        let scope = ClipboardPageScope {
+            favorites_only,
+            kind,
+            cursor,
+            limit,
+            pinned: None,
+        };
+        let budget = OnceCell::new();
+        if options.mode != ClipboardSearchMode::Mixed || query.is_empty() {
+            let mode = if query.is_empty() {
+                ClipboardSearchMode::Exact
+            } else {
+                options.mode
+            };
+            return self.clipboard_page_for_mode(
+                query,
+                ClipboardSearchOptions { mode, ..options },
+                scope,
+                &budget,
+            );
+        }
+
+        // Resolve the rule before slicing by cursor, independently for each visual section.
+        let section = |scope| {
+            for mode in [ClipboardSearchMode::Exact, ClipboardSearchMode::Regex] {
+                match self.clipboard_page_for_mode(
+                    query,
+                    ClipboardSearchOptions { mode, ..options },
+                    scope,
+                    &budget,
+                ) {
+                    Ok(page) if page.total_records > 0 => return Ok(page),
+                    Ok(_) => continue,
+                    Err(error)
+                        if mode == ClipboardSearchMode::Regex
+                            && error == "clipboard_invalid_regex" =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            self.clipboard_page_for_mode(
+                query,
+                ClipboardSearchOptions {
+                    mode: ClipboardSearchMode::Fuzzy,
+                    ..options
+                },
+                scope,
+                &budget,
+            )
+        };
+        let mut pinned = section(ClipboardPageScope {
+            pinned: Some(true),
+            ..scope
+        })?;
+        let remaining = limit - pinned.records.len();
+        let ordinary = section(ClipboardPageScope {
+            pinned: Some(false),
+            limit: remaining.max(1),
+            ..scope
+        })?;
+        pinned.total_records += ordinary.total_records;
+        if remaining == 0 {
+            pinned.has_more |= !ordinary.records.is_empty();
+        } else {
+            pinned.has_more |= ordinary.has_more;
+            pinned.cursor = ordinary.cursor.or(pinned.cursor);
+            pinned.records.extend(ordinary.records);
+            pinned.sources.extend(ordinary.sources);
+        }
+        Ok(pinned)
+    }
+
+    fn clipboard_page_for_mode(
+        &self,
+        query: &str,
+        options: ClipboardSearchOptions,
+        scope: ClipboardPageScope<'_>,
+        budget: &OnceCell<Arc<AdvancedSearchBudget>>,
+    ) -> Result<ClipboardPage, String> {
+        let folded = (options.mode != ClipboardSearchMode::Regex).then(|| query.to_lowercase());
+        let needle = folded.as_deref().unwrap_or(query);
+        let search = ClipboardSearch {
+            needle,
+            options,
+            advanced: !query.is_empty() && options.mode != ClipboardSearchMode::Exact,
+        };
+        if !search.advanced {
+            return self.query_clipboard_page(&search, scope);
+        }
+        let matcher = match options.mode {
+            ClipboardSearchMode::Fuzzy => AdvancedMatch::Fuzzy(needle.chars().collect()),
+            ClipboardSearchMode::Regex => AdvancedMatch::Regex(
+                regex::RegexBuilder::new(needle)
+                    .size_limit(1024 * 1024)
+                    .dfa_size_limit(1024 * 1024)
+                    .build()
+                    .map_err(|_| "clipboard_invalid_regex")?,
+            ),
+            ClipboardSearchMode::Exact | ClipboardSearchMode::Mixed => unreachable!(),
+        };
+        let budget = budget.get_or_init(|| Arc::new(AdvancedSearchBudget::default()));
+        let shared_budget = Arc::clone(budget);
+        self.connection
+            .create_scalar_function(
+                ADVANCED_MATCH,
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY,
+                move |ctx| {
+                    let text = ctx
+                        .get_raw(0)
+                        .as_str()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let remaining = shared_budget.remaining.load(Ordering::Relaxed);
+                    if text.len() > remaining || Instant::now() >= shared_budget.deadline {
+                        shared_budget.exhausted.store(true, Ordering::Relaxed);
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    shared_budget
+                        .remaining
+                        .store(remaining - text.len(), Ordering::Relaxed);
+                    Ok(matcher.is_match(text))
+                },
+            )
+            .map_err(storage_error)?;
+        let result = self.query_clipboard_page(&search, scope);
+        self.connection
+            .remove_function(ADVANCED_MATCH, 1)
+            .map_err(storage_error)?;
+        if budget.exhausted.load(Ordering::Relaxed) {
+            return Err("clipboard_search_too_broad".into());
+        }
+        result
+    }
+
+    fn query_clipboard_page(
+        &self,
+        search: &ClipboardSearch<'_>,
+        scope: ClipboardPageScope<'_>,
+    ) -> Result<ClipboardPage, String> {
+        let ClipboardPageScope {
+            favorites_only,
+            kind,
+            cursor,
+            limit,
+            pinned,
+        } = scope;
+        let needle = search.needle;
         let kind_filter = if kind.is_some() {
             " AND kind=:kind"
         } else {
             ""
         };
-        let needle = query.trim().to_lowercase();
-        let indexed = needle.chars().count() >= 3 && !needle.contains('\0');
+        let indexed = !search.advanced && needle.chars().count() >= 3 && !needle.contains('\0');
         let favorite = if favorites_only {
             " AND is_favorite=1"
         } else {
             ""
         };
+        let pin = match pinned {
+            Some(true) => " AND is_pinned=1",
+            Some(false) => " AND is_pinned=0",
+            None => "",
+        };
+        let unfiltered = !favorites_only && kind.is_none() && pinned.is_none();
         let matched = format!("\"{}\"", needle.replace('"', "\"\""));
+        let candidates = if indexed {
+            search
+                .projections()
+                .map(|(_, index, _)| {
+                    format!("SELECT rowid FROM {index} WHERE {index} MATCH :match")
+                })
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ")
+        } else {
+            String::new()
+        };
         let broad = if indexed {
             let mut probe = self
                 .connection
-                .prepare_cached(&format!("{SEARCH_CANDIDATES} LIMIT 1024"))
+                .prepare_cached(&format!("{candidates} LIMIT 1024"))
                 .map_err(storage_error)?;
             let mut rows = probe.query([&matched]).map_err(storage_error)?;
             let mut count = 0;
@@ -417,12 +668,21 @@ impl HistoryDatabase {
         } else {
             false
         };
-        let search = if needle.is_empty() {
-            String::new()
-        } else if indexed && !broad {
-            format!(" AND sequence IN ({SEARCH_CANDIDATES}){SEARCH_LITERAL}")
+        let mut filter = String::new();
+        if !needle.is_empty() {
+            if indexed && !broad {
+                filter.push_str(&format!(" AND sequence IN ({candidates})"));
+            }
+            let literals = search.projections().map(|(table, _, original)| format!("EXISTS (SELECT 1 FROM {table} p WHERE p.sequence=clipboard_records.sequence AND {})", search.predicate(original))).collect::<Vec<_>>().join(" OR ");
+            filter.push_str(&format!(" AND ({literals})"));
+        }
+        let image_text_match = if !needle.is_empty() && search.options.image_text {
+            format!(
+                "EXISTS (SELECT 1 FROM clipboard_ocr p WHERE p.sequence=r.sequence AND {})",
+                search.predicate("COALESCE(p.original_text,p.search_folded)")
+            )
         } else {
-            SEARCH_LITERAL.to_owned()
+            "0".into()
         };
         let hint = if broad {
             if kind.is_some() && favorites_only {
@@ -437,7 +697,7 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{search} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -451,30 +711,33 @@ impl HistoryDatabase {
             filters.push((":kind", kind));
         }
         if !needle.is_empty() {
-            filters.push((":needle", &needle));
+            if !search.advanced {
+                filters.push((":needle", &needle));
+            }
             if indexed && !broad {
                 filters.push((":match", &matched));
             }
         }
-        let total_records = if needle.is_empty() && !favorites_only && kind.is_none() {
+        let total_records = if needle.is_empty() && unfiltered {
             self.clipboard_total_records
         } else {
-            let matches = if needle.is_empty() {
-                None
-            } else if indexed {
-                Some(SEARCH_INDEXED_COUNT)
-            } else {
-                Some(SEARCH_SCAN_COUNT)
-            };
+            let matches = (!needle.is_empty() && !search.advanced).then(|| search.projections().map(|(table, index, original)| {
+                let predicate = search.predicate(original);
+                if indexed {
+                    format!("SELECT p.sequence FROM {index} JOIN {table} p ON p.sequence={index}.rowid WHERE {index} MATCH :match AND {predicate}")
+                } else {
+                    format!("SELECT p.sequence FROM {table} p WHERE {predicate}")
+                }
+            }).collect::<Vec<_>>().join(" UNION ALL "));
             let mut count_filters = filters.clone();
             if indexed && broad {
                 count_filters.push((":match", &matched));
             }
             let sql = match matches {
-                Some(matches) if !favorites_only && kind.is_none() =>
+                Some(matches) if unfiltered =>
                     format!("SELECT count(DISTINCT sequence) FROM ({matches})"),
-                Some(matches) => format!("SELECT count(*) FROM clipboard_records WHERE sequence IN ({matches}){favorite}{kind_filter}"),
-                None => format!("SELECT count(*) FROM clipboard_records WHERE 1=1{favorite}{kind_filter}"),
+                Some(matches) => format!("SELECT count(*) FROM clipboard_records WHERE sequence IN ({matches}){favorite}{kind_filter}{pin}"),
+                None => format!("SELECT count(*) FROM clipboard_records WHERE 1=1{favorite}{kind_filter}{pin}{filter}"),
             };
             self.connection
                 .prepare_cached(&sql)
@@ -509,6 +772,7 @@ impl HistoryDatabase {
                 is_favorite: row.get(5).map_err(storage_error)?,
                 is_pinned: row.get(6).map_err(storage_error)?,
                 source_app_id: row.get(7).map_err(storage_error)?,
+                image_text_match: row.get(10).map_err(storage_error)?,
             };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
@@ -601,16 +865,6 @@ impl HistoryDatabase {
         text: &str,
     ) -> Result<bool, String> {
         save_ocr(&self.connection, id, Some(fingerprint), text)
-    }
-
-    pub fn clipboard_correct_image_text(&mut self, id: &str, text: &str) -> Result<(), String> {
-        if text.trim().is_empty() || self.clipboard_record(id)?.kind != "image" {
-            return Err("invalid_argument".into());
-        }
-        if !save_ocr(&self.connection, id, None, text)? {
-            return Err("not_found".into());
-        }
-        Ok(())
     }
 
     /// Saves the existing extracted text record and indexes its source as one change.
@@ -1061,8 +1315,22 @@ impl HistoryDatabase {
         categories: u8,
         expected: Option<&str>,
     ) -> Result<(usize, Vec<String>), String> {
+        self.clipboard_cleanup_scoped(policy, categories, expected, None)
+    }
+
+    pub fn clipboard_cleanup_scoped(
+        &mut self,
+        policy: Option<HistoryPolicy>,
+        categories: u8,
+        expected: Option<&str>,
+        recent_since: Option<i64>,
+    ) -> Result<(usize, Vec<String>), String> {
         if let (Some(policy), 0, None) = (policy, categories, expected) {
-            if policy.valid() && self.clipboard_total_records <= policy.limit as usize {
+            if policy.valid()
+                && policy.max_age_days.is_none()
+                && recent_since.is_none()
+                && self.clipboard_total_records <= policy.limit as usize
+            {
                 return Ok((0, vec![]));
             }
         }
@@ -1071,8 +1339,18 @@ impl HistoryDatabase {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let view = RecordView::Clipboard;
-        check_cleanup(&transaction, view, policy, categories, expected)?;
-        let parameters = cleanup_parameters(policy, categories);
+        // Freeze the clock across verification and deletion so a record cannot age into the confirmed set mid-transaction.
+        let now = chrono::Utc::now().timestamp_millis();
+        check_cleanup(
+            &transaction,
+            view,
+            policy,
+            categories,
+            expected,
+            recent_since,
+            now,
+        )?;
+        let parameters = cleanup_parameters(policy, categories, recent_since, now);
         let candidates = candidates(view);
         let images = {
             let mut query = transaction.prepare_cached(&format!("{candidates}
@@ -1204,6 +1482,8 @@ impl HistoryDatabase {
             "clipboard_record_shortcuts",
             "clipboard_excluded_apps",
             "clipboard_activation",
+            "clipboard_paste_as_plain_text",
+            "clipboard_search_options",
             "records_open_focus",
             "clipboard_preview_lines",
             "translation_preview_lines",
@@ -1267,9 +1547,337 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_mixed_search_falls_back_by_section_and_keeps_cursor_stable() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        for (id, text, pinned, favorite) in [
+            ("pin-literal-old", "a.b literal older", true, false),
+            ("pin-literal-new", "a.b literal newer", true, false),
+            ("pin-regex", "axb pinned", true, true),
+            ("regular-regex", "axb regular", false, true),
+            ("regular-fuzzy", "ax.yb fallback", false, false),
+            ("invalid-regex-fuzzy", "[Notebook", false, false),
+            ("note-literal", "Unrelated body", false, false),
+        ] {
+            let mut item = record(id, text);
+            item.is_pinned = pinned;
+            item.is_favorite = favorite;
+            db.clipboard_insert(&item).unwrap();
+        }
+        db.clipboard_edit("note-literal", "a.b in excluded notes", None)
+            .unwrap();
+        let image = image_record("image-regex");
+        db.clipboard_insert(&image).unwrap();
+        db.clipboard_index_image(&image.id, &image.fingerprint, "azb in OCR")
+            .unwrap();
+        let mixed = ClipboardSearchOptions {
+            mode: ClipboardSearchMode::Mixed,
+            note: false,
+            ..ClipboardSearchOptions::default()
+        };
+        let search = |query, favorites, kind, cursor, limit| {
+            db.clipboard_page_with_search(query, favorites, kind, cursor, limit, mixed)
+                .unwrap()
+        };
+        let full_pinned = search("a.b", false, None, None, 2);
+        assert!(full_pinned.records.iter().all(|item| item.is_pinned));
+        assert!(full_pinned.has_more);
+        let after_pinned = search("a.b", false, None, full_pinned.cursor.as_ref(), 2);
+        assert_eq!(
+            after_pinned
+                .records
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["image-regex", "regular-regex"]
+        );
+        assert!(!after_pinned.has_more);
+        let first = search("a.b", false, None, None, 1);
+        assert_eq!(first.records[0].id, "pin-literal-new");
+        assert_eq!(first.total_records, 4);
+        assert!(first.has_more);
+        let second = search("a.b", false, None, first.cursor.as_ref(), 2);
+        assert_eq!(
+            second
+                .records
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pin-literal-old", "image-regex"]
+        );
+        assert!(second.records[1].image_text_match);
+        assert!(second.has_more);
+        let last = search("a.b", false, None, second.cursor.as_ref(), 2);
+        assert_eq!(last.records[0].id, "regular-regex");
+        assert_eq!(last.total_records, 4);
+        assert!(!last.has_more);
+        let exhausted = search("a.b", false, None, last.cursor.as_ref(), 2);
+        assert!(exhausted.records.is_empty());
+        assert_eq!(exhausted.total_records, 4);
+        assert_eq!(
+            search("a.b", true, Some("text"), None, 20)
+                .records
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pin-regex", "regular-regex"]
+        );
+        let invalid = search("[nbk", false, None, None, 20);
+        assert_eq!(invalid.total_records, 1);
+        assert_eq!(invalid.records[0].id, "invalid-regex-fuzzy");
+        assert_eq!(
+            search("a..b", false, Some("image"), None, 20).total_records,
+            0
+        );
+        assert_eq!(search("", false, None, None, 20).total_records, 8);
+    }
+
+    #[test]
+    fn clipboard_search_rules_scope_pagination_and_ocr_origin() {
+        let mut db = HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        let mut body = record("body", "Synthetic Notebook 42");
+        body.is_favorite = true;
+        db.clipboard_insert(&body).unwrap();
+        db.clipboard_insert(&record("note", "Plain unrelated body"))
+            .unwrap();
+        db.clipboard_edit("note", "Notebook 77", None).unwrap();
+        let mut image = image_record("ocr");
+        image.is_pinned = true;
+        db.clipboard_insert(&image).unwrap();
+        db.clipboard_index_image(&image.id, &image.fingerprint, "Notebook 99")
+            .unwrap();
+        let all = ClipboardSearchOptions::default();
+        let query = |query, search| {
+            db.clipboard_page_with_search(query, false, None, None, 10, search)
+                .unwrap()
+        };
+        let exact = query("NOTEBOOK", all);
+        assert_eq!(exact.total_records, 3);
+        assert_eq!(
+            exact
+                .records
+                .iter()
+                .filter(|r| r.image_text_match)
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ocr"]
+        );
+        assert!(query("", all).records.iter().all(|r| !r.image_text_match));
+        assert_eq!(
+            query(
+                "NOTEB",
+                ClipboardSearchOptions {
+                    note: false,
+                    image_text: false,
+                    ..all
+                }
+            )
+            .records[0]
+                .id,
+            "body"
+        );
+        assert_eq!(
+            query(
+                "NO",
+                ClipboardSearchOptions {
+                    body: false,
+                    image_text: false,
+                    ..all
+                }
+            )
+            .records[0]
+                .id,
+            "note"
+        );
+        let fuzzy = ClipboardSearchOptions {
+            mode: ClipboardSearchMode::Fuzzy,
+            ..all
+        };
+        assert_eq!(query("NBK", fuzzy).total_records, 3);
+        assert_eq!(query("NBK", all).total_records, 0);
+        assert_eq!(query("K8N", fuzzy).total_records, 0);
+        let regex = ClipboardSearchOptions {
+            mode: ClipboardSearchMode::Regex,
+            ..all
+        };
+        assert_eq!(query(r"^Notebook (77|99)$", regex).total_records, 2);
+        assert_eq!(query(r"^notebook", regex).total_records, 0);
+        let scoped = ClipboardSearchOptions {
+            body: false,
+            note: false,
+            ..regex
+        };
+        let hits = query(r"^Notebook \d+$", scoped);
+        assert_eq!(hits.total_records, 1);
+        assert!(hits.records[0].image_text_match);
+        assert_eq!(
+            db.clipboard_page_with_search(r"\d+$", true, Some("text"), None, 1, regex)
+                .unwrap()
+                .records[0]
+                .id,
+            "body"
+        );
+        let first = db
+            .clipboard_page_with_search(r"\d+$", false, None, None, 1, regex)
+            .unwrap();
+        let second = db
+            .clipboard_page_with_search(r"\d+$", false, None, first.cursor.as_ref(), 2, regex)
+            .unwrap();
+        assert_eq!(first.records[0].id, "ocr");
+        assert!(first.has_more);
+        assert_eq!(second.total_records, 3);
+        assert_eq!(
+            second
+                .records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["note", "body"]
+        );
+        assert_eq!(
+            db.clipboard_page_with_search("[", false, None, None, 10, regex)
+                .unwrap_err(),
+            "clipboard_invalid_regex"
+        );
+        assert_eq!(
+            db.clipboard_page_with_search(
+                "hello",
+                false,
+                None,
+                None,
+                10,
+                ClipboardSearchOptions {
+                    body: false,
+                    note: false,
+                    image_text: false,
+                    ..all
+                }
+            )
+            .unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(query("notebook", all).total_records, 3);
+    }
+
+    #[test]
+    fn clipboard_age_policy_persists_and_prunes_search_after_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("nami-retention-{}.sqlite3", uuid::Uuid::new_v4()));
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        let view = RecordView::Clipboard;
+        let policy = Some(HistoryPolicy {
+            limit: 500,
+            max_age_days: Some(7),
+        });
+        let mut expired = record("expired", "synthetic expired searchable body");
+        expired.date = "2001-01-01T00:00:00.000Z".into();
+        db.clipboard_insert(&expired).unwrap();
+        let mut protected = record("favorite", "synthetic favorite");
+        protected.date = expired.date.clone();
+        protected.is_favorite = true;
+        db.clipboard_insert(&protected).unwrap();
+        let mut later = record("later", "synthetic will age");
+        later.date = chrono::Utc::now().to_rfc3339();
+        db.clipboard_insert(&later).unwrap();
+        let preview = db.records_cleanup_preview(view, policy).unwrap();
+        assert_eq!(preview.count, 1);
+        assert_eq!(
+            db.clipboard_cleanup(policy, 0, Some(&preview.token))
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(
+            db.clipboard_page("searchable body", false, None, 100)
+                .unwrap()
+                .total_records,
+            0
+        );
+        assert_eq!(
+            db.records_cleanup_preview(RecordView::Translation, policy)
+                .err()
+                .as_deref(),
+            Some("invalid_argument")
+        );
+        db.connection
+            .execute(
+                "UPDATE clipboard_records SET date='2001-01-01T00:00:00.000Z' WHERE id='later'",
+                [],
+            )
+            .unwrap();
+        drop(db);
+
+        let mut db = HistoryDatabase::open(&path).unwrap();
+        let saved = db.records_history_policy(view).unwrap();
+        assert_eq!(Some(saved), policy);
+        assert_eq!(db.clipboard_cleanup(Some(saved), 0, None).unwrap().0, 1);
+        assert_eq!(
+            db.clipboard_page("", false, None, 100).unwrap().records[0].id,
+            "favorite"
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn clipboard_recent_cleanup_protects_flags_and_rechecks_confirmation() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let view = RecordView::Clipboard;
+        let now = chrono::Utc::now();
+        let since = now.timestamp_millis() - 15 * 60_000;
+        for (id, time, pinned, favorite) in [
+            ("before", since - 1, false, false),
+            ("boundary", since, false, false),
+            ("pinned", since, true, false),
+            ("favorite", since, false, true),
+        ] {
+            let mut item = record(id, id);
+            item.date = chrono::DateTime::from_timestamp_millis(time)
+                .unwrap()
+                .to_rfc3339();
+            item.is_pinned = pinned;
+            item.is_favorite = favorite;
+            db.clipboard_insert(&item).unwrap();
+        }
+        let preview = db
+            .records_cleanup_preview_scoped(view, None, Some(since))
+            .unwrap();
+        assert_eq!(preview.count, 1);
+        assert_eq!(preview.recent_since, Some(since));
+        let mut new = record("new", "synthetic added during confirmation");
+        new.date = now.to_rfc3339();
+        db.clipboard_insert(&new).unwrap();
+        assert_eq!(
+            db.clipboard_cleanup_scoped(None, 0, Some(&preview.token), Some(since)),
+            Err("clipboard_cleanup_changed".into())
+        );
+        let current = db
+            .records_cleanup_preview_scoped(view, None, Some(since))
+            .unwrap();
+        assert_eq!(current.count, 2);
+        assert!(db
+            .clipboard_cleanup_scoped(None, 7, Some(&current.token), Some(since))
+            .is_err());
+        assert_eq!(
+            db.clipboard_cleanup_scoped(None, 0, Some(&current.token), Some(since))
+                .unwrap()
+                .0,
+            2
+        );
+        let remaining = db.clipboard_page("", false, None, 100).unwrap();
+        assert_eq!(remaining.total_records, 3);
+        assert!(remaining
+            .records
+            .iter()
+            .all(|row| ["before", "pinned", "favorite"].contains(&row.id.as_str())));
+    }
+
+    #[test]
     fn clipboard_retention_keeps_old_rows_until_count_is_exceeded_and_protects_flags() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        let policy = HistoryPolicy { limit: 2 };
+        let policy = HistoryPolicy {
+            limit: 2,
+            ..Default::default()
+        };
         let mut old = record("old", "unique searchable body");
         old.date = "2001-01-01T00:00:00.000Z".into();
         db.clipboard_insert(&old).unwrap();
@@ -1312,7 +1920,10 @@ mod tests {
     #[test]
     fn clipboard_retention_confirmation_rejects_a_changed_set_or_rolled_back_write() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        let policy = HistoryPolicy { limit: 1 };
+        let policy = HistoryPolicy {
+            limit: 1,
+            ..Default::default()
+        };
         db.clipboard_insert(&record("first", "first")).unwrap();
         let original = db
             .records_cleanup_preview(RecordView::Clipboard, Some(policy))
@@ -1991,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn image_text_correction_replaces_search_and_survives_restart_without_changing_history() {
+    fn legacy_ocr_text_survives_restart_and_is_not_overwritten_by_indexing() {
         let root =
             std::env::temp_dir().join(format!("nami-ocr-correction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -2004,18 +2615,8 @@ mod tests {
             let derived = record("previous-extraction", "NAMl-0U-016");
             db.clipboard_insert_ocr_result(&image.id, &derived).unwrap();
             db.clipboard_edit(&image.id, "Keep note", None).unwrap();
-            assert!(db
-                .clipboard_correct_image_text(&derived.id, corrected)
-                .is_err());
-            for invalid in [" ", "bad\0text"] {
-                assert!(db.clipboard_correct_image_text(&image.id, invalid).is_err());
-            }
-            assert_eq!(
-                db.clipboard_ocr_text(&image.id).unwrap().as_deref(),
-                Some(derived.text.as_str())
-            );
-            db.clipboard_correct_image_text(&image.id, corrected)
-                .unwrap();
+            // Seed a legacy correction without retaining the removed mutation API.
+            assert!(save_ocr(&db.connection, &image.id, None, corrected).unwrap());
             assert!(!db
                 .clipboard_index_image(&image.id, &image.fingerprint, &derived.text)
                 .unwrap());

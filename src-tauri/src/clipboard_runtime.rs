@@ -65,9 +65,6 @@ pub(crate) async fn payload(
     let root = image_root(app)?;
     let (record, files, formatting) = database(app, move |database| {
         let record = database.clipboard_record(&id)?;
-        if plain_text && record.kind != "text" {
-            return Err("invalid_argument".into());
-        }
         let files = if restore_formats && record.kind != "text" {
             database.clipboard_file_representation(&id)?
         } else {
@@ -90,6 +87,49 @@ pub(crate) async fn payload(
     tauri::async_runtime::spawn_blocking(move || record_payload(&root, record, files))
         .await
         .map_err(|_| "storage_worker")?
+}
+
+pub(crate) async fn image_export_png(app: &AppHandle, id: String) -> Result<Vec<u8>, String> {
+    let payload = {
+        let state = app.state::<AppState>();
+        let _write = state.clipboard_writes.lock().await;
+        payload(app, id, false, false).await?
+    };
+    tauri::async_runtime::spawn_blocking(move || export_png(payload))
+        .await
+        .map_err(|_| "storage_worker")?
+}
+
+fn export_png(payload: platform::ClipboardPayload) -> Result<Vec<u8>, String> {
+    let platform::ClipboardPayload::Image { bytes, extension } =
+        platform::prepare_image_paste(payload)
+    else {
+        return Err("invalid_argument".into());
+    };
+    if extension != "png" || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("clipboard_image_format".into());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn save_image_export(
+    app_data: &Path,
+    destination: &Path,
+    png: Vec<u8>,
+) -> Result<(), String> {
+    let app_data = app_data.canonicalize().map_err(|_| "storage_unavailable")?;
+    let parent = destination.parent().ok_or("clipboard_save_failed")?;
+    let parent = parent.canonicalize().map_err(|_| "clipboard_save_failed")?;
+    if parent.starts_with(app_data) {
+        return Err("clipboard_save_failed".into());
+    }
+    let destination = parent.join(destination.file_name().ok_or("clipboard_save_failed")?);
+    match destination.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        _ => return Err("clipboard_save_failed".into()),
+    }
+    platform::write_image_export(&destination, png)
 }
 
 fn record_payload(
@@ -190,6 +230,10 @@ async fn retry_capture(app: &AppHandle, error: String, previous: &mut Option<Str
 }
 
 pub(crate) fn start(app: &AppHandle) {
+    start_with_poll_interval(app, std::time::Duration::from_millis(150));
+}
+
+pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Duration) {
     if !platform::capabilities().clipboard_write {
         return;
     }
@@ -197,6 +241,17 @@ pub(crate) fn start(app: &AppHandle) {
     state
         .clipboard_version
         .store(platform::clipboard_version(), Ordering::SeqCst);
+    let maintenance = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            {
+                let state = maintenance.state::<AppState>();
+                let _write = state.clipboard_writes.lock().await;
+                crate::clipboard_preferences::enforce_history(&maintenance, true).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
     let (index_tx, mut index_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     if platform::capabilities().image_ocr {
         let app = app.clone();
@@ -216,7 +271,7 @@ pub(crate) fn start(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut failure = None;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            tokio::time::sleep(interval).await;
             if !app
                 .state::<AppState>()
                 .clipboard_enabled
@@ -225,6 +280,9 @@ pub(crate) fn start(app: &AppHandle) {
                 failure = None;
                 continue;
             }
+            let state = app.state::<AppState>();
+            // Keep exclusions stable from the pre-read check through persistence.
+            let _write = state.clipboard_writes.lock().await;
             let read = on_main(&app, |app| {
                 let state = app.state::<AppState>();
                 if !state.clipboard_enabled.load(Ordering::SeqCst) {
@@ -236,9 +294,8 @@ pub(crate) fn start(app: &AppHandle) {
                     state.selection_copy_busy.load(Ordering::SeqCst),
                     || {
                         if state.clipboard_recording_types.lock().unwrap().any() {
-                            platform::read_clipboard(|bundle_id| {
-                                state.clipboard_options.lock().unwrap().excludes(bundle_id)
-                            })
+                            let options = state.clipboard_options.lock().unwrap();
+                            platform::read_clipboard(|bundle_id| options.excludes(bundle_id))
                         } else {
                             Ok(None)
                         }
@@ -251,27 +308,14 @@ pub(crate) fn start(app: &AppHandle) {
                 Ok(Ok(Some(pending))) => pending,
                 Ok(Ok(None)) => continue,
                 Ok(Err(error)) | Err(error) => {
+                    drop(_write);
                     retry_capture(&app, error, &mut failure).await;
                     continue;
                 }
             };
-            let state = app.state::<AppState>();
-            let _write = state.clipboard_writes.lock().await;
             if !state.clipboard_enabled.load(Ordering::SeqCst)
                 || state.clipboard_version.load(Ordering::SeqCst) != baseline
             {
-                continue;
-            }
-            if capture
-                .source_app
-                .as_ref()
-                .and_then(|source| source.get("bundleId"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|bundle_id| {
-                    state.clipboard_options.lock().unwrap().excludes(bundle_id)
-                })
-            {
-                acknowledge(&state.clipboard_version, baseline, capture.version);
                 continue;
             }
             let root = match image_root(&app) {
@@ -565,41 +609,74 @@ fn persist_capture_with(
 mod tests {
     use super::*;
 
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn recopy_queues_only_unindexed_images() {
-        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        let mut image = ClipboardRecord {
-            id: "original".into(),
+    fn image_export_writes_the_full_verified_png_and_protects_private_storage() {
+        let root = std::env::temp_dir().join(format!("nami-image-export-{}", uuid::Uuid::new_v4()));
+        let private = root.join("private");
+        let bytes = include_bytes!("../icons/icon.png").to_vec();
+        let image = clipboard::store_image(&private, &bytes, "png").unwrap();
+        let record = ClipboardRecord {
+            id: "save-image".into(),
             kind: "image".into(),
-            text: "Image".into(),
-            date: "2026-11-20T00:00:00Z".into(),
+            text: String::new(),
+            date: "2026-11-23T00:00:00Z".into(),
             is_favorite: false,
             is_pinned: false,
             source_app: None,
-            image_path: Some("fixture.png".into()),
-            fingerprint: "fixture".into(),
+            image_path: Some(image.clone()),
+            fingerprint: clipboard::fingerprint("image", &bytes),
         };
-        let original = db.clipboard_insert_capture(&image, None, None).unwrap();
-        assert_eq!(pending_image_index(&db, original, false).unwrap(), None);
-        image.id = "recopy".into();
-        let recopy = db.clipboard_insert_capture(&image, None, None).unwrap();
+        let png = export_png(record_payload(&private, record.clone(), None).unwrap()).unwrap();
+        assert_eq!(png, bytes);
+        let destination = root.join("output.png");
+        save_image_export(&private, &destination, png.clone()).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        assert!(save_image_export(&private, &private.join(&image), png.clone()).is_err());
+        let link = root.join("link.png");
+        std::os::unix::fs::symlink(&destination, &link).unwrap();
+        assert!(save_image_export(&private, &link, png).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_file(private.join(image)).unwrap();
         assert_eq!(
-            pending_image_index(&db, recopy.clone(), true).unwrap(),
-            Some("original".into())
+            record_payload(&private, record, None).unwrap_err(),
+            "clipboard_image_missing"
         );
-        assert_eq!(
-            db.clipboard_page("", false, None, 100)
-                .unwrap()
-                .total_records,
-            1
-        );
-        for text in ["", "Corrected text"] {
-            if text.is_empty() {
-                db.clipboard_index_image("original", "fixture", text)
-                    .unwrap();
-            } else {
-                db.clipboard_correct_image_text("original", text).unwrap();
-            }
+        assert!(export_png(platform::ClipboardPayload::Text("not an image".into())).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recopy_queues_only_unindexed_images() {
+        for text in ["", "Indexed text"] {
+            let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+            let mut image = ClipboardRecord {
+                id: "original".into(),
+                kind: "image".into(),
+                text: "Image".into(),
+                date: "2026-11-20T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: Some("fixture.png".into()),
+                fingerprint: "fixture".into(),
+            };
+            let original = db.clipboard_insert_capture(&image, None, None).unwrap();
+            assert_eq!(pending_image_index(&db, original, false).unwrap(), None);
+            image.id = "recopy".into();
+            let recopy = db.clipboard_insert_capture(&image, None, None).unwrap();
+            assert_eq!(
+                pending_image_index(&db, recopy.clone(), true).unwrap(),
+                Some("original".into())
+            );
+            assert_eq!(
+                db.clipboard_page("", false, None, 100)
+                    .unwrap()
+                    .total_records,
+                1
+            );
+            db.clipboard_index_image("original", "fixture", text)
+                .unwrap();
             assert_eq!(
                 pending_image_index(&db, recopy.clone(), true).unwrap(),
                 None

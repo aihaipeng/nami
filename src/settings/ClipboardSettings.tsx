@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { FileText, Folder, Image } from 'lucide-react';
 import type { ViewProps } from '../App';
 import { resolveLanguage } from '../shared/i18n';
+import { defaultClipboardSearch } from '../shared/clipboardSearch';
+import { ClipboardSearchSettings } from './ClipboardSearchSettings';
 import { ClipboardExcludedApps, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
 
 import { HistoryStorageSettings } from './HistoryStorageSettings';
@@ -52,6 +54,7 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
     </section>
     <ClipboardExcludedApps t={t} state={options} available={canCapture} />
     <HistoryStorageSettings t={t} available={canManage} view="clipboard" previewLines={snapshot.clipboardControls.previewLines?.clipboard ?? 3} locale={resolveLanguage(snapshot.locale)} />
+    <ClipboardSearchSettings t={t} search={snapshot.clipboardControls.search ?? defaultClipboardSearch} available={canManage} />
     <ClipboardReuseSettings t={t} state={options} platformAvailable={canCapture}
       locale={resolveLanguage(snapshot.locale)} />
   </div>;

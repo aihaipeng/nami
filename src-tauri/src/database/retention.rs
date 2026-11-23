@@ -22,19 +22,34 @@ fn preference(view: RecordView) -> &'static str {
 
 pub(super) fn candidates(view: RecordView) -> String {
     let table = table(view);
+    let copy_time = match view {
+        RecordView::Clipboard => "unixepoch(date,'subsec')",
+        RecordView::Translation => "NULL", // Translation policies don't accept time windows.
+    };
     format!("WITH cleanup(sequence) AS (
         SELECT sequence FROM {table} WHERE ?2 != 0 AND (?2 & CASE WHEN is_favorite=0 AND is_pinned=0 THEN 1 ELSE 2 * is_favorite + 4 * is_pinned END) != 0
         UNION ALL
         SELECT sequence FROM (SELECT sequence FROM {table} WHERE ?1 IS NOT NULL AND is_favorite=0 AND is_pinned=0
             ORDER BY created_at DESC,sequence DESC LIMIT -1 OFFSET COALESCE(?1,0))
+        UNION
+        SELECT sequence FROM {table} WHERE (?3 IS NOT NULL OR ?4 IS NOT NULL) AND is_favorite=0 AND is_pinned=0 AND ({copy_time} < ?3/1000.0 OR {copy_time} >= ?4/1000.0)
     )")
 }
 
 pub(super) fn cleanup_parameters(
     policy: Option<HistoryPolicy>,
     categories: u8,
-) -> (Option<u32>, u8) {
-    (policy.map(|value| value.limit), categories)
+    recent_since: Option<i64>,
+    now: i64,
+) -> (Option<u32>, u8, Option<i64>, Option<i64>) {
+    (
+        policy.map(|value| value.limit),
+        categories,
+        policy
+            .and_then(|value| value.max_age_days)
+            .map(|days| now - i64::from(days) * 86_400_000),
+        recent_since,
+    )
 }
 
 pub(super) fn check_cleanup(
@@ -43,15 +58,18 @@ pub(super) fn check_cleanup(
     policy: Option<HistoryPolicy>,
     categories: u8,
     expected: Option<&str>,
+    recent_since: Option<i64>,
+    now: i64,
 ) -> Result<(), String> {
-    if policy.is_some_and(|value| !value.valid())
-        || (policy.is_some() && categories != 0)
-        || (policy.is_none() && (!(1..=7).contains(&categories) || expected.is_none()))
+    validate_scope(view, policy, recent_since)?;
+    if ((policy.is_some() || recent_since.is_some()) && categories != 0)
+        || (policy.is_none() && expected.is_none())
+        || (policy.is_none() && recent_since.is_none() && !(1..=7).contains(&categories))
     {
         return Err("invalid_argument".into());
     }
     if let Some(expected) = expected {
-        if cleanup_preview(connection, view, policy)?.token != expected {
+        if cleanup_preview(connection, view, policy, recent_since, now)?.token != expected {
             return Err("clipboard_cleanup_changed".into());
         }
     }
@@ -71,12 +89,35 @@ pub(super) fn persist_limit(
     Ok(())
 }
 
+fn validate_scope(
+    view: RecordView,
+    policy: Option<HistoryPolicy>,
+    recent_since: Option<i64>,
+) -> Result<(), String> {
+    if policy.is_some_and(|value| {
+        !value.valid() || (view == RecordView::Translation && value.max_age_days.is_some())
+    }) || (recent_since.is_some() && (view != RecordView::Clipboard || policy.is_some()))
+    {
+        return Err("invalid_argument".into());
+    }
+    if let Some(since) = recent_since {
+        let now = chrono::Utc::now().timestamp_millis();
+        if !(now - 20 * 60_000..=now - 15 * 60_000).contains(&since) {
+            return Err("clipboard_cleanup_changed".into());
+        }
+    }
+    Ok(())
+}
+
 fn cleanup_preview(
     connection: &Connection,
     view: RecordView,
     policy: Option<HistoryPolicy>,
+    recent_since: Option<i64>,
+    now: i64,
 ) -> Result<CleanupPreview, String> {
-    let mut query = if policy.is_some() {
+    let scoped = policy.is_some() || recent_since.is_some();
+    let mut query = if scoped {
         connection.prepare_cached(&format!(
             "{} SELECT sequence, 0 FROM cleanup ORDER BY sequence",
             candidates(view)
@@ -88,8 +129,8 @@ fn cleanup_preview(
         ))
     }
     .map_err(storage_error)?;
-    let mut rows = if policy.is_some() {
-        query.query(cleanup_parameters(policy, 0))
+    let mut rows = if scoped {
+        query.query(cleanup_parameters(policy, 0, recent_since, now))
     } else {
         query.query([])
     }
@@ -98,6 +139,13 @@ fn cleanup_preview(
     hash.update([u8::from(policy.is_none())]);
     hash.update(table(view));
     hash.update(policy.map_or(0, |value| value.limit).to_le_bytes());
+    hash.update(
+        policy
+            .and_then(|value| value.max_age_days)
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    hash.update(recent_since.unwrap_or(0).to_le_bytes());
     let mut counts = [0; 3];
     let mut count = 0;
     // Manual confirmation covers the entire displayed snapshot, including each row's category.
@@ -120,7 +168,8 @@ fn cleanup_preview(
     Ok(CleanupPreview {
         count,
         token: format!("{:x}", hash.finalize()),
-        categories: policy.is_none().then_some(counts),
+        categories: (!scoped).then_some(counts),
+        recent_since,
     })
 }
 
@@ -131,7 +180,9 @@ fn delete_translations(
 ) -> Result<Vec<String>, String> {
     let mut query = connection.prepare_cached(&format!("{} DELETE FROM translation_records WHERE sequence IN (SELECT sequence FROM cleanup) RETURNING id", candidates(RecordView::Translation))).map_err(storage_error)?;
     let rows = query
-        .query_map(cleanup_parameters(policy, categories), |row| row.get(0))
+        .query_map(cleanup_parameters(policy, categories, None, 0), |row| {
+            row.get(0)
+        })
         .map_err(storage_error)?;
     rows.collect::<rusqlite::Result<_>>().map_err(storage_error)
 }
@@ -148,10 +199,23 @@ impl HistoryDatabase {
         view: RecordView,
         policy: Option<HistoryPolicy>,
     ) -> Result<CleanupPreview, String> {
-        if policy.is_some_and(|value| !value.valid()) {
-            return Err("invalid_argument".into());
-        }
-        cleanup_preview(&self.connection, view, policy)
+        self.records_cleanup_preview_scoped(view, policy, None)
+    }
+
+    pub fn records_cleanup_preview_scoped(
+        &self,
+        view: RecordView,
+        policy: Option<HistoryPolicy>,
+        recent_since: Option<i64>,
+    ) -> Result<CleanupPreview, String> {
+        validate_scope(view, policy, recent_since)?;
+        cleanup_preview(
+            &self.connection,
+            view,
+            policy,
+            recent_since,
+            chrono::Utc::now().timestamp_millis(),
+        )
     }
 
     pub fn translation_storage_bytes(&self) -> Result<u64, String> {
@@ -169,7 +233,15 @@ impl HistoryDatabase {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        check_cleanup(&transaction, view, policy, categories, Some(expected))?;
+        check_cleanup(
+            &transaction,
+            view,
+            policy,
+            categories,
+            Some(expected),
+            None,
+            0,
+        )?;
         let removed = delete_translations(&transaction, policy, categories)?;
         persist_limit(&transaction, view, policy, Some(expected))?;
         transaction.commit().map_err(storage_error)?;

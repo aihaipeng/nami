@@ -586,7 +586,10 @@ mod tests {
         );
         assert!(db.record("normal").unwrap().is_some());
         assert!(db.translation_storage_bytes().unwrap() < before);
-        let policy = Some(HistoryPolicy { limit: 71 });
+        let policy = Some(HistoryPolicy {
+            limit: 71,
+            ..Default::default()
+        });
         let preview = db.records_cleanup_preview(translation, policy).unwrap();
         assert_eq!(preview.count, 0);
         assert!(db

@@ -246,6 +246,8 @@ pub enum ClipboardRecordAction {
     Pin,
     Delete,
     CopyRecord,
+    PasteRecord,
+    SaveImage,
     SwitchView,
     FocusRecords,
     NavigateUp,
@@ -256,7 +258,10 @@ pub enum ClipboardRecordAction {
 
 impl ClipboardRecordAction {
     pub fn shared_with_translation(self) -> bool {
-        !matches!(self, Self::Ocr | Self::OpenTarget | Self::Translate)
+        !matches!(
+            self,
+            Self::Ocr | Self::OpenTarget | Self::Translate | Self::PasteRecord | Self::SaveImage
+        )
     }
 }
 
@@ -278,6 +283,8 @@ pub struct ClipboardRecordShortcuts {
     pin: RecordShortcut,
     delete: RecordShortcut,
     copy_record: RecordShortcut,
+    paste_record: RecordShortcut,
+    save_image: RecordShortcut,
     switch_view: RecordShortcut,
     focus_records: RecordShortcut,
     navigate_up: RecordShortcut,
@@ -312,6 +319,8 @@ impl Default for ClipboardRecordShortcuts {
             pin: enabled("KeyP", &["alt"]),
             delete: enabled("Backspace", &[primary]),
             copy_record: enabled("KeyC", &shifted),
+            paste_record: enabled("Enter", &shifted),
+            save_image: enabled("KeyS", &[primary]),
             switch_view: enabled("Tab", &[]),
             focus_records: RecordShortcut {
                 binding: None,
@@ -326,7 +335,7 @@ impl Default for ClipboardRecordShortcuts {
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 15] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 17] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -338,6 +347,8 @@ impl ClipboardRecordShortcuts {
             (Pin, &self.pin),
             (Delete, &self.delete),
             (CopyRecord, &self.copy_record),
+            (PasteRecord, &self.paste_record),
+            (SaveImage, &self.save_image),
             (SwitchView, &self.switch_view),
             (FocusRecords, &self.focus_records),
             (NavigateUp, &self.navigate_up),
@@ -353,6 +364,8 @@ impl ClipboardRecordShortcuts {
             ocr: defaults.ocr,
             open_target: defaults.open_target,
             translate: defaults.translate,
+            paste_record: defaults.paste_record,
+            save_image: defaults.save_image,
             ..self.clone()
         };
         restored.validate_unique()?;
@@ -364,6 +377,8 @@ impl ClipboardRecordShortcuts {
             ocr: self.ocr.clone(),
             open_target: self.open_target.clone(),
             translate: self.translate.clone(),
+            paste_record: self.paste_record.clone(),
+            save_image: self.save_image.clone(),
             ..Self::default()
         };
         restored.validate_unique()?;
@@ -426,6 +441,22 @@ impl ClipboardRecordShortcuts {
             .or_else(|| enabled.filter(|value| *value).and_then(|_| current()))
         {
             validate_window_reservation(value)?;
+            validate_quick_paste_reservation(value)?;
+            if matches!(
+                action,
+                ClipboardRecordAction::PasteRecord | ClipboardRecordAction::SaveImage
+            ) && (matches!(value.code.as_str(), "Escape" | "Tab")
+                || value.modifiers.is_empty()
+                    && matches!(
+                        value.code.as_str(),
+                        "Enter" | "Space" | "ArrowUp" | "ArrowDown" | "Home" | "End"
+                    )
+                || cfg!(target_os = "macos")
+                    && value.code == "KeyV"
+                    && (value.modifiers == ["meta"] || value.modifiers == ["shift", "meta"]))
+            {
+                return Err("shortcut_reserved_record_menu".into());
+            }
             if self.conflicts(value, Some(action))
                 || globals
                     .iter()
@@ -445,6 +476,8 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::Pin => &mut self.pin,
             ClipboardRecordAction::Delete => &mut self.delete,
             ClipboardRecordAction::CopyRecord => &mut self.copy_record,
+            ClipboardRecordAction::PasteRecord => &mut self.paste_record,
+            ClipboardRecordAction::SaveImage => &mut self.save_image,
             ClipboardRecordAction::SwitchView => &mut self.switch_view,
             ClipboardRecordAction::FocusRecords => &mut self.focus_records,
             ClipboardRecordAction::NavigateUp => &mut self.navigate_up,
@@ -509,6 +542,8 @@ impl ClipboardRecordShortcuts {
                     ("navigateDown", ClipboardRecordAction::NavigateDown),
                     ("previousCategory", ClipboardRecordAction::PreviousCategory),
                     ("nextCategory", ClipboardRecordAction::NextCategory),
+                    ("pasteRecord", ClipboardRecordAction::PasteRecord),
+                    ("saveImage", ClipboardRecordAction::SaveImage),
                 ] {
                     if value.get(key).is_none() {
                         let binding = shortcuts
@@ -626,6 +661,19 @@ fn validate_window_reservation(binding: &KeyBinding) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_quick_paste_reservation(binding: &KeyBinding) -> Result<(), String> {
+    if cfg!(target_os = "macos")
+        && binding.modifiers == ["meta"]
+        && matches!(
+            binding.code.as_str(),
+            "Digit1" | "Digit2" | "Digit3" | "Digit4" | "Digit5"
+        )
+    {
+        return Err("shortcut_reserved_quick_paste".into());
+    }
+    Ok(())
+}
+
 pub fn validate_clipboard_binding(
     binding: KeyBinding,
     shortcuts: &TranslationShortcuts,
@@ -645,6 +693,9 @@ pub fn assign_shortcut(
     let binding = binding.map(normalize_binding).transpose()?;
     if let Some(binding) = &binding {
         validate_window_reservation(binding)?;
+        if action.is_global() || is_general_window_action(action) {
+            validate_quick_paste_reservation(binding)?;
+        }
         if clipboard.is_some_and(|clipboard| same_binding(binding, clipboard)) {
             return Err("shortcut_clipboard".into());
         }
@@ -674,6 +725,70 @@ fn supported_code(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_menu_shortcuts_persist_and_new_defaults_yield_to_existing_bindings() {
+        use ClipboardRecordAction::*;
+        let defaults = ClipboardRecordShortcuts::default();
+        let mut legacy = serde_json::to_value(&defaults).unwrap();
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("pasteRecord");
+        legacy.remove("saveImage");
+        legacy.insert(
+            "pin".into(),
+            serde_json::to_value(&defaults.save_image).unwrap(),
+        );
+        let loaded =
+            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(legacy).unwrap()));
+        assert_eq!(loaded.pin.binding, defaults.save_image.binding);
+        assert_eq!(loaded.save_image.binding, None);
+        assert_eq!(loaded.paste_record.binding, defaults.paste_record.binding);
+
+        let mut custom = ClipboardRecordShortcuts::default();
+        let key = KeyBinding::new("KeyJ", &["alt"]);
+        custom
+            .set(PasteRecord, Some(key.clone()), None, &[])
+            .unwrap();
+        custom.set(SaveImage, None, None, &[]).unwrap();
+        custom.set(PasteRecord, None, Some(false), &[]).unwrap();
+        assert!(custom.set(SaveImage, Some(key.clone()), None, &[]).is_err());
+        assert!(custom
+            .set(SaveImage, Some(KeyBinding::new("Escape", &[])), None, &[])
+            .is_err());
+        let reopened =
+            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&custom).unwrap()));
+        assert_eq!(reopened.paste_record.binding, Some(key));
+        assert!(!reopened.paste_record.enabled);
+        assert!(reopened.save_image.binding.is_none());
+        assert_eq!(reopened.restore_general().unwrap().save_image.binding, None);
+        assert_eq!(
+            reopened.restore_clipboard().unwrap().save_image.binding,
+            defaults.save_image.binding
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fixed_clipboard_digits_reserve_the_panel_without_replacing_translation_copies() {
+        let shortcuts = TranslationShortcuts::defaults("meta");
+        let digit = KeyBinding::new("Digit4", &["meta"]);
+        assert_eq!(
+            assign_shortcut(
+                &shortcuts,
+                ShortcutAction::OpenTranslation,
+                Some(digit.clone()),
+                None
+            ),
+            Err("shortcut_reserved_quick_paste".into())
+        );
+        assert!(
+            assign_shortcut(&shortcuts, ShortcutAction::CopyPrimary, Some(digit), None).is_ok()
+        );
+        assert!(
+            validate_quick_paste_reservation(&KeyBinding::new("Digit5", &["meta", "shift"]))
+                .is_ok()
+        );
+    }
 
     #[test]
     fn panel_shortcuts_preserve_disabled_bindings_and_reject_conflicts() {

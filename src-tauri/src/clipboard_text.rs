@@ -216,44 +216,6 @@ pub(crate) async fn has_text(app: &AppHandle, id: String) -> Result<bool, String
         .map(|(_, text)| !text.trim().is_empty())
 }
 
-pub(crate) async fn correction_text(app: &AppHandle, id: String) -> Result<String, String> {
-    let record_id = id.clone();
-    clipboard_runtime::database(app, move |db| {
-        if db.clipboard_record(&record_id)?.kind != "image" {
-            return Err("invalid_argument".into());
-        }
-        Ok(())
-    })
-    .await?;
-    match text(app, id, false).await {
-        Ok((_, text)) => Ok(text),
-        Err(error)
-            if [
-                "ocr_invalid_image",
-                "ocr_image_limit",
-                "ocr_recognition_failed",
-            ]
-            .contains(&error.as_str()) =>
-        {
-            Ok(String::new())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-pub(crate) async fn correct(app: &AppHandle, id: String, corrected: String) -> Result<(), String> {
-    if !platform::capabilities().image_ocr {
-        return Err("platform_unavailable".into());
-    }
-    let state = app.state::<AppState>();
-    let _write = state.clipboard_writes.lock().await;
-    clipboard_runtime::database(app, move |db| {
-        db.clipboard_correct_image_text(&id, &corrected)
-    })
-    .await?;
-    clipboard_runtime::changed(app)
-}
-
 pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Result<(), String> {
     if action == "index" {
         let state = app.state::<AppState>();

@@ -45,6 +45,9 @@ pub fn finish_selection_copy(
     Err(UNAVAILABLE)
 }
 
+pub fn activation_epoch() -> u64 {
+    0
+}
 pub fn capture_target() -> Option<Target> {
     None
 }
@@ -102,7 +105,7 @@ pub fn paste_keys_up() -> Result<(), &'static str> {
     Err(UNAVAILABLE)
 }
 pub fn read_clipboard(
-    _: impl FnOnce(&str) -> bool,
+    _: impl Fn(&str) -> bool,
 ) -> Result<Option<super::ClipboardCapture>, &'static str> {
     Err(UNAVAILABLE)
 }
@@ -132,4 +135,15 @@ pub fn file_icon_data_url(_: &str) -> Option<String> {
 
 pub fn open_clipboard_target(_: nami::clipboard::open_target::OpenTarget) -> Result<(), String> {
     Err("platform_unavailable".into())
+}
+
+pub(crate) fn pick_image_save_path(
+    _: &tauri::Window,
+    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub(crate) fn write_image_export(_: &std::path::Path, _: Vec<u8>) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
 }

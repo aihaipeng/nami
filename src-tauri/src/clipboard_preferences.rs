@@ -5,7 +5,7 @@ use crate::{
     platform, AppState,
 };
 use nami::{
-    clipboard::{CleanupPreview, HistoryPolicy},
+    clipboard::{CleanupPreview, ClipboardSearchOptions, HistoryPolicy},
     database::HistoryDatabase,
 };
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,8 @@ pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
+    pub paste_as_plain_text: bool,
+    pub search: ClipboardSearchOptions,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
     pub record_shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
@@ -99,6 +101,8 @@ impl Default for ClipboardOptions {
             .collect(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
+            paste_as_plain_text: false,
+            search: ClipboardSearchOptions::default(),
             records_open_focus: RecordsOpenFocus::default(),
             preview_lines: Default::default(),
             record_shortcuts: Default::default(),
@@ -120,6 +124,14 @@ impl ClipboardOptions {
         options.activation = db
             .preference("clipboard_activation")?
             .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        options.paste_as_plain_text = db
+            .preference("clipboard_paste_as_plain_text")?
+            .is_some_and(|value| value == "true");
+        options.search = db
+            .preference("clipboard_search_options")?
+            .and_then(|value| serde_json::from_str::<ClipboardSearchOptions>(&value).ok())
+            .filter(|search| search.has_scope())
             .unwrap_or_default();
         options.records_open_focus = db
             .preference("records_open_focus")?
@@ -267,6 +279,7 @@ pub async fn clipboard_excluded_app_remove(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardControls {
     activation: Activation,
+    search: ClipboardSearchOptions,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
     shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
@@ -276,6 +289,7 @@ impl ClipboardOptions {
     pub(crate) fn controls(&self) -> ClipboardControls {
         ClipboardControls {
             activation: self.activation,
+            search: self.search,
             records_open_focus: self.records_open_focus,
             preview_lines: self.preview_lines.clone(),
             shortcuts: self.record_shortcuts.clone(),
@@ -335,20 +349,57 @@ pub async fn clipboard_record_shortcut_set(
 pub async fn clipboard_behavior_set(
     window: Webview,
     app: AppHandle,
-    activation: Activation,
+    activation: Option<Activation>,
+    paste_as_plain_text: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
     if !platform::capabilities().clipboard_write {
         return Err("platform_unavailable".into());
     }
+    let (key, value) = match (activation, paste_as_plain_text) {
+        (Some(activation), None) => (
+            "clipboard_activation",
+            serde_json::to_string(&activation).map_err(|_| "storage_record")?,
+        ),
+        (None, Some(plain)) => ("clipboard_paste_as_plain_text", plain.to_string()),
+        _ => return Err("invalid_argument".into()),
+    };
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
-    let value = serde_json::to_string(&activation).map_err(|_| "storage_record")?;
+    database(&app, move |db| db.preference_set(key, &value)).await?;
+    {
+        let mut options = state.clipboard_options.lock().unwrap();
+        if let Some(activation) = activation {
+            options.activation = activation;
+        }
+        if let Some(plain) = paste_as_plain_text {
+            options.paste_as_plain_text = plain;
+        }
+    }
+    if activation.is_some() {
+        publish_controls(&app, &state);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clipboard_search_set(
+    window: Webview,
+    app: AppHandle,
+    search: ClipboardSearchOptions,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    if !search.has_scope() {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.shortcut_writes.lock().await;
+    let value = serde_json::to_string(&search).map_err(|_| "storage_record")?;
     database(&app, move |db| {
-        db.preference_set("clipboard_activation", &value)
+        db.preference_set("clipboard_search_options", &value)
     })
     .await?;
-    state.clipboard_options.lock().unwrap().activation = activation;
+    state.clipboard_options.lock().unwrap().search = search;
     publish_controls(&app, &state);
     Ok(())
 }
@@ -405,6 +456,8 @@ pub async fn records_preview_lines_set(
 pub(crate) struct StorageInfo {
     bytes: u64,
     limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_age_days: Option<u32>,
 }
 
 // Size of the image store, including files left behind by a failed cleanup. No external file paths.
@@ -446,12 +499,12 @@ pub async fn records_storage_info(
     view: RecordView,
 ) -> Result<StorageInfo, String> {
     authorize(&window, &["settings"])?;
-    let (data, limit) = database(&app, move |db| {
+    let (data, policy) = database(&app, move |db| {
         let data = match view {
             RecordView::Clipboard => db.clipboard_storage_bytes()?,
             RecordView::Translation => db.translation_storage_bytes()?,
         };
-        Ok((data, db.records_history_policy(view)?.limit))
+        Ok((data, db.records_history_policy(view)?))
     })
     .await?;
     let media = if view == RecordView::Clipboard {
@@ -465,7 +518,8 @@ pub async fn records_storage_info(
     };
     Ok(StorageInfo {
         bytes: data.saturating_add(media),
-        limit,
+        limit: policy.limit,
+        max_age_days: policy.max_age_days,
     })
 }
 
@@ -482,9 +536,15 @@ pub async fn records_cleanup_preview(
     app: AppHandle,
     view: RecordView,
     policy: Option<HistoryPolicy>,
+    recent: Option<bool>,
 ) -> Result<CleanupPreview, String> {
     authorize(&window, &["settings"])?;
-    database(&app, move |db| db.records_cleanup_preview(view, policy)).await
+    let recent_since =
+        (recent == Some(true)).then(|| chrono::Utc::now().timestamp_millis() - 15 * 60_000);
+    database(&app, move |db| {
+        db.records_cleanup_preview_scoped(view, policy, recent_since)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -495,6 +555,7 @@ pub async fn records_cleanup_apply(
     policy: Option<HistoryPolicy>,
     categories: Option<u8>,
     token: String,
+    recent_since: Option<i64>,
 ) -> Result<CleanupResult, String> {
     authorize(&window, &["settings"])?;
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -502,6 +563,9 @@ pub async fn records_cleanup_apply(
     }
     let categories = categories.unwrap_or(0);
     if view == RecordView::Translation {
+        if recent_since.is_some() {
+            return Err("invalid_argument".into());
+        }
         let removed =
             crate::history_runtime::cleanup_translations(&app, policy, categories, token).await?;
         return Ok(CleanupResult {
@@ -511,7 +575,7 @@ pub async fn records_cleanup_apply(
     }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    let result = cleanup_locked(&app, policy, categories, Some(token), true).await?;
+    let result = cleanup_locked(&app, policy, categories, Some(token), recent_since, true).await?;
     if let Some(policy) = policy {
         state.clipboard_options.lock().unwrap().history_policy = policy;
     }
@@ -523,11 +587,12 @@ async fn cleanup_locked(
     policy: Option<HistoryPolicy>,
     categories: u8,
     token: Option<String>,
+    recent_since: Option<i64>,
     notify: bool,
 ) -> Result<CleanupResult, String> {
     let root = image_root(app)?;
     let (removed, images) = database(app, move |db| {
-        db.clipboard_cleanup(policy, categories, token.as_deref())
+        db.clipboard_cleanup_scoped(policy, categories, token.as_deref(), recent_since)
     })
     .await?;
     // The transaction is committed. Notify records even if the filesystem is temporarily inaccessible.
@@ -571,13 +636,20 @@ pub(crate) async fn retry_image_deletions_locked(
 }
 
 pub(crate) async fn enforce_history_locked(app: &AppHandle) {
+    enforce_history(app, false).await;
+}
+
+pub(crate) async fn enforce_history(app: &AppHandle, notify: bool) {
     let policy = app
         .state::<AppState>()
         .clipboard_options
         .lock()
         .unwrap()
         .history_policy;
-    match cleanup_locked(app, Some(policy), 0, None, false).await {
+    if notify && policy.max_age_days.is_none() {
+        return;
+    }
+    match cleanup_locked(app, Some(policy), 0, None, None, notify).await {
         Ok(result) if result.media_cleanup_failed => {
             eprintln!("Nami clipboard maintenance: clipboard_cleanup_failed")
         }

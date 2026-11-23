@@ -705,6 +705,18 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
             }
         }
         WindowEvent::Focused(false) => {
+            // A save sheet takes key status without leaving the records window.
+            if handle
+                .get_window(&owned_label)
+                .and_then(|window| window.ns_window().ok())
+                .is_some_and(|native| unsafe {
+                    let sheet: *mut objc2::runtime::AnyObject =
+                        objc2::msg_send![native.cast::<objc2::runtime::AnyObject>(), attachedSheet];
+                    !sheet.is_null()
+                })
+            {
+                return;
+            }
             if owned_label == "translation" {
                 handle.state::<AppState>().windows.lock().unwrap().blur();
                 let _ = apply_translation(&handle);
