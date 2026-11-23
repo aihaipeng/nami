@@ -384,4 +384,32 @@ describe('paged database history', () => {
     await new Promise((resolve) => setTimeout(resolve, 180));
     expect(calls('history_query')).toHaveLength(0);
   });
+
+  it('hydrates deduplicated wire source icons and keeps visual-only selection separate from user selection revision', async () => {
+    const view = renderHook(() => useHistory(true));
+    await waitFor(() => expect(view.result.current.loading).toBe(false));
+    const sourceApp = { bundleId: 'synthetic.wire', name: 'Synthetic Wire App', iconDataUrl: 'data:image/png;base64,d2lyZQ==' };
+    const baseRecord = { ...bridge.history.records[0] };
+    delete baseRecord.sourceApp;
+    await emit('history_changed', {
+      ...bridge.history,
+      revision: bridge.history.revision + 1,
+      sources: { '0': sourceApp },
+      records: [{ ...baseRecord, sourceAppId: 0 }],
+      totalRecords: 1,
+      hasMore: false,
+    });
+    expect(view.result.current.snapshot.records[0].sourceApp).toEqual(sourceApp);
+    const revBefore = view.result.current.selectionRevision;
+    await act(async () => bridge.listeners.get('history_sample_selected')?.forEach((listener) => listener({
+      payload: { sampleId: baseRecord.id, retranslate: false, visualOnly: true, revision: bridge.history.revision + 2 },
+    })));
+    expect(view.result.current.snapshot.selectedId).toBe(baseRecord.id);
+    expect(view.result.current.selectionRevision).toBe(revBefore);
+    await act(async () => bridge.listeners.get('history_sample_selected')?.forEach((listener) => listener({
+      payload: { sampleId: null, retranslate: false, visualOnly: true, revision: bridge.history.revision + 3 },
+    })));
+    expect(view.result.current.snapshot.selectedId).toBeNull();
+    expect(view.result.current.selectionRevision).toBe(revBefore);
+  });
 });

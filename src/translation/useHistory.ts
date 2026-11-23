@@ -1,12 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { historySamples, type HistorySelection, type HistorySnapshot } from './history';
+import { historySamples, type HistoryRecord, type HistorySelection, type HistorySnapshot } from './history';
 
 type HistoryPage = Pick<HistorySnapshot, 'records' | 'totalRecords' | 'hasMore'>;
+type HistoryWireRecord = Omit<HistoryRecord, 'sourceApp'> & {
+  sourceApp?: HistoryRecord['sourceApp'];
+  sourceAppId?: number | null;
+};
+type HistoryWireSnapshot = Omit<HistorySnapshot, 'records'> & {
+  records: HistoryWireRecord[];
+  sources?: Record<string, HistoryRecord['sourceApp']>;
+};
+
+const emptyDeleting = new Set<string>();
+
+function hydrateSnapshot(wire: HistoryWireSnapshot): HistorySnapshot {
+  if (!wire.sources) return wire as HistorySnapshot;
+  const sources = wire.sources;
+  return {
+    revision: wire.revision,
+    selectedId: wire.selectedId,
+    totalRecords: wire.totalRecords,
+    hasMore: wire.hasMore,
+    generation: wire.generation,
+    records: wire.records.map(({ sourceAppId, sourceApp, ...record }) => ({
+      ...record,
+      sourceApp: sourceApp !== undefined ? sourceApp : (sourceAppId != null ? sources[String(sourceAppId)] ?? null : null),
+    })),
+  };
+}
 
 export function useHistory(native: boolean) {
   const [snapshot, setSnapshot] = useState<HistorySnapshot>({ revision: -1, records: native ? [] : historySamples, selectedId: null, totalRecords: native ? 0 : historySamples.length, hasMore: false, generation: 0 });
+  const [deletingIds, setDeletingIds] = useState<ReadonlySet<string>>(emptyDeleting);
   const [error, setError] = useState(false);
   const [connecting, setConnecting] = useState(native);
   const [querying, setQuerying] = useState(false);
@@ -19,7 +46,9 @@ export function useHistory(native: boolean) {
   const lifecycle = useRef(0);
   const revision = useRef(-1);
   const selection = useRef({ revision: -1, selectedId: null as string | null });
+  const userSelectionRevision = useRef(-1);
   const latest = useRef(snapshot);
+  const pendingDeletes = useRef(new Set<string>());
   const queryRequest = useRef(0);
   const moreRequest = useRef(false);
   const queryPending = useRef(false);
@@ -28,11 +57,12 @@ export function useHistory(native: boolean) {
   const pages = useRef(new Map<boolean, HistoryPage>());
   const projection = useRef({ query: '', favoritesOnly: false, generation: 0 });
 
-  const accept = useCallback((next: HistorySnapshot) => {
-    if (!active.current || next.revision <= revision.current) return;
+  const accept = useCallback((raw: HistoryWireSnapshot) => {
+    const nextSnapshot = hydrateSnapshot(raw);
+    if (!active.current || nextSnapshot.revision <= revision.current) return;
     // Selection has no rows, so a delayed snapshot must still supply its page data.
-    const dataRevision = next.revision;
-    if (selection.current.revision > next.revision) next = { ...next, ...selection.current };
+    const dataRevision = nextSnapshot.revision;
+    const next = selection.current.revision > nextSnapshot.revision ? { ...nextSnapshot, ...selection.current } : nextSnapshot;
     if (revision.current < 0) projection.current.generation = next.generation;
     if (next.generation === projection.current.generation && cacheQuery.current === projection.current.query) {
       // An unchanged filtered page can still hide a newly added record in the alternate view.
@@ -59,7 +89,7 @@ export function useHistory(native: boolean) {
     let accepted = false;
     setError(false); setQuietQuery(quiet); setQuerying(true);
     try {
-      const next = await invoke<HistorySnapshot>('history_query', { query, favoritesOnly });
+      const next = await invoke<HistoryWireSnapshot>('history_query', { query, favoritesOnly });
       if (active.current && lifecycle.current === connection && request === queryRequest.current) {
         accept(next);
         if (next.generation === latest.current.generation) {
@@ -83,12 +113,13 @@ export function useHistory(native: boolean) {
     let disposed = false;
     const unlisten: (() => void)[] = [];
     async function connect() {
-      const remove = await listen<HistorySnapshot>('history_changed', ({ payload }) => { if (!disposed) accept(payload); });
+      const remove = await listen<HistoryWireSnapshot>('history_changed', ({ payload }) => { if (!disposed) accept(payload); });
       if (disposed) { remove(); return; }
       unlisten.push(remove);
       const removeSelection = await listen<HistorySelection>('history_sample_selected', ({ payload }) => {
         if (disposed || payload.revision <= Math.max(revision.current, selection.current.revision)) return;
         selection.current = { revision: payload.revision, selectedId: payload.sampleId };
+        if (!payload.visualOnly) userSelectionRevision.current = payload.revision;
         latest.current = { ...latest.current, ...selection.current };
         setSnapshot(latest.current);
       }).catch((error: unknown) => { unlisten.splice(0).forEach((remove) => remove()); throw error; });
@@ -97,7 +128,7 @@ export function useHistory(native: boolean) {
       const retry = retryFilters.current; retryFilters.current = null;
       if (retry) await setQuery(retry.query, retry.favoritesOnly);
       else {
-        const initial = await invoke<HistorySnapshot>('history_snapshot');
+        const initial = await invoke<HistoryWireSnapshot>('history_snapshot');
         if (!disposed) accept(initial);
       }
       if (!disposed) setConnecting(false);
@@ -105,7 +136,10 @@ export function useHistory(native: boolean) {
     void connect().catch(() => { if (!disposed) { setError(true); setConnecting(false); } });
     return () => {
       disposed = true;
-      if (lifecycle.current === connection) { active.current = false; ready.current = false; pages.current.clear(); }
+      if (lifecycle.current === connection) {
+        active.current = false; ready.current = false; pages.current.clear();
+        if (pendingDeletes.current.size) { pendingDeletes.current.clear(); setDeletingIds(emptyDeleting); }
+      }
       unlisten.splice(0).forEach((remove) => remove());
     };
   }, [native, accept, setQuery, connectionKey]);
@@ -118,7 +152,7 @@ export function useHistory(native: boolean) {
     const connection = lifecycle.current;
     moreRequest.current = true; setLoadingMore(true); setError(false);
     try {
-      const next = await invoke<HistorySnapshot>('history_load_more');
+      const next = await invoke<HistoryWireSnapshot>('history_load_more');
       if (active.current && lifecycle.current === connection && query === queryRequest.current && generation === next.generation) accept(next);
     } catch {
       if (active.current && lifecycle.current === connection && query === queryRequest.current) setError(true);
@@ -130,12 +164,23 @@ export function useHistory(native: boolean) {
 
   const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete' | 'note', title?: string) => {
     if (!native || !active.current) return false;
+    const optimisticDelete = action === 'delete';
+    if (optimisticDelete) {
+      if (pendingDeletes.current.has(recordId)) return false;
+      pendingDeletes.current.add(recordId);
+      setDeletingIds(new Set(pendingDeletes.current));
+    }
     const connection = lifecycle.current;
     setError(false);
     try {
-      const next = await invoke<HistorySnapshot>('history_record_update', { recordId, action, ...(title === undefined ? {} : { title }) });
+      const next = await invoke<HistoryWireSnapshot>('history_record_update', { recordId, action, ...(title === undefined ? {} : { title }) });
       if (active.current && lifecycle.current === connection) { accept(next); return true; }
     } catch { if (active.current && lifecycle.current === connection) setError(true); }
+    finally {
+      if (optimisticDelete && pendingDeletes.current.delete(recordId) && active.current && lifecycle.current === connection) {
+        setDeletingIds(pendingDeletes.current.size ? new Set(pendingDeletes.current) : emptyDeleting);
+      }
+    }
     return false;
   }, [native, accept]);
 
@@ -150,10 +195,10 @@ export function useHistory(native: boolean) {
     return cached ? { ...snapshot, records: cached.records, totalRecords: cached.totalRecords, hasMore: cached.hasMore } : snapshot;
   }
   function whenReady(query: string, favoritesOnly: boolean, recordId: string): boolean | Promise<boolean> {
-    const current = () => active.current && ready.current && !queryPending.current && projection.current.query === query && projection.current.favoritesOnly === favoritesOnly && latest.current.records.some((record) => record.id === recordId);
+    const current = () => active.current && ready.current && !queryPending.current && !pendingDeletes.current.has(recordId) && projection.current.query === query && projection.current.favoritesOnly === favoritesOnly && latest.current.records.some((record) => record.id === recordId);
     if (!queryPending.current) return current();
     const task = queryTask.current;
     return task?.query === query && task.favoritesOnly === favoritesOnly ? task.done.then((accepted) => accepted && current()) : false;
   }
-  return { snapshot, selectionRevision: selection.current.revision, displaySnapshot, displayReady: (query: string, favoritesOnly: boolean) => !connecting && cacheQuery.current === query && pages.current.has(favoritesOnly), whenReady, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, refresh, setQuery, loadMore, update };
+  return { snapshot, deletingIds, selectionRevision: userSelectionRevision.current, displaySnapshot, displayReady: (query: string, favoritesOnly: boolean) => !connecting && cacheQuery.current === query && pages.current.has(favoritesOnly), whenReady, error, loading: connecting || querying || loadingMore, showLoading: connecting || (querying && !quietQuery) || loadingMore, refresh, setQuery, loadMore, update };
 }

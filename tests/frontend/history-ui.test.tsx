@@ -812,4 +812,48 @@ describe('history divider interaction contract', () => {
     await mount('history'); await windowState({ translationVisible: false, translationExtent: 0 });
     expect(screen.queryByRole('separator')).toBeNull(); expect(records()).toHaveLength(20);
   });
+
+  it('hides rapidly deleted records immediately without flicker and restores only a failed deletion', async () => {
+    await mount('history');
+    const original = bridge.invoke.getMockImplementation()!;
+    const pending = new Map<string, { resolve: () => Promise<void>; reject: () => void }>();
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => {
+      if (name !== 'history_record_update') return original(name, args);
+      const { recordId } = args as { recordId: string };
+      return new Promise((resolve, reject) => {
+        pending.set(recordId, {
+          resolve: async () => { resolve(await original(name, args)); },
+          reject: () => reject(new Error('history_protected')),
+        });
+      });
+    });
+
+    const ids = ['sample-03', 'sample-05', 'sample-06'];
+    const rowById = (id: string) => document.querySelector<HTMLElement>(`[data-record-id="${id}"]`)!;
+    const rowsBefore = ids.map(rowById);
+    for (const [index, article] of rowsBefore.entries()) {
+      fireEvent.click(within(article).getByRole('button', { name: 'Delete history record' }));
+      expect(records()).toHaveLength(20 - (index + 1));
+      expect(screen.getByText(`${20 - (index + 1)} records`)).toBeTruthy();
+    }
+    // Duplicate clicks on an already-deleting row do not queue duplicate backend calls.
+    fireEvent.click(rowsBefore[0].querySelector<HTMLButtonElement>('[data-action=delete] button')!);
+    expect(calls('history_record_update').map(([, args]) => (args as { recordId: string }).recordId)).toEqual(ids);
+
+    // Committing the first delete must not flicker the remaining in-flight deletes back into view.
+    await act(async () => { await pending.get('sample-03')!.resolve(); });
+    expect(records()).toHaveLength(17);
+    expect(screen.getByText('17 records')).toBeTruthy();
+
+    // Rejecting the second delete restores only that row and surfaces an error.
+    await act(async () => { pending.get('sample-05')!.reject(); });
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(records()).toHaveLength(18);
+    expect(rowById('sample-05').hidden).toBe(false);
+    expect(screen.getByText('18 records')).toBeTruthy();
+
+    await act(async () => { await pending.get('sample-06')!.resolve(); });
+    expect(records()).toHaveLength(18);
+    expect(screen.getByText('18 records')).toBeTruthy();
+  });
 });

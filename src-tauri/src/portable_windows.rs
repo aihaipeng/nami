@@ -122,12 +122,15 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         });
     }
     if !state.translation_visible {
-        app.state::<AppState>()
+        let revision = app
+            .state::<AppState>()
             .history
             .lock()
             .unwrap()
-            .clear_visual_selection();
-        crate::history_runtime::publish_history(app)?;
+            .clear_visual_selection_revision();
+        if let Some(revision) = revision {
+            crate::history_runtime::publish_visual_selection(app, revision, None)?;
+        }
     }
     for label in ["translation", "history", "clipboard", "settings"] {
         if let Some(view) = app.get_webview(label) {
@@ -293,7 +296,7 @@ pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
 }
 
 pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
-    {
+    let restored = {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         if let Some(record_id) = record_id {
@@ -311,10 +314,18 @@ pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Resu
             regions.toggle_record_details();
         }
         if regions.translation_visible && regions.record_view == RecordView::Translation {
-            state.history.lock().unwrap().restore_visual_selection();
+            state
+                .history
+                .lock()
+                .unwrap()
+                .restore_visual_selection_revision()
+        } else {
+            None
         }
+    };
+    if let Some((revision, selected_id)) = restored {
+        crate::history_runtime::publish_visual_selection(app, revision, selected_id)?;
     }
-    crate::history_runtime::publish_history(app)?;
     apply_translation(app)
 }
 

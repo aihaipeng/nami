@@ -126,6 +126,18 @@ objc2::define_class!(
         }
         #[unsafe(method(resetCursorRects))]
         fn cursors(&self) {
+            if self
+                .ivars()
+                .app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .motion_anchor
+                .is_some()
+            {
+                return;
+            }
             unsafe {
                 let bounds: NSRect = objc2::msg_send![self, bounds];
                 let w = bounds.size.width;

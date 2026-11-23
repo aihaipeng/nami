@@ -36,6 +36,7 @@ export interface HistorySelection {
   sampleId: string | null;
   retranslate: boolean;
   clearDetail?: boolean;
+  visualOnly?: boolean;
   record?: HistoryRecord | null;
 }
 

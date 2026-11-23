@@ -4,7 +4,10 @@ use crate::{
 };
 use objc2::{rc::Retained, runtime::AnyObject, DefinedClass, MainThreadOnly};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
-use std::{cell::Cell, sync::atomic::Ordering};
+use std::{
+    cell::{Cell, RefCell},
+    sync::atomic::Ordering,
+};
 use tauri::{
     window::{Effect, EffectState, EffectsBuilder},
     AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window,
@@ -28,6 +31,7 @@ pub(crate) use crate::history_runtime::history_add;
 pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
 unsafe extern "C" {
+    static NSRunLoopCommonModes: *const objc2_foundation::NSString;
     fn objc_getAssociatedObject(object: *mut AnyObject, key: *const u8) -> *mut AnyObject;
     fn objc_setAssociatedObject(
         object: *mut AnyObject,
@@ -266,9 +270,69 @@ struct StageState {
     history_visible: Cell<bool>,
     translation_visible: Cell<bool>,
     translation_content: Cell<bool>,
+    animating: Cell<bool>,
+    geometry_version: Cell<u64>,
+    applied_version: Cell<u64>,
     translation_view: Cell<usize>,
     clipboard_view: Cell<usize>,
+    motion_link: RefCell<Option<Retained<AnyObject>>>,
 }
+
+struct MotionDriverState {
+    app: AppHandle,
+    window: Window,
+    start: PanelFrame,
+    target: PanelFrame,
+    velocity: PanelFrame,
+    revision: u64,
+    ns_y: f64,
+    height: f64,
+    began: std::time::Instant,
+}
+
+objc2::define_class!(
+    #[unsafe(super = objc2_foundation::NSObject)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = MotionDriverState]
+    struct MotionDisplayLinkTarget;
+
+    impl MotionDisplayLinkTarget {
+        #[unsafe(method(step:))]
+        fn step(&self, link: *mut AnyObject) {
+            let driver = self.ivars();
+            match advance_motion(
+                &driver.app,
+                &driver.window,
+                driver.start,
+                driver.target,
+                driver.velocity,
+                driver.revision,
+                driver.ns_y,
+                driver.height,
+                driver.began.elapsed().as_secs_f64(),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Ok(stage) = translation_stage(&driver.window) {
+                        stage.clear_motion_link(link);
+                    }
+                    unsafe {
+                        let _: () = objc2::msg_send![link, invalidate];
+                    }
+                }
+                Err(code) => {
+                    if let Ok(stage) = translation_stage(&driver.window) {
+                        stage.clear_motion_link(link);
+                    }
+                    unsafe {
+                        let _: () = objc2::msg_send![link, invalidate];
+                    }
+                    let _ = driver.window.emit("layout_error", code);
+                }
+            }
+        }
+    }
+);
 
 objc2::define_class!(
     #[unsafe(super = objc2_app_kit::NSView)]
@@ -337,8 +401,32 @@ objc2::define_class!(
 );
 
 impl TranslationStage {
+    fn stop_motion(&self) {
+        if let Some(link) = self.ivars().motion_link.borrow_mut().take() {
+            unsafe {
+                let _: () = objc2::msg_send![&*link, invalidate];
+            }
+        }
+    }
+
+    fn set_motion_link(&self, link: Retained<AnyObject>) {
+        self.stop_motion();
+        *self.ivars().motion_link.borrow_mut() = Some(link);
+    }
+
+    fn clear_motion_link(&self, pointer: *mut AnyObject) {
+        let mut slot = self.ivars().motion_link.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|current| std::ptr::eq(Retained::as_ptr(current), pointer))
+        {
+            slot.take();
+        }
+    }
+
     fn apply_frames(&self) {
         let state = self.ivars();
+        state.applied_version.set(state.geometry_version.get());
         let geometry = StageGeometry {
             mode: StageMode::from_raw(state.mode.get()),
             history_extent: state.history_extent.get(),
@@ -368,28 +456,45 @@ impl TranslationStage {
                     let _: () = objc2::msg_send![view, setFrame: rect];
                 }
             }
+            let detail_shown = state.translation_visible.get()
+                || (geometry.mode == StageMode::Explicit
+                    && bounds.size.width > geometry.history_extent + 0.5);
             let divider: *mut AnyObject = objc2::msg_send![self, viewWithTag: 206isize];
             if !divider.is_null() {
-                let _: () = objc2::msg_send![divider, setFrame: NSRect::new(NSPoint::new(frames.translation.x - 6.0, bounds.size.height * 0.03), NSSize::new(6.0, bounds.size.height * 0.94))];
-                let _: () = objc2::msg_send![divider, setHidden: !state.history_visible.get() || !state.translation_visible.get()];
+                let divider_rect = NSRect::new(
+                    NSPoint::new(frames.translation.x - 6.0, bounds.size.height * 0.03),
+                    NSSize::new(6.0, bounds.size.height * 0.94),
+                );
+                let current: NSRect = objc2::msg_send![divider, frame];
+                if current != divider_rect {
+                    let _: () = objc2::msg_send![divider, setFrame: divider_rect];
+                }
+                let hidden = !state.history_visible.get() || !detail_shown;
+                let is_hidden: bool = objc2::msg_send![divider, isHidden];
+                if is_hidden != hidden {
+                    let _: () = objc2::msg_send![divider, setHidden: hidden];
+                }
             }
             native_controls::layout(
                 self,
                 frames,
                 bounds.size.height,
-                state.translation_content.get()
-                    && (state.translation_visible.get()
-                        || (geometry.mode == StageMode::Explicit
-                            && bounds.size.width > geometry.history_extent + 0.5)),
+                state.translation_content.get() && detail_shown,
             );
-            let window: *mut AnyObject = objc2::msg_send![self, window];
-            if !window.is_null() {
-                let _: () = objc2::msg_send![window, invalidateCursorRectsForView: self];
+            if !state.animating.get() {
+                let window: *mut AnyObject = objc2::msg_send![self, window];
+                if !window.is_null() {
+                    let _: () = objc2::msg_send![window, invalidateCursorRectsForView: self];
+                }
             }
         }
     }
 
     fn configure(&self, geometry: StageGeometry) {
+        self.configure_with_motion(geometry, false);
+    }
+
+    fn configure_with_motion(&self, geometry: StageGeometry, animating: bool) {
         let state = self.ivars();
         state.mode.set(geometry.mode.raw());
         state.history_extent.set(geometry.history_extent);
@@ -398,9 +503,20 @@ impl TranslationStage {
         state.history_visible.set(geometry.history_visible);
         state.translation_visible.set(geometry.translation_visible);
         state.translation_content.set(geometry.translation_content);
+        state.animating.set(animating);
+        state
+            .geometry_version
+            .set(state.geometry_version.get().wrapping_add(1));
         unsafe {
             let _: () = objc2::msg_send![self, setNeedsLayout: true];
         }
+    }
+
+    fn invalidate_layout(&self) {
+        let state = self.ivars();
+        state
+            .geometry_version
+            .set(state.geometry_version.get().wrapping_add(1));
     }
 
     fn finish_layout(&self) {
@@ -416,8 +532,24 @@ impl TranslationStage {
                     let _: () = objc2::msg_send![self, setFrame: bounds];
                 }
             }
-            let _: () = objc2::msg_send![self, setNeedsLayout: true];
-            let _: () = objc2::msg_send![self, layoutSubtreeIfNeeded];
+            let state = self.ivars();
+            if state.applied_version.get() != state.geometry_version.get() {
+                let _: () = objc2::msg_send![self, setNeedsLayout: true];
+                let _: () = objc2::msg_send![self, layoutSubtreeIfNeeded];
+            }
+        }
+    }
+
+    fn invalidate_resize_cursors(&self) {
+        unsafe {
+            let window: *mut AnyObject = objc2::msg_send![self, window];
+            if !window.is_null() {
+                let _: () = objc2::msg_send![window, invalidateCursorRectsForView: self];
+                let edge: *mut AnyObject = objc2::msg_send![self, viewWithTag: 301isize];
+                if !edge.is_null() {
+                    let _: () = objc2::msg_send![window, invalidateCursorRectsForView: edge];
+                }
+            }
         }
     }
 }
@@ -762,10 +894,14 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         crate::clipboard_runtime::visibility(app, false)?;
     }
     if !state.translation_visible {
-        let state = app.state::<AppState>();
-        if state.history.lock().unwrap().selected_id().is_some() {
-            state.history.lock().unwrap().clear_visual_selection();
-            crate::history_runtime::publish_history(app)?;
+        let revision = app
+            .state::<AppState>()
+            .history
+            .lock()
+            .unwrap()
+            .clear_visual_selection_revision();
+        if let Some(revision) = revision {
+            crate::history_runtime::publish_visual_selection(app, revision, None)?;
         }
     }
     if let Some(view) = app.get_webview("clipboard") {
@@ -970,6 +1106,9 @@ pub fn resize_history(app: &AppHandle, width: f64, initialize: bool) -> Result<(
         )
     };
     platform::save_history_width(width.round());
+    if let Ok(stage) = translation_stage(&window) {
+        stage.stop_motion();
+    }
     window
         .set_min_size(Some(LogicalSize::new(1.0, 440.0)))
         .map_err(|_| "window_geometry")?;
@@ -1000,6 +1139,16 @@ fn sync_translation_views(app: &AppHandle, window: &Window) -> Result<(), String
     set_native_frame(window, None, &state, height, false)
 }
 
+fn ns_origin_y(window: &Window, top: f64, height: f64) -> Result<f64, String> {
+    let current_top = window
+        .outer_position()
+        .map_err(|_| "window_geometry")?
+        .to_logical::<f64>(window.scale_factor().map_err(|_| "window_geometry")?)
+        .y;
+    let current = native_translation_frame(window)?;
+    Ok(current.origin.y + current.size.height - height + current_top - top)
+}
+
 fn set_native_frame(
     window: &Window,
     frame: Option<(PanelFrame, f64)>,
@@ -1011,36 +1160,30 @@ fn set_native_frame(
     let history_extent = frame
         .map(|(frame, _)| frame.history)
         .unwrap_or(state.history_extent);
-    stage.configure(StageGeometry {
-        mode: if state.native_resizing {
-            StageMode::NativeResize
-        } else {
-            StageMode::Explicit
+    stage.configure_with_motion(
+        StageGeometry {
+            mode: if state.native_resizing {
+                StageMode::NativeResize
+            } else {
+                StageMode::Explicit
+            },
+            history_extent,
+            history_width: state.history_width,
+            translation_width: state.translation_width,
+            history_visible: state.history_visible,
+            translation_visible: state.translation_visible,
+            translation_content: state.record_view == RecordView::Translation,
         },
-        history_extent,
-        history_width: state.history_width,
-        translation_width: state.translation_width,
-        history_visible: state.history_visible,
-        translation_visible: state.translation_visible,
-        translation_content: state.record_view == RecordView::Translation,
-    });
-    if let Some((frame, top)) = frame {
-        let current_top = window
-            .outer_position()
-            .map_err(|_| "window_geometry")?
-            .to_logical::<f64>(window.scale_factor().map_err(|_| "window_geometry")?)
-            .y;
+        frame.is_some() && !finished,
+    );
+    if let Some((frame, ns_y)) = frame {
         let native = window
             .ns_window()
             .map_err(|_| "window_geometry")?
             .cast::<AnyObject>();
         unsafe {
-            let current: objc2_foundation::NSRect = objc2::msg_send![native, frame];
             let rect = objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(
-                    frame.left,
-                    current.origin.y + current.size.height - height + current_top - top,
-                ),
+                objc2_foundation::NSPoint::new(frame.left, ns_y),
                 objc2_foundation::NSSize::new(frame.history + frame.translation, height),
             );
             let _: () = objc2::msg_send![native, setFrame: rect, display: false];
@@ -1064,6 +1207,19 @@ fn set_panel_frame(
     height: f64,
     finished: bool,
 ) -> Result<bool, String> {
+    let ns_y = ns_origin_y(window, top, height)?;
+    set_panel_frame_ns_y(app, window, revision, motion, ns_y, height, finished)
+}
+
+fn set_panel_frame_ns_y(
+    app: &AppHandle,
+    window: &Window,
+    revision: u64,
+    motion: (PanelFrame, PanelFrame),
+    ns_y: f64,
+    height: f64,
+    finished: bool,
+) -> Result<bool, String> {
     let (frame, velocity) = motion;
     {
         let state = app.state::<AppState>();
@@ -1076,7 +1232,7 @@ fn set_panel_frame(
         state.motion_velocity = velocity;
     }
     let state = app.state::<AppState>().windows.lock().unwrap().clone();
-    set_native_frame(window, Some((frame, top)), &state, height, finished)?;
+    set_native_frame(window, Some((frame, ns_y)), &state, height, finished)?;
     if finished {
         update_size_limits(app, window)?;
         app.state::<AppState>()
@@ -1084,6 +1240,9 @@ fn set_panel_frame(
             .lock()
             .unwrap()
             .motion_anchor = None;
+        if let Ok(stage) = translation_stage(window) {
+            stage.invalidate_resize_cursors();
+        }
     }
     if finished {
         emit_state(app)?;
@@ -1091,10 +1250,54 @@ fn set_panel_frame(
     Ok(!finished)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn advance_motion(
+    app: &AppHandle,
+    window: &Window,
+    start: PanelFrame,
+    target: PanelFrame,
+    velocity: PanelFrame,
+    revision: u64,
+    ns_y: f64,
+    height: f64,
+    elapsed: f64,
+) -> Result<bool, String> {
+    let (mut frame, mut speed) = start.spring(target, velocity, elapsed);
+    let state = app.state::<AppState>().windows.lock().unwrap().clone();
+    let anchor = frame.left + frame.history;
+    if frame.history < 0.0 || frame.history > state.history_width {
+        frame.history = frame.history.clamp(0.0, state.history_width);
+        speed.left += speed.history;
+        speed.history = 0.0;
+    }
+    frame.left = anchor - frame.history;
+    if frame.translation < 0.0 || frame.translation > state.translation_width {
+        frame.translation = frame.translation.clamp(0.0, state.translation_width);
+        speed.translation = 0.0;
+    }
+    let finished = frame.settled(target, speed);
+    set_panel_frame_ns_y(
+        app,
+        window,
+        revision,
+        if finished {
+            (target, PanelFrame::default())
+        } else {
+            (frame, speed)
+        },
+        ns_y,
+        height,
+        finished,
+    )
+}
+
 fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     let Some(window) = app.get_window("translation") else {
         return emit_state(app);
     };
+    if let Ok(stage) = translation_stage(&window) {
+        stage.stop_motion();
+    }
     let scale = window.scale_factor().map_err(|_| "window_geometry")?;
     let position = window
         .outer_position()
@@ -1161,6 +1364,8 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             (origin.y + available.height - height).max(origin.y),
         );
     }
+    let current_ns = native_translation_frame(&window)?;
+    let ns_y = current_ns.origin.y + current_ns.size.height - height + position.y - top;
     window
         .set_min_size(Some(LogicalSize::new(1.0, 440.0)))
         .map_err(|_| "window_geometry")?;
@@ -1175,12 +1380,12 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             && (start.translation - target.translation).abs() < 0.5
             && (start.left - target.left).abs() < 0.5)
     {
-        set_panel_frame(
+        set_panel_frame_ns_y(
             app,
             &window,
             revision,
             (target, PanelFrame::default()),
-            top,
+            ns_y,
             height,
             true,
         )?;
@@ -1203,80 +1408,116 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             }
         }
     };
-    let advance = move |app: &AppHandle, window: &Window, elapsed: f64| {
-        let (mut frame, mut speed) = start.spring(target, velocity, elapsed);
-        let state = app.state::<AppState>().windows.lock().unwrap().clone();
-        let anchor = frame.left + frame.history;
-        if frame.history < 0.0 || frame.history > state.history_width {
-            frame.history = frame.history.clamp(0.0, state.history_width);
-            speed.left += speed.history;
-            speed.history = 0.0;
-        }
-        frame.left = anchor - frame.history;
-        if frame.translation < 0.0 || frame.translation > state.translation_width {
-            frame.translation = frame.translation.clamp(0.0, state.translation_width);
-            speed.translation = 0.0;
-        }
-        let finished = frame.settled(target, speed);
-        set_panel_frame(
-            app,
-            window,
-            revision,
-            if finished {
-                (target, PanelFrame::default())
-            } else {
-                (frame, speed)
-            },
-            top,
-            height,
-            finished,
-        )
-    };
     let period = std::time::Duration::from_secs_f64(1.0 / refresh_rate);
     let now = std::time::Instant::now();
     let detail_only =
         start.history == target.history && (start.translation - target.translation).abs() >= 0.5;
     let (began, next_tick) = if detail_only {
         // Present the first detail frame before publishing selection and window changes.
-        if !advance(app, &window, period.as_secs_f64())? {
+        if !advance_motion(
+            app,
+            &window,
+            start,
+            target,
+            velocity,
+            revision,
+            ns_y,
+            height,
+            period.as_secs_f64(),
+        )? {
             return Ok(());
         }
         (now - period, now + period)
     } else {
         (now, now)
     };
-    let owned = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let app = owned;
-        let mut ticks = tokio::time::interval_at(next_tick.into(), period);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticks.tick().await;
-            let owned_app = app.clone();
-            let owned_window = window.clone();
-            let (send, receive) = tokio::sync::oneshot::channel();
-            if app
-                .run_on_main_thread(move || {
-                    let _ = send.send(advance(
-                        &owned_app,
-                        &owned_window,
-                        began.elapsed().as_secs_f64(),
-                    ));
-                })
-                .is_err()
-            {
-                break;
+    let started_display_link = if let (Some(marker), Ok(stage), Ok(native)) = (
+        objc2::MainThreadMarker::new(),
+        translation_stage(&window),
+        window.ns_window(),
+    ) {
+        let native = native.cast::<AnyObject>();
+        let supported: bool = unsafe {
+            objc2::msg_send![native, respondsToSelector: objc2::sel!(displayLinkWithTarget:selector:)]
+        };
+        if supported {
+            let driver = MotionDisplayLinkTarget::alloc(marker).set_ivars(MotionDriverState {
+                app: app.clone(),
+                window: window.clone(),
+                start,
+                target,
+                velocity,
+                revision,
+                ns_y,
+                height,
+                began,
+            });
+            let driver: Retained<MotionDisplayLinkTarget> =
+                unsafe { objc2::msg_send![super(driver), init] };
+            let link: Option<Retained<AnyObject>> = unsafe {
+                objc2::msg_send![native, displayLinkWithTarget: &*driver, selector: objc2::sel!(step:)]
+            };
+            if let Some(link) = link {
+                unsafe {
+                    let run_loop: *mut AnyObject =
+                        objc2::msg_send![objc2::class!(NSRunLoop), mainRunLoop];
+                    let _: () = objc2::msg_send![
+                        &*link,
+                        addToRunLoop: run_loop,
+                        forMode: NSRunLoopCommonModes
+                    ];
+                }
+                stage.set_motion_link(link);
+                true
+            } else {
+                false
             }
-            match receive.await {
-                Ok(Ok(true)) => {}
-                Ok(Err(code)) => {
-                    let _ = window.emit("layout_error", code);
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !started_display_link {
+        let owned = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = owned;
+            let mut ticks = tokio::time::interval_at(next_tick.into(), period);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                let owned_app = app.clone();
+                let owned_window = window.clone();
+                let (send, receive) = tokio::sync::oneshot::channel();
+                if app
+                    .run_on_main_thread(move || {
+                        let _ = send.send(advance_motion(
+                            &owned_app,
+                            &owned_window,
+                            start,
+                            target,
+                            velocity,
+                            revision,
+                            ns_y,
+                            height,
+                            began.elapsed().as_secs_f64(),
+                        ));
+                    })
+                    .is_err()
+                {
                     break;
                 }
-                _ => break,
+                match receive.await {
+                    Ok(Ok(true)) => {}
+                    Ok(Err(code)) => {
+                        let _ = window.emit("layout_error", code);
+                        break;
+                    }
+                    _ => break,
+                }
             }
-        }
-    });
+        });
+    }
     emit_state(app)
 }
 
@@ -1331,7 +1572,7 @@ pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
 }
 
 pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
-    let restore_selection = {
+    let restored = {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         if let Some(record_id) = record_id {
@@ -1348,15 +1589,18 @@ pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Resu
         } else {
             regions.toggle_record_details();
         }
-        let restore_selection =
-            regions.translation_visible && regions.record_view == RecordView::Translation;
-        if restore_selection {
-            state.history.lock().unwrap().restore_visual_selection();
+        if regions.translation_visible && regions.record_view == RecordView::Translation {
+            state
+                .history
+                .lock()
+                .unwrap()
+                .restore_visual_selection_revision()
+        } else {
+            None
         }
-        restore_selection
     };
-    if restore_selection {
-        crate::history_runtime::publish_history(app)?;
+    if let Some((revision, selected_id)) = restored {
+        crate::history_runtime::publish_visual_selection(app, revision, selected_id)?;
     }
     apply_translation(app)
 }

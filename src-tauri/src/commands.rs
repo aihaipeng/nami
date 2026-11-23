@@ -486,13 +486,13 @@ struct HistorySelection {
 pub fn history_snapshot(
     window: Webview,
     app: AppHandle,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
     let state = app.state::<AppState>();
     if let Some(error) = state.storage_error.lock().unwrap().clone() {
         return Err(error);
     }
-    let snapshot = state.history.lock().unwrap().snapshot();
+    let snapshot = state.history.lock().unwrap().wire_snapshot();
     Ok(snapshot)
 }
 
@@ -502,7 +502,7 @@ pub async fn history_query(
     app: AppHandle,
     query: String,
     favorites_only: bool,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
     crate::history_runtime::query_history(&app, query, favorites_only).await
 }
@@ -511,7 +511,7 @@ pub async fn history_query(
 pub async fn history_load_more(
     window: Webview,
     app: AppHandle,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
     crate::history_runtime::load_more(&app).await
 }
@@ -523,7 +523,7 @@ pub async fn history_record_update(
     record_id: String,
     action: String,
     title: Option<String>,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     authorize(&window, &["translation", "history", "clipboard"])?;
     crate::history_runtime::update_record(&app, record_id, action, title).await
 }

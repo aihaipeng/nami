@@ -1,7 +1,34 @@
 use crate::{model::HistoryRecord, AppState};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 const HISTORY_VIEWS: [&str; 3] = ["translation", "history", "clipboard"];
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VisualSelection {
+    revision: u64,
+    sample_id: Option<String>,
+    retranslate: bool,
+    clear_detail: bool,
+    visual_only: bool,
+    record: Option<HistoryRecord>,
+}
+
+fn history_consumer_labels() -> &'static [&'static str] {
+    if crate::platform::capabilities().native_history {
+        &["history", "clipboard"]
+    } else {
+        &HISTORY_VIEWS
+    }
+}
+
+fn history_consumer_views(app: &AppHandle) -> Vec<tauri::Webview> {
+    history_consumer_labels()
+        .iter()
+        .filter_map(|label| app.get_webview(label))
+        .collect()
+}
 
 fn record_storage_failure(
     error: String,
@@ -60,17 +87,55 @@ pub(crate) fn history_add(app: &AppHandle, record: HistoryRecord) -> Result<(), 
     publish_history(app)
 }
 
+pub(crate) fn publish_history_snapshot(
+    app: &AppHandle,
+    snapshot: &crate::history::HistoryWireSnapshot,
+) -> Result<(), String> {
+    let views = history_consumer_views(app);
+    for view in views {
+        view.emit("history_changed", snapshot)
+            .map_err(|_| "event_emit")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn publish_history(app: &AppHandle) -> Result<(), String> {
-    let views: Vec<_> = HISTORY_VIEWS
-        .into_iter()
-        .filter_map(|label| app.get_webview(label))
-        .collect();
+    let views = history_consumer_views(app);
     if views.is_empty() {
         return Ok(());
     }
-    let snapshot = app.state::<AppState>().history.lock().unwrap().snapshot();
+    let snapshot = app
+        .state::<AppState>()
+        .history
+        .lock()
+        .unwrap()
+        .wire_snapshot();
     for view in views {
         view.emit("history_changed", &snapshot)
+            .map_err(|_| "event_emit")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn publish_visual_selection(
+    app: &AppHandle,
+    revision: u64,
+    sample_id: Option<String>,
+) -> Result<(), String> {
+    let views = history_consumer_views(app);
+    if views.is_empty() {
+        return Ok(());
+    }
+    let selection = VisualSelection {
+        revision,
+        sample_id,
+        retranslate: false,
+        clear_detail: false,
+        visual_only: true,
+        record: None,
+    };
+    for view in views {
+        view.emit("history_sample_selected", &selection)
             .map_err(|_| "event_emit")?;
     }
     Ok(())
@@ -81,7 +146,7 @@ pub(crate) async fn update_record(
     id: String,
     action: String,
     title: Option<String>,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     let state = app.state::<AppState>();
     let _write = state.history_writes.lock().await;
     if let Some(error) = state.storage_error.lock().unwrap().clone() {
@@ -104,7 +169,7 @@ pub(crate) async fn update_record(
             let history = state.history.lock().unwrap();
             history
                 .requires_update_query(&previous, next.as_ref(), &query)
-                .then(|| history.snapshot().records.len() + 1)
+                .then(|| history.len() + 1)
         };
         let mut databases = state.database.lock().unwrap();
         let replacement = if let Some(database) = databases.as_mut() {
@@ -135,25 +200,24 @@ pub(crate) async fn update_record(
             .unwrap()
             .cache
             .update_record(&previous, next.as_ref());
-        if let Some(page) = replacement {
+        let snapshot = if let Some(page) = replacement {
             let cursor = page.cursor.clone();
-            let loaded = {
+            let (loaded, snapshot) = {
                 let mut history = state.history.lock().unwrap();
                 history.apply_updated_page(page, &id, next);
-                history.loaded_page(cursor.clone())
+                (history.loaded_page(cursor.clone()), history.wire_snapshot())
             };
             let mut paging = state.history_page.lock().unwrap();
             paging.cursor = cursor;
             paging.cache.insert(query, loaded);
+            snapshot
         } else {
-            state
-                .history
-                .lock()
-                .unwrap()
-                .apply_update(&previous, next, &query)?;
-        }
-        publish_history(&app)?;
-        Ok(app.state::<AppState>().history.lock().unwrap().snapshot())
+            let mut history = state.history.lock().unwrap();
+            history.apply_update(&previous, next, &query)?;
+            history.wire_snapshot()
+        };
+        publish_history_snapshot(&app, &snapshot)?;
+        Ok(snapshot)
     })
     .await?
 }
@@ -333,7 +397,7 @@ pub(crate) async fn query_history(
     app: &AppHandle,
     query: String,
     favorites_only: bool,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     let state = app.state::<AppState>();
     let revision = state
         .history_query_revision
@@ -350,13 +414,15 @@ pub(crate) async fn query_history(
     .await
 }
 
-pub(crate) async fn load_more(app: &AppHandle) -> Result<crate::history::HistorySnapshot, String> {
+pub(crate) async fn load_more(
+    app: &AppHandle,
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     let state = app.state::<AppState>();
     if state
         .history_loading_more
         .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        return Ok(state.history.lock().unwrap().snapshot());
+        return Ok(state.history.lock().unwrap().wire_snapshot());
     }
     let revision = state
         .history_query_revision
@@ -372,7 +438,7 @@ async fn load_page(
     app: &AppHandle,
     query: Option<crate::database::HistoryQuery>,
     revision: u64,
-) -> Result<crate::history::HistorySnapshot, String> {
+) -> Result<crate::history::HistoryWireSnapshot, String> {
     let state = app.state::<AppState>();
     let _write = state.history_writes.lock().await;
     if let Some(error) = state.storage_error.lock().unwrap().clone() {
@@ -385,7 +451,7 @@ async fn load_page(
             == revision
     };
     if !current() || (query.is_none() && !state.history.lock().unwrap().has_more()) {
-        return Ok(state.history.lock().unwrap().snapshot());
+        return Ok(state.history.lock().unwrap().wire_snapshot());
     }
     let reset = query.is_some();
     let request = if let Some(query) = query {
@@ -445,17 +511,17 @@ async fn load_page(
             .load(std::sync::atomic::Ordering::SeqCst)
             != revision
         {
-            return Ok(state.history.lock().unwrap().snapshot());
+            return Ok(state.history.lock().unwrap().wire_snapshot());
         }
         let cursor = page.cursor.clone();
         let detail_visible = state.windows.lock().unwrap().translation_visible;
-        let loaded = {
+        let (loaded, snapshot) = {
             let mut history = state.history.lock().unwrap();
             history.apply_page(page, reset);
             if detail_visible {
                 history.restore_visual_selection();
             }
-            history.loaded_page(cursor.clone())
+            (history.loaded_page(cursor.clone()), history.wire_snapshot())
         };
         {
             let mut paging = state.history_page.lock().unwrap();
@@ -463,8 +529,7 @@ async fn load_page(
             paging.query = request.query;
             paging.cursor = cursor;
         }
-        publish_history(&app)?;
-        let snapshot = state.history.lock().unwrap().snapshot();
+        publish_history_snapshot(&app, &snapshot)?;
         Ok(snapshot)
     })
     .await?

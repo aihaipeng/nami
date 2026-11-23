@@ -4062,17 +4062,11 @@ return document.activeElement===document.body;
             }
             wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
             wait_motion(app)?;
-            let pre_motion_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let observed = pre_motion_events.clone();
-            let owned_app = app.clone();
+            let close_history_events =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = close_history_events.clone();
             let close_listener = app.listen_any("history_changed", move |_| {
-                let state = owned_app.state::<AppState>();
-                let state = state.windows.lock().unwrap();
-                if !state.translation_visible
-                    && state.translation_extent >= state.translation_width - 0.5
-                {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                }
+                observed.fetch_add(1, Ordering::SeqCst);
             });
             let clicked_at = std::time::Instant::now();
             if trigger == "space" {
@@ -4081,29 +4075,47 @@ return document.activeElement===document.body;
                 evaluate_view_dom(app, "clipboard", close)?;
             }
             let mut first_move_ms = None;
-            for _ in 0..100 {
-                let moved = on_main(app, |app| {
+            let mut extents = Vec::new();
+            for _ in 0..160 {
+                let (extent, width, settled) = on_main(app, |app| {
                     let state = app.state::<AppState>();
                     let state = state.windows.lock().unwrap();
-                    Ok(state.translation_extent < state.translation_width - 0.5)
+                    Ok((
+                        state.translation_extent,
+                        state.translation_width,
+                        state.motion_anchor.is_none() && state.translation_extent <= 0.5,
+                    ))
                 })?;
-                if moved {
+                if first_move_ms.is_none() && extent < width - 0.5 {
                     first_move_ms = Some(clicked_at.elapsed().as_secs_f64() * 1000.0);
+                }
+                if extents
+                    .last()
+                    .is_none_or(|previous: &f64| (*previous - extent).abs() >= 0.5)
+                {
+                    extents.push(extent);
+                }
+                if settled {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(5));
             }
+            wait_motion(app)?;
             app.unlisten(close_listener);
-            let pre_motion_events = pre_motion_events.load(Ordering::SeqCst);
-            case.samples.push(serde_json::json!({"trigger":trigger,"closeFirstMoveMs":first_move_ms,"historySnapshotsBeforeMotion":pre_motion_events}));
-            if pre_motion_events != 0 || first_move_ms.is_none_or(|elapsed| elapsed > 75.0) {
-                return Err(format!("{trigger} close waited before moving: historySnapshots={pre_motion_events}, firstMoveMs={first_move_ms:?}"));
+            let close_history_events = close_history_events.load(Ordering::SeqCst);
+            let monotonic = extents.windows(2).all(|pair| pair[1] <= pair[0] + 0.5);
+            case.samples.push(serde_json::json!({"trigger":trigger,"closeFirstMoveMs":first_move_ms,"historySnapshotsDuringClose":close_history_events,"closeIntermediateFrames":extents.len(),"monotonic":monotonic}));
+            if close_history_events != 0
+                || first_move_ms.is_none_or(|elapsed| elapsed > 75.0)
+                || !monotonic
+                || (!crate::platform::reduce_motion() && extents.len() < 4)
+            {
+                return Err(format!("{trigger} close stuttered or broadcast full history: historySnapshots={close_history_events}, firstMoveMs={first_move_ms:?}, frames={}, monotonic={monotonic}", extents.len()));
             }
             let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
             if closed["beam"] != false {
                 return Err(format!("{trigger} close showed activity"));
             }
-            wait_motion(app)?;
         }
         case.samples.push(wait_records(app, "const keys=window.__detailKeys;return {ready:keys.length===2&&keys.every(k=>k.trusted&&k.handled&&k.body),keys};")?);
         app.get_webview("clipboard")

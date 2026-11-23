@@ -13,6 +13,38 @@ pub struct HistorySnapshot {
     pub generation: u64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryWireRecord {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    pub id: String,
+    pub text: String,
+    pub source_language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<crate::model::TranslationMetadata>,
+    pub target_languages: Vec<String>,
+    pub translations: Vec<String>,
+    pub date: String,
+    pub is_favorite: bool,
+    pub is_pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app_id: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryWireSnapshot {
+    pub revision: u64,
+    pub records: Vec<HistoryWireRecord>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sources: HashMap<usize, serde_json::Value>,
+    pub selected_id: Option<String>,
+    pub total_records: usize,
+    pub has_more: bool,
+    pub generation: u64,
+}
+
 #[derive(Clone, Default)]
 pub struct HistoryPageCache {
     pages: Vec<(crate::database::HistoryQuery, crate::database::HistoryPage)>,
@@ -201,6 +233,67 @@ impl HistoryStore {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn wire_snapshot(&self) -> HistoryWireSnapshot {
+        let mut sources = HashMap::new();
+        let mut seen: Vec<(&serde_json::Value, usize)> = Vec::new();
+        let mut records = Vec::with_capacity(self.records.len());
+        for record in &self.records {
+            let source_app_id = record.source_app.as_ref().map(|source| {
+                if let Some((_, id)) = seen.iter().find(|(existing, _)| *existing == source) {
+                    *id
+                } else {
+                    let id = seen.len();
+                    seen.push((source, id));
+                    sources.insert(id, source.clone());
+                    id
+                }
+            });
+            records.push(HistoryWireRecord {
+                title: record.title.clone(),
+                id: record.id.clone(),
+                text: record.text.chars().take(256).collect(),
+                source_language: record.source_language.clone(),
+                // Full detection details stay in the record fetched by ID.
+                translation: record.translation.as_ref().map(|metadata| {
+                    crate::model::TranslationMetadata {
+                        requested_source: metadata.requested_source.clone(),
+                        engine: metadata.engine.clone(),
+                        target_engines: metadata.target_engines.clone(),
+                        strategy_version: metadata.strategy_version,
+                        detections: Vec::new(),
+                    }
+                }),
+                target_languages: record.target_languages.clone(),
+                translations: record
+                    .translations
+                    .iter()
+                    .map(|text| text.chars().take(256).collect())
+                    .collect(),
+                date: record.date.clone(),
+                is_favorite: record.is_favorite,
+                is_pinned: record.is_pinned,
+                source_app_id,
+            });
+        }
+        HistoryWireSnapshot {
+            revision: self.revision,
+            records,
+            sources,
+            selected_id: self.selected_id.clone(),
+            total_records: self.total_records,
+            has_more: self.has_more,
+            generation: self.generation,
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -277,20 +370,34 @@ impl HistoryStore {
     }
 
     pub fn clear_visual_selection(&mut self) {
+        let _ = self.clear_visual_selection_revision();
+    }
+
+    pub fn clear_visual_selection_revision(&mut self) -> Option<u64> {
         if self.selected_id.take().is_some() {
             self.revision += 1;
+            Some(self.revision)
+        } else {
+            None
         }
     }
 
     pub fn restore_visual_selection(&mut self) {
+        let _ = self.restore_visual_selection_revision();
+    }
+
+    pub fn restore_visual_selection_revision(&mut self) -> Option<(u64, Option<String>)> {
         let id = self
             .selected_record
             .as_ref()
             .filter(|record| self.indices.contains_key(&record.id))
             .map(|record| record.id.clone());
         if self.selected_id != id {
-            self.selected_id = id;
+            self.selected_id = id.clone();
             self.revision += 1;
+            Some((self.revision, id))
+        } else {
+            None
         }
     }
 
@@ -1207,5 +1314,47 @@ mod tests {
         assert_eq!(store.snapshot().selected_id.as_deref(), Some("one"));
         store.select(None).unwrap();
         assert_eq!(store.snapshot().selected_id, None);
+    }
+
+    #[test]
+    fn wire_snapshot_deduplicates_source_icons_and_visual_selection_revisions_are_idempotent() {
+        let icon_a = serde_json::json!({
+            "bundleId": "synthetic.app.a",
+            "name": "Synthetic A",
+            "iconDataUrl": format!("data:image/png;base64,{}", "A".repeat(65_536))
+        });
+        let icon_b = serde_json::json!({
+            "bundleId": "synthetic.app.b",
+            "name": "Synthetic B",
+            "iconDataUrl": format!("data:image/png;base64,{}", "B".repeat(65_536))
+        });
+        let records = (0..100)
+            .map(|index| {
+                let mut item = record(&format!("wire-{index}"));
+                item.source_app = Some(if index % 2 == 0 {
+                    icon_a.clone()
+                } else {
+                    icon_b.clone()
+                });
+                item
+            })
+            .collect();
+        let mut store = HistoryStore::new(records);
+        let wire = store.wire_snapshot();
+        assert_eq!(wire.records.len(), 100);
+        assert_eq!(wire.sources.len(), 2);
+        let json = serde_json::to_string(&wire).unwrap();
+        assert_eq!(json.matches("iconDataUrl").count(), 2);
+        assert!(json.len() < 200_000);
+
+        store.select(Some("wire-0")).unwrap();
+        let cleared_rev = store.clear_visual_selection_revision().unwrap();
+        assert_eq!(store.selected_id(), None);
+        assert_eq!(store.revision(), cleared_rev);
+        assert_eq!(store.clear_visual_selection_revision(), None);
+        let (restored_rev, restored_id) = store.restore_visual_selection_revision().unwrap();
+        assert_eq!(restored_id.as_deref(), Some("wire-0"));
+        assert_eq!(store.revision(), restored_rev);
+        assert_eq!(store.restore_visual_selection_revision(), None);
     }
 }

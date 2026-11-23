@@ -193,8 +193,14 @@ pub(super) fn layout(
         objc2_foundation::NSSize::new(width, 32.0),
     );
     unsafe {
-        let _: () = objc2::msg_send![&*source, setFrame: rect];
-        let _: () = objc2::msg_send![&*source, setHidden: hidden];
+        let current: objc2_foundation::NSRect = objc2::msg_send![&*source, frame];
+        if current != rect {
+            let _: () = objc2::msg_send![&*source, setFrame: rect];
+        }
+        let is_hidden: bool = objc2::msg_send![&*source, isHidden];
+        if is_hidden != hidden {
+            let _: () = objc2::msg_send![&*source, setHidden: hidden];
+        }
     }
 }
 
@@ -214,6 +220,7 @@ pub fn update(app: &AppHandle, source_label: String, source_width: f64) -> Resul
         let _: () = objc2::msg_send![&*button, setAccessibilityLabel: &*accessible];
         objc2_app_kit::NSView::setNeedsDisplay(&button, true);
     }
+    stage.invalidate_layout();
     stage.finish_layout();
     Ok(())
 }

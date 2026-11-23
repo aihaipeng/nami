@@ -992,10 +992,13 @@ pub fn test_move_pointer(x: f64, y: f64) -> Result<(), String> {
 pub fn file_icon_data_url(path: &str) -> Option<String> {
     objc2::rc::autoreleasepool(|_| unsafe {
         let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let tiff = file_icon_tiff(workspace, &NSString::from_str(path))?;
-        let bitmap: Option<Retained<AnyObject>> =
-            msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff];
-        bitmap_png(&*bitmap?).map(|data| png_data_url(&data))
+        let ns_path = NSString::from_str(path);
+        application_thumbnail(workspace, &ns_path).or_else(|| {
+            let tiff = file_icon_tiff(workspace, &ns_path)?;
+            let bitmap: Option<Retained<AnyObject>> =
+                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff];
+            bitmap_png(&*bitmap?).map(|data| png_data_url(&data))
+        })
     })
 }
 

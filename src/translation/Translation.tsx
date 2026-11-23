@@ -125,7 +125,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
     }
     const removeSelection = listen<HistorySelection>('history_sample_selected', ({ payload }) => {
-      if (disposed) return;
+      if (disposed || payload.visualOnly) return;
       if (payload.sampleId === null) {
         if (payload.clearDetail) clearDetail();
         else setSelectedId(null);
@@ -211,7 +211,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useLayoutEffect(() => {
     const bar = sourceBar.current;
     const picker = bar?.querySelector<HTMLElement>('.language-picker');
-    if (!capabilities.nativeHistory || !bar || !picker) return;
+    if (!capabilities.nativeHistory || !state.translationVisible || !bar || !picker) return;
     const measure = () => {
       bar.style.paddingRight = `${picker.offsetWidth + 24}px`;
       if (picker.offsetWidth > 0) setSourceWidth(Math.min(360, Math.max(32, picker.offsetWidth)));
