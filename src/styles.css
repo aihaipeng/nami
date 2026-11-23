@@ -158,7 +158,7 @@
   .language-options button svg { width: 13px; height: 13px; }
   .language-options button[data-active=true] { background: hsl(var(--foreground) / .1); }
   .language-no-results { padding: 16px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
-  .history-panel { --history-edge-mask: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); --history-label: hsl(var(--foreground)); --history-secondary: hsl(var(--muted-foreground)); --history-red: hsl(var(--destructive)); --history-scroll-thumb: hsl(var(--foreground) / .35); color: var(--history-label); width: var(--history-width); height: 100%; position: absolute; right: 0; top: 0; display: flex; flex-direction: column; background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; }
+  .history-panel { --history-edge-mask: linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent); --history-label: hsl(var(--foreground)); --history-secondary: hsl(var(--muted-foreground)); --history-red: hsl(var(--destructive)); --history-scroll-thumb: hsl(var(--foreground) / .24); --history-scroll-thumb-hover: hsl(var(--foreground) / .42); color: var(--history-label); width: var(--history-width); height: 100%; position: absolute; right: 0; top: 0; display: flex; flex-direction: column; background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; }
   html[data-native=true] .history-panel { width: 100%; left: 0; right: auto; }
   .history-symbol { display: inline-block; width: 14px; height: 14px; flex-shrink: 0; background: currentColor; -webkit-mask: var(--symbol-url) center / contain no-repeat; mask: var(--symbol-url) center / contain no-repeat; }
   .history-view { position: relative; height: 100%; }
@@ -193,10 +193,10 @@
   .history-unpinned { min-width: 0; }
   .history-list::-webkit-scrollbar { display: none; }
   .history-scrollbar { position: absolute; z-index: 2; right: 0; top: 0; bottom: 0; width: 12px; touch-action: none; }
-  .history-scrollbar-thumb { opacity: 0; transition: opacity 180ms ease-out; position: absolute; top: 0; right: 3px; width: 6px; border-radius: 3px; background: var(--history-scroll-thumb); }
+  .history-scrollbar-thumb { display: block; opacity: 0; transition: opacity 180ms ease-out, background-color 140ms ease-out; position: absolute; top: 0; right: 3px; width: 4px; border-radius: 999px; background: var(--history-scroll-thumb, hsl(var(--foreground) / .24)); }
   .history-scrollbar.visible .history-scrollbar-thumb { opacity: 1; }
   @media (prefers-reduced-motion: reduce) { .history-scrollbar-thumb { transition: none; } }
-  .history-scrollbar:hover .history-scrollbar-thumb, .history-scrollbar:focus-visible .history-scrollbar-thumb { background: var(--history-secondary); }
+  .history-scrollbar:hover .history-scrollbar-thumb, .history-scrollbar:focus-visible .history-scrollbar-thumb { background: var(--history-scroll-thumb-hover, hsl(var(--foreground) / .42)); }
   .history-footer { position: absolute; bottom: 4px; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 14px; color: var(--history-secondary); font-size: 11px; }
   .history-footer .history-shortcuts { color: var(--history-secondary); margin-left: auto; }
   .history-footer .history-filters { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; }
@@ -212,10 +212,15 @@
   .records-workspace { position: relative; width: 100%; height: 100%; }
   .record-view[hidden] { display: none; }
 
-  .history-shortcuts-panel { position: absolute; right: 12px; bottom: 36px; width: 230px; max-height: calc(100vh - 72px); overflow-y: auto; padding: 14px; border-radius: 10px; font-size: 11px; }
+  .history-shortcuts-panel { position: absolute; right: 12px; bottom: 36px; width: 230px; max-height: calc(100vh - 72px); display: flex; flex-direction: column; overflow: hidden; padding: 0; border-radius: 10px; font-size: 11px; }
+  .history-shortcuts-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px; scrollbar-width: none; }
+  .history-shortcuts-scroll[data-scrollable=true] { -webkit-mask-image: var(--history-edge-mask, linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent)); mask-image: var(--history-edge-mask, linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent)); }
+  .history-shortcuts-scroll::-webkit-scrollbar { display: none; }
   .history-shortcuts-panel strong { display: block; font-size: 12px; margin-bottom: 10px; }
-  .history-shortcuts-panel > div { display: flex; justify-content: space-between; height: 24px; color: var(--history-label); }
-  .history-shortcuts-panel > div > span:last-child { color: var(--history-secondary); }
+  .history-shortcuts-scroll > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; height: 24px; color: var(--history-label); }
+  .history-shortcuts-scroll > div > span:last-child { color: var(--history-secondary); flex-shrink: 0; }
+  .history-shortcuts-panel .history-scrollbar { top: 8px; bottom: 8px; right: 1px; width: 10px; }
+  .history-shortcuts-panel .history-scrollbar-thumb { right: 2px; width: 3px; }
   .history-row { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-feature-settings: normal; position: relative; border: 1px solid transparent; border-radius: 10px; margin-bottom: 4px; }
   .history-row[hidden] { display: none; }
   .history-row:last-child { margin-bottom: 0; }

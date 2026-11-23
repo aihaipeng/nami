@@ -182,7 +182,10 @@ describe('clipboard type filters', () => {
     expect(within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('HotKey')).toBeTruthy();
     const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
       (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
-    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Category': '← / →', 'Open Clipboard History': '⌃ `', 'Paste as Plain Text': '⌘ ↵', 'Save Image': '⌘ S', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T' });
+    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Category': '← / →', 'Paste one of first 5 items': '⌘ 1～5', 'Open Clipboard History': '⌃ `', 'Paste as Plain Text': '⌘ ↵', 'Save Image': '⌘ S', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T' });
+    view.rerender(<HistoryFooter {...props} t={translator('zh-CN')} clipboard activation="paste" />);
+    expect(entries()).toMatchObject({ '粘贴前5项': '⌘ 1～5' });
+    view.rerender(<HistoryFooter {...props} clipboard activation="paste" />);
     expect(entries()).not.toHaveProperty('Open Translation');
     expect(entries()).not.toHaveProperty('Copy Primary Translation');
 
@@ -195,6 +198,64 @@ describe('clipboard type filters', () => {
     view.rerender(<HistoryFooter {...props} snapshot={{ ...props.snapshot, translationPreferences: { ...preferences, disabledShortcuts: [...preferences.disabledShortcuts] } }} />);
     expect(entries()).not.toHaveProperty('Translate');
     expect(entries()).toHaveProperty('Copy Secondary Translation', '⌘ 2');
+  });
+
+  it('uses the shared auto-hiding overlay scrollbar for overflowing HotKey popovers in both clipboard and translation views', () => {
+    vi.useFakeTimers();
+    try {
+      const props = { t: translator('en'), snapshot: bridge.snapshot, command: vi.fn(), native: true, active: true, search: { current: null }, total: 1 };
+      for (const clipboard of [true, false]) {
+        const view = render(<HistoryFooter {...props} clipboard={clipboard} activation="paste" />);
+        fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+        const dialog = screen.getByRole('dialog', { name: 'HotKey' });
+        const scroller = dialog.querySelector<HTMLElement>('.history-shortcuts-scroll')!;
+        expect(scroller.dataset.scrollable).toBe('false');
+        expect(within(dialog).queryByRole('scrollbar')).toBeNull();
+
+        Object.defineProperties(scroller, {
+          clientHeight: { configurable: true, value: 216 },
+          scrollHeight: { configurable: true, value: 516 },
+        });
+        scroller.scrollTop = 0;
+        fireEvent.scroll(scroller);
+
+        const scrollbar = within(dialog).getByRole('scrollbar', { name: 'Scroll HotKey' });
+        expect(scroller.dataset.scrollable).toBe('true');
+        expect(scrollbar.getAttribute('aria-valuemax')).toBe('300');
+        expect(scrollbar.getAttribute('aria-valuenow')).toBe('0');
+        expect(scrollbar.classList.contains('visible')).toBe(true);
+
+        act(() => vi.advanceTimersByTime(1000));
+        expect(scrollbar.classList.contains('visible')).toBe(false);
+
+        fireEvent.pointerEnter(scrollbar);
+        act(() => vi.advanceTimersByTime(1500));
+        expect(scrollbar.classList.contains('visible')).toBe(true);
+        fireEvent.pointerLeave(scrollbar);
+        act(() => vi.advanceTimersByTime(1000));
+        expect(scrollbar.classList.contains('visible')).toBe(false);
+
+        fireEvent.keyDown(scrollbar, { key: 'End' });
+        expect(scroller.scrollTop).toBe(300);
+        expect(scrollbar.getAttribute('aria-valuenow')).toBe('300');
+        expect(scrollbar.classList.contains('visible')).toBe(true);
+
+        const thumb = scrollbar.firstElementChild as HTMLElement;
+        fireEvent.pointerDown(thumb, { pointerId: 5, button: 0, clientY: 160 });
+        fireEvent.pointerMove(scrollbar, { pointerId: 5, clientY: 110 });
+        expect(scroller.scrollTop).toBeLessThan(300);
+        act(() => vi.advanceTimersByTime(1500));
+        expect(scrollbar.classList.contains('visible')).toBe(true);
+        fireEvent.lostPointerCapture(scrollbar, { pointerId: 5 });
+
+        fireEvent.keyDown(scrollbar, { key: 'Home' });
+        expect(scroller.scrollTop).toBe(0);
+        expect(scrollbar.getAttribute('aria-valuenow')).toBe('0');
+
+        view.unmount();
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    } finally { vi.useRealTimers(); }
   });
 
   it('places mutually exclusive, cancellable type buttons after Favorites without changing translation controls', () => {

@@ -1,10 +1,126 @@
-import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react';
+import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { ViewProps } from '../App';
 import { clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardShortcutLabels, sharedRecordActions } from './clipboardShortcuts';
 import { translationShortcutEnabled } from './contracts';
 import { editsText, globalTranslationActions, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles, translationWindowActions } from './shortcuts';
 import type { ClipboardKind } from '../clipboard/useClipboard';
 import { HistoryIcon } from '../translation/HistoryIcon';
+
+function ShortcutsPopover({ label, children }: { label: string; children: ReactNode }) {
+  const scrollId = useId();
+  const scrollRef = useRef<HTMLElement>(null);
+  const trackRef = useRef<HTMLSpanElement>(null);
+  const [scrollbarVisible, setScrollbarVisible] = useState(false);
+  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0 });
+  const idle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const dragging = useRef(false);
+  const focused = useRef(false);
+  const hovered = useRef(false);
+  const revealedOnOpen = useRef(false);
+  const dragCleanup = useRef<(() => void) | undefined>(undefined);
+
+  function showScrollbar() {
+    window.clearTimeout(idle.current);
+    setScrollbarVisible(true);
+    idle.current = window.setTimeout(() => {
+      if (!dragging.current && !focused.current && !hovered.current) setScrollbarVisible(false);
+    }, 1000);
+  }
+
+  function measure() {
+    const element = scrollRef.current;
+    if (!element) return;
+    const height = element.clientHeight;
+    const content = element.scrollHeight;
+    const maximum = Math.max(0, content - height);
+    const track = trackRef.current?.clientHeight || Math.max(0, height - 16);
+    const next = { top: Math.max(0, Math.min(maximum, element.scrollTop)), height, content, track };
+    setScroll((old) => (old.top === next.top && old.height === next.height && old.content === next.content && old.track === next.track ? old : next));
+    if (maximum > 0 && !revealedOnOpen.current) {
+      revealedOnOpen.current = true;
+      showScrollbar();
+    }
+  }
+  const measureRef = useRef(measure);
+  measureRef.current = measure;
+
+  useEffect(() => () => { window.clearTimeout(idle.current); dragCleanup.current?.(); }, []);
+  useLayoutEffect(() => { measureRef.current(); }, [children]);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(() => measureRef.current());
+    if (scrollRef.current) observer.observe(scrollRef.current);
+    if (trackRef.current) observer.observe(trackRef.current);
+    return () => observer.disconnect();
+  }, [scroll.content > scroll.height]);
+
+  const maximum = Math.max(0, scroll.content - scroll.height);
+  const thumb = Math.min(scroll.track, Math.max(24, scroll.track * scroll.height / Math.max(1, scroll.content)));
+  const travel = Math.max(0, scroll.track - thumb);
+  function move(top: number) {
+    const clamped = Math.max(0, Math.min(maximum, top));
+    scrollRef.current?.scrollTo({ top: clamped });
+    measure();
+  }
+
+  return <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label={label}>
+    <section
+      ref={scrollRef}
+      id={scrollId}
+      className="history-shortcuts-scroll"
+      data-scrollable={maximum > 0}
+      onScroll={() => { measure(); showScrollbar(); }}
+      onWheel={showScrollbar}
+      onTouchMove={showScrollbar}
+    >
+      {children}
+    </section>
+    {maximum > 0 && <span
+      ref={trackRef}
+      className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`}
+      role="scrollbar"
+      aria-label={`Scroll ${label}`}
+      aria-controls={scrollId}
+      aria-orientation="vertical"
+      aria-valuemin={0}
+      aria-valuemax={maximum}
+      aria-valuenow={Math.round(scroll.top)}
+      tabIndex={0}
+      onPointerEnter={() => { hovered.current = true; showScrollbar(); }}
+      onPointerMove={showScrollbar}
+      onPointerLeave={() => { hovered.current = false; showScrollbar(); }}
+      onFocus={() => { focused.current = true; showScrollbar(); }}
+      onBlur={() => { focused.current = false; showScrollbar(); }}
+      onKeyDown={(event) => {
+        const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;
+        if (delta || event.key === 'Home' || event.key === 'End') {
+          showScrollbar();
+          event.preventDefault();
+          event.stopPropagation();
+          move(event.key === 'Home' ? 0 : event.key === 'End' ? maximum : scroll.top + delta);
+        }
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        dragging.current = true; showScrollbar();
+        const track = event.currentTarget;
+        track.setPointerCapture(event.pointerId);
+        const startY = event.clientY;
+        const onThumb = (event.target as HTMLElement).classList.contains('history-scrollbar-thumb');
+        const startTop = onThumb ? scroll.top : Math.max(0, Math.min(maximum, (event.clientY - track.getBoundingClientRect().top - thumb / 2) / Math.max(1, travel) * maximum));
+        move(startTop);
+        const drag = (next: PointerEvent) => { if (next.pointerId === event.pointerId) { showScrollbar(); move(startTop + (next.clientY - startY) / Math.max(1, travel) * maximum); } };
+        const cleanup = () => { track.removeEventListener('pointermove', drag); track.removeEventListener('lostpointercapture', end); dragCleanup.current = undefined; };
+        const end = () => { dragging.current = false; showScrollbar(); cleanup(); };
+        track.addEventListener('pointermove', drag);
+        track.addEventListener('lostpointercapture', end);
+        dragCleanup.current = cleanup;
+      }}
+    >
+      <span className="history-scrollbar-thumb" style={{ height: thumb, transform: `translateY(${maximum ? scroll.top / maximum * travel : 0}px)` }} />
+    </span>}
+  </div>;
+}
 
 export function HistoryFooter({ t, snapshot, command, native, active, search, total, clipboard = false, favoritesOnly = false, onFavorites, kind = null, onKindChange, activation }: Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> & {
   active: boolean; search: RefObject<HTMLInputElement | null>; total: number; clipboard?: boolean; favoritesOnly?: boolean; onFavorites?: () => void;
@@ -87,16 +203,16 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
     </div>
     <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} title={t('hotKey')} aria-expanded={open} onClick={() => setOpen(!open)}><HistoryIcon name="keyboard" /></button>
-    {open && <div className="history-shortcuts-panel floating-panel" role="dialog" aria-label={t('hotKey')}>
+    {open && <ShortcutsPopover label={t('hotKey')}>
       <strong>{t('hotKey')}</strong>
       <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
       <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
       <div><span>{t('switchCategory')}</span><span>← / →</span></div>
-      {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘1–⌘5</span></div>}
+      {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘ 1～5</span></div>}
       {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><span>{keyLabel(binding)}</span></div>)}
       <div><span>Hide window</span><span>Esc / {capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W</span></div>
-    </div>}
+    </ShortcutsPopover>}
   </footer>;
 }

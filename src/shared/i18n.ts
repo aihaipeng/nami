@@ -179,7 +179,7 @@ export const messages = {
   clipboardFilesDescription: ['普通文件和文件夹只保存路径。', 'Regular files and folders are stored as paths only.'],
   clipboardRecordingPaused: ['记录已暂停，可从菜单栏恢复。', 'Recording paused. Resume from the menu bar.'],
   clipboardNoTypes: ['未选择内容类型，暂不会新增自动记录。', 'No content types selected. New copies won’t be recorded.'],
-  clipboardQuickPaste: ['回贴前五条非置顶记录', 'Paste First 5 Unpinned Items'],
+  clipboardQuickPaste: ['粘贴前5项', 'Paste one of first 5 items'],
   clipboardShortcutOpenTarget: ['打开链接、邮箱或定位文件', 'Open Link, Email or Locate File'],
   clipboardRevealFile: ['在 Finder 中定位', 'Show in Finder'],
   clipboardRevealInFileManager: ['在资源管理器中展示', 'Show in File Manager'],
