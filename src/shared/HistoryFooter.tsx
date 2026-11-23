@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react';
 import type { ViewProps } from '../App';
 import { clipboardMenuOnlyActions, clipboardPanelShortcuts, clipboardShortcutAvailable, clipboardShortcutLabels, sharedRecordActions } from './clipboardShortcuts';
 import { translationShortcutEnabled } from './contracts';
@@ -41,32 +41,29 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
         ? [{ label: shortcutTitles[action], binding }] : [];
     });
   const keyLabel = (binding: Parameters<typeof keycapLabels>[0]) => keycapLabels(binding, capabilities.platform === 'macos', t).join(' ');
+  // Registered once per activation. Holding Command re-renders the panel during the same key dispatch, and a
+  // listener removed mid-dispatch never runs for that key in WebKit.
+  const keydown = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead' || editsText(event)) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && target !== document.body && !footer.current?.parentElement?.contains(target)) return;
+    const shortcut = shortcuts.find(({ action, binding }) => action !== 'openSettings' && matchesBinding(binding, event));
+    if (!shortcut) return;
+    event.preventDefault();
+    if (event.repeat) return;
+    if (shortcut.action === 'pin') void command('window_pin', { region: 'history', pinned: !state.historyPinned });
+    else if (shortcut.action === 'focusSearch') {
+      setOpen(false);
+      search.current?.focus({ preventScroll: true });
+      search.current?.select();
+    }
+    else { setOpen((shown) => !shown); button.current?.focus({ preventScroll: true }); }
+  });
   useEffect(() => {
     if (!active) return;
-    const keydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key === 'Dead' || editsText(event)) return;
-      const target = event.target;
-      if (target instanceof HTMLElement && target !== document.body && !footer.current?.parentElement?.contains(target)) return;
-      const shortcut = shortcuts.find(({ action, binding }) => action !== 'openSettings' && matchesBinding(binding, event));
-      if (!shortcut) return;
-      event.preventDefault();
-      if (event.repeat) return;
-      if (shortcut.action === 'pin') void command('window_pin', { region: 'history', pinned: !state.historyPinned });
-      else if (shortcut.action === 'focusSearch') {
-        setOpen(false);
-        if (!clipboard && state.translationVisible && target instanceof HTMLElement && target.closest('.history-row')) {
-          if (native) void command('translation_focus_input');
-          else document.querySelector<HTMLTextAreaElement>('.source-input')?.focus({ preventScroll: true });
-        } else {
-          search.current?.focus({ preventScroll: true });
-          search.current?.select();
-        }
-      }
-      else { setOpen((shown) => !shown); button.current?.focus({ preventScroll: true }); }
-    };
     window.addEventListener('keydown', keydown, true);
     return () => window.removeEventListener('keydown', keydown, true);
-  }, [active, clipboard, command, native, search, shortcuts, state.historyPinned, state.translationVisible]);
+  }, [active]);
 
   return <footer ref={footer} className="history-footer" onKeyDown={(event) => {
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }

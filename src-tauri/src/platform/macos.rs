@@ -249,6 +249,22 @@ unsafe extern "C" {
     fn CFRelease(value: *const c_void);
 }
 
+// libSystem exports the main queue object itself; `dispatch_get_main_queue()`
+// is only an inline wrapper around it.
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(
+        queue: *mut c_void,
+        context: *mut c_void,
+        work: Option<unsafe extern "C" fn(*mut c_void)>,
+    );
+}
+
+/// Finder reveals that returned on the main queue; observed by the native UI case.
+#[cfg(feature = "ui-tests")]
+pub(crate) static FINDER_REVEALS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 // Every AppKit call in this module runs on Tauri's main thread.
 pub fn current_apple_event() -> Option<serde_json::Value> {
     unsafe {
@@ -448,14 +464,20 @@ unsafe fn running(target: Target) -> Option<Retained<AnyObject>> {
     (!terminated && same_target(actual, target)).then_some(application)
 }
 
+/// Opens a clipboard target. Link and Email open synchronously on the main
+/// thread and report failure. Revealing a file is queued to the main queue and
+/// cannot report failure: AppKit runs a nested event loop until Finder answers,
+/// and tao keeps its event handler lock for the whole callback of a task posted
+/// with `run_on_main_thread`. A view redraw inside that nested loop re-takes
+/// the lock and would block the main thread against itself.
 pub fn open_clipboard_target(
     target: nami::clipboard::open_target::OpenTarget,
 ) -> Result<(), String> {
     use nami::clipboard::open_target::OpenTarget;
     unsafe {
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
         match target {
             OpenTarget::Link(url) | OpenTarget::Email(url) => {
+                let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
                 let url = NSURL::URLWithString(&NSString::from_str(url.as_str()))
                     .ok_or("invalid_argument")?;
                 let opened: bool = msg_send![workspace, openURL: &*url];
@@ -464,16 +486,30 @@ pub fn open_clipboard_target(
                 }
             }
             OpenTarget::File(path) => {
-                let path = path.to_str().ok_or("invalid_argument")?;
-                let urls = NSArray::from_retained_slice(&[NSURL::fileURLWithPath(
-                    &NSString::from_str(path),
-                )]);
-                let _: () = msg_send![workspace, activateFileViewerSelectingURLs: &*urls];
+                let path = path.to_str().ok_or("invalid_argument")?.to_owned();
+                dispatch_async_f(
+                    std::ptr::from_ref(&_dispatch_main_q).cast_mut(),
+                    Box::into_raw(Box::new(path)).cast(),
+                    Some(reveal_in_finder),
+                );
             }
             OpenTarget::ChooseFile => return Err("invalid_argument".into()),
         }
     }
     Ok(())
+}
+
+// Runs on the main thread from the main queue, outside tao's event handler callbacks.
+unsafe extern "C" fn reveal_in_finder(context: *mut c_void) {
+    let path = Box::from_raw(context.cast::<String>());
+    objc2::rc::autoreleasepool(|_| {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let urls =
+            NSArray::from_retained_slice(&[NSURL::fileURLWithPath(&NSString::from_str(&path))]);
+        let _: () = msg_send![workspace, activateFileViewerSelectingURLs: &*urls];
+    });
+    #[cfg(feature = "ui-tests")]
+    FINDER_REVEALS.fetch_add(1, Ordering::SeqCst);
 }
 
 #[cfg(feature = "ui-tests")]

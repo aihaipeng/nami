@@ -1900,7 +1900,14 @@ pub async fn clipboard_open_target(
     };
     let kind = target.kind();
     if execute && target != OpenTarget::ChooseFile {
-        on_main(&app, |_| platform::open_clipboard_target(target)).await??;
+        if matches!(target, OpenTarget::File(_)) {
+            // Revealing runs a nested AppKit event loop, which must not run inside a
+            // window event handler callback. The platform queues it to the main thread;
+            // the command returns before Finder answers.
+            platform::open_clipboard_target(target)?;
+        } else {
+            on_main(&app, |_| platform::open_clipboard_target(target)).await??;
+        }
     }
     Ok(Some(kind))
 }

@@ -511,7 +511,6 @@ describe('unified records workspace', () => {
     bridge.snapshot.clipboardControls.recordsOpenFocus = openingFocus;
     const { shortcuts } = bridge.snapshot.clipboardControls;
     shortcuts.navigateDown.binding = { code: 'KeyJ', modifiers: [] };
-    shortcuts.focusRecords.binding = { code: 'F6', modifiers: [] };
     shortcuts.favorite.binding = { code: 'KeyF', modifiers: [] };
     await mount('clipboard');
     for (const kind of ['clipboard', 'translation'] as const) {
@@ -527,12 +526,13 @@ describe('unified records workspace', () => {
       expect(document.activeElement).toBe(input);
       expect(fireEvent.keyDown(input, { key: 'j', code: 'KeyJ' })).toBe(true);
       expect(fireEvent.keyDown(input, { key: 'f', code: 'KeyF' })).toBe(true);
-      expect(fireEvent.keyDown(input, { key: 'F6', code: 'F6', isComposing: true })).toBe(true);
       expect(document.activeElement).toBe(input);
       const query = kind === 'clipboard' ? 'Saved' : row.getAttribute('aria-label')!.slice('Translation: '.length);
       fireEvent.change(input, { target: { value: query } });
       await waitFor(() => expect(panel(kind).hasAttribute('data-focus-ready')).toBe(true));
-      expect(fireEvent.keyDown(input, { key: 'F6', code: 'F6' })).toBe(false);
+      shortcuts.navigateDown.binding = { code: 'ArrowDown', modifiers: [] };
+      await emit('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
+      expect(fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' })).toBe(false);
       expect(document.activeElement).toBe(row);
       expect(fireEvent.keyDown(row, { key: 'f', code: 'KeyF' })).toBe(false);
       await waitFor(() => expect(calls(kind === 'clipboard' ? 'clipboard_record_update' : 'history_record_update').at(-1)?.[1]).toEqual({ recordId: row.closest('article')?.dataset.recordId, action: 'favorite' }));
@@ -548,7 +548,8 @@ describe('unified records workspace', () => {
     await mount('clipboard');
     for (const kind of ['clipboard', 'translation'] as const) {
       if (kind === 'translation') await switchView(kind);
-      const rows = () => [...panel(kind).querySelectorAll<HTMLElement>('.history-row:not([hidden])')];
+      // Opening and the arrow keys below start in the ordinary list, below any pinned records.
+      const rows = () => [...panel(kind).querySelectorAll<HTMLElement>('.history-unpinned .history-row:not([hidden])')];
       await waitFor(() => expect(rows().length).toBeGreaterThan(1));
       const [first, second] = rows();
       const button = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('.history-row-select')!;
@@ -588,6 +589,129 @@ describe('unified records workspace', () => {
     await switchView('translation');
     await waitFor(() => expect(document.activeElement).toBe(search('translation')));
     expect(panel('translation').querySelector('.history-row-select')).toBeNull();
+  });
+
+  it('opens both views on the first unpinned record by default and moves between it and search', async () => {
+    expect(bridge.snapshot.clipboardControls.recordsOpenFocus).toBe('list');
+    bridge.history.records.forEach((record) => { record.isPinned = false; });
+    await mount('clipboard');
+    for (const kind of ['clipboard', 'translation'] as const) {
+      if (kind === 'translation') await switchView(kind);
+      const row = () => panel(kind).querySelector<HTMLButtonElement>('[data-keyboard-current] .history-row-select');
+      await waitFor(() => expect(document.activeElement).toBe(row()));
+      expect(row()).toBe(panel(kind).querySelector('.history-row:not([hidden]) .history-row-select'));
+      expect(calls('translation_focus_input')).toHaveLength(0);
+      fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
+      expect(document.activeElement).toBe(search(kind));
+      fireEvent.keyDown(search(kind), { key: 'ArrowDown', code: 'ArrowDown' });
+      expect(document.activeElement).toBe(row());
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+      expect(document.activeElement).toBe(search(kind));
+    }
+  });
+
+  it('opens both views on the first unpinned record when pinned records exist', async () => {
+    const pinned = clipboardRecords[1];
+    pinned.isPinned = true;
+    try {
+      await mount('clipboard');
+      for (const kind of ['clipboard', 'translation'] as const) {
+        if (kind === 'translation') await switchView(kind);
+        const rows = () => [...panel(kind).querySelectorAll<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select')];
+        const unpinned = rows().filter((button) => !button.closest('article')!.classList.contains('pinned'));
+        const pinnedRows = rows().filter((button) => button.closest('article')!.classList.contains('pinned'));
+        await waitFor(() => expect(document.activeElement).toBe(unpinned[0]));
+        expect(pinnedRows.length).toBeGreaterThan(0);
+        expect(document.activeElement!.closest('article')!.dataset.recordId).toBe(kind === 'clipboard' ? 'clip-first' : bridge.history.records.find((record) => !record.isPinned)!.id);
+        // Pinned rows stay above the first unpinned record for arrow keys as well as the pointer.
+        fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+        expect(document.activeElement).toBe(pinnedRows[pinnedRows.length - 1]);
+        for (let index = pinnedRows.length - 1; index > 0; index -= 1) fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+        expect(document.activeElement).toBe(pinnedRows[0]);
+        fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
+        expect(document.activeElement).toBe(search(kind));
+      }
+    } finally { pinned.isPinned = false; }
+  });
+
+  it('keeps the footer shortcut listener registered while the Command hint re-renders the panel', async () => {
+    await mount('clipboard');
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    // Holding Command shows the numbered paste hints. WebKit flushes that render between listeners, and a
+    // listener removed during a dispatch never runs for the same key, so the footer must not re-register.
+    fireEvent.keyDown(document.activeElement!, { key: 'Meta', code: 'MetaLeft', metaKey: true });
+    expect(removed.mock.calls.filter(([type, , options]) => type === 'keydown' && options === true)).toHaveLength(0);
+    expect(added.mock.calls.filter(([type, , options]) => type === 'keydown' && options === true)).toHaveLength(0);
+    fireEvent.keyUp(document.activeElement!, { key: 'Meta', code: 'MetaLeft' });
+    fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', metaKey: true });
+    expect(document.activeElement).toBe(search('clipboard'));
+  });
+
+  it('waits for an in-flight refresh before focusing the first record on open', async () => {
+    await mount('clipboard');
+    const focused = (id: string) => panel('clipboard').querySelector(`[data-record-id="${id}"] .history-row-select`);
+    await waitFor(() => expect(document.activeElement).toBe(focused('clip-first')));
+    await windowState({ historyVisible: false });
+    // WebKit drops focus from the hidden view; jsdom keeps it on the old row.
+    (document.activeElement as HTMLElement | null)?.blur();
+    const original = bridge.invoke.getMockImplementation()!;
+    const before = calls('clipboard_query').length;
+    let complete!: (value: unknown) => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'clipboard_query'
+      ? new Promise<unknown>((resolve) => { complete = resolve; })
+      : original(name, args));
+    clipboardRecords.unshift({ id: 'clip-newest', kind: 'text', title: '', text: 'Newest text', date: '2026-11-16T12:00:00Z', isFavorite: false, isPinned: false, sourceAppId: null });
+    try {
+      await emit('clipboard_changed', 1);
+      await waitFor(() => expect(calls('clipboard_query').length).toBeGreaterThan(before));
+      await windowState({ historyVisible: true, recordsFocus: 1 });
+      // A copy that arrived while hidden is still being loaded: do not focus the stale first record.
+      expect(document.activeElement).not.toBe(focused('clip-first'));
+      const page = { records: [...clipboardRecords], sources: {}, totalRecords: clipboardRecords.length, hasMore: false, cursor: null };
+      complete({ page, alternate: page });
+      await waitFor(() => expect(document.activeElement).toBe(focused('clip-newest')));
+    } finally { clipboardRecords.shift(); bridge.invoke.mockImplementation(original); }
+  });
+
+  it('returns to the last keyboard record when switching views and opens on the first record when reopened', async () => {
+    await mount('clipboard');
+    const row = (kind: 'clipboard' | 'translation') => panel(kind).querySelector<HTMLButtonElement>('[data-keyboard-current] .history-row-select');
+    const down = () => fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown', code: 'ArrowDown' });
+    await waitFor(() => expect(row('clipboard')?.closest('article')?.dataset.recordId).toBe('clip-first'));
+    down();
+    expect(row('clipboard')?.closest('article')?.dataset.recordId).toBe('clip-favorite');
+    await switchView('translation');
+    expect(row('translation')?.closest('article')?.dataset.recordId).toBe('sample-03');
+    down();
+    expect(row('translation')?.closest('article')?.dataset.recordId).toBe('sample-04');
+    expect(document.activeElement).toBe(row('translation'));
+    await switchView('clipboard');
+    expect(document.activeElement).toBe(row('clipboard'));
+    expect(row('clipboard')?.closest('article')?.dataset.recordId).toBe('clip-favorite');
+    await switchView('translation');
+    expect(document.activeElement).toBe(row('translation'));
+    expect(row('translation')?.closest('article')?.dataset.recordId).toBe('sample-04');
+    await windowState({ historyVisible: false, recordsSession: 1 });
+    await windowState({ historyVisible: true, recordsFocus: 1, recordsSession: 2 });
+    expect(document.activeElement).toBe(row('translation'));
+    expect(row('translation')?.closest('article')?.dataset.recordId).toBe('sample-03');
+  });
+
+  it('opens both views on the first pinned record when only pinned records exist', async () => {
+    const pinned = [...clipboardRecords, ...bridge.history.records];
+    pinned.forEach((record) => { record.isPinned = true; });
+    try {
+      await mount('clipboard');
+      for (const kind of ['clipboard', 'translation'] as const) {
+        if (kind === 'translation') await switchView(kind);
+        const first = () => panel(kind).querySelector<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select');
+        await waitFor(() => expect(document.activeElement).toBe(first()));
+        expect(panel(kind).querySelector('.history-unpinned .history-row:not([hidden])')).toBeNull();
+        expect(first()!.closest('article')!.classList.contains('pinned')).toBe(true);
+        expect(document.activeElement).not.toBe(search(kind));
+      }
+    } finally { pinned.forEach((record) => { record.isPinned = false; }); }
   });
 
   it('cycles categories per view and switches record views with Tab', async () => {
@@ -630,7 +754,7 @@ describe('unified records workspace', () => {
     expect(workspace.getAttribute('data-record-view')).toBe('translation');
     expect(clipboardPane.closest<HTMLElement>('.record-view')!.hidden).toBe(true);
     expect(translationPane.closest<HTMLElement>('.record-view')!.hidden).toBe(false);
-    expect(document.activeElement).toBe(search('translation'));
+    expect(document.activeElement).toBe(translationPane.querySelector('[data-record-id="sample-03"] .history-row-select'));
     const translationRow = translationPane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
     expect(icons(translationRow)).toEqual(icons(clipboardRow).filter(([symbol]) => symbol !== 'languages'));
     expect(translationRow.querySelector('[data-action=copy]')).toBeTruthy();
@@ -776,9 +900,10 @@ describe('unified records workspace', () => {
   it('reveals a newly selected translation without stealing row focus or showing the scrollbar', async () => {
     await mount('clipboard'); await switchView('translation');
     const pane = panel('translation');
-    const input = search('translation');
     const list = pane.querySelector<HTMLElement>('.history-list')!;
     const row = pane.querySelector<HTMLElement>('[data-record-id="sample-03"]')!;
+    const focused = row.querySelector<HTMLButtonElement>('.history-row-select')!;
+    expect(document.activeElement).toBe(focused);
     Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 1000 } });
     list.getBoundingClientRect = () => ({ top: 50, bottom: 150 } as DOMRect);
     row.getBoundingClientRect = () => ({ top: 20, bottom: 100 } as DOMRect);
@@ -786,7 +911,7 @@ describe('unified records workspace', () => {
     await windowState({ translationVisible: true, translationExtent: 920 });
     await emit('history_sample_selected', { sampleId: 'sample-03', retranslate: false });
     expect(list.scrollTop).toBe(66);
-    expect(document.activeElement).toBe(input);
+    expect(document.activeElement).toBe(focused);
     fireEvent.scroll(list);
     expect(within(pane).getByRole('scrollbar').classList.contains('visible')).toBe(false);
     await switchView('clipboard');
@@ -944,14 +1069,18 @@ describe('unified records workspace', () => {
     expect(list.scrollTop).toBe(0);
   });
 
-  it('restores search focus on explicit clipboard entry without stealing it during normal updates', async () => {
+  it.each(['search', 'list'] as const)('restores the %s opening target on explicit clipboard entry without stealing focus during normal updates', async (openingFocus) => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = openingFocus;
     await mount('translation');
-    expect(document.activeElement).toBe(search('clipboard'));
+    const target = () => openingFocus === 'list'
+      ? panel('clipboard').querySelector<HTMLButtonElement>('[data-record-id="clip-first"] .history-row-select')
+      : search('clipboard');
+    expect(document.activeElement).toBe(target());
     const pin = within(panel('clipboard')).getByRole('button', { name: 'Pin records' }); pin.focus();
     await windowState({ historyWidth: 420 });
     expect(document.activeElement).toBe(pin);
     await windowState({ recordsFocus: 1 });
-    expect(document.activeElement).toBe(search('clipboard'));
+    expect(document.activeElement).toBe(target());
   });
 
   it('keeps clipboard text unchanged and delegates clicked records to the configured activation', async () => {

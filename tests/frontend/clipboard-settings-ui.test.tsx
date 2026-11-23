@@ -21,10 +21,10 @@ describe('clipboard recording settings', () => {
 
   it('saves the shared opening focus from General', async () => {
     await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Focus When Opening Records: Search Field' }));
-    fireEvent.click(screen.getByRole('option', { name: 'Record List' }));
-    await screen.findByRole('button', { name: 'Focus When Opening Records: Record List' });
-    expect(calls('records_open_focus_set').at(-1)?.[1]).toEqual({ focus: 'list' });
+    fireEvent.click(screen.getByRole('button', { name: 'Focus When Opening Records: Record List' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Search Field' }));
+    await screen.findByRole('button', { name: 'Focus When Opening Records: Search Field' });
+    expect(calls('records_open_focus_set').at(-1)?.[1]).toEqual({ focus: 'search' });
   });
 
   it('restores only the shortcuts and enabled states in the selected group', async () => {
@@ -76,8 +76,9 @@ describe('clipboard recording settings', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['General', 'Clipboard', 'Translation']);
     const general = within(screen.getByRole('group', { name: 'General' }));
     expect(general.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
-      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Focus Record List', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
+      'Focus Input', 'Navigate Up', 'Navigate Down', 'Switch Record View', 'Previous Category', 'Next Category', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
+    expect(screen.queryByRole('checkbox', { name: 'Focus Record List' })).toBeNull();
     const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
     for (const [name, key] of [['Navigate Up', '↑'], ['Navigate Down', '↓'], ['Previous Category', '←'], ['Next Category', '→']]) {
       expect(general.getByRole('button', { name: `${name} shortcut` }).textContent).toBe(key);
@@ -139,14 +140,13 @@ describe('clipboard recording settings', () => {
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(0);
   });
 
-  it('leaves list focus unbound by default and keeps the secondary copy shortcut when the second language is off', async () => {
+  it('keeps the secondary copy shortcut when the second language is off', async () => {
     const prefs = bridge.snapshot.translationPreferences;
     const saved = { code: 'KeyU', modifiers: ['meta'] as const };
     prefs.shortcuts.copySecondary = { ...saved, modifiers: [...saved.modifiers] };
     prefs.secondaryLanguage = 'none';
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
-    expect(screen.getByRole('button', { name: 'Focus Record List shortcut' }).textContent).toBe('Add Hotkey');
     expect(screen.getByRole('button', { name: 'Copy Secondary Translation shortcut' }).textContent).toBe('⌘U');
     await emit('translation_preferences_changed', { ...prefs, secondaryLanguage: 'fr' });
     expect(screen.getByRole('button', { name: 'Copy Secondary Translation shortcut' }).textContent).toBe('⌘U');
@@ -163,7 +163,7 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Focus Record List', 'focusRecords', 'Add Hotkey'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '↵'], ['Paste as Plain Text (Context Menu)', 'pastePlain', '⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
+  it.each([['Navigate Up', 'navigateUp', '↑'], ['Navigate Down', 'navigateDown', '↓'], ['Previous Category', 'previousCategory', '←'], ['Next Category', 'nextCategory', '→'], ['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Switch Record View', 'switchView', 'Tab'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste (Context Menu)', 'pasteRecord', '↵'], ['Paste as Plain Text (Context Menu)', 'pastePlain', '⌘↵'], ['Save Image (Context Menu)', 'saveImage', '⌘S']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));

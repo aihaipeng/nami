@@ -275,7 +275,6 @@ pub enum ClipboardRecordAction {
     PastePlain,
     SaveImage,
     SwitchView,
-    FocusRecords,
     NavigateUp,
     NavigateDown,
     PreviousCategory,
@@ -314,7 +313,6 @@ pub struct ClipboardRecordShortcuts {
     paste_plain: RecordShortcut,
     save_image: RecordShortcut,
     switch_view: RecordShortcut,
-    focus_records: RecordShortcut,
     navigate_up: RecordShortcut,
     navigate_down: RecordShortcut,
     previous_category: RecordShortcut,
@@ -358,10 +356,6 @@ impl Default for ClipboardRecordShortcuts {
             paste_plain: enabled("Enter", &[primary]),
             save_image: enabled("KeyS", &[primary]),
             switch_view: enabled("Tab", &[]),
-            focus_records: RecordShortcut {
-                binding: None,
-                enabled: true,
-            },
             navigate_up: enabled("ArrowUp", &[]),
             navigate_down: enabled("ArrowDown", &[]),
             previous_category: enabled("ArrowLeft", &[]),
@@ -371,7 +365,7 @@ impl Default for ClipboardRecordShortcuts {
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 18] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 17] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -387,7 +381,6 @@ impl ClipboardRecordShortcuts {
             (PastePlain, &self.paste_plain),
             (SaveImage, &self.save_image),
             (SwitchView, &self.switch_view),
-            (FocusRecords, &self.focus_records),
             (NavigateUp, &self.navigate_up),
             (NavigateDown, &self.navigate_down),
             (PreviousCategory, &self.previous_category),
@@ -559,7 +552,6 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::PastePlain => &mut self.paste_plain,
             ClipboardRecordAction::SaveImage => &mut self.save_image,
             ClipboardRecordAction::SwitchView => &mut self.switch_view,
-            ClipboardRecordAction::FocusRecords => &mut self.focus_records,
             ClipboardRecordAction::NavigateUp => &mut self.navigate_up,
             ClipboardRecordAction::NavigateDown => &mut self.navigate_down,
             ClipboardRecordAction::PreviousCategory => &mut self.previous_category,
@@ -614,7 +606,6 @@ impl ClipboardRecordShortcuts {
                     ("translate", ClipboardRecordAction::Translate),
                     ("copyRecord", ClipboardRecordAction::CopyRecord),
                     ("switchView", ClipboardRecordAction::SwitchView),
-                    ("focusRecords", ClipboardRecordAction::FocusRecords),
                     ("navigateUp", ClipboardRecordAction::NavigateUp),
                     ("navigateDown", ClipboardRecordAction::NavigateDown),
                     ("previousCategory", ClipboardRecordAction::PreviousCategory),
@@ -1054,13 +1045,10 @@ mod tests {
         );
         assert!(!restored.favorite.enabled);
         assert!(restored.pin.binding.is_none());
-        assert!(restored.focus_records.binding.is_none());
         for (_, shortcut) in restored.entries().into_iter().filter(|(action, _)| {
             !matches!(
                 action,
-                ClipboardRecordAction::Favorite
-                    | ClipboardRecordAction::Pin
-                    | ClipboardRecordAction::FocusRecords
+                ClipboardRecordAction::Favorite | ClipboardRecordAction::Pin
             )
         }) {
             let binding = shortcut.binding.clone().unwrap();
@@ -1092,27 +1080,18 @@ mod tests {
     }
 
     #[test]
-    fn record_list_focus_has_no_default_but_preserves_saved_binding() {
-        let mut saved = ClipboardRecordShortcuts::default();
-        assert!(saved.focus_records.binding.is_none());
-        let custom = KeyBinding::new("F6", &[]);
-        saved
-            .set(
-                ClipboardRecordAction::FocusRecords,
-                Some(custom.clone()),
-                None,
-                &[],
-            )
-            .unwrap();
-        let saved =
-            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&saved).unwrap()));
-        assert_eq!(saved.focus_records.binding, Some(custom));
-        assert!(saved
-            .restore_general()
-            .unwrap()
-            .focus_records
-            .binding
-            .is_none());
+    fn ignores_the_retired_record_list_focus_without_resetting_other_keys() {
+        let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
+        old["focusRecords"] = serde_json::json!({
+            "binding":{"code":"F8","modifiers":[]},"enabled":true
+        });
+        old["navigateUp"] = serde_json::json!({"binding":null,"enabled":true});
+        let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
+        assert!(restored.navigate_up.binding.is_none());
+        assert!(restored.navigate_down.binding.is_some());
+        let saved = serde_json::to_value(&restored).unwrap();
+        assert!(saved.get("focusRecords").is_none());
+        assert!(serde_json::from_value::<ClipboardRecordAction>("focusRecords".into()).is_err());
     }
 
     #[test]

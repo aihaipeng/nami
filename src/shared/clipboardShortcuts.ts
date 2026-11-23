@@ -4,7 +4,7 @@ import type { MessageKey } from './i18n';
 import { bindingFromEvent, editsText, globalTranslationActions, recordWindowActions, sameBinding, type KeyBinding } from './shortcuts';
 
 export const recordNavigationActions = ['navigateUp', 'navigateDown', 'previousCategory', 'nextCategory'] as const;
-export const sharedRecordActions = [...recordNavigationActions, 'switchView', 'focusRecords', 'preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
+export const sharedRecordActions = [...recordNavigationActions, 'switchView', 'preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
 export const clipboardMenuOnlyActions = ['pasteRecord', 'pastePlain', 'saveImage'] as const;
 export const clipboardOnlyActions = ['openTarget', 'ocr', 'translate', ...clipboardMenuOnlyActions] as const;
 export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyActions] as const;
@@ -22,7 +22,7 @@ export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
     note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
     navigateUp: shortcut('ArrowUp', []), navigateDown: shortcut('ArrowDown', []),
     previousCategory: shortcut('ArrowLeft', []), nextCategory: shortcut('ArrowRight', []),
-    switchView: shortcut('Tab', []), focusRecords: { binding: null, enabled: true }, copyRecord: shortcut('KeyC', [primary, 'shift']),
+    switchView: shortcut('Tab', []), copyRecord: shortcut('KeyC', [primary, 'shift']),
     favorite: shortcut('KeyF'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
   };
 }
@@ -35,7 +35,7 @@ export const clipboardShortcutLabels = {
   pasteRecord: 'clipboardShortcutPasteRecord', pastePlain: 'clipboardShortcutPastePlain', saveImage: 'clipboardShortcutSaveImage',
   openTarget: 'clipboardShortcutOpenTarget', preview: 'clipboardShortcutPreview', note: 'toggleRecordNote', ocr: 'clipboardShortcutOcr', translate: 'translation',
   navigateUp: 'navigateUp', navigateDown: 'navigateDown', previousCategory: 'previousCategory', nextCategory: 'nextCategory',
-  switchView: 'switchRecordView', focusRecords: 'focusRecords', copyRecord: 'copy',
+  switchView: 'switchRecordView', copyRecord: 'copy',
   favorite: 'clipboardShortcutFavorite', pin: 'clipboardShortcutPin', delete: 'clipboardShortcutDelete',
 } as const satisfies Record<ClipboardRecordAction, MessageKey>;
 
@@ -58,14 +58,14 @@ export function clipboardPanelShortcuts(snapshot: AppSnapshot, actions: readonly
     const contextual = action === 'translate' && snapshot.capabilities.platform === 'macos' && binding && isClipboardTranslateLaunchKey(binding);
     const globalConflict = !!binding && [
       ...(contextual ? clipboardGlobalBindings(snapshot, false) : globals),
-      ...recordWindowActions.filter((candidate) => candidate !== 'openSettings' && (action === 'copyRecord' || action === 'focusRecords') && translationShortcutEnabled(snapshot.translationPreferences, candidate)).map((candidate) => snapshot.translationPreferences.shortcuts[candidate]),
+      ...recordWindowActions.filter((candidate) => candidate !== 'openSettings' && action === 'copyRecord' && translationShortcutEnabled(snapshot.translationPreferences, candidate)).map((candidate) => snapshot.translationPreferences.shortcuts[candidate]),
     ].some((global) => global && sameBinding(global, binding));
     return { action, ...shortcut, globalConflict };
   });
 }
 
 export function clipboardShortcutAvailable(snapshot: AppSnapshot, native: boolean, action: ClipboardRecordAction) {
-  return action === 'preview' || action === 'switchView' || action === 'focusRecords' || recordNavigationActions.some((navigation) => navigation === action) || (native && !snapshot.storageError
+  return action === 'preview' || action === 'switchView' || recordNavigationActions.some((navigation) => navigation === action) || (native && !snapshot.storageError
     && (action !== 'ocr' || snapshot.capabilities.imageOcr && snapshot.capabilities.clipboardWrite)
     && (action !== 'openTarget' || snapshot.capabilities.clipboardOpenTarget)
     && (action !== 'copyRecord' || snapshot.capabilities.clipboardWrite)

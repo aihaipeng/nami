@@ -74,8 +74,8 @@ describe('history list and session actions', () => {
 
   it('copies selected translations from the list without opening details', async () => {
     bridge.snapshot.translationPreferences.secondaryLanguage = 'none';
-    await mount('history');
     await windowState({ translationVisible: false, translationExtent: 0 });
+    await mount('history');
     const target = within(row('sample-07')).getByRole('button', { name: /^Translation:/ });
     act(() => target.focus());
     fireEvent.keyDown(target, { code: 'Digit1', key: '1', metaKey: true });
@@ -428,8 +428,8 @@ describe('history list and session actions', () => {
 
   it('copies the three saved parts of the context record without opening details', async () => {
     bridge.snapshot.translationPreferences.secondaryLanguage = 'none';
-    await mount('history');
     await windowState({ translationVisible: false, translationExtent: 0 });
+    await mount('history');
     for (const [name, part] of [['Copy source text', 'source'], ['Copy Primary Text', 'primary'], ['Copy Secondary Text', 'secondary']]) {
       fireEvent.contextMenu(row('sample-03'));
       fireEvent.click(screen.getByRole('menuitem', { name }));

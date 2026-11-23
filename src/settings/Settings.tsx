@@ -46,7 +46,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
             <div className="settings-field">
               <label className="settings-field-content" htmlFor="records-open-focus">{t('recordsOpenFocus')}</label>
               {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
-                <SearchableDropdown id="records-open-focus" value={snapshot.clipboardControls.recordsOpenFocus ?? 'search'}
+                <SearchableDropdown id="records-open-focus" value={snapshot.clipboardControls.recordsOpenFocus ?? 'list'}
                   onChange={(focus) => void command('records_open_focus_set', { focus: focus as RecordsOpenFocus })}
                   label={t('recordsOpenFocus')} items={[{ code: 'search', name: t('recordsFocusSearch') }, { code: 'list', name: t('recordsFocusList') }]}
                   open={openDropdown === 'recordsFocus'} onOpenChange={(open) => setOpenDropdown(open ? 'recordsFocus' : null)} t={t} side="bottom" searchable={false} settings />}

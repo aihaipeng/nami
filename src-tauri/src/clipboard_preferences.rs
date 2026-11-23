@@ -35,8 +35,8 @@ pub(crate) enum Activation {
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RecordsOpenFocus {
-    #[default]
     Search,
+    #[default]
     List,
 }
 
@@ -80,7 +80,7 @@ pub(crate) struct ClipboardOptions {
     pub activation: Activation,
     pub paste_as_plain_text: bool,
     pub search: ClipboardSearchOptions,
-    records_open_focus: RecordsOpenFocus,
+    pub(crate) records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
     pub record_shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
@@ -701,4 +701,31 @@ pub(crate) async fn set_recording(app: &AppHandle, enabled: Option<bool>) -> Res
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_open_on_the_list_unless_another_focus_was_saved() {
+        let mut db =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        let focus = |db: &crate::database::HistoryDatabase| match ClipboardOptions::load(db)
+            .unwrap()
+            .records_open_focus
+        {
+            RecordsOpenFocus::Search => "search",
+            RecordsOpenFocus::List => "list",
+        };
+        assert_eq!(focus(&db), "list");
+        for (stored, expected) in [
+            ("\"search\"", "search"),
+            ("\"list\"", "list"),
+            ("\"unknown\"", "list"),
+        ] {
+            db.preference_set("records_open_focus", stored).unwrap();
+            assert_eq!(focus(&db), expected, "stored {stored}");
+        }
+    }
 }

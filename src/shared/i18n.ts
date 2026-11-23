@@ -95,7 +95,6 @@ export const messages = {
   recordsOpenFocus: ['打开记录时聚焦', 'Focus When Opening Records'],
   recordsFocusSearch: ['搜索框', 'Search Field'],
   recordsFocusList: ['记录列表', 'Record List'],
-  focusRecords: ['聚焦记录列表', 'Focus Record List'],
   focusSearch: ['聚焦输入框', 'Focus Input'],
   hotKey: ['HotKey', 'HotKey'],
   pressShortcut: ['按下快捷键', 'Press shortcut'],

@@ -1,4 +1,5 @@
 use super::*;
+use crate::clipboard_preferences::RecordsOpenFocus;
 use crate::model::WindowState;
 use serde::Serialize;
 use std::{sync::mpsc, time::Duration};
@@ -1516,6 +1517,7 @@ return {languagePickerOutline:outline};
             crate::sync_global_shortcuts(app);
             Ok(())
         })?;
+        set_opening_focus(app, RecordsOpenFocus::Search)?;
         let press_history = || {
             on_main(app, |app| {
                 send_registered_hotkey(
@@ -1758,7 +1760,7 @@ fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value
         .map_err(|_| "retranslation commit timeout")??;
     samples.push(wait_records(app, &format!("const row=document.querySelector('[data-record-id={id}] .history-row-select');return {{ready:!!row&&row.getAttribute('aria-pressed')==='true'&&document.hasFocus()&&document.activeElement===row,retranslatedFocus:{id:?},focused:document.activeElement?.closest('[data-record-id]')?.dataset.recordId}};"))?);
     post_records_key(app, 3, 1 << 20, "f", "f", false)?;
-    samples.push(wait_dom(app, "return {ready:document.hasFocus()&&document.activeElement===document.querySelector('.source-input'),focusInputFromHistory:true};")?);
+    samples.push(wait_records(app, "const input=document.querySelector('#translation-history .history-search input');return {ready:document.hasFocus()&&document.activeElement===input&&input.selectionStart===0&&input.selectionEnd===input.value.length,focusSearchFromHistory:true};")?);
     let handle = app.clone();
     let (send, receive) = mpsc::channel();
     tauri::async_runtime::spawn(async move {
@@ -2588,7 +2590,7 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='16,7,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='15,7,6')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
@@ -2616,7 +2618,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     window.clipboardSettingsProbe.lastRejectedCommand=name;
     throw error;
   });
-  if((await invoke('app_snapshot')).clipboardControls.recordsOpenFocus!=='search')throw Error('expected search focus by default');
+  if((await invoke('app_snapshot')).clipboardControls.recordsOpenFocus!=='list')throw Error('expected the first record to be focused by default');
   await invoke('records_open_focus_set',{focus:'list'});
   if((await invoke('app_snapshot')).clipboardControls.recordsOpenFocus!=='list')throw Error('failed to change initial focus');
   await invoke('records_open_focus_set',{focus:'search'});
@@ -3607,7 +3609,23 @@ fn wait_records_attempts(
     Err(format!("records WebView did not settle: {last}"))
 }
 
+/// Arranges the opening focus for a native case. The product default opens on the first record;
+/// cases that continue from the search field opt into `Search` explicitly.
+fn set_opening_focus(app: &AppHandle, focus: RecordsOpenFocus) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.clipboard_options.lock().unwrap().records_open_focus = focus;
+    crate::clipboard_preferences::publish_controls(app, &state);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OpeningFocus {
+    Search,
+    FirstRecord,
+}
+
 fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+    set_opening_focus(app, RecordsOpenFocus::Search)?;
     on_main(app, move |app| {
         let window = create(app, "translation")?;
         {
@@ -5273,11 +5291,22 @@ fn records_open_measurement(
     app: &AppHandle,
     label: &'static str,
     reopen: bool,
+    focus: OpeningFocus,
 ) -> Result<serde_json::Value, String> {
     let hide_handoff = if reopen {
         Some(records_hide_handoff(app)?)
     } else {
         None
+    };
+    let target = match focus {
+        OpeningFocus::Search => {
+            set_opening_focus(app, RecordsOpenFocus::Search)?;
+            "document.activeElement===input"
+        }
+        OpeningFocus::FirstRecord => {
+            set_opening_focus(app, RecordsOpenFocus::List)?;
+            "document.activeElement===(rows.find(row=>!row.classList.contains('pinned'))??rows[0])?.querySelector('.history-row-select')"
+        }
     };
     let started = std::time::Instant::now();
     on_main(app, |app| resume_navigation(app, "clipboard"))?;
@@ -5302,7 +5331,7 @@ if(window.__recordsOpenProbe?.token!==token){{
       probe.frames++;probe.staleFilteredFrames+=Number(!!query||favorite!=='false'||kind!==null);probe.loadingFrames+=Number(loading);
       probe.firstObserved??={{rows:rows.length,count,query,favorite,kind,loading}};
     }}
-    if(visible&&rows.length===100&&count==='100 records'&&query===''&&favorite==='false'&&kind===null&&input&&!input.disabled&&!input.readOnly&&document.activeElement===input&&document.hasFocus()&&document.fonts.status==='loaded'){{
+    if(visible&&rows.length===100&&count==='100 records'&&query===''&&favorite==='false'&&kind===null&&input&&!input.disabled&&!input.readOnly&&{target}&&document.hasFocus()&&document.fonts.status==='loaded'){{
       requestAnimationFrame(()=>{{probe.presented=true;}});
     }}else requestAnimationFrame(sample);
   }};
@@ -5310,7 +5339,7 @@ if(window.__recordsOpenProbe?.token!==token){{
 }}
 const p=document.querySelector('.clipboard-panel'),input=p?.querySelector('.history-search input'),rows=[...p?.querySelectorAll('.history-row:not([hidden])')??[]],probe=window.__recordsOpenProbe;
 if(p&&!window.__recordsOpenPanel)window.__recordsOpenPanel=p;
-return {{ready:probe.presented&&rows.length===100&&p?.querySelector('.history-record-count')?.textContent==='100 records'&&input?.value===''&&p?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&!p?.querySelector('.history-kind[aria-pressed=true]'),rows:rows.length,total:p?.querySelector('.history-record-count')?.textContent,query:input?.value,favorite:p?.querySelector('.history-favorites')?.getAttribute('aria-pressed'),kind:p?.querySelector('.history-kind[aria-pressed=true]')?.getAttribute('aria-label')??null,samePanel:!!p&&window.__recordsOpenPanel===p,searchReady:!!input&&!input.disabled&&!input.readOnly&&document.activeElement===input,syntheticOnly:rows.every(row=>row.dataset.recordId.startsWith('open-record-')),visible:!!p?.getClientRects().length&&!p.closest('[hidden]'),documentFocused:document.hasFocus(),activeElement:document.activeElement?.className,documentVisibility:document.visibilityState,visibilityEvents:window.__recordsOpenVisibilityLog,fonts:document.fonts.status,error:p?.querySelector('[role=alert]')?.textContent,...probe}};
+return {{ready:probe.presented&&rows.length===100&&p?.querySelector('.history-record-count')?.textContent==='100 records'&&input?.value===''&&p?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&!p?.querySelector('.history-kind[aria-pressed=true]'),rows:rows.length,total:p?.querySelector('.history-record-count')?.textContent,query:input?.value,favorite:p?.querySelector('.history-favorites')?.getAttribute('aria-pressed'),kind:p?.querySelector('.history-kind[aria-pressed=true]')?.getAttribute('aria-label')??null,samePanel:!!p&&window.__recordsOpenPanel===p,openingTargetFocused:!!input&&!input.disabled&&!input.readOnly&&{target},activeRecord:document.activeElement?.closest('[data-record-id]')?.dataset.recordId??null,openingRecord:(rows.find(row=>!row.classList.contains('pinned'))??rows[0])?.dataset.recordId??null,hoveredRows:p?.querySelectorAll('.history-row:hover').length??0,syntheticOnly:rows.every(row=>row.dataset.recordId.startsWith('open-record-')),visible:!!p?.getClientRects().length&&!p.closest('[hidden]'),documentFocused:document.hasFocus(),activeElement:document.activeElement?.className,documentVisibility:document.visibilityState,visibilityEvents:window.__recordsOpenVisibilityLog,fonts:document.fonts.status,error:p?.querySelector('[role=alert]')?.textContent,...probe}};
 "#,
         serde_json::to_string(label).unwrap()
     );
@@ -5326,7 +5355,7 @@ return {{ready:probe.presented&&rows.length===100&&p?.querySelector('.history-re
     })?;
     if sample["samePanel"] != true
         || sample["syntheticOnly"] != true
-        || sample["searchReady"] != true
+        || sample["openingTargetFocused"] != true
         || !native_visible
     {
         return Err(format!(
@@ -5881,7 +5910,8 @@ return {{ready:({predicate}),action:{action:?},record:row?.dataset.recordId,focu
                 crate::clipboard_preferences::Activation::Copy;
         }
         summon_with_clipboard_hotkey(app)?;
-        samples.push(check("Open Clipboard History", "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-second'&&count==='4 records'")?);
+        // The default opening focus is the first record, reached through the registered global hotkey.
+        samples.push(check("Open Clipboard History", "!focused&&document.hasFocus()&&document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&count==='4 records'")?);
         evaluate_view_dom(
             app,
             "clipboard",
@@ -5964,9 +5994,9 @@ return true;
         press(123, 0, "\u{f702}", "\u{f702}")?;
         check("Previous category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&keys.at(-1)?.trusted")?;
         press(48, 0, "\t", "\t")?;
-        samples.push(check("Tab to translation records", "document.querySelector('.records-workspace')?.dataset.recordView==='translation'&&document.activeElement===document.querySelector('#translation-history input[type=search]')&&keys.at(-1)?.trusted")?);
+        samples.push(check("Tab to translation records", "document.querySelector('.records-workspace')?.dataset.recordView==='translation'&&document.activeElement===document.querySelector('#translation-history .history-unpinned .history-row:not([hidden]) .history-row-select')&&keys.at(-1)?.trusted")?);
         press(48, 0, "\t", "\t")?;
-        check("Tab to clipboard records", "focused&&document.querySelector('.records-workspace')?.dataset.recordView==='clipboard'&&keys.at(-1)?.trusted")?;
+        samples.push(check("Tab to clipboard records", "!focused&&document.querySelector('.records-workspace')?.dataset.recordView==='clipboard'&&document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted")?);
         press(45, CMD | SHIFT, "N", "N")?;
         samples.push(check("Note", "keys.at(-1)?.trusted&&document.querySelector('.clipboard-editor textarea')?.value==='Synthetic shortcut smoke second'")?);
         press(53, 0, "\u{1b}", "\u{1b}")?;
@@ -6046,13 +6076,13 @@ return true;
             "settings",
             r#"
 window.__copyShortcutSaved=false;
-(async()=>{const invoke=window.__TAURI_INTERNALS__.invoke;await invoke('clipboard_record_shortcut_set',{action:'copyRecord',binding:{code:'KeyC',modifiers:['meta']}});await invoke('clipboard_record_shortcut_set',{action:'focusRecords',binding:{code:'F8',modifiers:[]}});})().then(()=>window.__copyShortcutSaved=true,error=>window.__copyShortcutSaved=String(error));return true;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_shortcut_set',{action:'copyRecord',binding:{code:'KeyC',modifiers:['meta']}}).then(()=>window.__copyShortcutSaved=true,error=>window.__copyShortcutSaved=String(error));return true;
 "#,
         )?;
         wait_view_dom(app,"settings", "if(typeof window.__copyShortcutSaved==='string')throw Error(window.__copyShortcutSaved);return {ready:window.__copyShortcutSaved===true};")?;
-        press(100, 0, "\u{f70b}", "\u{f70b}")?;
+        press(97, 0, "\u{f709}", "\u{f709}")?;
         check(
-            "Focus record with custom F8 for Command-C",
+            "Enter the record list with the remapped F6 for Command-C",
             "document.activeElement===row?.querySelector('.history-row-select')&&!row?.querySelector('.record-copied')",
         )?;
         samples.push(activate("Command-C copies focused record", Some(CMD))?);
@@ -6210,14 +6240,14 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         on_main(app, |app| resume_navigation(app, "clipboard"))?;
         check(
             "OCR image ready with privacy descriptions",
-            "focused&&document.hasFocus()&&row?.dataset.recordId==='smoke-ocr'
+            "!focused&&document.hasFocus()&&document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-ocr'
              &&row.querySelector('[data-action=ocr] button')?.getAttribute('aria-description')==='Recognizes text on this Mac without sending the image or text.'
              &&row.querySelector('[data-action=translate] button')?.getAttribute('aria-description')==='Sends text to the selected translation service.'",
         )?;
         press(31, CMD | SHIFT, "O", "O")?;
         let ocr = check(
             "Extract Text",
-            "focused&&count==='6 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
+            "!focused&&document.activeElement===row?.querySelector('.history-row-select')&&count==='6 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
         )?;
         let text = on_main(app, |_| {
             let capture = crate::platform::read_clipboard(|_| false)?
@@ -6243,6 +6273,8 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
             }
         }
         samples.push(ocr);
+        // The query is typed from the search field, as a user would after the remapped focus key (Shift-Command-F).
+        press(3, CMD | SHIFT, "F", "F")?;
         search_for("smoke keep")?;
         check(
             "Translate text ready",
@@ -6562,6 +6594,7 @@ const buttons=[...document.querySelectorAll('.clipboard-detail button.clipboard-
             samples.push(wait_dom(app, r#"
 const pane=document.querySelector('.clipboard-detail');return {ready:pane?.textContent.includes('The original file was moved or deleted and cannot be located'),action:'Revalidate the selected file at execution time'};
 "#)?);
+            let reveals = crate::platform::FINDER_REVEALS.load(Ordering::SeqCst);
             evaluate_view_dom(
                 app,
                 "translation",
@@ -6570,6 +6603,18 @@ window.__finderDispatch='pending';window.__TAURI_INTERNALS__.invoke('clipboard_o
 "#,
             )?;
             samples.push(wait_dom(app, r#"return {ready:window.__finderDispatch==='file',action:'Hand off the remaining synthetic file to Finder',result:window.__finderDispatch};"#)?);
+            // The command returns before Finder answers. Waiting for the reveal to finish
+            // proves AppKit's nested loop ran outside the event handler callback, and a
+            // task posted afterwards proves the main thread did not lock against itself.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while crate::platform::FINDER_REVEALS.load(Ordering::SeqCst) == reveals {
+                if std::time::Instant::now() >= deadline {
+                    return Err("Finder reveal did not complete on the main queue".into());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            on_main(app, |_| Ok(()))?;
+            samples.push(serde_json::json!({"action":"Finder reveal finished outside the event handler callback","finderRevealCompleted":true,"mainThreadServicedTask":true}));
             Ok::<(), String>(())
         })();
         let _ = std::fs::remove_dir_all(fixture);
@@ -6832,6 +6877,7 @@ fn run_records_open(app: &AppHandle) -> DomCase {
                 "cold-first-open"
             },
             false,
+            OpeningFocus::Search,
         )?;
         first["prewarmed"] = prewarm.into();
         samples.push(first);
@@ -6850,7 +6896,12 @@ const [first,second]=rows, bg=row=>getComputedStyle(row).backgroundColor;
 return {ready:document.activeElement===p.querySelector('.history-search input')&&p.querySelector('[data-record-target]')===second&&rows.filter(row=>bg(row)!==bg(first)).length===1,phase:'one mouse target without stealing search focus'};
 "#)?);
         for phase in ["immediate-reopen-1", "immediate-reopen-2"] {
-            samples.push(records_open_measurement(app, phase, true)?);
+            samples.push(records_open_measurement(
+                app,
+                phase,
+                true,
+                OpeningFocus::Search,
+            )?);
         }
         evaluate_view_dom(
             app,
@@ -6862,7 +6913,37 @@ return {ready:document.activeElement===p.querySelector('.history-search input')&
             app,
             "immediate-reopen-reset-filters",
             true,
+            OpeningFocus::Search,
         )?);
+        // The product default: a reopened panel enters on the first record and reaches search from it.
+        samples.push(records_open_measurement(
+            app,
+            "reopen-first-record-open",
+            true,
+            OpeningFocus::FirstRecord,
+        )?);
+        samples.push(wait_records(app, r#"
+const p=document.querySelector('.clipboard-panel'),rows=[...p.querySelectorAll('.history-row:not([hidden])')];
+if(document.activeElement!==rows[0].querySelector('.history-row-select'))return {ready:false};
+const targets=[...p.querySelectorAll('[data-record-target]')].map(row=>row.dataset.recordId);
+if(targets.length!==1||targets[0]!==rows[0].dataset.recordId)throw Error('first-record opening target mismatch: '+JSON.stringify(targets));
+return {ready:true,phase:'default opening focuses the first record',record:rows[0].dataset.recordId};
+"#)?);
+        post_records_key(app, 126, 0, "\u{f700}", "\u{f700}", false)?;
+        samples.push(wait_records(app, r#"
+const p=document.querySelector('.clipboard-panel');
+return {ready:document.hasFocus()&&document.activeElement===p.querySelector('.history-search input'),phase:'ArrowUp moves from the first record to search'};
+"#)?);
+        post_records_key(app, 125, 0, "\u{f701}", "\u{f701}", false)?;
+        samples.push(wait_records(app, r#"
+const p=document.querySelector('.clipboard-panel'),rows=[...p.querySelectorAll('.history-row:not([hidden])')];
+return {ready:document.hasFocus()&&document.activeElement===rows[0].querySelector('.history-row-select'),phase:'ArrowDown returns from search to the first record'};
+"#)?);
+        post_records_key(app, 3, 1 << 20, "f", "f", false)?;
+        samples.push(wait_records(app, r#"
+const p=document.querySelector('.clipboard-panel');
+return {ready:document.hasFocus()&&document.activeElement===p.querySelector('.history-search input'),phase:'Command-F moves from the first record to search'};
+"#)?);
         Ok(())
     })();
     if let Some(database) = original_database {

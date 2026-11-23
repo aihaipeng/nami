@@ -113,7 +113,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="general-shortcut-heading">
         {translationRow('focusSearch')}
-        {(['navigateUp', 'navigateDown', 'switchView', 'previousCategory', 'nextCategory', 'focusRecords', 'preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
+        {(['navigateUp', 'navigateDown', 'switchView', 'previousCategory', 'nextCategory', 'preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
         {translationRow('pin')}
         {translationRow('showShortcuts')}
         {translationRow('openSettings')}

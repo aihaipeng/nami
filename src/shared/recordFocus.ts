@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef, type MouseEvent, type RefObject } from 'react';
 
 const rowSelector = '.history-row:not([hidden]) .history-row-select';
+// Pinned records render above the ordinary list; opening starts at the first ordinary record.
+const unpinnedRowSelector = `.history-unpinned ${rowSelector}`;
 
 export function focusRecordList(panel: HTMLElement | null | undefined) {
   const button = panel?.querySelector<HTMLButtonElement>('.history-row[data-keyboard-current]:not([hidden]) .history-row-select')
@@ -26,25 +28,41 @@ export function useRecordPointer() {
   };
 }
 
-export function useRecordsOpenFocus(search: RefObject<HTMLInputElement | null>, active: boolean, request: number | undefined, preferList: boolean, canFocusList: boolean, settled: boolean, onTarget: (id: string | null) => void) {
-  const pending = useRef<{ origin: Element | null } | null>(null);
+export function useRecordsOpenFocus(search: RefObject<HTMLInputElement | null>, active: boolean, visible: boolean, request: number | undefined, preferList: boolean, canFocusList: boolean, settled: boolean, onTarget: (id: string | null) => void) {
+  const pending = useRef<{ origin: Element | null; recordId: string | null } | null>(null);
   const options = useRef({ preferList, onTarget });
+  // Entering a view while the records stay visible returns to its last keyboard record; a hidden workspace opens on the first record.
+  const shown = useRef(false);
+  const lastRecord = useRef<string | null>(null);
   useLayoutEffect(() => { options.current = { preferList, onTarget }; }, [preferList, onTarget]);
   useLayoutEffect(() => {
+    const switching = shown.current;
+    shown.current = visible;
     pending.current = null;
     if (!active || request === undefined) return;
-    options.current.onTarget(null);
-    if (options.current.preferList) pending.current = { origin: document.activeElement };
+    const recordId = switching ? lastRecord.current : null;
+    options.current.onTarget(options.current.preferList ? recordId : null);
+    if (options.current.preferList) pending.current = { origin: document.activeElement, recordId };
     else search.current?.focus({ preventScroll: true });
   }, [active, request, search]);
   useLayoutEffect(() => {
+    if (!active || pending.current) return;
+    const current = search.current?.closest('.history-panel')?.querySelector<HTMLElement>('.history-row[data-keyboard-current]')?.dataset.recordId;
+    if (current) lastRecord.current = current;
+  });
+  useLayoutEffect(() => {
     if (!pending.current) return;
-    const origin = pending.current.origin;
+    const { origin, recordId } = pending.current;
     if (document.activeElement !== origin && document.activeElement !== document.body) {
       pending.current = null;
       return;
     }
-    const button = canFocusList ? search.current?.closest('.history-panel')?.querySelector<HTMLButtonElement>(rowSelector) : null;
+    // A copy that arrived while hidden may still be loading; focusing the cached page would miss it.
+    const panel = canFocusList && settled ? search.current?.closest('.history-panel') : null;
+    const resumed = panel && recordId
+      ? [...panel.querySelectorAll<HTMLElement>('.history-row:not([hidden])')].find((row) => row.dataset.recordId === recordId) : null;
+    const button = resumed?.querySelector<HTMLButtonElement>('.history-row-select')
+      ?? panel?.querySelector<HTMLButtonElement>(unpinnedRowSelector) ?? panel?.querySelector<HTMLButtonElement>(rowSelector);
     if (button) {
       pending.current = null;
       options.current.onTarget(button.closest<HTMLElement>('[data-record-id]')?.dataset.recordId ?? null);
@@ -53,6 +71,7 @@ export function useRecordsOpenFocus(search: RefObject<HTMLInputElement | null>, 
     }
     if (!settled) return;
     pending.current = null;
+    options.current.onTarget(null);
     search.current?.focus({ preventScroll: true });
   });
 }

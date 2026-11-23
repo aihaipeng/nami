@@ -493,14 +493,16 @@ describe('selection across native webviews', () => {
     expect(original.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('focuses the translation input from the selected history row with open details', async () => {
+  it('focuses search instead of the translation input from the selected history row with open details', async () => {
     const translation = await mount(); const history = await mount('history');
     await select(sample.id);
+    expect(bridge.snapshot.window.translationVisible).toBe(true);
     const row = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
     act(() => row.focus());
     fireEvent.keyDown(row, { key: 'f', code: 'KeyF', metaKey: true });
-    expect(document.activeElement).toBe(within(translation.container).getByRole('textbox', { name: 'Source text' }));
-    expect(calls('translation_focus_input')).toHaveLength(1);
+    expect(document.activeElement).toBe(history.container.querySelector<HTMLInputElement>('.history-search input'));
+    expect(within(translation.container).getByRole('textbox', { name: 'Source text' })).not.toBe(document.activeElement);
+    expect(calls('translation_focus_input')).toHaveLength(0);
   });
 
   it('reveals the fresh unstarred result when retranslating from Favorites', async () => {

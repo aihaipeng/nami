@@ -101,7 +101,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const setTarget = (id: string | null) => setKeyboardSelection((current) =>
     id === null ? null : current?.id === id && current.session === state.recordsSession ? current : { id, session: state.recordsSession });
   const focusReady = !native || history.displayReady(query, favoritesOnly);
-  useRecordsOpenFocus(search, active, state.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
+  useRecordsOpenFocus(search, active, state.historyVisible, state.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
     focusReady, !history.loading, setTarget);
   useEffect(() => {
     if (!native) return;
@@ -285,7 +285,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       } else if (row && action === 'navigateUp') search.current?.focus();
       return;
     }
-    if (!action || action === 'focusRecords' || action === 'switchView') return;
+    if (!action || action === 'switchView') return;
     if (fromSearch && key.key === 'Backspace' && query && action !== 'delete') return;
     const record = row ? filtered.find(({ id }) => id === row.dataset.recordId) : filtered.find(({ id }) => id === keyboardId);
     if (!record || !clipboardShortcutAvailable(snapshot, native, action)) return;

@@ -135,7 +135,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setSession((value) => value + 1);
   }, [snapshot.window.recordsSession]);
   useEffect(() => { if (!active) { ++operation.current; ++processingRevision.current; setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setProcessing(null); setProcessingError(null); setSession((value) => value + 1); } }, [active]);
-  useRecordsOpenFocus(search, active, snapshot.window.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
+  useRecordsOpenFocus(search, active, snapshot.window.historyVisible, snapshot.window.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
     clipboard.displayReady, !clipboard.loading, setSelected);
 
   useEffect(() => {
@@ -348,7 +348,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }
       return;
     }
-    if (!action || action === 'focusRecords' || action === 'switchView' || action === 'navigateUp' || action === 'navigateDown' || action === 'previousCategory' || action === 'nextCategory') return;
+    if (!action || action === 'switchView' || action === 'navigateUp' || action === 'navigateDown' || action === 'previousCategory' || action === 'nextCategory') return;
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;

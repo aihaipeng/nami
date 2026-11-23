@@ -1061,7 +1061,9 @@ describe('database clipboard history', () => {
     await windowState({ recordsFocus: (bridge.snapshot.window.recordsFocus ?? 0) + 1 });
     await waitFor(() => expect(listRows()).toHaveLength(2));
     expect(screen.getByRole('button', { name: 'Favorite clipboard records' }).getAttribute('aria-pressed')).toBe('false');
-    expect(document.querySelector('.history-row.selected')).toBeNull();
+    // A fresh session enters on the first unpinned record instead of restoring an earlier selection.
+    expect([...document.querySelectorAll('.history-row.selected')]).toEqual([row('first')]);
+    expect(document.activeElement).toBe(row('first').querySelector('.history-row-select'));
     expect(calls('clipboard_record_update')).toHaveLength(0);
     fireEvent.contextMenu(row('first')); fireEvent.click(screen.getByRole('menuitem', { name: 'Note' }));
     expect((await screen.findByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('');
@@ -1092,7 +1094,8 @@ describe('database clipboard history', () => {
     await act(async () => finish());
     await windowState({ recordsFocus: (bridge.snapshot.window.recordsFocus ?? 0) + 1 });
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(document.querySelector('.history-row.selected')).toBeNull();
+    expect([...document.querySelectorAll('.history-row.selected')]).toEqual([row('first')]);
+    expect(document.activeElement).toBe(row('first').querySelector('.history-row-select'));
     view.unmount();
     expect(bridge.listeners.get('window://visibility')?.size).toBe(0);
   });
@@ -1445,6 +1448,7 @@ describe('database clipboard history', () => {
 
   it('starts with a keyboard target and runs Return, preview and record actions from search without a click', async () => {
     bridge.snapshot.window.translationVisible = false;
+    bridge.snapshot.clipboardControls.recordsOpenFocus = 'search';
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     const search = screen.getByRole('searchbox');
@@ -2507,6 +2511,9 @@ describe('database clipboard history', () => {
     const search = screen.getByRole('searchbox');
     const first = row('first').querySelector('.history-row-select')!;
     const pinned = row('pinned').querySelector('.history-row-select')!;
+    // Opening starts on the first unpinned record; the search field is one Command-F away.
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'f', code: 'KeyF', metaKey: true });
     expect(document.activeElement).toBe(search);
     fireEvent.keyDown(search, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(first);

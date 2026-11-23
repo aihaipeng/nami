@@ -3,7 +3,6 @@ import type { ViewProps } from '../App';
 import { Clipboard } from '../clipboard/Clipboard';
 import { HistoryPanel } from '../translation/HistoryPanel';
 import type { HistoryRecord } from '../translation/history';
-import { focusRecordList } from './recordFocus';
 import { editsText, matchesBinding } from './shortcuts';
 import { translationShortcutEnabled } from './contracts';
 import { clipboardKeyAction, clipboardPanelShortcuts } from './clipboardShortcuts';
@@ -32,10 +31,6 @@ export function RecordsWorkspace({ selectedId = null, onSelect, ...props }: View
         return;
       }
       const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot), event);
-      if (action === 'focusRecords') {
-        if (!event.repeat && focusRecordList(root.querySelector('.record-view:not([hidden]) .history-panel[data-focus-ready]'))) event.preventDefault();
-        return;
-      }
       if (target instanceof HTMLElement && target !== document.body && !target.closest('.history-row-select, .history-search input')) return;
       if (action !== 'switchView') return;
       event.preventDefault();
