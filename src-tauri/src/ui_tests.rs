@@ -7864,7 +7864,81 @@ return true;
                         "paste was received but host reported failure: {result}"
                     ));
                 }
-                samples.push(serde_json::json!({"actualExternalPasteReceived":true}));
+                const SECOND_TEXT: &str = "NAMI pinned sequential paste two";
+                {
+                    let state = app.state::<AppState>();
+                    state
+                        .database
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .ok_or("test database")?
+                        .clipboard_insert(&nami::clipboard::ClipboardRecord {
+                            id: "cross-app-paste-two".into(),
+                            kind: "text".into(),
+                            text: SECOND_TEXT.into(),
+                            date: "2099-01-01T00:00:01Z".into(),
+                            is_favorite: false,
+                            is_pinned: false,
+                            source_app: None,
+                            image_path: None,
+                            fingerprint: "cross-app-paste-two".into(),
+                        })?;
+                }
+                crate::clipboard_runtime::changed(app)?;
+                on_main(app, move |app| {
+                    {
+                        let state = app.state::<AppState>();
+                        let mut regions = state.windows.lock().unwrap();
+                        regions.history_pinned = true;
+                        regions.clipboard_pinned = true;
+                    }
+                    crate::windows::resume_navigation(app, "clipboard")?;
+                    *app.state::<AppState>().target.lock().unwrap() = Some(target);
+                    Ok(())
+                })?;
+                evaluate_view_dom(
+                    app,
+                    "clipboard",
+                    r#"
+window.__fixturePasteTwo=null;
+window.__TAURI_INTERNALS__.invoke('clipboard_record_use',{recordId:'cross-app-paste-two',action:'paste'})
+    .then(value=>window.__fixturePasteTwo=value,error=>window.__fixturePasteTwo={error:String(error)});
+return true;
+"#,
+                )?;
+                let second = wait_records(
+                    app,
+                    "return {ready:!!window.__fixturePasteTwo,...window.__fixturePasteTwo};",
+                )?;
+                fixture.expect(&format!("PASTE [{TEXT}{SECOND_TEXT}]"))?;
+                if second["status"] != "dispatched" {
+                    return Err(format!(
+                        "pinned sequential paste reported failure: {second}"
+                    ));
+                }
+                let mut returned_focus = false;
+                for _ in 0..40 {
+                    if on_main(app, |app| Ok(crate::windows::clipboard_has_focus(app)))? {
+                        returned_focus = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                if !returned_focus {
+                    return Err(
+                        "pinned clipboard panel did not reclaim focus after sequential paste"
+                            .into(),
+                    );
+                }
+                on_main(app, |app| {
+                    let state = app.state::<AppState>();
+                    let mut regions = state.windows.lock().unwrap();
+                    regions.history_pinned = false;
+                    regions.clipboard_pinned = false;
+                    Ok(())
+                })?;
+                samples.push(serde_json::json!({"actualExternalPasteReceived":true,"pinnedSequentialPasteReceived":true,"pinnedFocusReturned":true}));
             } else {
                 if result["code"] != "permission_required" || fixture.next_event()?.is_some() {
                     return Err(format!(

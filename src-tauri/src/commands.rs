@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, Webview};
 
 const IMAGE_PASTE_SETTLE: Duration = Duration::from_millis(200);
 const PASTE_KEY_GAP: Duration = Duration::from_millis(15);
+const PASTE_FOCUS_RETURN_DELAY: Duration = Duration::from_millis(60);
 
 fn image_history_paste(payload: &platform::ClipboardPayload) -> bool {
     matches!(
@@ -890,7 +891,8 @@ pub async fn clipboard_record_use(
             operation,
             activation,
         };
-        // Yield the key-up turn before reclaiming focus, then check ownership again.
+        // Let the target app consume Cmd+V before reclaiming pinned panel focus.
+        tokio::time::sleep(PASTE_FOCUS_RETURN_DELAY).await;
         on_main(&app, move |app| {
             let state = app.state::<AppState>();
             let owns_focus = handoff.still_owned(
@@ -2236,7 +2238,7 @@ pub async fn clipboard_image(
 mod tests {
     use super::{
         image_history_paste, paste_release_result, remaining_image_settle, PasteFocusReturn,
-        WindowState, PASTE_KEY_GAP,
+        WindowState, PASTE_FOCUS_RETURN_DELAY, PASTE_KEY_GAP,
     };
     use crate::platform::ClipboardPayload;
     use std::time::Duration;
@@ -2341,6 +2343,7 @@ mod tests {
             Duration::ZERO
         );
         assert_eq!(PASTE_KEY_GAP, Duration::from_millis(15));
+        assert_eq!(PASTE_FOCUS_RETURN_DELAY, Duration::from_millis(60));
     }
 
     #[test]

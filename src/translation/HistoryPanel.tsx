@@ -177,6 +177,16 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   async function updateRecord(id: string, action: 'favorite' | 'pin' | 'delete') {
     const version = actionVersion.current;
     const follow = { query, favoritesOnly, selectedId: selection, selectionRevision: history.selectionRevision };
+    if (action === 'delete') {
+      const focusedRow = document.activeElement?.closest<HTMLElement>('article[data-record-id]');
+      if (focusedRow?.dataset.recordId === id) {
+        const ordered = [...filtered.filter((record) => record.isPinned), ...filtered.filter((record) => !record.isPinned)];
+        const index = ordered.findIndex((record) => record.id === id);
+        const neighbor = (ordered[index + 1] ?? ordered[index - 1])?.id;
+        if (neighbor) focusRow(neighbor);
+        else search.current?.focus({ preventScroll: true });
+      }
+    }
     if (await history.update(id, action) && version === actionVersion.current && actionContext.current.active) setFollowQuery(follow);
   }
 
@@ -306,6 +316,12 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const isDeleting = deleting.has(record.id);
     const canDelete = !record.isFavorite && !record.isPinned;
     const label = `${name(record.sourceLanguage)} - ${record.targetLanguages.map(name).join(', ')}`;
+    const description = [
+      record.title ? `Note: ${record.title}` : null,
+      record.isPinned ? 'Pinned' : null,
+      record.isFavorite ? 'Favorite' : null,
+      label,
+    ].filter(Boolean).join(', ');
     return <article hidden={isDeleting} aria-hidden={isDeleting || undefined} inert={isDeleting || undefined} data-record-target={active && focusReady && !isDeleting && (menu?.id ?? focusedId) === record.id || undefined} onFocus={(event) => {
       if (!event.currentTarget.contains(event.relatedTarget)) { setTarget(record.id); previewRecord(record); }
     }} onMouseMove={(event) => {
@@ -313,7 +329,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       targetOnMouseMove(event, () => { setTarget(record.id); previewRecord(record); });
     }} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} data-record-id={record.id} data-keyboard-current={keyboardId === record.id || undefined} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')}
       style={{ '--history-actions-width': `${canDelete ? 124 : 99}px` } as CSSProperties}>
-      <button className="history-row-select" aria-label={`Translation: ${record.text}`} aria-current={keyboardId === record.id || undefined} aria-pressed={selection === record.id} onClick={(event) => {
+      <button className="history-row-select" aria-label={`Translation: ${record.text}`} aria-description={description} aria-current={keyboardId === record.id || undefined} aria-pressed={selection === record.id} onClick={(event) => {
         setTarget(record.id);
         if (clickedRecord.current === record.id) {
           clickedRecord.current = null;

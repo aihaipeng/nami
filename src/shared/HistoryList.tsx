@@ -85,7 +85,7 @@ export function HistoryList({ list, pinnedList, pinned, pinnedCount = pinned.len
     if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.nativeEvent.isComposing && ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) showScrollbar();
   }}>
     <div ref={frame} id={scroll.overflow ? listId : undefined} className={`history-list-frame${scroll.overflow ? ' history-list' : ''}`} data-overflow={scroll.overflow} onScroll={handleScroll}>
-      <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.overflow}>{pinned}</div>
+      <div ref={pinnedList} className={`history-pinned${pinnedCount ? '' : ' empty'}`} data-overflow={scroll.overflow} role={pinnedCount ? 'region' : undefined} aria-label={pinnedCount ? 'Pinned records' : undefined}>{pinned}</div>
       <div ref={content} id={scroll.overflow ? undefined : listId} className={`history-unpinned${scroll.overflow ? '' : ' history-list'}`} onScroll={handleScroll}>
         <div className="history-items">{children}</div>
       </div>

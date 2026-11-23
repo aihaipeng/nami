@@ -11,8 +11,20 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
   kind?: ClipboardKind | null; onKindChange?: (kind: ClipboardKind | null) => void; activation?: 'copy' | 'paste';
 }) {
   const [open, setOpen] = useState(false);
+  const [announcement, setAnnouncement] = useState('');
   const footer = useRef<HTMLElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const previousFilter = useRef<{ favoritesOnly: boolean; kind: ClipboardKind | null } | null>(null);
+  const filterAnnounce = useRef(false);
+  useEffect(() => {
+    const previous = previousFilter.current;
+    previousFilter.current = { favoritesOnly, kind };
+    if (!active) { filterAnnounce.current = false; setAnnouncement(''); return; }
+    if (previous && (previous.favoritesOnly !== favoritesOnly || previous.kind !== kind)) filterAnnounce.current = true;
+    if (!filterAnnounce.current) return;
+    const filterName = favoritesOnly ? 'Favorites' : kind === 'text' ? 'Text' : kind === 'image' ? 'Images' : kind === 'files' ? 'Files' : 'All records';
+    setAnnouncement(`${filterName}, ${total} ${total === 1 ? 'record' : 'records'}`);
+  }, [active, favoritesOnly, kind, total]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => { if (!footer.current?.contains(event.target as Node)) setOpen(false); };
@@ -69,7 +81,8 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }
   }}>
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
-    <div className="history-filters">
+    <span className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</span>
+    <div className="history-filters" role="group" aria-label="Filter records">
       {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
       {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
     </div>

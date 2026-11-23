@@ -2609,4 +2609,45 @@ describe('clipboard open target', () => {
     fireEvent.click(reveal);
     expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'pinned', execute: true });
   });
+
+  it('exposes VoiceOver live announcements, pinned landmark, row metadata and focus restoration for menu and inline actions', async () => {
+    records = [
+      { ...records[1], id: 'pinned-file', kind: 'files', text: 'report.pdf', title: 'Quarterly report', isPinned: true, isFavorite: true },
+      { ...records[0], id: 'first-text', kind: 'text', text: 'First entry', isPinned: false, isFavorite: false },
+      { ...records[0], id: 'second-text', kind: 'text', text: 'Second entry', isPinned: false, isFavorite: false },
+    ];
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(3));
+
+    // Persistent polite live feedback region is mounted even before any message renders.
+    const feedbackRegion = document.querySelector('.clipboard-panel .record-feedback-live');
+    expect(feedbackRegion?.getAttribute('aria-live')).toBe('polite');
+    expect(document.querySelector('.clipboard-panel .record-feedback')).toBeNull();
+
+    // Pinned section has a region landmark and rows expose kind, note, pin and favorite state.
+    expect(screen.getByRole('region', { name: 'Pinned records' })).toBeTruthy();
+    const pinnedButton = within(row('pinned-file')).getByRole('button', { name: 'Clipboard: report.pdf' });
+    expect(pinnedButton.getAttribute('aria-description')).toBe('Files, Note: Quarterly report, Pinned, Favorite');
+
+    // Switching category filter announces active filter and count politely without stealing focus.
+    expect(screen.getByRole('group', { name: 'Filter records' })).toBeTruthy();
+    const liveFilter = document.querySelector<HTMLElement>('.clipboard-panel .history-footer .sr-only[aria-live="polite"]')!;
+    expect(liveFilter.textContent).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    await waitFor(() => expect(liveFilter.textContent).toBe('Favorites, 1 record'));
+    fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+    await waitFor(() => expect(liveFilter.textContent).toBe('All records, 3 records'));
+
+    // Context-menu action returns focus to the record row instead of dropping to body.
+    fireEvent.contextMenu(row('first-text'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Favorite' }));
+    await waitFor(() => expect(document.activeElement).toBe(within(row('first-text')).getByRole('button', { name: 'Clipboard: First entry' })));
+
+    // Inline delete button activation restores focus cleanly to the neighboring record.
+    const deleteButton = within(row('first-text')).getByRole('button', { name: 'Delete clipboard record' });
+    act(() => deleteButton.focus());
+    fireEvent.click(deleteButton);
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    expect(document.activeElement).toBe(within(row('second-text')).getByRole('button', { name: 'Clipboard: Second entry' }));
+  });
 });
