@@ -235,8 +235,10 @@ describe('clipboard details', () => {
     fireEvent.mouseMove(row('second'));
     await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
     expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(within(pane()).queryByRole('button', { name: 'Show QR Code' })).toBeNull();
+    expect(within(pane()).getByRole('button', { name: 'Show in Finder' })).toBeTruthy();
     expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
-    expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
+    expect(pane().querySelectorAll('.history-action')).toHaveLength(6);
   });
 
   it('disables every retained detail action while a new record loads and delays the shared activity beam', async () => {
@@ -472,4 +474,167 @@ it('toggles details closed with the preview shortcut when focus is inside the de
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
   expect(fireEvent.keyDown(pane().querySelector('.clipboard-detail-text')!, { key: ' ', code: 'Space' })).toBe(false);
   expect(calls('records_details_toggle')).toHaveLength(1);
+});
+
+it('renders sanitized rich text preview by default, blocks script/external media/link navigation, and toggles to plain text', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_record_detail') {
+      const { recordId } = args as { recordId: string };
+      const record = first();
+      if (recordId === record.id) {
+        return {
+          ...record,
+          width: null,
+          height: null,
+          size: null,
+          characterCount: record.text.length,
+          richTextFormat: 'html',
+          richTextHtml: '<p>Hello <strong>Rich</strong></p><script>window.__xss=1</script><img src="https://evil.example/a.png"><a href="https://example.com">Docs</a><a href="javascript:alert(1)">Bad</a>',
+          files: [],
+        };
+      }
+    }
+    return baseInvoke(name, args);
+  });
+
+  direct();
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
+  const rich = pane().querySelector<HTMLElement>('.clipboard-detail-rich')!;
+  expect(rich.querySelector('strong')?.textContent).toBe('Rich');
+  expect(rich.querySelector('script')).toBeNull();
+  expect(rich.querySelector('img')).toBeNull();
+  const links = [...rich.querySelectorAll('a')];
+  expect(links[0].getAttribute('href')).toBe('https://example.com');
+  expect(links[1].getAttribute('href')).toBeNull();
+  expect(fireEvent.click(links[0])).toBe(false);
+  expect(pane().querySelector('.clipboard-detail-metadata')?.textContent).toContain('Rich Text (HTML)');
+
+  const modeGroup = within(pane()).getByRole('group', { name: 'Preview Format' });
+  fireEvent.click(within(modeGroup).getByRole('button', { name: 'Plain' }));
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+  expect(pane().querySelector('.clipboard-detail-rich')).toBeNull();
+
+  fireEvent.click(within(modeGroup).getByRole('button', { name: 'Rich' }));
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
+});
+
+it('renders L2 color, JSON, timestamp, and QR code views in details without modifying the stored record', async () => {
+  // Color card + one-click HEX/RGB/HSL copy using shared icon-button and record-copied feedback
+  first().text = '#0ea5e9';
+  direct();
+  const copyRgb = await within(pane()).findByRole('button', { name: 'Copy RGB' });
+  expect(pane().querySelector('.clipboard-smart-color')).toBeTruthy();
+  expect(copyRgb.classList.contains('icon-button')).toBe(true);
+  expect(copyRgb.querySelector('.history-symbol[data-symbol="doc.on.doc"]')).toBeTruthy();
+  fireEvent.click(copyRgb);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'rgb(14, 165, 233)' }));
+  await waitFor(() => expect(copyRgb.classList.contains('record-copied')).toBe(true));
+  expect(copyRgb.querySelector('.copy-success')).toBeTruthy();
+
+  // JSON format / minify / copy
+  first().text = '{"b":2,"a":1}';
+  await emit('clipboard_changed', 2);
+  const formatBtn = await within(pane()).findByRole('button', { name: 'Format' });
+  fireEvent.click(formatBtn);
+  expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('{\n  "b": 2,\n  "a": 1\n}');
+  const copyJson = within(pane()).getByRole('button', { name: 'Copy JSON' });
+  expect(copyJson.classList.contains('icon-button')).toBe(true);
+  fireEvent.click(copyJson);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '{\n  "b": 2,\n  "a": 1\n}' }));
+  expect(first().text).toBe('{"b":2,"a":1}');
+
+  // Timestamp local + ISO copy
+  first().text = '1700000000';
+  await emit('clipboard_changed', 3);
+  const copyIso = await within(pane()).findByRole('button', { name: 'Copy ISO' });
+  fireEvent.click(copyIso);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '2023-11-14T22:13:20.000Z' }));
+
+  // Local QR generator toggle integrated into RecordActions
+  first().text = 'https://example.test/docs';
+  await emit('clipboard_changed', 4);
+  const qrToggle = await within(pane()).findByRole('button', { name: 'Show QR Code' });
+  expect(qrToggle.closest('.history-row-actions')).toBeTruthy();
+  expect(qrToggle.classList.contains('icon-button')).toBe(true);
+  fireEvent.click(qrToggle);
+  expect(within(pane()).getByRole('img', { name: 'QR Code' })).toBeTruthy();
+  const hideQr = within(pane()).getByRole('button', { name: 'Hide QR Code' });
+  expect(hideQr.classList.contains('record-active')).toBe(true);
+  fireEvent.click(hideQr);
+  expect(within(pane()).queryByRole('img', { name: 'QR Code' })).toBeNull();
+
+  // Ordinary long plain text shows no extra smart cards or QR toggle
+  first().text = 'Plain text without structured data. '.repeat(12);
+  await emit('clipboard_changed', 5);
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+  expect(pane().querySelector('.clipboard-smart-card')).toBeNull();
+  expect(pane().querySelector('.clipboard-smart-bar')).toBeNull();
+  expect(within(pane()).queryByRole('button', { name: 'Show QR Code' })).toBeNull();
+});
+
+it('displays locally detected QR codes on images and opens links only on explicit click', async () => {
+  records[1] = { ...first(), id: 'qr-img', kind: 'image', text: 'Image', imageIndexStatus: 'indexed', width: 400, height: 400, characterCount: null, size: 12_000 };
+  bridge.snapshot.window.clipboardDetailId = 'qr-img';
+  bridge.snapshot.window.translationVisible = true;
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_image_qr_codes') return ['https://example.test/from-qr', 'plain-qr-payload'];
+    if (name === 'clipboard_text_copy' || name === 'clipboard_open_url') return null;
+    return baseInvoke(name, args);
+  });
+  render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
+  expect(await within(pane()).findByText('https://example.test/from-qr')).toBeTruthy();
+  expect(within(pane()).getByText('plain-qr-payload')).toBeTruthy();
+  expect(calls('clipboard_open_url')).toHaveLength(0);
+  const openButtons = within(pane()).getAllByRole('button', { name: 'Open Link' });
+  expect(openButtons).toHaveLength(1);
+  fireEvent.click(openButtons[0]);
+  await waitFor(() => expect(calls('clipboard_open_url').at(-1)?.[1]).toEqual({ url: 'https://example.test/from-qr' }));
+  fireEvent.click(within(pane()).getAllByRole('button', { name: 'Copy QR Code' })[1]);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'plain-qr-payload' }));
+});
+
+it('shows a detail toolbar open-target action for openable files and links and omits it for missing files', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_open_target') {
+      const req = args as { execute: boolean; fileIndex?: number };
+      if (!req.execute) {
+        if (first().text.startsWith('https://')) return 'link';
+        if (first().text.startsWith('/tmp/')) return 'file';
+        return null;
+      }
+      return 'file';
+    }
+    return baseInvoke(name, args);
+  });
+
+  // Single existing file (including single image file) gets Show in Finder action in RecordActions.
+  Object.assign(first(), {
+    kind: 'files',
+    text: '["/tmp/photo.png"]',
+    files: [{ path: '/tmp/photo.png', name: 'photo.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }],
+  });
+  direct();
+  const revealFileBtn = await within(pane()).findByRole('button', { name: 'Show in Finder' });
+  expect(revealFileBtn.closest('.history-row-actions')).toBeTruthy();
+  expect(revealFileBtn.classList.contains('icon-button')).toBe(true);
+  fireEvent.click(revealFileBtn);
+  await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
+
+  // Missing single file omits the toolbar open button.
+  Object.assign(first(), {
+    files: [{ path: '/tmp/missing.png', name: 'missing.png', exists: false, isDir: false, isImage: true, iconDataUrl: null }],
+  });
+  await emit('clipboard_changed', 2);
+  await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull());
+
+  // Openable text link shows Open Link in RecordActions.
+  Object.assign(first(), { kind: 'text', text: 'https://example.test/open', files: [] });
+  await emit('clipboard_changed', 3);
+  const openLinkBtn = await within(pane()).findByRole('button', { name: 'Open Link' });
+  expect(openLinkBtn.closest('.history-row-actions')).toBeTruthy();
+  fireEvent.click(openLinkBtn);
+  await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: undefined }));
 });

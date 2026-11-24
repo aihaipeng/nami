@@ -55,13 +55,35 @@
 /* The detail pane shares the records toolbar, actions, edge mask and scrollbar. */
 .clipboard-detail.history-panel { position: relative; inset: auto; width: 100%; min-width: 0; }
 .translation-panel[hidden] { display: none; }
-.clipboard-detail-toolbar { height: 38px; flex: 0 0 38px; display: flex; align-items: center; justify-content: flex-end; padding: 10px 10px 0; }
+.clipboard-detail-toolbar { height: 38px; flex: 0 0 38px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 10px 0; }
+.clipboard-detail-mode { margin-right: auto; display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: 7px; background: hsl(var(--foreground) / .06); }
+.clipboard-detail-mode button { height: 22px; padding: 0 8px; border-radius: 5px; font-size: 11px; color: var(--history-secondary); transition: background-color 120ms ease-out, color 120ms ease-out; }
+.clipboard-detail-mode button:hover:not([aria-pressed=true]) { color: var(--history-label); }
+.clipboard-detail-mode button[aria-pressed=true] { background: hsl(var(--foreground) / .13); color: var(--history-label); font-weight: 500; }
 .clipboard-detail-toolbar .history-row-actions { position: relative; inset: auto; opacity: 1; visibility: visible; transform: none; }
 .clipboard-detail .history-viewport { position: relative; inset: auto; flex: 1; margin-top: 4px; }
 .clipboard-detail .history-list { padding: 8px 14px; }
 .clipboard-detail .history-items { margin: 0; padding: 0; clip-path: none; }
 .clipboard-detail-content { min-width: 0; }
 .clipboard-detail-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.clipboard-detail-rich { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; color: hsl(var(--foreground)); }
+.clipboard-detail-rich > :first-child { margin-top: 0; }
+.clipboard-detail-rich > :last-child { margin-bottom: 0; }
+.clipboard-detail-rich :is(p, ul, ol, pre, blockquote, table, h1, h2, h3, h4, h5, h6) { margin: 0 0 8px; }
+.clipboard-detail-rich h1 { font-size: 17px; font-weight: 650; line-height: 1.3; }
+.clipboard-detail-rich h2 { font-size: 15px; font-weight: 650; line-height: 1.35; }
+.clipboard-detail-rich h3, .clipboard-detail-rich h4, .clipboard-detail-rich h5, .clipboard-detail-rich h6 { font-size: 13.5px; font-weight: 600; line-height: 1.4; }
+.clipboard-detail-rich :is(ul, ol) { padding-left: 18px; }
+.clipboard-detail-rich blockquote { padding-left: 10px; border-left: 2px solid hsl(var(--foreground) / .22); color: var(--history-secondary); }
+.clipboard-detail-rich :is(code, pre) { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+.clipboard-detail-rich code { padding: 1px 4px; border-radius: 4px; background: hsl(var(--foreground) / .07); }
+.clipboard-detail-rich pre { padding: 8px 10px; border-radius: 7px; background: hsl(var(--foreground) / .06); overflow-x: auto; white-space: pre-wrap; }
+.clipboard-detail-rich pre code { padding: 0; background: none; }
+.clipboard-detail-rich table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.clipboard-detail-rich :is(th, td) { padding: 4px 7px; border: 1px solid hsl(var(--foreground) / .14); text-align: left; vertical-align: top; }
+.clipboard-detail-rich th { background: hsl(var(--foreground) / .05); font-weight: 600; }
+.clipboard-detail-rich hr { border: 0; border-top: 1px solid hsl(var(--foreground) / .14); margin: 10px 0; }
+.clipboard-detail-rich a { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: default; }
 .clipboard-detail .clipboard-image-preview { display: flex; justify-content: center; margin: 0; }
 .clipboard-detail .clipboard-image-preview img { max-height: none; max-width: 100%; }
 .clipboard-detail .clipboard-files { margin: 0; gap: 10px; }
@@ -95,3 +117,23 @@
 .clipboard-inline-icon { display: inline-block; width: 13px; height: 13px; margin-right: 5px; vertical-align: -2px; stroke-width: 1.5; color: var(--history-secondary); opacity: .88; }
 .clipboard-link-muted, .clipboard-link-rest { color: var(--history-secondary); }
 .clipboard-link-host { font-weight: 500; color: var(--history-label); }
+
+.clipboard-smart-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.clipboard-smart-bar .clipboard-detail-mode { margin-right: 0; }
+
+.clipboard-smart-card { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 10px; border-radius: 10px; border: 1px solid hsl(var(--foreground) / .09); background: hsl(var(--foreground) / .04); }
+.clipboard-smart-color-preview { position: relative; height: 34px; border-radius: 7px; overflow: hidden; }
+.clipboard-smart-color-preview[data-alpha=true] { background: repeating-conic-gradient(hsl(var(--foreground) / .18) 0% 25%, hsl(var(--background) / .75) 0% 50%) 50% / 10px 10px; }
+.clipboard-smart-color-preview::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: var(--swatch-color); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .16); }
+.clipboard-smart-rows { display: flex; flex-direction: column; gap: 4px; }
+.clipboard-smart-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
+.clipboard-smart-key { flex: 0 0 auto; min-width: 48px; white-space: nowrap; font-size: 11px; color: var(--history-secondary); }
+.clipboard-smart-icon { flex: 0 0 14px; width: 14px; height: 14px; stroke-width: 1.5; color: var(--history-secondary); }
+.clipboard-smart-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: var(--history-label); user-select: text; -webkit-user-select: text; }
+.clipboard-smart-value-wrap { white-space: normal; overflow-wrap: anywhere; }
+.clipboard-smart-icon-button, .clipboard-smart-icon-button[aria-pressed=true] { background: transparent; color: var(--history-label); }
+.clipboard-smart-icon-button:hover:not(:disabled), .clipboard-smart-icon-button:active:not(:disabled) { background: transparent; }
+.clipboard-smart-icon-button:disabled { opacity: .4; }
+
+.clipboard-qr-preview { display: flex; justify-content: center; padding: 14px 8px; }
+.clipboard-qr-svg { display: block; width: min(210px, 100%); height: auto; border-radius: 10px; box-shadow: 0 2px 12px rgb(0 0 0 / .14); }

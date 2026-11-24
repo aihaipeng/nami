@@ -206,8 +206,10 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     await command('records_details_toggle');
   }
 
-  async function useRecord(recordId: string, action: 'copy' | 'paste' | 'pastePlain' | 'pastePaths' | 'activate') {
-    if (!native || (action === 'copy' || action === 'activate' ? !snapshot.capabilities.clipboardWrite : !snapshot.capabilities.autoPaste)) return false;
+  async function useRecord(recordId: string, action: 'copy' | 'copyPlain' | 'paste' | 'pastePlain' | 'pastePaths' | 'activate' | 'activateAlternate') {
+    const needsPaste = action === 'paste' || action === 'pastePlain' || action === 'pastePaths'
+      || (action === 'activateAlternate' && snapshot.clipboardControls.activation === 'copy');
+    if (!native || (needsPaste ? !snapshot.capabilities.autoPaste : !snapshot.capabilities.clipboardWrite)) return false;
     const current = ++operation.current;
     setSelected(recordId); setFeedback(null);
     try {
@@ -407,8 +409,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       return;
     }
     const activate = (fromSearch || fromRecord) && !action && plain && key.key === 'Enter';
+    const alternateActivate = (fromSearch || fromRecord) && !action && key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey && key.key === 'Enter';
     // The row button must not paste on Space or activate a stale result on Return.
-    if (fromRecord && ((key.key === ' ' && !(action === 'preview' && canPreview)) || activate)) event.preventDefault();
+    if (fromRecord && ((key.key === ' ' && !(action === 'preview' && canPreview)) || activate || alternateActivate)) event.preventDefault();
     const index = ordered.findIndex((record) => record.id === id);
     const record = ordered[index];
     if (!clipboard.displayReady || !record) return;
@@ -425,9 +428,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       } else if (!fromSearch && key.key === 'ArrowUp') input?.focus();
       return;
     }
-    if (activate) {
+    if (activate || alternateActivate) {
       event.preventDefault();
-      if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }
+      if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, alternateActivate ? 'activateAlternate' : 'activate'); }
       return;
     }
     if (!action || action === 'switchView' || action === 'preview') return;
@@ -540,7 +543,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
     {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} snapshot={snapshot} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canCopy={native && snapshot.capabilities.clipboardWrite} canSave={native && snapshot.capabilities.clipboardImageSave && !savingImage} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
-      if (action === 'paste' || action === 'pastePlain' || action === 'pastePaths' || action === 'copy') void useRecord(menuRecord.id, action);
+      if (action === 'paste' || action === 'pastePlain' || action === 'pastePaths' || action === 'copy' || action === 'copyPlain') void useRecord(menuRecord.id, action);
       else if (action === 'save') void saveImage(menuRecord.id);
       else if (action === 'translate' || action === 'ocr') void processRecord(menuRecord.id, action);
       else if (action === 'openTarget') void openRecordTarget(menuRecord.id);

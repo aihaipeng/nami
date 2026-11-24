@@ -722,14 +722,19 @@ pub async fn clipboard_record_use(
         let state = app.state::<AppState>();
         let options = state.clipboard_options.lock().unwrap();
         let activation = match action.as_str() {
-            "copy" => Activation::Copy,
+            "copy" | "copyPlain" => Activation::Copy,
             "paste" | "pastePlain" | "pastePaths" => Activation::Paste,
             "activate" => options.activation,
+            "activateAlternate" => match options.activation {
+                Activation::Paste => Activation::Copy,
+                Activation::Copy => Activation::Paste,
+            },
             _ => return Err("invalid_argument".into()),
         };
         let mode = match action.as_str() {
-            "pastePlain" => PayloadMode::PlainText,
+            "pastePlain" | "copyPlain" => PayloadMode::PlainText,
             "pastePaths" => PayloadMode::FilePaths,
+            "activateAlternate" => PayloadMode::Restore { plain_text: false },
             _ => PayloadMode::Restore {
                 plain_text: matches!(activation, Activation::Paste) && options.paste_as_plain_text,
             },
@@ -1947,6 +1952,92 @@ pub async fn clipboard_record_drag(
     .await?;
     dispatched?;
     receiver.await.map_err(|_| "clipboard_drag_failed")?
+}
+
+#[tauri::command]
+pub async fn clipboard_image_qr_codes(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().image_ocr {
+        return Ok(Vec::new());
+    }
+    let record = crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_record(&record_id)
+    })
+    .await?;
+    let root = crate::clipboard_runtime::image_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let bytes = match record.kind.as_str() {
+            "image" => record
+                .image_path
+                .as_deref()
+                .and_then(|path| nami::clipboard::read_image(&root, path).ok()),
+            "files" => {
+                let files = nami::clipboard::all_file_entries(&record.text)?;
+                if files.len() == 1 && files[0].exists && !files[0].is_dir && files[0].is_image {
+                    nami::clipboard::read_file_preview(std::path::Path::new(&files[0].path)).ok()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some(bytes) = bytes else {
+            return Ok(Vec::new());
+        };
+        match platform::detect_image_qr_codes(&bytes) {
+            Ok(codes) => Ok(codes),
+            Err(_) => Ok(Vec::new()),
+        }
+    })
+    .await
+    .map_err(|_| "storage_worker".to_owned())?
+}
+
+#[tauri::command]
+pub async fn clipboard_text_copy(
+    window: Webview,
+    app: AppHandle,
+    text: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    if text.is_empty() || text.len() > nami::clipboard::MAX_TEXT_BYTES {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    on_main(&app, move |app| {
+        let version = platform::write_clipboard(&platform::ClipboardPayload::Text(text))
+            .map_err(|(code, _)| code.to_owned())?;
+        app.state::<AppState>()
+            .clipboard_version
+            .store(version, Ordering::SeqCst);
+        Ok(())
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn clipboard_open_url(
+    window: Webview,
+    app: AppHandle,
+    url: String,
+) -> Result<(), String> {
+    use nami::clipboard::open_target::{self, OpenTarget};
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_open_target {
+        return Err("platform_unavailable".into());
+    }
+    let Some(target @ OpenTarget::Link(_)) = open_target::resolve("text", &url, None)? else {
+        return Err("invalid_argument".into());
+    };
+    on_main(&app, move |_| platform::open_clipboard_target(target)).await?
 }
 
 #[tauri::command]

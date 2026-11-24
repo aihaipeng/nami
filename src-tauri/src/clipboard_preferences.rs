@@ -78,6 +78,7 @@ pub(crate) struct ClipboardOptions {
     excluded_apps: Vec<ExcludedApp>,
     ignored_pasteboard_types: Vec<String>,
     ignored_regexps: Vec<String>,
+    ignore_secrets: bool,
     #[serde(skip)]
     compiled_regexps: Vec<regex::Regex>,
     pub history_policy: HistoryPolicy,
@@ -103,8 +104,12 @@ impl Default for ClipboardOptions {
                 icon_data_url: None,
             })
             .collect(),
-            ignored_pasteboard_types: Vec::new(),
+            ignored_pasteboard_types: nami::clipboard::DEFAULT_IGNORED_PASTEBOARD_TYPES
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             ignored_regexps: Vec::new(),
+            ignore_secrets: false,
             compiled_regexps: Vec::new(),
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
@@ -155,6 +160,9 @@ impl ClipboardOptions {
             options.ignored_regexps = valid;
             options.compiled_regexps = compiled;
         }
+        options.ignore_secrets = db
+            .preference("clipboard_ignore_secrets")?
+            .is_some_and(|value| value == "true");
         options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
         options.activation = db
             .preference("clipboard_activation")?
@@ -195,9 +203,11 @@ impl ClipboardOptions {
     }
 
     pub(crate) fn ignores_text(&self, text: &str) -> bool {
-        self.compiled_regexps
-            .iter()
-            .any(|regex| regex.is_match(text))
+        (self.ignore_secrets && nami::clipboard::matches_secret_pattern(text))
+            || self
+                .compiled_regexps
+                .iter()
+                .any(|regex| regex.is_match(text))
     }
 }
 
@@ -411,6 +421,78 @@ pub async fn clipboard_ignored_type_remove(
         .unwrap()
         .ignored_pasteboard_types = types.clone();
     Ok(types)
+}
+
+#[tauri::command]
+pub async fn clipboard_ignored_type_update(
+    window: Webview,
+    app: AppHandle,
+    old_pasteboard_type: String,
+    new_pasteboard_type: String,
+) -> Result<Vec<String>, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let next_kind = new_pasteboard_type.trim().to_owned();
+    if !nami::clipboard::valid_pasteboard_type(&next_kind) {
+        return Err("clipboard_invalid_pasteboard_type".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let mut types = state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types
+        .clone();
+    let Some(index) = types
+        .iter()
+        .position(|existing| existing == &old_pasteboard_type)
+    else {
+        return Ok(types);
+    };
+    if types
+        .iter()
+        .enumerate()
+        .any(|(i, existing)| i != index && existing == &next_kind)
+    {
+        types.remove(index);
+    } else {
+        types[index] = next_kind;
+    }
+    let value = serde_json::to_string(&types).map_err(|_| "storage_record")?;
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignored_pasteboard_types", &value)
+    })
+    .await?;
+    state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .ignored_pasteboard_types = types.clone();
+    Ok(types)
+}
+
+#[tauri::command]
+pub async fn clipboard_ignore_secrets_set(
+    window: Webview,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<bool, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let value = enabled.to_string();
+    database(&app, move |db| {
+        db.preference_set("clipboard_ignore_secrets", &value)
+    })
+    .await?;
+    state.clipboard_options.lock().unwrap().ignore_secrets = enabled;
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -668,6 +750,8 @@ pub(crate) struct StorageInfo {
     limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_age_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_storage_mb: Option<u32>,
 }
 
 // Size of the image store, including files left behind by a failed cleanup. No external file paths.
@@ -730,6 +814,7 @@ pub async fn records_storage_info(
         bytes: data.saturating_add(media),
         limit: policy.limit,
         max_age_days: policy.max_age_days,
+        max_storage_mb: policy.max_storage_mb,
     })
 }
 
@@ -751,8 +836,13 @@ pub async fn records_cleanup_preview(
     authorize(&window, &["settings"])?;
     let recent_since =
         (recent == Some(true)).then(|| chrono::Utc::now().timestamp_millis() - 15 * 60_000);
+    let root = if view == RecordView::Clipboard {
+        image_root(&app).ok()
+    } else {
+        None
+    };
     database(&app, move |db| {
-        db.records_cleanup_preview_scoped(view, policy, recent_since)
+        db.records_cleanup_preview_with_media(view, policy, recent_since, root.as_deref())
     })
     .await
 }
@@ -801,8 +891,15 @@ async fn cleanup_locked(
     notify: bool,
 ) -> Result<CleanupResult, String> {
     let root = image_root(app)?;
+    let root_for_db = root.clone();
     let (removed, images) = database(app, move |db| {
-        db.clipboard_cleanup_scoped(policy, categories, token.as_deref(), recent_since)
+        db.clipboard_cleanup_with_media(
+            policy,
+            categories,
+            token.as_deref(),
+            recent_since,
+            Some(&root_for_db),
+        )
     })
     .await?;
     // The transaction is committed. Notify records even if the filesystem is temporarily inaccessible.
@@ -856,7 +953,7 @@ pub(crate) async fn enforce_history(app: &AppHandle, notify: bool) {
         .lock()
         .unwrap()
         .history_policy;
-    if notify && policy.max_age_days.is_none() {
+    if notify && policy.max_age_days.is_none() && policy.max_storage_mb.is_none() {
         return;
     }
     match cleanup_locked(app, Some(policy), 0, None, None, notify).await {
@@ -948,9 +1045,32 @@ mod tests {
     fn loads_and_matches_custom_pasteboard_types_and_ignored_regexps() {
         let mut db =
             crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        // Unsaved preference loads the 5 built-in editable third-party UTI defaults.
+        let fresh = ClipboardOptions::load(&db).unwrap();
+        assert_eq!(
+            fresh.ignored_pasteboard_types,
+            nami::clipboard::DEFAULT_IGNORED_PASTEBOARD_TYPES
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert!(fresh.ignores_pasteboard_type("Pasteboard generator type"));
+        assert!(fresh.ignores_pasteboard_type("com.agilebits.onepassword"));
+        assert!(
+            !fresh.ignores_pasteboard_type(nami::clipboard::UNIVERSAL_CLIPBOARD_PASTEBOARD_TYPE)
+        );
+        assert!(!fresh.ignore_secrets);
+
+        // Saving an explicit empty list must stay empty after reload and never resurrect defaults.
+        db.preference_set("clipboard_ignored_pasteboard_types", "[]")
+            .unwrap();
+        let cleared = ClipboardOptions::load(&db).unwrap();
+        assert!(cleared.ignored_pasteboard_types.is_empty());
+        assert!(!cleared.ignores_pasteboard_type("com.agilebits.onepassword"));
+
         db.preference_set(
             "clipboard_ignored_pasteboard_types",
-            r#"["org.example.SecretType","com.vendor.token"]"#,
+            r#"["org.example.SecretType","com.vendor.token","com.apple.is-remote-clipboard"]"#,
         )
         .unwrap();
         db.preference_set(
@@ -958,10 +1078,15 @@ mod tests {
             r#"["^sk-[A-Za-z0-9]{6,}$","[invalid"]"#,
         )
         .unwrap();
+        db.preference_set("clipboard_ignore_secrets", "true")
+            .unwrap();
         let options = ClipboardOptions::load(&db).unwrap();
         assert!(options.ignores_pasteboard_type("org.example.SecretType"));
+        assert!(options.ignores_pasteboard_type("com.apple.is-remote-clipboard"));
         assert!(!options.ignores_pasteboard_type("org.example.Other"));
+        assert!(options.ignore_secrets);
         assert!(options.ignores_text("sk-abcdef12"));
+        assert!(options.ignores_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc"));
         assert!(!options.ignores_text("plain note"));
         assert_eq!(options.ignored_regexps, vec!["^sk-[A-Za-z0-9]{6,}$"]);
     }

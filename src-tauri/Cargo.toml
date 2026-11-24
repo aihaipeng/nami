@@ -35,6 +35,8 @@ html-escape = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["sync", "time", "macros"] }
 sha2 = "0.10"
+ring = "0.17"
+zeroize = "1"
 rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
 regex = "1"
 uuid = { version = "1.29.2", features = ["v4"] }
@@ -46,4 +48,4 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEven
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "objc2-core-foundation"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-image-io = { version = "0.3", default-features = false, features = ["std", "CGImageSource", "CGImageProperties"] }
-objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNTypes", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "objc2-image-io"] }
+objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNTypes", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNDetectBarcodesRequest", "VNObservation", "objc2-image-io"] }

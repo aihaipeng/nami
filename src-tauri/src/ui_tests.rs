@@ -2434,7 +2434,7 @@ const clean=!section.textContent.includes('Checks the active app only.')&&!secti
 const sizesOfIcons=[...list.querySelectorAll('img.clipboard-excluded-icon')].filter(img=>img.naturalWidth).map(img=>[img.naturalWidth,img.naturalHeight]);
 if(!sizesOfIcons.length)return {ready:false,iconCount:list.querySelectorAll('img').length};
 if(sizesOfIcons.some(size=>Math.max(...size)>40))throw Error('excluded app icon exceeds the thumbnail size');
-if(blocks.length!==3||section.querySelectorAll('.settings-group').length!==1||addButtons.length!==3||section.querySelector('.clipboard-rule-input'))throw Error('ignore rules must group apps, pasteboard types, and regex into one card with on-demand inputs');
+if(blocks.length!==4||section.querySelectorAll('.settings-group').length!==1||addButtons.length!==3||section.querySelector('.clipboard-rule-input'))throw Error('ignore rules must group apps, pasteboard types, regex, and privacy presets into one card with on-demand inputs');
 const addRights=addButtons.map(btn=>btn.getBoundingClientRect().right);
 if(addRights.some(right=>Math.abs(right-addRights[0])>0.5))throw Error('ignore rule add buttons must share a right edge');
 if(chips.length>=2&&Math.abs(chips[0].getBoundingClientRect().top-chips[1].getBoundingClientRect().top)>1)throw Error('excluded app chips should flow inline');
@@ -2836,12 +2836,18 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   await invoke('clipboard_capture_set',{enabled:false});
   if((await invoke('app_snapshot')).clipboardCaptureEnabled)throw Error('clipboard_capture_set did not disable capture');
   let badType=false;
-  try {await invoke('clipboard_ignored_type_add',{pasteboardType:'has space'});} catch (_) {badType=true;}
+  try {await invoke('clipboard_ignored_type_add',{pasteboardType:'bad\ntype'});} catch (_) {badType=true;}
   if(!badType)throw Error('invalid pasteboard type was accepted');
   const addedTypes=await invoke('clipboard_ignored_type_add',{pasteboardType:'org.example.SecretType'});
   if(!addedTypes.includes('org.example.SecretType'))throw Error('custom pasteboard type was not saved');
-  const removedTypes=await invoke('clipboard_ignored_type_remove',{pasteboardType:'org.example.SecretType'});
-  if(removedTypes.includes('org.example.SecretType'))throw Error('custom pasteboard type was not removed');
+  const updatedTypes=await invoke('clipboard_ignored_type_update',{oldPasteboardType:'org.example.SecretType',newPasteboardType:'org.example.UpdatedType'});
+  if(!updatedTypes.includes('org.example.UpdatedType')||updatedTypes.includes('org.example.SecretType'))throw Error('custom pasteboard type was not updated');
+  const removedTypes=await invoke('clipboard_ignored_type_remove',{pasteboardType:'org.example.UpdatedType'});
+  if(removedTypes.includes('org.example.UpdatedType'))throw Error('custom pasteboard type was not removed');
+  const secretsOn=await invoke('clipboard_ignore_secrets_set',{enabled:true});
+  if(secretsOn!==true)throw Error('ignore secrets was not enabled');
+  const secretsOff=await invoke('clipboard_ignore_secrets_set',{enabled:false});
+  if(secretsOff!==false)throw Error('ignore secrets was not disabled');
   let badRegex=false;
   try {await invoke('clipboard_ignored_regex_add',{pattern:'[unclosed'});} catch (_) {badRegex=true;}
   if(!badRegex)throw Error('invalid regex was accepted');

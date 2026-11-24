@@ -2,7 +2,11 @@ mod backup;
 mod clipboard;
 mod retention;
 
-pub use backup::{inspect_backup, BackupImportMode, BackupImportReport, BackupSummary};
+pub use backup::{
+    decrypt_backup_file, encrypt_backup_file, inspect_backup, inspect_backup_with_password,
+    is_encrypted_backup, BackupImportMode, BackupImportReport, BackupSummary, TempFileGuard,
+    MAX_BACKUP_PASSWORD_BYTES,
+};
 pub use clipboard::unlink_pending_clipboard_images;
 
 use crate::model::HistoryRecord;

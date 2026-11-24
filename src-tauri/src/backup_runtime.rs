@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager, Webview};
+use zeroize::Zeroizing;
 
 const IMPORT_CONFIRM_TTL: Duration = Duration::from_secs(300);
 
@@ -23,6 +24,7 @@ pub(crate) struct PendingBackupImport {
     path: PathBuf,
     file_size: u64,
     modified: Option<SystemTime>,
+    encrypted: bool,
     created_at: Instant,
 }
 
@@ -31,7 +33,9 @@ pub(crate) struct PendingBackupImport {
 pub struct BackupImportPreview {
     pub token: String,
     pub file_name: String,
-    pub summary: BackupSummary,
+    pub encrypted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<BackupSummary>,
 }
 
 fn validate_export_destination(app_data: &Path, destination: &Path) -> Result<PathBuf, String> {
@@ -79,10 +83,20 @@ fn atomic_publish_file(staging: &Path, destination: &Path) -> Result<(), String>
 pub async fn backup_export(
     window: Webview,
     app: AppHandle,
+    password: Option<String>,
 ) -> Result<Option<BackupSummary>, String> {
     authorize(&window, &["settings"])?;
     if !platform::capabilities().local_backup {
         return Err("platform_unavailable".into());
+    }
+    let password = password
+        .filter(|value| !value.is_empty())
+        .map(Zeroizing::new);
+    if password
+        .as_ref()
+        .is_some_and(|value| value.len() > database::MAX_BACKUP_PASSWORD_BYTES)
+    {
+        return Err("invalid_argument".into());
     }
     let app_data = app
         .path()
@@ -102,39 +116,46 @@ pub async fn backup_export(
     };
 
     let resolved_dest = validate_export_destination(&app_data, &destination)?;
-    let staging = std::env::temp_dir().join(format!(
+    let staging = database::TempFileGuard(std::env::temp_dir().join(format!(
         "nami-backup-staging-{}.namibak",
         uuid::Uuid::new_v4().simple()
-    ));
+    )));
 
     let state = app.state::<AppState>();
     let _history_lock = state.history_writes.lock().await;
     let _clipboard_lock = state.clipboard_writes.lock().await;
 
-    let staging_for_db = staging.clone();
-    let export_result = clipboard_runtime::database(&app, move |db| {
+    let staging_for_db = staging.0.clone();
+    let mut summary = clipboard_runtime::database(&app, move |db| {
         db.export_backup(&image_root, &staging_for_db)
     })
-    .await;
+    .await?;
 
-    let summary = match export_result {
-        Ok(summary) => summary,
-        Err(error) => {
-            let _ = std::fs::remove_file(&staging);
-            return Err(error);
-        }
-    };
+    let staging_for_publish = staging.0.clone();
+    let encrypted_size =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Option<u64>, String> {
+            if let Some(password) = password {
+                let encrypted_staging = database::TempFileGuard(std::env::temp_dir().join(
+                    format!("nami-backup-enc-{}.namibak", uuid::Uuid::new_v4().simple()),
+                ));
+                let size = database::encrypt_backup_file(
+                    &staging_for_publish,
+                    &encrypted_staging.0,
+                    &password,
+                )?;
+                atomic_publish_file(&encrypted_staging.0, &resolved_dest)?;
+                Ok(Some(size))
+            } else {
+                atomic_publish_file(&staging_for_publish, &resolved_dest)?;
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|_| "storage_worker")??;
 
-    let staging_for_copy = staging.clone();
-    let publish_result = tauri::async_runtime::spawn_blocking(move || {
-        let outcome = atomic_publish_file(&staging_for_copy, &resolved_dest);
-        let _ = std::fs::remove_file(&staging_for_copy);
-        outcome
-    })
-    .await
-    .map_err(|_| "storage_worker")?;
-
-    publish_result?;
+    if let Some(size) = encrypted_size {
+        summary.file_size = size;
+    }
     Ok(Some(summary))
 }
 
@@ -173,7 +194,12 @@ pub async fn backup_import_pick(
         if !meta.is_file() {
             return Err("backup_invalid".into());
         }
-        let summary = database::inspect_backup(&canonical)?;
+        let encrypted = database::is_encrypted_backup(&canonical)?;
+        let summary = if encrypted {
+            None
+        } else {
+            Some(database::inspect_backup(&canonical)?)
+        };
         let file_name = canonical
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -183,13 +209,14 @@ pub async fn backup_import_pick(
             meta.len(),
             meta.modified().ok(),
             file_name,
+            encrypted,
             summary,
         ))
     })
     .await
     .map_err(|_| "storage_worker")??;
 
-    let (canonical, file_size, modified, file_name, summary) = inspected;
+    let (canonical, file_size, modified, file_name, encrypted, summary) = inspected;
     let token = uuid::Uuid::new_v4().to_string();
     *app.state::<AppState>()
         .pending_backup_import
@@ -199,13 +226,67 @@ pub async fn backup_import_pick(
         path: canonical,
         file_size,
         modified,
+        encrypted,
         created_at: Instant::now(),
     });
     Ok(Some(BackupImportPreview {
         token,
         file_name,
+        encrypted,
         summary,
     }))
+}
+
+#[tauri::command]
+pub async fn backup_import_unlock(
+    window: Webview,
+    app: AppHandle,
+    token: String,
+    password: String,
+) -> Result<BackupSummary, String> {
+    authorize(&window, &["settings"])?;
+    if !platform::capabilities().local_backup {
+        return Err("platform_unavailable".into());
+    }
+    let password = Zeroizing::new(password);
+    if password.is_empty() {
+        return Err("backup_password_required".into());
+    }
+    if password.len() > database::MAX_BACKUP_PASSWORD_BYTES {
+        return Err("backup_wrong_password".into());
+    }
+    let (path, file_size, modified, encrypted) = {
+        let state = app.state::<AppState>();
+        let slot = state.pending_backup_import.lock().unwrap();
+        let Some(pending) = slot.as_ref() else {
+            return Err("backup_token_expired".into());
+        };
+        if pending.token != token || pending.created_at.elapsed() > IMPORT_CONFIRM_TTL {
+            return Err("backup_token_expired".into());
+        }
+        (
+            pending.path.clone(),
+            pending.file_size,
+            pending.modified,
+            pending.encrypted,
+        )
+    };
+    if !encrypted {
+        return Err("invalid_argument".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<BackupSummary, String> {
+        let current_meta = std::fs::symlink_metadata(&path).map_err(|_| "backup_invalid")?;
+        if !current_meta.is_file()
+            || current_meta.len() != file_size
+            || current_meta.modified().ok() != modified
+        {
+            return Err("backup_changed".into());
+        }
+        database::inspect_backup_with_password(&path, Some(&password))
+    })
+    .await
+    .map_err(|_| "storage_worker")?
 }
 
 #[tauri::command]
@@ -214,11 +295,15 @@ pub async fn backup_import_apply(
     app: AppHandle,
     token: String,
     mode: BackupImportMode,
+    password: Option<String>,
 ) -> Result<BackupImportReport, String> {
     authorize(&window, &["settings"])?;
     if !platform::capabilities().local_backup {
         return Err("platform_unavailable".into());
     }
+    let password = password
+        .filter(|value| !value.is_empty())
+        .map(Zeroizing::new);
     let pending = {
         let state = app.state::<AppState>();
         let mut slot = state.pending_backup_import.lock().unwrap();
@@ -227,6 +312,12 @@ pub async fn backup_import_apply(
         });
         if !valid {
             return Err("backup_token_expired".into());
+        }
+        if slot
+            .as_ref()
+            .is_some_and(|pending| pending.encrypted && password.is_none())
+        {
+            return Err("backup_password_required".into());
         }
         slot.take().unwrap()
     };
@@ -250,7 +341,12 @@ pub async fn backup_import_apply(
     let primary_modifier = platform::capabilities().primary_modifier;
 
     let (report, page, reloaded_prefs) = clipboard_runtime::database(&app, move |db| {
-        let report = db.import_backup(&import_path, &image_root_for_import, mode)?;
+        let report = db.import_backup_with_password(
+            &import_path,
+            &image_root_for_import,
+            mode,
+            password.as_deref().map(String::as_str),
+        )?;
         let page = db.page(
             &database::HistoryQuery::default(),
             None,

@@ -1,4 +1,5 @@
 pub mod open_target;
+pub mod rich_text;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,13 +13,62 @@ pub const MAX_IGNORED_PASTEBOARD_TYPES: usize = 256;
 pub const MAX_IGNORED_REGEXPS: usize = 128;
 pub const MAX_IGNORED_REGEX_BYTES: usize = 512;
 pub const MAX_IGNORED_REGEX_COMPILED_BYTES: usize = 256 * 1024;
+pub const UNIVERSAL_CLIPBOARD_PASTEBOARD_TYPE: &str = "com.apple.is-remote-clipboard";
+pub const DEFAULT_IGNORED_PASTEBOARD_TYPES: [&str; 5] = [
+    "Pasteboard generator type",
+    "com.agilebits.onepassword",
+    "com.typeit4me.clipping",
+    "de.petermaurer.TransientPasteboardType",
+    "net.antelle.keeweb",
+];
 
 pub fn valid_pasteboard_type(kind: &str) -> bool {
     !kind.is_empty()
         && kind.len() <= 255
+        && kind == kind.trim()
         && kind
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b".-_:/".contains(&byte))
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-_:/ ".contains(&byte))
+}
+
+pub fn matches_secret_pattern(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
+            r"(?:^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{10,}(?:$|[^A-Za-z0-9_-])",
+            r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b",
+            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b",
+            r"\bsk-(?:proj-|ant-api\d{2}-|live_|test_)?[A-Za-z0-9_-]{20,}\b",
+            r"\bAIza[0-9A-Za-z_-]{35}\b",
+            r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b",
+            r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+            r"\bnpm_[A-Za-z0-9]{36}\b",
+            r"\bhf_[A-Za-z0-9]{20,}\b",
+        ]
+        .into_iter()
+        .map(|pattern| regex::Regex::new(pattern).expect("built-in secret regex must compile"))
+        .collect()
+    });
+    const HEAD_SCAN_BYTES: usize = 64 * 1024;
+    const TAIL_SCAN_BYTES: usize = 16 * 1024;
+    if text.len() <= HEAD_SCAN_BYTES + TAIL_SCAN_BYTES {
+        return patterns.iter().any(|re| re.is_match(text));
+    }
+    let mut head_end = HEAD_SCAN_BYTES;
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len() - TAIL_SCAN_BYTES;
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let head = &text[..head_end];
+    let tail = &text[tail_start..];
+    patterns
+        .iter()
+        .any(|re| re.is_match(head) || re.is_match(tail))
 }
 
 pub fn compile_ignored_regex(pattern: &str) -> Result<regex::Regex, String> {
@@ -76,6 +126,8 @@ pub struct HistoryPolicy {
     pub limit: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_storage_mb: Option<u32>,
 }
 
 impl Default for HistoryPolicy {
@@ -83,6 +135,7 @@ impl Default for HistoryPolicy {
         Self {
             limit: 500,
             max_age_days: None,
+            max_storage_mb: None,
         }
     }
 }
@@ -103,6 +156,13 @@ impl HistoryPolicy {
             && self
                 .max_age_days
                 .is_none_or(|days| [1, 7, 30].contains(&days))
+            && self
+                .max_storage_mb
+                .is_none_or(|mb| [500, 1024, 2048].contains(&mb))
+    }
+
+    pub fn max_storage_bytes(self) -> Option<u64> {
+        self.max_storage_mb.map(|mb| u64::from(mb) * 1024 * 1024)
     }
 
     pub fn from_store(value: Option<String>) -> Self {
@@ -111,6 +171,7 @@ impl HistoryPolicy {
         struct Saved {
             limit: Option<u32>,
             max_age_days: Option<u32>,
+            max_storage_mb: Option<u32>,
         }
         value
             .and_then(|value| serde_json::from_str::<Saved>(&value).ok())
@@ -118,6 +179,9 @@ impl HistoryPolicy {
                 value.limit.map(|limit| Self {
                     limit,
                     max_age_days: value.max_age_days.filter(|days| [1, 7, 30].contains(days)),
+                    max_storage_mb: value
+                        .max_storage_mb
+                        .filter(|mb| [500, 1024, 2048].contains(mb)),
                 })
             })
             .filter(|policy| policy.valid())
@@ -267,6 +331,10 @@ pub struct ClipboardDetail {
     pub height: Option<u32>,
     pub size: Option<u64>,
     pub character_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rich_text_format: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rich_text_html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_index_status: Option<&'static str>,
     pub files: Vec<FileEntry>,
@@ -631,9 +699,13 @@ mod file_display_tests {
     fn validates_custom_pasteboard_types_and_ignored_regexps() {
         assert!(valid_pasteboard_type("org.example.SecretType"));
         assert!(valid_pasteboard_type("com.bitwarden.password:v1"));
+        assert!(valid_pasteboard_type("Pasteboard generator type"));
         assert!(!valid_pasteboard_type(""));
-        assert!(!valid_pasteboard_type("has space"));
+        assert!(!valid_pasteboard_type("   "));
+        assert!(!valid_pasteboard_type(" leading"));
+        assert!(!valid_pasteboard_type("trailing "));
         assert!(!valid_pasteboard_type("line\nbreak"));
+        assert!(!valid_pasteboard_type("tab\there"));
         assert!(!valid_pasteboard_type(&"a".repeat(256)));
 
         let compiled = compile_ignored_regex("^sk-[A-Za-z0-9]{8,}$").unwrap();
@@ -655,5 +727,37 @@ mod file_display_tests {
             compile_ignored_regex("a{100000}").unwrap_err(),
             "clipboard_invalid_regex"
         );
+    }
+
+    #[test]
+    fn built_in_secret_patterns_match_credentials_without_flagging_normal_text() {
+        let samples = [
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE=",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+            "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+            "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+            "sk-proj-1234567890abcdefghijklmnop",
+            "AIzaSyD-1234567890abcdefghijklmnopqrstuvwxyz"[..39].as_ref(),
+            "xoxb-1234567890-abcdefghij",
+            "glpat-1234567890abcdefghij",
+            "npm_1234567890abcdefghijklmnopqrstuvwxyz",
+            "hf_1234567890abcdefghij",
+        ];
+        for secret in samples {
+            assert!(matches_secret_pattern(secret), "expected secret: {secret}");
+        }
+        for benign in [
+            "Hello world",
+            "https://example.com/docs/auth",
+            "sk-short",
+            "eyJnotajwt",
+            "const value = 42;",
+        ] {
+            assert!(
+                !matches_secret_pattern(benign),
+                "unexpected match: {benign}"
+            );
+        }
     }
 }

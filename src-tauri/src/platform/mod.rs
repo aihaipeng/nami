@@ -49,7 +49,7 @@ pub use selection_copy::*;
 mod image_metadata;
 pub use image_metadata::image_dimensions;
 mod ocr;
-pub use ocr::recognize_image_text;
+pub use ocr::{detect_image_qr_codes, recognize_image_text};
 
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
 mod unsupported;

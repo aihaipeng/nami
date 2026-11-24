@@ -1,14 +1,17 @@
 // Adapted from EcoPaste ClipboardQuickActions; modified for Nami. See licenses/EcoPaste.txt.
 import type { ViewProps } from '../App';
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
-import { CircleCheck } from 'lucide-react';
+import { CircleCheck, ExternalLink, FolderOpen, ScanQrCode } from 'lucide-react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import { HistoryIcon } from '../translation/HistoryIcon';
 
-export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false, allowMarkedDelete = false, recordId }: Pick<ViewProps, 't' | 'native'> & {
+export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel, deleteLabel, onCopy, onOpenTarget, onQrCode, onUpdate, onTranslate, onOcr, onNote, busy = false, retainDelete = false, allowMarkedDelete = false, recordId }: Pick<ViewProps, 't' | 'native'> & {
   favorite: boolean; pinned: boolean; canCopy?: boolean;
   copyLabel?: string; deleteLabel: string;
-  onCopy?: () => void | boolean | Promise<boolean>; onUpdate: (action: 'favorite' | 'pin' | 'delete') => void;
+  onCopy?: () => void | boolean | Promise<boolean>;
+  onOpenTarget?: { kind: 'file' | 'link' | 'email'; label: string; onClick: () => void };
+  onQrCode?: { active: boolean; label: string; onClick: () => void };
+  onUpdate: (action: 'favorite' | 'pin' | 'delete') => void;
   onTranslate?: () => void; onOcr?: () => void; onNote?: () => void; busy?: boolean; retainDelete?: boolean; allowMarkedDelete?: boolean; recordId?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -35,6 +38,8 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
   const animatedDelete = !retainDelete && !allowMarkedDelete;
   const staticActions = [
     ...(onCopy ? [{ id: 'copy', label: copyLabel ?? t('copy'), icon: 'doc.on.doc' as const, disabled: !canCopy, onClick: () => { void copy(); } }] : []),
+    ...(onOpenTarget ? [{ id: 'openTarget', label: onOpenTarget.label, customIcon: onOpenTarget.kind === 'file' ? <FolderOpen aria-hidden="true" /> : <ExternalLink aria-hidden="true" />, onClick: onOpenTarget.onClick }] : []),
+    ...(onQrCode ? [{ id: 'qrcode', label: onQrCode.label, customIcon: <ScanQrCode aria-hidden="true" />, pressed: onQrCode.active, onClick: onQrCode.onClick }] : []),
     ...(onTranslate ? [{ id: 'translate', label: 'Translate', description: t('clipboardTranslatePrivacy'), icon: 'languages' as const, disabled: busy, onClick: onTranslate }] : []),
     ...(onOcr ? [{ id: 'ocr', label: 'Extract text', description: t('clipboardOcrPrivacy'), icon: 'ocr' as const, disabled: busy, onClick: onOcr }] : []),
     ...(onNote ? [{ id: 'note', label: 'Note', icon: 'note' as const, onClick: onNote }] : []),
@@ -44,8 +49,9 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
   ];
   const renderButton = (action: typeof staticActions[number]) => {
     const description = 'description' in action ? action.description : undefined;
-    return <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : action.id === 'favorite' && favorite ? ' record-favorite' : action.id === 'copy' && copied ? ' record-copied' : ''}`} title={description ? `${action.label} — ${description}` : action.label} aria-label={action.label} aria-description={description}
-      aria-pressed={'pressed' in action ? action.pressed : undefined} disabled={!native || ('disabled' in action && action.disabled)} onClick={action.onClick}>{action.id === 'copy' && copied ? <CircleCheck className="copy-success" aria-hidden="true" /> : <HistoryIcon name={action.icon} />}</ActionButton>;
+    const activeToggle = action.id === 'qrcode' && 'pressed' in action && action.pressed;
+    return <ActionButton className={`icon-button${action.id === 'delete' ? ' history-delete' : action.id === 'favorite' && favorite ? ' record-favorite' : action.id === 'copy' && copied ? ' record-copied' : activeToggle ? ' record-active' : ''}`} title={description ? `${action.label} — ${description}` : action.label} aria-label={action.label} aria-description={description}
+      aria-pressed={'pressed' in action ? action.pressed : undefined} disabled={!native || ('disabled' in action && action.disabled)} onClick={action.onClick}>{action.id === 'copy' && copied ? <CircleCheck className="copy-success" aria-hidden="true" /> : 'customIcon' in action ? action.customIcon : <HistoryIcon name={action.icon} />}</ActionButton>;
   };
   const buttons = staticActions.map((action) => <span key={action.id} className="history-action" data-action={action.id}>{renderButton(action)}</span>);
   return <div className="history-row-actions" role="group" aria-label={t('actions')} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>

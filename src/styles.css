@@ -339,7 +339,8 @@ html[data-native-material=true] .app-surface.clipboard { box-shadow: none; }
 @media (prefers-reduced-motion: reduce) { .history-panel .history-row-actions, .history-panel .history-row time { transition: none !important; } }
 
 :is(.history-row-actions, .history-footer) .icon-button.record-favorite, .record-context-menu button.record-favorite .history-symbol { color: var(--record-favorite-color); }
-.history-row-actions .icon-button.record-copied { color: var(--record-success-color); }
-.history-row-actions .icon-button, .history-footer .history-favorites, .record-context-menu button .history-symbol { transition: color 150ms; }
-.history-row-actions .copy-success { width: 14px; height: 14px; stroke-width: 1.5; }
+.history-row-actions .icon-button.record-active { background: hsl(var(--foreground) / .1); }
+.history-row-actions .icon-button.record-copied, .clipboard-smart-icon-button.record-copied { color: var(--record-success-color); }
+.history-row-actions .icon-button, .clipboard-smart-icon-button, .history-footer .history-favorites, .record-context-menu button .history-symbol { transition: color 150ms; }
+.history-row-actions .icon-button > svg, .clipboard-smart-icon-button > svg, .history-row-actions .copy-success { width: 14px; height: 14px; stroke-width: 1.5; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

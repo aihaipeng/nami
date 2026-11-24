@@ -1,14 +1,328 @@
 use super::{storage_error, HistoryDatabase, APPLICATION_ID, VERSION};
 use crate::clipboard;
+use ring::{
+    aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM},
+    pbkdf2,
+    rand::{SecureRandom, SystemRandom},
+};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::io::{Read, Write};
+use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 const BACKUP_FORMAT_VERSION: &str = "1";
 const MAX_BACKUP_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+const ENCRYPTED_BACKUP_PREFIX: &[u8; 7] = b"NAMIBAK";
+const ENCRYPTED_BACKUP_VERSION: u8 = 1;
+const KDF_PBKDF2_SHA256: u8 = 1;
+const AEAD_AES_256_GCM: u8 = 1;
+const ENCRYPTED_HEADER_LEN: usize = 72;
+const AEAD_TAG_LEN: usize = 16;
+const DEFAULT_PBKDF2_ITERATIONS: u32 = 600_000;
+const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
+const MAX_PBKDF2_ITERATIONS: u32 = 5_000_000;
+const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
+const MIN_CHUNK_SIZE: u32 = 4096;
+const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
+pub const MAX_BACKUP_PASSWORD_BYTES: usize = 1024;
+
+pub struct TempFileGuard(pub PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+pub fn create_restricted_temp_file(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|_| "backup_export_failed".into())
+}
+
+pub fn is_encrypted_backup(path: &Path) -> Result<bool, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| "backup_invalid")?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_BACKUP_FILE_BYTES {
+        return Err("backup_invalid".into());
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| "backup_invalid")?;
+    let mut magic = [0u8; 8];
+    if file.read(&mut magic).map_err(|_| "backup_invalid")? < 8 {
+        return Ok(false);
+    }
+    if &magic[..7] == ENCRYPTED_BACKUP_PREFIX {
+        if magic[7] > ENCRYPTED_BACKUP_VERSION {
+            return Err("backup_unsupported_version".into());
+        }
+        if magic[7] != ENCRYPTED_BACKUP_VERSION {
+            return Err("backup_invalid".into());
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn chunk_nonce(base_nonce: &[u8; 12], chunk_index: u64) -> [u8; 12] {
+    let mut nonce = *base_nonce;
+    let index_bytes = chunk_index.to_be_bytes();
+    for (slot, byte) in nonce[4..12].iter_mut().zip(index_bytes) {
+        *slot ^= byte;
+    }
+    nonce
+}
+
+fn chunk_aad(
+    header: &[u8; ENCRYPTED_HEADER_LEN],
+    chunk_index: u64,
+) -> [u8; ENCRYPTED_HEADER_LEN + 8] {
+    let mut aad = [0u8; ENCRYPTED_HEADER_LEN + 8];
+    aad[..ENCRYPTED_HEADER_LEN].copy_from_slice(header);
+    aad[ENCRYPTED_HEADER_LEN..].copy_from_slice(&chunk_index.to_be_bytes());
+    aad
+}
+
+fn derive_backup_key(
+    password: &str,
+    salt: &[u8; 32],
+    iterations: u32,
+) -> Result<Zeroizing<[u8; 32]>, String> {
+    let Some(count) = NonZeroU32::new(iterations) else {
+        return Err("backup_invalid".into());
+    };
+    let mut key = Zeroizing::new([0u8; 32]);
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        count,
+        salt,
+        password.as_bytes(),
+        &mut *key,
+    );
+    Ok(key)
+}
+
+pub fn encrypt_backup_file(
+    source: &Path,
+    destination: &Path,
+    password: &str,
+) -> Result<u64, String> {
+    encrypt_backup_file_with_params(
+        source,
+        destination,
+        password,
+        DEFAULT_PBKDF2_ITERATIONS,
+        DEFAULT_CHUNK_SIZE,
+    )
+}
+
+fn encrypt_backup_file_with_params(
+    source: &Path,
+    destination: &Path,
+    password: &str,
+    iterations: u32,
+    chunk_size: u32,
+) -> Result<u64, String> {
+    if password.is_empty() || password.len() > MAX_BACKUP_PASSWORD_BYTES {
+        return Err("invalid_argument".into());
+    }
+    if !(MIN_PBKDF2_ITERATIONS..=MAX_PBKDF2_ITERATIONS).contains(&iterations)
+        || !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size)
+    {
+        return Err("invalid_argument".into());
+    }
+    let meta = std::fs::symlink_metadata(source).map_err(|_| "backup_export_failed")?;
+    let plaintext_len = meta.len();
+    if !meta.is_file() || plaintext_len == 0 || plaintext_len > MAX_BACKUP_FILE_BYTES {
+        return Err("backup_export_failed".into());
+    }
+
+    let rng = SystemRandom::new();
+    let mut salt = [0u8; 32];
+    let mut base_nonce = [0u8; 12];
+    rng.fill(&mut salt).map_err(|_| "backup_export_failed")?;
+    rng.fill(&mut base_nonce)
+        .map_err(|_| "backup_export_failed")?;
+
+    let key_bytes = derive_backup_key(password, &salt, iterations)?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &*key_bytes).map_err(|_| "backup_export_failed")?;
+    let key = LessSafeKey::new(unbound);
+
+    let mut header = [0u8; ENCRYPTED_HEADER_LEN];
+    header[..7].copy_from_slice(ENCRYPTED_BACKUP_PREFIX);
+    header[7] = ENCRYPTED_BACKUP_VERSION;
+    header[8] = KDF_PBKDF2_SHA256;
+    header[9] = AEAD_AES_256_GCM;
+    header[10..12].copy_from_slice(&[0, 0]);
+    header[12..16].copy_from_slice(&iterations.to_be_bytes());
+    header[16..20].copy_from_slice(&chunk_size.to_be_bytes());
+    header[20..28].copy_from_slice(&plaintext_len.to_be_bytes());
+    header[28..60].copy_from_slice(&salt);
+    header[60..72].copy_from_slice(&base_nonce);
+
+    let mut src = std::fs::File::open(source).map_err(|_| "backup_export_failed")?;
+    let mut dst = create_restricted_temp_file(destination)?;
+
+    let write_result = (|| -> Result<u64, String> {
+        dst.write_all(&header).map_err(|_| "backup_export_failed")?;
+        let mut total_written = ENCRYPTED_HEADER_LEN as u64;
+        let mut remaining = plaintext_len;
+        let mut chunk_index = 0u64;
+        let mut buffer = Vec::with_capacity(chunk_size as usize + AEAD_TAG_LEN);
+
+        while remaining > 0 {
+            let take = remaining.min(u64::from(chunk_size)) as usize;
+            buffer.resize(take, 0);
+            src.read_exact(&mut buffer)
+                .map_err(|_| "backup_export_failed")?;
+            let nonce = Nonce::assume_unique_for_key(chunk_nonce(&base_nonce, chunk_index));
+            let aad = chunk_aad(&header, chunk_index);
+            key.seal_in_place_append_tag(nonce, Aad::from(&aad), &mut buffer)
+                .map_err(|_| "backup_export_failed")?;
+            dst.write_all(&buffer).map_err(|_| "backup_export_failed")?;
+            total_written = total_written
+                .checked_add(buffer.len() as u64)
+                .ok_or("backup_export_failed")?;
+            remaining -= take as u64;
+            chunk_index += 1;
+        }
+        dst.sync_all().map_err(|_| "backup_export_failed")?;
+        Ok(total_written)
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    write_result
+}
+
+pub fn decrypt_backup_file(
+    source: &Path,
+    destination: &Path,
+    password: &str,
+) -> Result<(), String> {
+    if password.is_empty() || password.len() > MAX_BACKUP_PASSWORD_BYTES {
+        return Err("backup_wrong_password".into());
+    }
+    let meta = std::fs::symlink_metadata(source).map_err(|_| "backup_invalid")?;
+    let file_len = meta.len();
+    if !meta.is_file()
+        || file_len <= ENCRYPTED_HEADER_LEN as u64
+        || file_len > MAX_BACKUP_FILE_BYTES
+    {
+        return Err("backup_invalid".into());
+    }
+
+    let mut src = std::fs::File::open(source).map_err(|_| "backup_invalid")?;
+    let mut header = [0u8; ENCRYPTED_HEADER_LEN];
+    src.read_exact(&mut header).map_err(|_| "backup_invalid")?;
+
+    if &header[..7] != ENCRYPTED_BACKUP_PREFIX {
+        return Err("backup_invalid".into());
+    }
+    if header[7] > ENCRYPTED_BACKUP_VERSION {
+        return Err("backup_unsupported_version".into());
+    }
+    if header[7] != ENCRYPTED_BACKUP_VERSION
+        || header[8] != KDF_PBKDF2_SHA256
+        || header[9] != AEAD_AES_256_GCM
+        || header[10..12] != [0, 0]
+    {
+        return Err("backup_invalid".into());
+    }
+    let iterations = u32::from_be_bytes(header[12..16].try_into().unwrap());
+    let chunk_size = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    let plaintext_len = u64::from_be_bytes(header[20..28].try_into().unwrap());
+    if !(MIN_PBKDF2_ITERATIONS..=MAX_PBKDF2_ITERATIONS).contains(&iterations)
+        || !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size)
+        || plaintext_len == 0
+        || plaintext_len > MAX_BACKUP_FILE_BYTES
+    {
+        return Err("backup_invalid".into());
+    }
+    let total_chunks = plaintext_len.div_ceil(u64::from(chunk_size));
+    let expected_len = (ENCRYPTED_HEADER_LEN as u64)
+        .checked_add(plaintext_len)
+        .and_then(|v| v.checked_add(total_chunks.checked_mul(AEAD_TAG_LEN as u64)?))
+        .ok_or("backup_invalid")?;
+    if file_len != expected_len {
+        return Err("backup_invalid".into());
+    }
+
+    let salt: [u8; 32] = header[28..60].try_into().unwrap();
+    let base_nonce: [u8; 12] = header[60..72].try_into().unwrap();
+    let key_bytes = derive_backup_key(password, &salt, iterations)?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &*key_bytes).map_err(|_| "backup_invalid")?;
+    let key = LessSafeKey::new(unbound);
+
+    let mut dst = create_restricted_temp_file(destination).map_err(|_| "backup_import_failed")?;
+    let decrypt_result = (|| -> Result<(), String> {
+        let mut remaining = plaintext_len;
+        let mut chunk_index = 0u64;
+        let mut buffer = Vec::with_capacity(chunk_size as usize + AEAD_TAG_LEN);
+
+        while remaining > 0 {
+            let plain_take = remaining.min(u64::from(chunk_size)) as usize;
+            let cipher_take = plain_take + AEAD_TAG_LEN;
+            buffer.resize(cipher_take, 0);
+            src.read_exact(&mut buffer).map_err(|_| "backup_invalid")?;
+            let nonce = Nonce::assume_unique_for_key(chunk_nonce(&base_nonce, chunk_index));
+            let aad = chunk_aad(&header, chunk_index);
+            let plaintext = key
+                .open_in_place(nonce, Aad::from(&aad), &mut buffer)
+                .map_err(|_| "backup_wrong_password")?;
+            if plaintext.len() != plain_take {
+                return Err("backup_invalid".into());
+            }
+            dst.write_all(plaintext)
+                .map_err(|_| "backup_import_failed")?;
+            remaining -= plain_take as u64;
+            chunk_index += 1;
+        }
+        dst.sync_all().map_err(|_| "backup_import_failed")?;
+        Ok(())
+    })();
+
+    if decrypt_result.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    decrypt_result
+}
+
+pub fn inspect_backup_with_password(
+    path: &Path,
+    password: Option<&str>,
+) -> Result<BackupSummary, String> {
+    if is_encrypted_backup(path)? {
+        let password = password
+            .filter(|p| !p.is_empty())
+            .ok_or("backup_password_required")?;
+        let encrypted_size = std::fs::symlink_metadata(path)
+            .map_err(|_| "backup_invalid")?
+            .len();
+        let staging = TempFileGuard(std::env::temp_dir().join(format!(
+            "nami-backup-inspect-{}.sqlite3",
+            uuid::Uuid::new_v4().simple()
+        )));
+        decrypt_backup_file(path, &staging.0, password)?;
+        let mut summary = inspect_backup(&staging.0)?;
+        summary.file_size = encrypted_size;
+        Ok(summary)
+    } else {
+        inspect_backup(path)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +639,28 @@ impl HistoryDatabase {
             let _ = std::fs::remove_file(staging_path);
         }
         result
+    }
+
+    pub fn import_backup_with_password(
+        &mut self,
+        backup_path: &Path,
+        image_root: &Path,
+        mode: BackupImportMode,
+        password: Option<&str>,
+    ) -> Result<BackupImportReport, String> {
+        if is_encrypted_backup(backup_path)? {
+            let password = password
+                .filter(|p| !p.is_empty())
+                .ok_or("backup_password_required")?;
+            let staging = TempFileGuard(std::env::temp_dir().join(format!(
+                "nami-backup-import-{}.sqlite3",
+                uuid::Uuid::new_v4().simple()
+            )));
+            decrypt_backup_file(backup_path, &staging.0, password)?;
+            self.import_backup(&staging.0, image_root, mode)
+        } else {
+            self.import_backup(backup_path, image_root, mode)
+        }
     }
 
     pub fn import_backup(
@@ -830,6 +1166,150 @@ mod tests {
                 .unwrap_err(),
             "backup_invalid"
         );
+
+        drop(src);
+        drop(dst);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn encrypted_backup_round_trips_multi_chunk_and_rejects_wrong_password_or_tampering() {
+        let root = std::env::temp_dir().join(format!(
+            "nami-encrypted-backup-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let src_images = root.join("src_images");
+        let dst_images = root.join("dst_images");
+        std::fs::create_dir_all(&src_images).unwrap();
+        std::fs::create_dir_all(&dst_images).unwrap();
+
+        let mut src = HistoryDatabase::open(&root.join("src.sqlite3")).unwrap();
+        src.preference_set("ui_locale", "zh-CN").unwrap();
+        let png = b"\x89PNG\r\n\x1a\nencrypted-backup-payload".repeat(300);
+        let rel_img = clipboard::store_image(&src_images, &png, "png").unwrap();
+        src.clipboard_insert(&clipboard::ClipboardRecord {
+            id: "enc-img".into(),
+            kind: "image".into(),
+            text: String::new(),
+            date: "2026-11-24T12:00:00.000Z".into(),
+            is_favorite: true,
+            is_pinned: false,
+            source_app: None,
+            image_path: Some(rel_img.clone()),
+            fingerprint: clipboard::fingerprint("image", &png),
+        })
+        .unwrap();
+        src.clipboard_insert_capture(
+            &clipboard::ClipboardRecord {
+                id: "enc-rich".into(),
+                kind: "text".into(),
+                text: "Secret note".into(),
+                date: "2026-11-24T12:01:00.000Z".into(),
+                is_favorite: false,
+                is_pinned: true,
+                source_app: None,
+                image_path: None,
+                fingerprint: clipboard::fingerprint("text", b"Secret note"),
+            },
+            None,
+            Some(&clipboard::ClipboardTextFormatting {
+                html: Some(b"<strong>Secret note</strong>".to_vec()),
+                rtf: None,
+            }),
+        )
+        .unwrap();
+
+        let plain_path = root.join("plain.namibak");
+        let enc_path = root.join("encrypted.namibak");
+        src.export_backup(&src_images, &plain_path).unwrap();
+        assert!(!is_encrypted_backup(&plain_path).unwrap());
+
+        // Use MIN_PBKDF2_ITERATIONS + 4096-byte chunks so multi-chunk AEAD is exercised fast.
+        let enc_size = encrypt_backup_file_with_params(
+            &plain_path,
+            &enc_path,
+            "correct-horse-battery-staple",
+            MIN_PBKDF2_ITERATIONS,
+            4096,
+        )
+        .unwrap();
+        assert!(enc_size > ENCRYPTED_HEADER_LEN as u64);
+        assert!(is_encrypted_backup(&enc_path).unwrap());
+
+        // Missing or wrong password fails cleanly.
+        assert_eq!(
+            inspect_backup_with_password(&enc_path, None).unwrap_err(),
+            "backup_password_required"
+        );
+        assert_eq!(
+            inspect_backup_with_password(&enc_path, Some("wrong-password")).unwrap_err(),
+            "backup_wrong_password"
+        );
+
+        let summary =
+            inspect_backup_with_password(&enc_path, Some("correct-horse-battery-staple")).unwrap();
+        assert_eq!(summary.clipboard_count, 2);
+        assert_eq!(summary.image_count, 1);
+        assert_eq!(summary.file_size, enc_size);
+
+        // Tampered ciphertext and truncated/extended files are rejected.
+        let tampered = root.join("tampered.namibak");
+        let mut raw = std::fs::read(&enc_path).unwrap();
+        raw[ENCRYPTED_HEADER_LEN + 10] ^= 0xFF;
+        std::fs::write(&tampered, &raw).unwrap();
+        assert_eq!(
+            inspect_backup_with_password(&tampered, Some("correct-horse-battery-staple"))
+                .unwrap_err(),
+            "backup_wrong_password"
+        );
+
+        let truncated = root.join("truncated.namibak");
+        let mut raw = std::fs::read(&enc_path).unwrap();
+        raw.pop();
+        std::fs::write(&truncated, &raw).unwrap();
+        assert_eq!(
+            inspect_backup_with_password(&truncated, Some("correct-horse-battery-staple"))
+                .unwrap_err(),
+            "backup_invalid"
+        );
+
+        // Replace import restores encrypted backup intact and preserves destination on failure.
+        let mut dst = HistoryDatabase::open(&root.join("dst.sqlite3")).unwrap();
+        assert_eq!(
+            dst.import_backup_with_password(
+                &enc_path,
+                &dst_images,
+                BackupImportMode::Replace,
+                Some("wrong-password"),
+            )
+            .unwrap_err(),
+            "backup_wrong_password"
+        );
+        let report = dst
+            .import_backup_with_password(
+                &enc_path,
+                &dst_images,
+                BackupImportMode::Replace,
+                Some("correct-horse-battery-staple"),
+            )
+            .unwrap();
+        assert_eq!(report.imported_clipboard, 2);
+        assert_eq!(report.restored_images, 1);
+        assert_eq!(clipboard::read_image(&dst_images, &rel_img).unwrap(), png);
+        assert_eq!(
+            dst.clipboard_detail("enc-rich").unwrap().rich_text_format,
+            Some("html")
+        );
+        assert_eq!(
+            dst.preference("ui_locale").unwrap().as_deref(),
+            Some("zh-CN")
+        );
+
+        // Plaintext backup remains backward compatible through import_backup_with_password.
+        let plain_report = dst
+            .import_backup_with_password(&plain_path, &dst_images, BackupImportMode::Merge, None)
+            .unwrap();
+        assert_eq!(plain_report.skipped_clipboard, 2);
 
         drop(src);
         drop(dst);

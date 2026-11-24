@@ -428,7 +428,7 @@ describe('clipboard privacy, retention and behavior', () => {
     const ignoreRules = screen.getByRole('region', { name: 'Ignore Rules' });
     expect(within(ignoreRules).getAllByRole('heading')).toHaveLength(1);
     expect(ignoreRules.querySelectorAll('.settings-group')).toHaveLength(1);
-    expect(ignoreRules.querySelectorAll('.clipboard-ignore-block')).toHaveLength(3);
+    expect(ignoreRules.querySelectorAll('.clipboard-ignore-block')).toHaveLength(4);
     expect(ignoreRules.querySelectorAll('.clipboard-tip-trigger')).toHaveLength(0);
     expect(within(ignoreRules).queryAllByRole('textbox')).toHaveLength(0);
     expect(ignoreRules.textContent).not.toContain('Checks the active app only.');
@@ -806,5 +806,106 @@ describe('clipboard privacy, retention and behavior', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Copy Only' }));
     await screen.findByRole('button', { name: 'When Activating an Item: Copy Only' });
     expect(calls('clipboard_behavior_set')[0][1]).toEqual({ activation: 'copy' });
+  });
+
+  it('previews and applies clipboard storage space limits while preserving existing retention fields', async () => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let storedPolicy: { limit: number; maxAgeDays?: number; maxStorageMb?: number } = { limit: 500, maxAgeDays: 7 };
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_options_get') return { excludedApps, activation: 'paste', pasteAsPlainText: false };
+      if (name === 'records_storage_info') return { bytes: 8000, ...storedPolicy };
+      if (name === 'records_cleanup_preview') return { count: 2, token: 'storage-limit-token' };
+      if (name === 'records_cleanup_apply') {
+        const next = (args as { policy?: typeof storedPolicy }).policy;
+        if (next) storedPolicy = next;
+        return { removed: 2, mediaCleanupFailed: false };
+      }
+      return invoke(name, args);
+    });
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    const storageLimit = await screen.findByRole('button', { name: 'Storage Limit: No Limit' });
+    fireEvent.click(storageLimit);
+    fireEvent.click(screen.getByRole('option', { name: '500 MB' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Change history retention?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Apply & Remove/i }));
+    await screen.findByRole('button', { name: 'Storage Limit: 500 MB' });
+    expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({
+      view: 'clipboard',
+      policy: { limit: 500, maxAgeDays: 7, maxStorageMb: 500 },
+      token: 'storage-limit-token',
+    });
+  });
+
+  it('edits pre-populated pasteboard types inline and toggles Universal Clipboard and sensitive credential presets', async () => {
+    const invoke = bridge.invoke.getMockImplementation()!;
+    let types = [
+      'Pasteboard generator type',
+      'com.agilebits.onepassword',
+      'com.typeit4me.clipping',
+      'de.petermaurer.TransientPasteboardType',
+      'net.antelle.keeweb',
+    ];
+    let ignoreSecrets = false;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'clipboard_options_get') {
+        return { excludedApps, ignoredPasteboardTypes: [...types], ignoredRegexps: [], ignoreSecrets, activation: 'paste', pasteAsPlainText: false };
+      }
+      if (name === 'clipboard_ignored_type_update') {
+        const { oldPasteboardType, newPasteboardType } = args as { oldPasteboardType: string; newPasteboardType: string };
+        types = types.map((entry) => entry === oldPasteboardType ? newPasteboardType : entry);
+        return [...types];
+      }
+      if (name === 'clipboard_ignored_type_add') {
+        const { pasteboardType } = args as { pasteboardType: string };
+        if (!types.includes(pasteboardType)) types = [...types, pasteboardType];
+        return [...types];
+      }
+      if (name === 'clipboard_ignored_type_remove') {
+        const { pasteboardType } = args as { pasteboardType: string };
+        types = types.filter((entry) => entry !== pasteboardType);
+        return [...types];
+      }
+      if (name === 'clipboard_ignore_secrets_set') {
+        ignoreSecrets = Boolean((args as { enabled: boolean }).enabled);
+        return ignoreSecrets;
+      }
+      return invoke(name, args);
+    });
+
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    const ignoreRules = await screen.findByRole('region', { name: 'Ignore Rules' });
+    await within(ignoreRules).findByText('Pasteboard generator type');
+    await within(ignoreRules).findByText('com.agilebits.onepassword');
+
+    // Inline edit a pre-populated type.
+    fireEvent.click(within(ignoreRules).getByRole('button', { name: 'Edit com.agilebits.onepassword' }));
+    const editInput = within(ignoreRules).getByRole<HTMLInputElement>('textbox', { name: 'Edit com.agilebits.onepassword' });
+    fireEvent.change(editInput, { target: { value: 'com.custom.vault' } });
+    fireEvent.click(within(ignoreRules).getByRole('button', { name: 'Save' }));
+    await within(ignoreRules).findByText('com.custom.vault');
+    expect(calls('clipboard_ignored_type_update').at(-1)?.[1]).toEqual({
+      oldPasteboardType: 'com.agilebits.onepassword',
+      newPasteboardType: 'com.custom.vault',
+    });
+
+    // Toggle Universal Clipboard adds/removes com.apple.is-remote-clipboard.
+    const universal = within(ignoreRules).getByRole<HTMLInputElement>('checkbox', { name: 'Ignore Universal Clipboard' });
+    expect(universal.checked).toBe(false);
+    fireEvent.click(universal);
+    await waitFor(() => expect(universal.checked).toBe(true));
+    expect(calls('clipboard_ignored_type_add').at(-1)?.[1]).toEqual({ pasteboardType: 'com.apple.is-remote-clipboard' });
+    await within(ignoreRules).findByText('com.apple.is-remote-clipboard');
+    fireEvent.click(universal);
+    await waitFor(() => expect(universal.checked).toBe(false));
+    expect(calls('clipboard_ignored_type_remove').at(-1)?.[1]).toEqual({ pasteboardType: 'com.apple.is-remote-clipboard' });
+
+    // Toggle built-in sensitive credential interception.
+    const secrets = within(ignoreRules).getByRole<HTMLInputElement>('checkbox', { name: 'Ignore Sensitive Credentials' });
+    expect(secrets.checked).toBe(false);
+    fireEvent.click(secrets);
+    await waitFor(() => expect(secrets.checked).toBe(true));
+    expect(calls('clipboard_ignore_secrets_set').at(-1)?.[1]).toEqual({ enabled: true });
   });
 });

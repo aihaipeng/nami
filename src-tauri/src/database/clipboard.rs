@@ -1,4 +1,4 @@
-use super::retention::{candidates, check_cleanup, cleanup_parameters, persist_limit};
+use super::retention::{check_cleanup, clipboard_cleanup_sequences, persist_limit, CleanupContext};
 use super::{storage_error, HistoryDatabase};
 use crate::clipboard::{
     valid_image_name, ClipboardCursor, ClipboardFileRepresentation, ClipboardPage, ClipboardRecord,
@@ -1135,9 +1135,19 @@ impl HistoryDatabase {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
+        let (rich_text_format, rich_text_html) = if record.kind == "text" {
+            self.clipboard_text_formatting(id)?
+                .as_ref()
+                .map(crate::clipboard::rich_text::preview)
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
         Ok(crate::clipboard::ClipboardDetail {
             title,
             character_count: (record.kind == "text").then(|| record.text.chars().count()),
+            rich_text_format,
+            rich_text_html,
             image_index_status: None,
             id: record.id,
             date: record.date,
@@ -1325,9 +1335,59 @@ impl HistoryDatabase {
         expected: Option<&str>,
         recent_since: Option<i64>,
     ) -> Result<(usize, Vec<String>), String> {
+        self.clipboard_cleanup_with_media(policy, categories, expected, recent_since, None)
+    }
+
+    pub fn clipboard_cleanup_with_media(
+        &mut self,
+        policy: Option<HistoryPolicy>,
+        categories: u8,
+        expected: Option<&str>,
+        recent_since: Option<i64>,
+        image_root: Option<&std::path::Path>,
+    ) -> Result<(usize, Vec<String>), String> {
+        self.clipboard_cleanup_internal(
+            policy,
+            categories,
+            expected,
+            recent_since,
+            image_root,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clipboard_cleanup_with_budget(
+        &mut self,
+        policy: Option<HistoryPolicy>,
+        expected: Option<&str>,
+        image_root: Option<&std::path::Path>,
+        storage_budget_override: Option<u64>,
+    ) -> Result<(usize, Vec<String>), String> {
+        self.clipboard_cleanup_internal(
+            policy,
+            0,
+            expected,
+            None,
+            image_root,
+            storage_budget_override,
+        )
+    }
+
+    fn clipboard_cleanup_internal(
+        &mut self,
+        policy: Option<HistoryPolicy>,
+        categories: u8,
+        expected: Option<&str>,
+        recent_since: Option<i64>,
+        image_root: Option<&std::path::Path>,
+        storage_budget_override: Option<u64>,
+    ) -> Result<(usize, Vec<String>), String> {
         if let (Some(policy), 0, None) = (policy, categories, expected) {
             if policy.valid()
                 && policy.max_age_days.is_none()
+                && policy.max_storage_mb.is_none()
+                && storage_budget_override.is_none()
                 && recent_since.is_none()
                 && self.clipboard_total_records <= policy.limit as usize
             {
@@ -1340,30 +1400,55 @@ impl HistoryDatabase {
             .map_err(storage_error)?;
         let view = RecordView::Clipboard;
         // Freeze the clock across verification and deletion so a record cannot age into the confirmed set mid-transaction.
-        let now = chrono::Utc::now().timestamp_millis();
-        check_cleanup(
-            &transaction,
-            view,
+        let ctx = CleanupContext {
             policy,
             categories,
-            expected,
             recent_since,
-            now,
-        )?;
-        let parameters = cleanup_parameters(policy, categories, recent_since, now);
-        let candidates = candidates(view);
-        let images = {
-            let mut query = transaction.prepare_cached(&format!("{candidates}
-                SELECT r.image_path FROM cleanup JOIN clipboard_records r USING(sequence) WHERE r.image_path IS NOT NULL
-                UNION
-                SELECT f.image_path FROM cleanup JOIN clipboard_file_representations f USING(sequence)")).map_err(storage_error)?;
-            let rows = query
-                .query_map(parameters, |row| row.get::<_, String>(0))
-                .map_err(storage_error)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(storage_error)?
+            now: chrono::Utc::now().timestamp_millis(),
+            image_root,
+            storage_budget_override,
         };
-        let removed = transaction.prepare_cached(&format!("{candidates} DELETE FROM clipboard_records WHERE sequence IN (SELECT sequence FROM cleanup)")).map_err(storage_error)?.execute(parameters).map_err(storage_error)?;
+        check_cleanup(&transaction, view, ctx, expected)?;
+        let sequences = clipboard_cleanup_sequences(&transaction, ctx)?;
+        let mut images = std::collections::HashSet::new();
+        {
+            let mut image_query = transaction
+                .prepare_cached(
+                    "SELECT r.image_path, f.image_path
+                    FROM clipboard_records r
+                    LEFT JOIN clipboard_file_representations f ON f.sequence = r.sequence
+                    WHERE r.sequence = ?1",
+                )
+                .map_err(storage_error)?;
+            for &seq in &sequences {
+                if let Some((primary, file_rep)) = image_query
+                    .query_row([seq], |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    })
+                    .optional()
+                    .map_err(storage_error)?
+                {
+                    if let Some(path) = primary {
+                        images.insert(path);
+                    }
+                    if let Some(path) = file_rep {
+                        images.insert(path);
+                    }
+                }
+            }
+        }
+        let mut removed = 0usize;
+        {
+            let mut delete_stmt = transaction
+                .prepare_cached("DELETE FROM clipboard_records WHERE sequence = ?1")
+                .map_err(storage_error)?;
+            for &seq in &sequences {
+                removed += delete_stmt.execute([seq]).map_err(storage_error)?;
+            }
+        }
         persist_limit(&transaction, view, policy, expected)?;
         let mut unreferenced = Vec::new();
         for image in images {
@@ -1485,6 +1570,7 @@ impl HistoryDatabase {
             "clipboard_excluded_apps",
             "clipboard_ignored_pasteboard_types",
             "clipboard_ignored_regexps",
+            "clipboard_ignore_secrets",
             "clipboard_activation",
             "clipboard_paste_as_plain_text",
             "clipboard_search_options",
@@ -1771,6 +1857,7 @@ mod tests {
         let policy = Some(HistoryPolicy {
             limit: 500,
             max_age_days: Some(7),
+            max_storage_mb: None,
         });
         let mut expired = record("expired", "synthetic expired searchable body");
         expired.date = "2001-01-01T00:00:00.000Z".into();
@@ -4304,6 +4391,138 @@ mod tests {
         );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clipboard_detail_includes_sanitized_rich_text_preview_and_clears_after_body_edit() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let html_item = record("rich-html", "Hello World");
+        let formatting = ClipboardTextFormatting {
+            html: Some(
+                br#"<p onclick="alert(1)">Hello <strong>World</strong></p><script>evil()</script><img src="https://tracker.example/x.png">"#
+                    .to_vec(),
+            ),
+            rtf: None,
+        };
+        db.clipboard_insert_capture(&html_item, None, Some(&formatting))
+            .unwrap();
+        let detail = db.clipboard_detail("rich-html").unwrap();
+        assert_eq!(detail.rich_text_format, Some("html"));
+        let preview = detail.rich_text_html.as_deref().unwrap();
+        assert!(preview.contains("<strong>World</strong>"));
+        assert!(!preview.contains("script"));
+        assert!(!preview.contains("onclick"));
+        assert!(!preview.contains("<img"));
+
+        let rtf_item = record("rich-rtf", "Bold RTF");
+        let rtf_formatting = ClipboardTextFormatting {
+            html: None,
+            rtf: Some(br#"{\rtf1\ansi \b Bold RTF}"#.to_vec()),
+        };
+        db.clipboard_insert_capture(&rtf_item, None, Some(&rtf_formatting))
+            .unwrap();
+        let rtf_detail = db.clipboard_detail("rich-rtf").unwrap();
+        assert_eq!(rtf_detail.rich_text_format, Some("rtf"));
+        assert!(rtf_detail
+            .rich_text_html
+            .as_deref()
+            .unwrap()
+            .contains("<strong>Bold RTF</strong>"));
+
+        db.clipboard_edit("rich-html", "", Some("Edited plain text"))
+            .unwrap();
+        let edited_detail = db.clipboard_detail("rich-html").unwrap();
+        assert_eq!(edited_detail.rich_text_format, None);
+        assert_eq!(edited_detail.rich_text_html, None);
+    }
+
+    #[test]
+    fn clipboard_storage_limit_evicts_oldest_unprotected_and_protects_flags_and_shared_images() {
+        let root =
+            std::env::temp_dir().join(format!("nami-storage-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("history.sqlite3");
+        let image_root = root.join("images");
+        let mut db = HistoryDatabase::open(&db_path).unwrap();
+
+        let mut shared_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        shared_bytes.resize(4096, 0x42);
+        let shared_path = crate::clipboard::store_image(&image_root, &shared_bytes, "png").unwrap();
+        let mut solo_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        solo_bytes.resize(6144, 0x99);
+        let solo_path = crate::clipboard::store_image(&image_root, &solo_bytes, "png").unwrap();
+
+        let mut old_shared = record("old-shared", "");
+        old_shared.kind = "image".into();
+        old_shared.date = "2026-11-01T00:00:00.000Z".into();
+        old_shared.image_path = Some(shared_path.clone());
+        old_shared.fingerprint = "fp-old-shared".into();
+        db.clipboard_insert(&old_shared).unwrap();
+
+        let mut old_solo = record("old-solo", "");
+        old_solo.kind = "image".into();
+        old_solo.date = "2026-11-02T00:00:00.000Z".into();
+        old_solo.image_path = Some(solo_path.clone());
+        old_solo.fingerprint = "fp-old-solo".into();
+        db.clipboard_insert(&old_solo).unwrap();
+
+        let mut pinned_shared = record("pinned-shared", "");
+        pinned_shared.kind = "image".into();
+        pinned_shared.date = "2026-11-03T00:00:00.000Z".into();
+        pinned_shared.image_path = Some(shared_path.clone());
+        pinned_shared.is_pinned = true;
+        pinned_shared.fingerprint = "fp-pinned-shared".into();
+        db.clipboard_insert(&pinned_shared).unwrap();
+
+        let mut newest_text = record("newest-text", "keep newest");
+        newest_text.date = "2026-11-04T00:00:00.000Z".into();
+        db.clipboard_insert(&newest_text).unwrap();
+
+        let policy = HistoryPolicy {
+            limit: 500,
+            max_age_days: None,
+            max_storage_mb: Some(500),
+        };
+        assert_eq!(
+            db.records_cleanup_preview(RecordView::Translation, Some(policy))
+                .err()
+                .as_deref(),
+            Some("invalid_argument")
+        );
+
+        // Budget fits shared image (4096) + remaining DB rows (~600B), but NOT solo image (6144).
+        // Evicting old-shared alone does not free shared_bytes (pinned-shared still holds a ref),
+        // so both old-shared and old-solo must be evicted while pinned-shared and newest-text stay.
+        let budget = 5500u64;
+        let preview = db
+            .records_cleanup_preview_with_budget(policy, Some(&image_root), budget)
+            .unwrap();
+        assert_eq!(preview.count, 2);
+        let (removed, unreferenced) = db
+            .clipboard_cleanup_with_budget(
+                Some(policy),
+                Some(&preview.token),
+                Some(&image_root),
+                Some(budget),
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(unreferenced, vec![solo_path]);
+        assert!(db.clipboard_record("old-shared").is_err());
+        assert!(db.clipboard_record("old-solo").is_err());
+        assert!(db.clipboard_record("pinned-shared").is_ok());
+        assert!(db.clipboard_record("newest-text").is_ok());
+        drop(db);
+
+        let reopened = HistoryDatabase::open(&db_path).unwrap();
+        assert_eq!(
+            reopened
+                .records_history_policy(RecordView::Clipboard)
+                .unwrap(),
+            policy
+        );
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     use std::path::Path;

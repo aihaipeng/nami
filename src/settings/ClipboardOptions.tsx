@@ -8,7 +8,8 @@ import { errorCode } from './ShortcutCapture';
 
 type ExcludedApp = { bundleId: string; name: string; iconDataUrl?: string };
 type Activation = 'paste' | 'copy';
-type Options = { excludedApps: ExcludedApp[]; ignoredPasteboardTypes?: string[]; ignoredRegexps?: string[]; activation: Activation; pasteAsPlainText: boolean };
+type Options = { excludedApps: ExcludedApp[]; ignoredPasteboardTypes?: string[]; ignoredRegexps?: string[]; ignoreSecrets?: boolean; activation: Activation; pasteAsPlainText: boolean };
+const UNIVERSAL_CLIPBOARD_TYPE = 'com.apple.is-remote-clipboard';
 
 function Setting({ label, children }: { label: string; children: ReactNode }) {
   return <div className="settings-field clipboard-option-row">
@@ -48,12 +49,15 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
   const apps = state.options?.excludedApps;
   const ignoredTypes = state.options?.ignoredPasteboardTypes ?? [];
   const ignoredRegexps = state.options?.ignoredRegexps ?? [];
+  const ignoreUniversal = ignoredTypes.includes(UNIVERSAL_CLIPBOARD_TYPE);
+  const ignoreSecrets = Boolean(state.options?.ignoreSecrets);
   const [typeOpen, setTypeOpen] = useState(false);
   const [typeDraft, setTypeDraft] = useState('');
   const [typeError, setTypeError] = useState<MessageKey | null>(null);
   const [regexOpen, setRegexOpen] = useState(false);
   const [regexDraft, setRegexDraft] = useState('');
   const [regexError, setRegexError] = useState<MessageKey | null>(null);
+  const [presetError, setPresetError] = useState<MessageKey | null>(null);
 
   async function change(bundleId?: string, trigger?: HTMLButtonElement) {
     if (pending.current) return;
@@ -100,6 +104,48 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
       if (trigger && trigger === document.activeElement) fallback?.focus({ preventScroll: true });
       state.setOptions((previous) => previous && { ...previous, ignoredPasteboardTypes: next });
     } catch { setTypeError('clipboardSettingsSaveFailed'); }
+    finally { pending.current = false; setBusy(false); }
+  }
+
+  async function updateType(oldPasteboardType: string, nextValue: string) {
+    if (pending.current || !state.options) return false;
+    const value = nextValue.trim();
+    if (!value) { setTypeError('clipboardInvalidType'); return false; }
+    pending.current = true;
+    setBusy(true);
+    setTypeError(null);
+    try {
+      const next = await invoke<string[]>('clipboard_ignored_type_update', { oldPasteboardType, newPasteboardType: value });
+      state.setOptions((previous) => previous && { ...previous, ignoredPasteboardTypes: next });
+      return true;
+    } catch (err) {
+      setTypeError(ruleErrorMessage(err, 'type'));
+      return false;
+    } finally { pending.current = false; setBusy(false); }
+  }
+
+  async function toggleUniversalClipboard(enabled: boolean) {
+    if (pending.current || !state.options) return;
+    pending.current = true;
+    setBusy(true);
+    setPresetError(null);
+    setTypeError(null);
+    try {
+      const next = await invoke<string[]>(enabled ? 'clipboard_ignored_type_add' : 'clipboard_ignored_type_remove', { pasteboardType: UNIVERSAL_CLIPBOARD_TYPE });
+      state.setOptions((previous) => previous && { ...previous, ignoredPasteboardTypes: next });
+    } catch (err) { setPresetError(ruleErrorMessage(err, 'type')); }
+    finally { pending.current = false; setBusy(false); }
+  }
+
+  async function toggleIgnoreSecrets(enabled: boolean) {
+    if (pending.current || !state.options) return;
+    pending.current = true;
+    setBusy(true);
+    setPresetError(null);
+    try {
+      const next = await invoke<boolean>('clipboard_ignore_secrets_set', { enabled });
+      state.setOptions((previous) => previous && { ...previous, ignoreSecrets: next });
+    } catch { setPresetError('clipboardSettingsSaveFailed'); }
     finally { pending.current = false; setBusy(false); }
   }
 
@@ -166,9 +212,11 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         note={t('clipboardIgnoredTypesNote')}
         addLabel={t('clipboardAddType')}
         submitLabel={t('clipboardAddRule')}
+        saveLabel={t('clipboardSaveRule')}
         placeholder={t('clipboardIgnoredTypesPlaceholder')}
         items={ignoredTypes}
         removeLabel={(value) => t('clipboardRemoveType').replace('{type}', value)}
+        editLabel={(value) => t('clipboardEditType').replace('{type}', value)}
         open={typeOpen}
         onOpenChange={(next) => { setTypeOpen(next); if (!next) { setTypeDraft(''); setTypeError(null); } }}
         draft={typeDraft}
@@ -177,6 +225,7 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         ready={Boolean(state.options)}
         busy={busy}
         onSubmit={submitType}
+        onEdit={updateType}
         onRemove={removeType}
       />
 
@@ -199,28 +248,65 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         onSubmit={submitRegex}
         onRemove={removeRegex}
       />
+
+      <div className="clipboard-ignore-block">
+        <label className="settings-field" title={t('clipboardIgnoreUniversalNote')}>
+          <span className="settings-field-content"><span>{t('clipboardIgnoreUniversal')}</span></span>
+          <input className="settings-checkbox" id="clipboard-ignore-universal" type="checkbox"
+            aria-label={t('clipboardIgnoreUniversal')} aria-description={t('clipboardIgnoreUniversalNote')}
+            checked={ignoreUniversal} disabled={!state.options} aria-disabled={busy || undefined}
+            onChange={(event) => { if (!busy) void toggleUniversalClipboard(event.target.checked); }} />
+        </label>
+        <label className="settings-field" title={t('clipboardIgnoreSecretsNote')}>
+          <span className="settings-field-content"><span>{t('clipboardIgnoreSecrets')}</span></span>
+          <input className="settings-checkbox" id="clipboard-ignore-secrets" type="checkbox"
+            aria-label={t('clipboardIgnoreSecrets')} aria-description={t('clipboardIgnoreSecretsNote')}
+            checked={ignoreSecrets} disabled={!state.options} aria-disabled={busy || undefined}
+            onChange={(event) => { if (!busy) void toggleIgnoreSecrets(event.target.checked); }} />
+        </label>
+        {presetError && <p className="clipboard-setting-note" role="alert">{t(presetError)}</p>}
+      </div>
     </div>}
   </section>;
 }
 
 function IgnoreRuleBlock({
-  headingId, heading, note, addLabel, submitLabel, placeholder, items, removeLabel,
-  open, onOpenChange, draft, onDraftChange, error, ready, busy, onSubmit, onRemove,
+  headingId, heading, note, addLabel, submitLabel, saveLabel, placeholder, items, removeLabel, editLabel,
+  open, onOpenChange, draft, onDraftChange, error, ready, busy, onSubmit, onEdit, onRemove,
 }: {
-  headingId: string; heading: string; note: string; addLabel: string; submitLabel: string; placeholder: string;
-  items: string[]; removeLabel: (value: string) => string; open: boolean; onOpenChange: (open: boolean) => void;
+  headingId: string; heading: string; note: string; addLabel: string; submitLabel: string; saveLabel?: string; placeholder: string;
+  items: string[]; removeLabel: (value: string) => string; editLabel?: (value: string) => string; open: boolean; onOpenChange: (open: boolean) => void;
   draft: string; onDraftChange: (value: string) => void; error: string | null; ready: boolean; busy: boolean;
-  onSubmit: () => Promise<void>; onRemove: (value: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) => Promise<void>;
+  onSubmit: () => Promise<void>; onEdit?: (oldValue: string, nextValue: string) => Promise<boolean>; onRemove: (value: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) => Promise<void>;
 }) {
   const addButton = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
   useEffect(() => {
     if (open) inputRef.current?.focus({ preventScroll: true });
   }, [open]);
+  useEffect(() => {
+    if (editing !== null) {
+      editInputRef.current?.focus({ preventScroll: true });
+      editInputRef.current?.select();
+    }
+  }, [editing]);
+  useEffect(() => {
+    if (editing !== null && !items.includes(editing)) { setEditing(null); setEditDraft(''); }
+  }, [items, editing]);
 
   function close(restoreFocus = false) {
     onOpenChange(false);
     if (restoreFocus) addButton.current?.focus({ preventScroll: true });
+  }
+
+  async function saveEdit() {
+    if (editing === null || !onEdit) return;
+    if (editDraft.trim() === editing) { setEditing(null); setEditDraft(''); return; }
+    const saved = await onEdit(editing, editDraft);
+    if (saved) { setEditing(null); setEditDraft(''); }
   }
 
   return <div className="clipboard-ignore-block">
@@ -229,13 +315,36 @@ function IgnoreRuleBlock({
       <button type="button" ref={addButton} className="settings-action clipboard-icon-button clipboard-ignore-add"
         title={addLabel} aria-label={addLabel} aria-description={note} aria-expanded={open}
         disabled={!ready} aria-disabled={busy || undefined}
-        onClick={() => onOpenChange(!open)}><Plus aria-hidden="true" /></button>
+        onClick={() => { setEditing(null); onOpenChange(!open); }}><Plus aria-hidden="true" /></button>
     </div>
     {!!items.length && <ul className="clipboard-ignore-chips clipboard-rule-list" role="list" aria-labelledby={headingId}>
       {items.map((value) => {
         const remove = removeLabel(value);
+        if (onEdit && editing === value) {
+          return <li className="clipboard-ignore-chip clipboard-ignore-chip-editing" key={value}>
+            <form className="clipboard-rule-inline-editor" onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}>
+              <input ref={editInputRef} type="text" className="settings-text-input clipboard-rule-input" value={editDraft}
+                disabled={!ready} readOnly={busy} spellCheck={false} autoComplete="off"
+                aria-label={editLabel ? editLabel(value) : heading} aria-invalid={error ? true : undefined}
+                onChange={(event) => setEditDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setEditing(null);
+                    setEditDraft('');
+                  }
+                }} />
+              <button type="submit" className="settings-action clipboard-composer-submit" disabled={!ready || !editDraft.trim()} aria-disabled={busy || undefined}>{saveLabel ?? submitLabel}</button>
+            </form>
+          </li>;
+        }
         return <li className="clipboard-ignore-chip" key={value}>
-          <code className="clipboard-rule-value" title={value}>{value}</code>
+          {onEdit ? <button type="button" className="clipboard-rule-edit-trigger" title={editLabel ? editLabel(value) : value}
+            aria-label={editLabel ? editLabel(value) : value} disabled={!ready} aria-disabled={busy || undefined}
+            onClick={() => { if (busy) return; onOpenChange(false); setEditing(value); setEditDraft(value); }}>
+            <code className="clipboard-rule-value">{value}</code>
+          </button> : <code className="clipboard-rule-value" title={value}>{value}</code>}
           <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button clipboard-chip-remove" title={remove}
             aria-label={remove} onClick={(event) => void onRemove(value, event.currentTarget, addButton.current)}><X aria-hidden="true" /></button>
         </li>;

@@ -117,6 +117,8 @@ describe('Settings', () => {
     const backupSection = screen.getByRole('region', { name: 'Backup & Migration' });
 
     fireEvent.click(within(backupSection).getByRole('button', { name: 'Export Backup' }));
+    const exportDialog = await screen.findByRole('alertdialog', { name: 'Export Backup' });
+    fireEvent.click(within(exportDialog).getByRole('button', { name: 'Export' }));
     expect(await within(backupSection).findByRole('status')).toBeTruthy();
     expect(within(backupSection).getByRole('status').textContent).toContain('Backup exported');
     expect(within(backupSection).getByRole('status').textContent).toContain('12 Clipboard');
@@ -142,5 +144,66 @@ describe('Settings', () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
     expect(within(screen.getByRole('region', { name: 'Backup & Migration' })).queryByRole('button', { name: 'Export Backup' })).toBeNull();
+  });
+
+  it('supports password-encrypted backup export and encrypted backup unlock/import with retry', async () => {
+    const baseInvoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'backup_export') {
+        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 2, clipboardCount: 8, imageCount: 1, fileSize: 8192 };
+      }
+      if (name === 'backup_import_pick') {
+        return {
+          token: 'tok-enc-1',
+          fileName: 'Secret_Backup.namibak',
+          encrypted: true,
+          summary: null,
+        };
+      }
+      if (name === 'backup_import_unlock') {
+        const { password } = args as { token: string; password: string };
+        if (password !== 'secret-123') throw 'backup_wrong_password';
+        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 2, clipboardCount: 8, imageCount: 1, fileSize: 8192 };
+      }
+      if (name === 'backup_import_apply') {
+        const { mode } = args as { token: string; mode: 'merge' | 'replace'; password?: string };
+        return { mode, importedTranslations: 2, skippedTranslations: 0, importedClipboard: 8, skippedClipboard: 0, restoredImages: 1 };
+      }
+      return baseInvoke(name, args);
+    });
+
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    const backupSection = screen.getByRole('region', { name: 'Backup & Migration' });
+
+    // Export with password validates confirmation mismatch before submitting.
+    fireEvent.click(within(backupSection).getByRole('button', { name: 'Export Backup' }));
+    const exportDialog = await screen.findByRole('alertdialog', { name: 'Export Backup' });
+    fireEvent.change(within(exportDialog).getByLabelText('Backup Password'), { target: { value: 'secret-123' } });
+    fireEvent.change(within(exportDialog).getByLabelText('Confirm Password'), { target: { value: 'mismatch' } });
+    fireEvent.click(within(exportDialog).getByRole('button', { name: 'Export' }));
+    expect((await within(exportDialog).findByRole('alert')).textContent).toBe('Passwords do not match.');
+    expect(calls('backup_export')).toHaveLength(0);
+
+    fireEvent.change(within(exportDialog).getByLabelText('Confirm Password'), { target: { value: 'secret-123' } });
+    fireEvent.click(within(exportDialog).getByRole('button', { name: 'Export' }));
+    expect(calls('backup_export').at(-1)?.[1]).toEqual({ password: 'secret-123' });
+    expect((await within(backupSection).findByRole('status')).textContent).toContain('Encrypted');
+
+    // Import encrypted backup prompts for password, handles wrong password retry, then applies.
+    fireEvent.click(within(backupSection).getByRole('button', { name: 'Import Backup' }));
+    const unlockDialog = await screen.findByRole('alertdialog', { name: 'Unlock Encrypted Backup' });
+    fireEvent.change(within(unlockDialog).getByLabelText('Backup Password'), { target: { value: 'wrong' } });
+    fireEvent.click(within(unlockDialog).getByRole('button', { name: 'Unlock' }));
+    expect((await within(unlockDialog).findByRole('alert')).textContent).toBe('Incorrect password or corrupted backup file.');
+
+    fireEvent.change(within(unlockDialog).getByLabelText('Backup Password'), { target: { value: 'secret-123' } });
+    fireEvent.click(within(unlockDialog).getByRole('button', { name: 'Unlock' }));
+    const confirmDialog = await screen.findByRole('alertdialog', { name: 'Import Backup' });
+    expect(confirmDialog.textContent).toContain('Secret_Backup.namibak');
+    expect(confirmDialog.textContent).toContain('Encrypted');
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Replace' }));
+    expect(calls('backup_import_apply').at(-1)?.[1]).toEqual({ token: 'tok-enc-1', mode: 'replace', password: 'secret-123' });
+    expect((await within(backupSection).findByRole('status')).textContent).toContain('Import complete');
   });
 });

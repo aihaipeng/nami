@@ -703,7 +703,7 @@ describe('database clipboard history', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⇧⌘C'], '/',
+      ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⇧⌘C'], ['Copy as Plain Text', '—'], '/',
       ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(items.every((item) => item.children.length === 3)).toBe(true);
@@ -1566,7 +1566,7 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(search, { key: 'y', code: 'KeyY', metaKey: true });
     fireEvent.mouseMove(row('pinned'));
     fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true });
-    fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', altKey: true });
+    fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', shiftKey: true });
     fireEvent.keyDown(search, { key: 'ƒ', code: 'KeyF', altKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'favorite' }));
     fireEvent.keyDown(search, { key: 'π', code: 'KeyP', altKey: true });
@@ -1607,7 +1607,7 @@ describe('database clipboard history', () => {
     const search = screen.getByRole('searchbox');
     expect(fireEvent.copy(search)).toBe(true);
     expect(fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true })).toBe(true);
-    expect(fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', shiftKey: true })).toBe(true);
     expect(calls('clipboard_record_use')).toHaveLength(0);
     fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
@@ -1659,7 +1659,7 @@ describe('database clipboard history', () => {
     expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
     expect(calls('clipboard_record_use')).toHaveLength(0);
     fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true });
-    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', altKey: true });
+    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', shiftKey: true });
     expect(calls('clipboard_record_use')).toHaveLength(0);
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyDown(target, { key: 'p', code: 'KeyP', altKey: true, isComposing: true });
@@ -1677,7 +1677,7 @@ describe('database clipboard history', () => {
     const press = (node: Element, code: string, repeat = false) => fireEvent.keyDown(node, { key: code.slice(-1).toLowerCase(), code, altKey: true, repeat });
     expect(fireEvent.keyDown(target, { key: ' ', code: 'Space' })).toBe(false);
     fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true });
-    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', altKey: true });
+    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', shiftKey: true });
     press(target, 'KeyL');
     fireEvent.keyDown(target, { key: 'Backspace', code: 'Backspace', altKey: true });
     expect(calls('records_details_toggle')).toHaveLength(0);
@@ -2865,5 +2865,37 @@ describe('clipboard open target', () => {
     (document.activeElement as HTMLElement | null)?.blur();
     expect(pressSpace(document.body)).toBe(false);
     expect(calls('records_details_toggle').at(-1)?.[1]).toBeUndefined();
+  });
+
+  it('supports Option+Return inverted activation and Copy as Plain Text from text context menu', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const select = row('first').querySelector<HTMLButtonElement>('.history-row-select')!;
+    select.focus();
+
+    // Default activation is paste: Enter activates normally, Option+Enter sends activateAlternate.
+    fireEvent.keyDown(select, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activate' }));
+    fireEvent.keyDown(select, { key: 'Enter', code: 'Enter', altKey: true });
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activateAlternate' }));
+
+    // Switching activation preference to copy still routes Option+Enter to activateAlternate (paste with formatting).
+    bridge.snapshot.clipboardControls.activation = 'copy';
+    await emit('clipboard_controls_changed', { ...bridge.snapshot.clipboardControls });
+    fireEvent.keyDown(select, { key: 'Enter', code: 'Enter', altKey: true });
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activateAlternate' }));
+
+    // Context menu on text records offers Copy as Plain Text without triggering paste.
+    fireEvent.contextMenu(row('first'));
+    const copyPlain = await screen.findByRole('menuitem', { name: 'Copy as Plain Text' });
+    fireEvent.click(copyPlain);
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copyPlain' }));
+
+    // Non-text records do not show Copy as Plain Text.
+    records = [{ ...records[0], id: 'pic', kind: 'image', text: '' }];
+    await emit('clipboard_changed', 99);
+    await waitFor(() => expect(row('pic')).toBeTruthy());
+    fireEvent.contextMenu(row('pic'));
+    expect(screen.queryByRole('menuitem', { name: 'Copy as Plain Text' })).toBeNull();
   });
 });

@@ -6,10 +6,16 @@ import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { SettingsDialog } from './SettingsDialog';
 import { errorCode } from './ShortcutCapture';
 
-type Policy = { limit: number; maxAgeDays?: number };
+type Policy = { limit: number; maxAgeDays?: number; maxStorageMb?: number };
 type Storage = Policy & { bytes: number };
 type Preview = { count: number; token: string; categories?: [number, number, number]; recentSince?: number };
 const categories = ['clipboardCleanupOrdinary', 'clipboardCleanupFavorites', 'clipboardCleanupPinned'] as const;
+const storageLimitOptions = [
+  { code: '0', label: null },
+  { code: '500', label: '500 MB' },
+  { code: '1024', label: '1 GB' },
+  { code: '2048', label: '2 GB' },
+] as const;
 
 function storageSize(bytes: number, locale: string) {
   let value = bytes;
@@ -21,7 +27,7 @@ function storageSize(bytes: number, locale: string) {
 
 export function HistoryStorageSettings({ t, available, view, locale }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string }) {
   const id = useId();
-  const [ageOpen, setAgeOpen] = useState(false);
+  const [openPicker, setOpenPicker] = useState<'age' | 'storage' | null>(null);
   const [storage, setStorage] = useState<Storage>();
   const [storageError, setStorageError] = useState(false);
   const [refresh, refreshStorage] = useState(0);
@@ -103,7 +109,16 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
         onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearRecords')}</button>
     </div>
     <div className="settings-group">
-      <form className="settings-field" onSubmit={(event) => { event.preventDefault(); if (canSave) preview({ limit, ...(storage?.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}) }); }}>
+      <form className="settings-field" onSubmit={(event) => {
+        event.preventDefault();
+        if (canSave) {
+          preview({
+            limit,
+            ...(storage?.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}),
+            ...(storage?.maxStorageMb ? { maxStorageMb: storage.maxStorageMb } : {}),
+          });
+        }
+      }}>
         <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
         {available && storage ? <div className="settings-history-limit">
           <input id={`${id}-limit`} type="text" inputMode="numeric" pattern="[0-9]+" maxLength={7} className="settings-text-input"
@@ -117,7 +132,32 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
           <label className="settings-field-content" htmlFor={`${id}-retention`}>{t('clipboardHistoryAge')}</label>
           {available && storage ? <SearchableDropdown id={`${id}-retention`} label={t('clipboardHistoryAge')} value={String(storage.maxAgeDays ?? 0)}
             items={['0', '1', '7', '30'].map((code) => ({ code, name: code === '0' ? t('clipboardHistoryNoExpiry') : code === '1' ? t('clipboardHistoryOneDay') : t('clipboardHistoryDays').replace('{count}', number.format(Number(code))) }))}
-            open={ageOpen} onOpenChange={setAgeOpen} onChange={(code) => { const days = Number(code); if (days !== (storage.maxAgeDays ?? 0)) preview({ limit: storage.limit, ...(days ? { maxAgeDays: days } : {}) }); }}
+            open={openPicker === 'age'} onOpenChange={(next) => setOpenPicker(next ? 'age' : null)} onChange={(code) => {
+              const days = Number(code);
+              if (days !== (storage.maxAgeDays ?? 0)) {
+                preview({
+                  limit: storage.limit,
+                  ...(days ? { maxAgeDays: days } : {}),
+                  ...(storage.maxStorageMb ? { maxStorageMb: storage.maxStorageMb } : {}),
+                });
+              }
+            }}
+            t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
+        </div>
+        <div className="settings-field">
+          <label className="settings-field-content" htmlFor={`${id}-storage-limit`}>{t('clipboardStorageLimit')}</label>
+          {available && storage ? <SearchableDropdown id={`${id}-storage-limit`} label={t('clipboardStorageLimit')} value={String(storage.maxStorageMb ?? 0)}
+            items={storageLimitOptions.map(({ code, label }) => ({ code, name: label ?? t('clipboardStorageNoLimit') }))}
+            open={openPicker === 'storage'} onOpenChange={(next) => setOpenPicker(next ? 'storage' : null)} onChange={(code) => {
+              const mb = Number(code);
+              if (mb !== (storage.maxStorageMb ?? 0)) {
+                preview({
+                  limit: storage.limit,
+                  ...(storage.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}),
+                  ...(mb ? { maxStorageMb: mb } : {}),
+                });
+              }
+            }}
             t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
         </div>
         <div className="settings-field">

@@ -6,7 +6,7 @@ import { clipboardPanelShortcuts } from '../shared/clipboardShortcuts';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import type { ClipboardRecord } from './useClipboard';
 
-type Action = 'paste' | 'pastePlain' | 'pastePaths' | 'copy' | 'save' | 'translate' | 'ocr' | 'openTarget' | 'favorite' | 'pin' | 'note' | 'delete';
+type Action = 'paste' | 'pastePlain' | 'pastePaths' | 'copy' | 'copyPlain' | 'save' | 'translate' | 'ocr' | 'openTarget' | 'favorite' | 'pin' | 'note' | 'delete';
 type Item = RecordMenuItem & { action: Action };
 
 export function ClipboardMenu({ record, snapshot, x, y, canPaste, canCopy, canSave, canTranslate, canOcr, canOpenTarget, t, busy, onClose, onReturnFocus, onAction }: {
@@ -36,7 +36,7 @@ export function ClipboardMenu({ record, snapshot, x, y, canPaste, canCopy, canSa
     [{ action: 'openTarget', label: t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager'), icon: <FolderOpen aria-hidden="true" />, disabled: !canOpenTarget }],
     marks, remove,
   ] : [
-    [paste, { action: 'pastePlain', label: t('clipboardPastePlain'), icon: pasteIcon, disabled: !canPaste }, copy],
+    [paste, { action: 'pastePlain', label: t('clipboardPastePlain'), icon: pasteIcon, disabled: !canPaste }, copy, { action: 'copyPlain', label: t('clipboardCopyPlain'), icon: <HistoryIcon name="doc.on.doc" />, disabled: !canCopy }],
     marks, remove,
   ];
   const configured = clipboardPanelShortcuts(snapshot);
