@@ -18,10 +18,21 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const copyGeneration = useRef(0);
   const copying = useRef(false);
+  const copyKey = `${recordId ?? ''}\0${copyLabel ?? ''}`;
+  const lastCopyKey = useRef(copyKey);
   useEffect(() => {
-    ++copyGeneration.current; copying.current = false; setCopied(false);
-    return () => { ++copyGeneration.current; clearTimeout(copyTimer.current); };
-  }, [recordId, copyLabel]);
+    if (lastCopyKey.current !== copyKey) {
+      lastCopyKey.current = copyKey;
+      ++copyGeneration.current;
+      copying.current = false;
+      clearTimeout(copyTimer.current);
+      setCopied(false);
+    }
+  }, [copyKey]);
+  useEffect(() => () => {
+    ++copyGeneration.current;
+    clearTimeout(copyTimer.current);
+  }, []);
   async function copy() {
     if (copying.current || copied) return;
     copying.current = true;

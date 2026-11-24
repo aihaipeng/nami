@@ -1772,6 +1772,10 @@ mod tests {
 
     #[test]
     fn file_paths_payload_supports_files_and_local_image_representations_only() {
+        let root = std::env::temp_dir();
+        let photo = root.join("photo.png").to_string_lossy().into_owned();
+        let first = root.join("a.txt").to_string_lossy().into_owned();
+        let second = root.join("b.txt").to_string_lossy().into_owned();
         let local_image = ClipboardRecord {
             id: "local-img".into(),
             kind: "image".into(),
@@ -1784,12 +1788,12 @@ mod tests {
             fingerprint: "fp-local-img".into(),
         };
         let representation = ClipboardFileRepresentation {
-            paths: vec!["/Users/apple/Pictures/photo.png".into()],
+            paths: vec![photo.clone()],
             image_path: "clipboard-images/local.png".into(),
         };
         assert_eq!(
             file_paths_payload(&local_image, Some(&representation)).unwrap(),
-            platform::ClipboardPayload::Text("/Users/apple/Pictures/photo.png".into())
+            platform::ClipboardPayload::Text(photo.clone())
         );
         assert_eq!(
             file_paths_payload(&local_image, None).unwrap_err(),
@@ -1797,7 +1801,7 @@ mod tests {
         );
         let text_record = ClipboardRecord {
             kind: "text".into(),
-            text: "/Users/apple/Pictures/photo.png".into(),
+            text: photo,
             ..local_image.clone()
         };
         assert_eq!(
@@ -1806,13 +1810,13 @@ mod tests {
         );
         let files_record = ClipboardRecord {
             kind: "files".into(),
-            text: r#"["/tmp/a.txt","/tmp/b.txt"]"#.into(),
+            text: serde_json::to_string(&[&first, &second]).unwrap(),
             image_path: None,
             ..local_image
         };
         assert_eq!(
             file_paths_payload(&files_record, None).unwrap(),
-            platform::ClipboardPayload::Text("/tmp/a.txt\n/tmp/b.txt".into())
+            platform::ClipboardPayload::Text(format!("{first}\n{second}"))
         );
     }
 

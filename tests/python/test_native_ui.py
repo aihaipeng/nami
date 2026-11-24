@@ -154,9 +154,13 @@ def launch_services_host(bundle, environment):
     return subprocess.run([*command, str(bundle)], cwd=ROOT, timeout=90)
 
 
+def current_uid():
+    return os.getuid() if hasattr(os, 'getuid') else 0
+
+
 def session_host_identity(executable):
     console_uid = Path('/dev/console').stat().st_uid
-    assert console_uid == os.getuid(), 'Run in the foreground macOS test login session'
+    assert console_uid == current_uid(), 'Run in the foreground macOS test login session'
     assert executable.is_file(), 'Build and sign the isolated Nami UI Tests bundle first'
     info = (executable.parents[1] / 'Info.plist').read_bytes()
     assert plistlib.loads(info)['CFBundleIdentifier'] == 'dev.local.nami.ui-tests'
@@ -176,7 +180,7 @@ def check_cross_app_permission_evidence(result, mode):
 
 
 def check_session_host(executable, report, mode):
-    production = subprocess.run(['/usr/bin/pgrep', '-u', str(os.getuid()), '-fx', '/Applications/Nami.app/Contents/MacOS/nami'],
+    production = subprocess.run(['/usr/bin/pgrep', '-u', str(current_uid()), '-fx', '/Applications/Nami.app/Contents/MacOS/nami'],
                                 stdout=subprocess.DEVNULL, check=False)
     assert production.returncode == 1, 'Quit the production Nami in the dedicated test login session before running this check'
     host = session_host_identity(executable)
@@ -302,6 +306,23 @@ def test_session_checks_reject_running_production_before_launch(tmp_path, monkey
     monkeypatch.setitem(globals(), 'session_host_identity', lambda executable: pytest.fail('Must abort preflight'))
     with pytest.raises(AssertionError, match='Quit the production Nami'):
         check_session_host(tmp_path / 'nami', tmp_path / 'report.json', 'full')
+
+
+@pytest.mark.dfx_diagnostics
+def test_session_checks_tolerate_missing_posix_getuid(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, 'getuid', raising=False)
+    seen = []
+
+    def run(args, **kwargs):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 1 if args[0].endswith('pgrep') else 0)
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setitem(globals(), 'session_host_identity',
+                        lambda executable: {'bundle': 'synthetic-path', 'consoleUid': 0})
+    result = check_session_host(tmp_path / 'nami', tmp_path / 'report.json', 'full')
+    assert result['mode'] == 'full'
+    assert seen[0][:3] == ['/usr/bin/pgrep', '-u', '0']
 
 
 def valid_report():

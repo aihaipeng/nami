@@ -608,8 +608,8 @@ export function parseSmartJwt(trimmed: string): SmartJwt | null {
   }
 }
 
-function isPrintableDecodedText(text: string, strictReadable = false): boolean {
-  if (text.length < (strictReadable ? 3 : 2) || DECODED_CONTROL_RE.test(text)) return false;
+function isPrintableDecodedText(text: string, strictReadable = false, minLength = strictReadable ? 3 : 2): boolean {
+  if (text.length < minLength || DECODED_CONTROL_RE.test(text)) return false;
   if (!strictReadable) return true;
   let readable = 0;
   let total = 0;
@@ -638,15 +638,33 @@ function tryPrettyJson(text: string): string | null {
   return json ? json.pretty : null;
 }
 
-function unescapeTextSequences(input: string): { text: string; unicodeCount: number; strongCount: number; standardCount: number; unknownCount: number } {
+function isProseIsolatedEscape(input: string, start: number, endExclusive: number): boolean {
+  const prevWs = start === 0 || /\s/.test(input[start - 1]);
+  const nextCh = input[endExclusive];
+  const nextBoundary = nextCh === undefined || /[\s.,;:!?)]/.test(nextCh);
+  return prevWs && nextBoundary;
+}
+
+function unescapeTextSequences(input: string): {
+  text: string;
+  unicodeCount: number;
+  strongCount: number;
+  nonIsolatedStrongCount: number;
+  standardCount: number;
+  unknownCount: number;
+  hasUnescapedDoubleQuote: boolean;
+} {
   let out = '';
   let unicodeCount = 0;
   let strongCount = 0;
+  let nonIsolatedStrongCount = 0;
   let standardCount = 0;
   let unknownCount = 0;
+  let hasUnescapedDoubleQuote = false;
   for (let i = 0; i < input.length; i += 1) {
     const ch = input[i];
     if (ch !== '\\' || i + 1 >= input.length) {
+      if (ch === '"') hasUnescapedDoubleQuote = true;
       out += ch;
       continue;
     }
@@ -676,18 +694,36 @@ function unescapeTextSequences(input: string): { text: string; unicodeCount: num
       unknownCount += 1;
       out += '\\u';
       i += 1;
+    } else if (next === 'r' && input[i + 2] === '\\' && input[i + 3] === 'n') {
+      out += '\r\n';
+      strongCount += 2;
+      standardCount += 2;
+      if (!isProseIsolatedEscape(input, i, i + 4)) nonIsolatedStrongCount += 2;
+      i += 3;
     } else if (next === 'n') {
-      out += '\n'; strongCount += 1; standardCount += 1; i += 1;
+      out += '\n';
+      strongCount += 1;
+      standardCount += 1;
+      if (!isProseIsolatedEscape(input, i, i + 2)) nonIsolatedStrongCount += 1;
+      i += 1;
     } else if (next === 'r') {
-      out += '\r'; strongCount += 1; standardCount += 1; i += 1;
+      out += '\r';
+      strongCount += 1;
+      standardCount += 1;
+      if (!isProseIsolatedEscape(input, i, i + 2)) nonIsolatedStrongCount += 1;
+      i += 1;
     } else if (next === 't') {
-      out += '\t'; strongCount += 1; standardCount += 1; i += 1;
+      out += '\t';
+      strongCount += 1;
+      standardCount += 1;
+      if (!isProseIsolatedEscape(input, i, i + 2)) nonIsolatedStrongCount += 1;
+      i += 1;
     } else if (next === 'b') {
       out += '\b'; standardCount += 1; i += 1;
     } else if (next === 'f') {
       out += '\f'; standardCount += 1; i += 1;
     } else if (next === '"') {
-      out += '"'; strongCount += 1; standardCount += 1; i += 1;
+      out += '"'; strongCount += 1; nonIsolatedStrongCount += 1; standardCount += 1; i += 1;
     } else if (next === '\'' || next === '\\' || next === '/') {
       out += next; standardCount += 1; i += 1;
     } else {
@@ -696,13 +732,21 @@ function unescapeTextSequences(input: string): { text: string; unicodeCount: num
       i += 1;
     }
   }
-  return { text: out, unicodeCount, strongCount, standardCount, unknownCount };
+  return {
+    text: out,
+    unicodeCount,
+    strongCount,
+    nonIsolatedStrongCount,
+    standardCount,
+    unknownCount,
+    hasUnescapedDoubleQuote,
+  };
 }
 
 export function parseSmartEscape(trimmed: string): SmartDecoded | null {
   if (trimmed.length < 4 || trimmed.length > MAX_SMART_TEXT_CHARS || !trimmed.includes('\\')) return null;
-  if (/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('\\\\') || /^\/.+\/[dgimsuvy]*$/.test(trimmed)) return null;
 
+  // 1. Valid JSON-quoted string literal (e.g. "{\"ok\":true,\n\"n\":1}" or "C:\\Users\\Alice").
   if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 6 && /\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])/.test(trimmed)) {
     try {
       const parsed: unknown = JSON.parse(trimmed);
@@ -714,9 +758,53 @@ export function parseSmartEscape(trimmed: string): SmartDecoded | null {
     }
   }
 
+  // Reject Windows/UNC paths (leading or embedded), regex literals, and braced LaTeX commands.
+  if (
+    /(?:^|[\s"'(=])(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\)/.test(trimmed)
+    || /^\/.+\/[dgimsuvy]*$/.test(trimmed)
+    || /\\(?:frac|text(?:bf|it|tt|rm)?|begin|end|sqrt|sum|int)\{/.test(trimmed)
+  ) {
+    return null;
+  }
+
   const unescaped = unescapeTextSequences(trimmed);
-  if (unescaped.unicodeCount === 0 && (unescaped.strongCount < 1 || unescaped.standardCount < 2 || unescaped.unknownCount > 0)) return null;
-  if (unescaped.text === trimmed || !isPrintableDecodedText(unescaped.text)) return null;
+  const hasRealNewline = /[\r\n]/.test(trimmed);
+  const hasEmbeddedSingleQuoted = /(?:^|[\s(=:,])'[^'\r\n]*\\[uUnrtbf"'\\][^'\r\n]*'(?:$|[\s),;])/.test(trimmed);
+
+  // 2. Unicode escape sequences (\uXXXX / \u{XXXXX}).
+  if (unescaped.unicodeCount > 0) {
+    if (hasRealNewline) {
+      if (
+        unescaped.unicodeCount < 2
+        || unescaped.unknownCount > 0
+        || unescaped.hasUnescapedDoubleQuote
+        || hasEmbeddedSingleQuoted
+        || trimmed.startsWith('#!')
+      ) {
+        return null;
+      }
+    } else if (
+      unescaped.unicodeCount === 1
+      && (unescaped.hasUnescapedDoubleQuote || hasEmbeddedSingleQuoted || unescaped.unknownCount > 0)
+    ) {
+      return null;
+    }
+  } else {
+    // 3. Unquoted non-Unicode escapes: only single-line escaped payloads without raw quotes/code literals.
+    if (
+      hasRealNewline
+      || unescaped.unknownCount > 0
+      || unescaped.hasUnescapedDoubleQuote
+      || hasEmbeddedSingleQuoted
+      || unescaped.strongCount < 2
+      || unescaped.nonIsolatedStrongCount < 1
+    ) {
+      return null;
+    }
+  }
+
+  const minLength = unescaped.unicodeCount > 0 ? 1 : 2;
+  if (unescaped.text === trimmed || !isPrintableDecodedText(unescaped.text, false, minLength)) return null;
   return { kind: 'decoded', encoding: 'escape', text: unescaped.text, jsonPretty: tryPrettyJson(unescaped.text) };
 }
 

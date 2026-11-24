@@ -177,29 +177,34 @@ mod tests {
 
     #[test]
     fn file_groups_require_a_choice_and_never_accept_a_path_from_the_caller() {
-        let files = r#"["/tmp/first.txt","/tmp/second file.txt"]"#;
+        let root = std::env::temp_dir();
+        let first = root.join("first.txt").to_string_lossy().into_owned();
+        let second = root.join("second file.txt").to_string_lossy().into_owned();
+        let photo = root.join("photo.png").to_string_lossy().into_owned();
+        let bad = root.join("bad\0.png").to_string_lossy().into_owned();
+        let files = serde_json::to_string(&[&first, &second]).unwrap();
         assert_eq!(
-            resolve("files", files, None).unwrap(),
+            resolve("files", &files, None).unwrap(),
             Some(OpenTarget::ChooseFile)
         );
         assert_eq!(
-            resolve("files", files, Some(1)).unwrap(),
-            Some(OpenTarget::File("/tmp/second file.txt".into()))
+            resolve("files", &files, Some(1)).unwrap(),
+            Some(OpenTarget::File(second.into()))
         );
-        assert!(resolve("files", files, Some(2)).is_err());
+        assert!(resolve("files", &files, Some(2)).is_err());
         assert!(resolve("files", r#"["relative.txt"]"#, None).is_err());
-        assert!(resolve("text", "/tmp/first.txt", Some(0)).is_err());
+        assert!(resolve("text", &first, Some(0)).is_err());
         assert_eq!(
-            resolve_paths(&["/tmp/photo.png".into()], None).unwrap(),
-            Some(OpenTarget::File("/tmp/photo.png".into()))
+            resolve_paths(std::slice::from_ref(&photo), None).unwrap(),
+            Some(OpenTarget::File(photo.clone().into()))
         );
         assert_eq!(
-            resolve_paths(&["/tmp/photo.png".into()], Some(0)).unwrap(),
-            Some(OpenTarget::File("/tmp/photo.png".into()))
+            resolve_paths(std::slice::from_ref(&photo), Some(0)).unwrap(),
+            Some(OpenTarget::File(photo.clone().into()))
         );
         assert!(resolve_paths(&[], None).is_err());
         assert!(resolve_paths(&["relative.png".into()], None).is_err());
-        assert!(resolve_paths(&["/tmp/bad\0.png".into()], None).is_err());
-        assert!(resolve_paths(&["/tmp/photo.png".into()], Some(1)).is_err());
+        assert!(resolve_paths(&[bad], None).is_err());
+        assert!(resolve_paths(&[photo], Some(1)).is_err());
     }
 }

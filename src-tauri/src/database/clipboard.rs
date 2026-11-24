@@ -18,6 +18,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
+    connection
+        .prepare_cached("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
+        .map_err(storage_error)?
+        .exists([name])
+        .map_err(storage_error)
+}
+
 pub(super) fn migrate(connection: &mut rusqlite::Connection) -> Result<(), String> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -697,7 +705,17 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_file_representations f WHERE f.sequence=r.sequence),r.kind='text' AND EXISTS (SELECT 1 FROM clipboard_text_formatting t WHERE t.sequence=r.sequence) FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let has_file_paths = if has_table(&self.connection, "clipboard_file_representations")? {
+            "r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_file_representations f WHERE f.sequence=r.sequence)"
+        } else {
+            "0"
+        };
+        let has_rich_text = if has_table(&self.connection, "clipboard_text_formatting")? {
+            "r.kind='text' AND EXISTS (SELECT 1 FROM clipboard_text_formatting t WHERE t.sequence=r.sequence)"
+        } else {
+            "0"
+        };
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},{has_file_paths},{has_rich_text} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)

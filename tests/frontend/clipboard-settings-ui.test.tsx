@@ -205,7 +205,10 @@ describe('clipboard recording settings', () => {
     expect(recorder.textContent).toBe('Press shortcut');
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(0);
     fireEvent.keyDown(recorder, { key: 'c', code: 'KeyC', metaKey: true });
-    await waitFor(() => expect(recorder.textContent).toBe('⌘C'));
+    await waitFor(() => {
+      expect(recorder.textContent).toBe('⌘C');
+      expect(recorder.getAttribute('aria-disabled')).toBeNull();
+    });
 
     function choose() {
       fireEvent.click(recorder);
@@ -216,13 +219,19 @@ describe('clipboard recording settings', () => {
     fireEvent.change(manual.getByRole('combobox', { name: 'Key' }), { target: { value: 'KeyC' } });
     fireEvent.click(manual.getByRole('checkbox', { name: '⌘ Command' }));
     fireEvent.click(manual.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(calls('clipboard_record_shortcut_set')).toHaveLength(2));
+    await waitFor(() => {
+      expect(calls('clipboard_record_shortcut_set')).toHaveLength(2);
+      expect(recorder.getAttribute('aria-disabled')).toBeNull();
+    });
     expect(bridge.snapshot.clipboardControls.shortcuts.copyRecord.binding).toEqual({ code: 'KeyC', modifiers: ['meta'] });
 
     manual = choose();
     fireEvent.change(manual.getByRole('combobox', { name: 'Key' }), { target: { value: 'MetaLeft' } });
     fireEvent.click(manual.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(recorder.textContent).toBe('Left ⌘'));
+    await waitFor(() => {
+      expect(recorder.textContent).toBe('Left ⌘');
+      expect(recorder.getAttribute('aria-disabled')).toBeNull();
+    });
     expect(bridge.snapshot.clipboardControls.shortcuts.copyRecord.binding).toEqual({ code: 'MetaLeft', modifiers: [] });
     fireEvent.click(choose().getByRole('button', { name: 'Cancel' }));
     expect(recorder.textContent).toBe('Left ⌘');

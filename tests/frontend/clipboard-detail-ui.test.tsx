@@ -964,8 +964,8 @@ it('copies plain text from the detail toolbar after switching a rich-text record
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
 
   const richCopy = within(pane()).getByRole('button', { name: 'Copy' });
-  fireEvent.click(richCopy);
-  await waitFor(() => expect(richCopy.querySelector('.copy-success')).toBeTruthy());
+  await act(async () => { fireEvent.click(richCopy); });
+  expect(richCopy.querySelector('.copy-success')).toBeTruthy();
   expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
 
   const modeGroup = within(pane()).getByRole('group', { name: 'Preview Format' });
@@ -974,16 +974,16 @@ it('copies plain text from the detail toolbar after switching a rich-text record
 
   const plainCopy = within(pane()).getByRole('button', { name: 'Copy as Plain Text' });
   expect(plainCopy.querySelector('.copy-success')).toBeNull();
-  fireEvent.click(plainCopy);
-  await waitFor(() => expect(plainCopy.querySelector('.copy-success')).toBeTruthy());
+  await act(async () => { fireEvent.click(plainCopy); });
+  expect(plainCopy.querySelector('.copy-success')).toBeTruthy();
   expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copyPlain' });
 
   fireEvent.click(within(modeGroup).getByRole('button', { name: 'Rich' }));
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
   const richCopyAgain = within(pane()).getByRole('button', { name: 'Copy' });
   expect(richCopyAgain.querySelector('.copy-success')).toBeNull();
-  fireEvent.click(richCopyAgain);
-  await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
+  await act(async () => { fireEvent.click(richCopyAgain); });
+  expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
 });
 
 it('extracts a 48x48 offscreen image palette below single images alongside QR and path cards and copies HEX on click', async () => {

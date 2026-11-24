@@ -480,4 +480,95 @@ describe('smartDetail', () => {
       expect(analyzeSmartDetail(nonNumber)).toBeNull();
     }
   });
+
+  it('decodes genuine escaped payloads while rejecting shell commands, code snippets, prose, paths, and LaTeX', () => {
+    const positiveCases: Array<{ label: string; input: string; expectedText: string; expectJson?: boolean }> = [
+      { label: 'pure unicode', input: '\\u4f60\\u597d\\u4e16\\u754c', expectedText: '你好世界' },
+      { label: 'single unicode', input: '\\u4f60', expectedText: '你' },
+      { label: 'es6 codepoint', input: '\\u{1F600}\\u{1F680}', expectedText: '😀🚀' },
+      { label: 'mixed ascii + unicode', input: 'Hello \\u4e16\\u754c!', expectedText: 'Hello 世界!' },
+      { label: 'multiline java properties unicode', input: 'app.title=\\u6d6a\\u6f6e\napp.subtitle=\\u526a\\u8d34\\u677f', expectedText: 'app.title=浪潮\napp.subtitle=剪贴板' },
+      { label: 'quoted JSON string containing JSON', input: '"{\\"ok\\":true,\\n\\"n\\":1}"', expectedText: '{"ok":true,\n"n":1}', expectJson: true },
+      { label: 'quoted JSON string with quotes and newline', input: '"He said \\"hello\\"\\nLine 2"', expectedText: 'He said "hello"\nLine 2' },
+      { label: 'quoted JSON string with unicode', input: '"\\u4f60\\u597d\\n\\u4e16\\u754c"', expectedText: '你好\n世界' },
+      { label: 'quoted JSON Windows path', input: '"C:\\\\Users\\\\Alice\\\\notes.txt"', expectedText: 'C:\\Users\\Alice\\notes.txt' },
+      { label: 'unquoted escaped JSON object', input: '{\\"user\\":\\"nami\\",\\"role\\":\\"admin\\"}', expectedText: '{"user":"nami","role":"admin"}', expectJson: true },
+      { label: 'unquoted escaped JSON array', input: '[{\\"id\\":1},{\\"id\\":2}]', expectedText: '[{"id":1},{"id":2}]', expectJson: true },
+      { label: 'unquoted escaped log with n/t/quote', input: 'line1\\nline2\\t\\"ok\\"', expectedText: 'line1\nline2\t"ok"' },
+      { label: 'unquoted single-line stack trace', input: 'Error: boom\\n    at foo (a.ts:10)\\n    at bar (b.ts:20)', expectedText: 'Error: boom\n    at foo (a.ts:10)\n    at bar (b.ts:20)' },
+      { label: 'unquoted CRLF log', input: '2026-11-25 INFO start\\r\\n2026-11-25 INFO done', expectedText: '2026-11-25 INFO start\r\n2026-11-25 INFO done' },
+      { label: 'unquoted prose with apostrophes and newlines', input: "Don't panic\\nIt's working\\nAll good", expectedText: "Don't panic\nIt's working\nAll good" },
+      { label: 'unquoted escaped SQL', input: 'SELECT *\\nFROM users\\nWHERE active = 1', expectedText: 'SELECT *\nFROM users\nWHERE active = 1' },
+      { label: 'unquoted escaped HTML fragment', input: '<p class=\\"title\\">Hello</p>\\n<p>World</p>', expectedText: '<p class="title">Hello</p>\n<p>World</p>' },
+      { label: 'unquoted key-value escaped quotes', input: 'title=\\"Nami\\" status=\\"ok\\"', expectedText: 'title="Nami" status="ok"' },
+    ];
+
+    for (const item of positiveCases) {
+      const result = analyzeSmartDetail(item.input);
+      expect(result, `expected positive escape match for: ${item.label}`).toMatchObject({
+        kind: 'decoded',
+        encoding: 'escape',
+        text: item.expectedText,
+      });
+      if (item.expectJson && result?.kind === 'decoded') {
+        expect(result.jsonPretty).not.toBeNull();
+      }
+    }
+
+    const negativeCases: Array<{ label: string; input: string }> = [
+      {
+        label: 'single-line osascript command with escaped HTML quotes',
+        input: 'osascript -l JavaScript -e \'ObjC.import("AppKit"); const pb = $.NSPasteboard.generalPasteboard; pb.clearContents; pb.setStringForType("Nami HTML 富文本验证", "public.utf8-plain-text"); pb.setStringForType("<p><strong>Nami</strong> <em>HTML 富文本</em>验证 — <a href=\\"https://example.com\\">示例链接</a></p>", "public.html");\'',
+      },
+      {
+        label: 'multi-line zsh script with escaped quotes and RTF',
+        input: [
+          '#!/bin/zsh',
+          'set -e',
+          'echo "Writing 4 exact text types..."',
+          'osascript -l JavaScript -e \'item.setStringForType("<a href=\\"https://example.com\\">link</a>", "public.html");\'',
+          'osascript -l JavaScript -e \'item.setStringForType("{\\\\rtf1\\\\ansi {\\\\b Nami} Sample}", "public.rtf");\'',
+          'echo "Done!"',
+        ].join('\n'),
+      },
+      { label: 'curl command with escaped JSON payload', input: 'curl -X POST https://api.example.com/v1 -H "Content-Type: application/json" -d "{\\"name\\":\\"nami\\"}"' },
+      { label: 'JS console.log with escaped quote and newline', input: 'console.log("Hello \\"world\\"\\nDone\\n");' },
+      { label: 'TS const with double-quoted escapes', input: 'const msg = "line1\\nline2\\tvalue";' },
+      { label: 'TS const with single-quoted escapes', input: "const msg = 'line1\\nline2\\tvalue';" },
+      { label: 'shell printf double-quoted', input: 'printf "line1\\nline2\\n"' },
+      { label: 'shell printf single-quoted', input: "printf 'line1\\nline2\\n'" },
+      { label: 'shell echo -e single-quoted', input: "echo -e 'a\\nb\\tc'" },
+      { label: 'python3 -c command', input: 'python3 -c \'print("a\\nb\\tc")\'' },
+      { label: 'git commit with escaped quotes', input: 'git commit -m "Fix \\"quote\\" and \\n handling"' },
+      { label: 'awk command with tab and newline', input: 'awk \'{print $1 "\\t" $2 "\\n"}\'' },
+      { label: 'function call with single-quoted literal', input: "notify('Step 1\\nStep 2\\nDone');" },
+      { label: 'standalone single-quoted literal', input: "'hello\\nworld\\n'" },
+      { label: 'multi-line TypeScript function with escapes', input: 'function greet() {\n  const s = "a\\nb\\n\\"c\\"";\n  return s;\n}' },
+      { label: 'multi-line JS file with unicode constants', input: 'const NBSP = "\\u00a0";\nconst ZWSP = "\\u200b";\nexport const clean = (s: string) => s.replace(NBSP, " ");' },
+      { label: 'single-line JS const with single unicode escape (single-quoted)', input: "const NBSP = '\\u00a0';" },
+      { label: 'single-line JS const with single unicode escape (double-quoted)', input: 'const NBSP = "\\u00a0";' },
+      { label: 'multi-line shebang script with unicode escapes', input: '#!/bin/zsh\necho \\u4f60\\u597d' },
+      { label: 'multi-line markdown mentioning escapes', input: 'Formatting rules:\nUse \\n for line break\nUse \\t for tab' },
+      { label: 'single-line prose mentioning \\n and \\t', input: 'Use \\n for newline and \\t for tab.' },
+      { label: 'single-line prose mentioning \\r\\n and \\n', input: 'Convert \\r\\n to \\n before saving.' },
+      { label: 'Windows path with standard escape letters', input: 'C:\\new\\temp\\file.txt' },
+      { label: 'embedded Windows path with standard escape letters', input: 'path=C:\\new\\temp\\file.txt' },
+      { label: 'UNC path', input: '\\\\server\\share\\file' },
+      { label: 'regex literal', input: '/^\\d+\\s+\\w+$/' },
+      { label: 'plain double backslashes', input: 'foo\\\\bar\\\\baz' },
+      { label: 'LaTeX frac and text', input: '\\frac{1}{2} + \\text{hello} + \\text{world}' },
+      { label: 'raw RTF source', input: '{\\rtf1\\ansi {\\b Nami} \\tab ok}' },
+      { label: 'single weak escape only', input: 'foo\\nbar' },
+      { label: 'single quote escape plus backslash', input: 'a \\" b \\\\ c' },
+      { label: 'non-printable control unicode escape', input: '\\u0007' },
+    ];
+
+    for (const item of negativeCases) {
+      const result = analyzeSmartDetail(item.input);
+      expect(result?.kind === 'decoded' && result.encoding === 'escape', `unexpected escape match for: ${item.label}`).toBe(false);
+    }
+
+    // Valid JSON containing escapes stays classified as JSON, not Unescaped.
+    expect(analyzeSmartDetail('{"msg":"line1\\nline2"}')?.kind).toBe('json');
+  });
 });
