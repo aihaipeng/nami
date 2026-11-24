@@ -10,9 +10,21 @@ import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
 import { FileList, ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import { ClipboardRichText } from './ClipboardRichText';
-import { ClipboardColorCard, ClipboardImageQrBar, ClipboardJsonBar, ClipboardQrPreview, ClipboardTimestampCard, type JsonViewMode } from './ClipboardSmartDetail';
+import {
+  ClipboardColorCard,
+  ClipboardDateTimeCard,
+  ClipboardDecodedCard,
+  ClipboardImageQrBar,
+  ClipboardJsonBar,
+  ClipboardJwtCard,
+  ClipboardQrPreview,
+  ClipboardTimestampCard,
+  ClipboardUrlCard,
+  type JsonViewMode,
+} from './ClipboardSmartDetail';
 import { ClipboardTextPreview } from './ClipboardTextPreview';
 import { analyzeSmartDetail, canEncodeQr } from './smartDetail';
+import { resolveLanguage } from '../shared/i18n';
 import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import type { ClipboardRecord } from './useClipboard';
 import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
@@ -209,6 +221,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
     : current?.text ?? '';
   const canCopyDerived = native && current !== null && !loading && snapshot.capabilities.clipboardWrite;
+  const language = resolveLanguage(snapshot.locale);
   const mac = snapshot.capabilities.platform === 'macos';
   const openTargetAction = current && openTargetKind ? {
     kind: openTargetKind,
@@ -221,7 +234,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     label: t(showQr ? 'clipboardQrHide' : 'clipboardQrGenerate'),
     onClick: () => setShowQr((value) => !value),
   } : undefined;
-  return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" aria-label="Clipboard details" aria-busy={loading}>
+  return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" data-qr-view={(showQr && canShowQr) || undefined} aria-label="Clipboard details" aria-busy={loading}>
     <ActivityBeam label={t('working')} active={active && loading} />
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
       {hasRichPreview && !showQr && <div className="clipboard-detail-mode" role="group" aria-label={t('clipboardRichPreviewMode')} data-tauri-drag-region="false">
@@ -244,7 +257,11 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
                 {smart?.kind === 'json' && <ClipboardJsonBar json={smart} mode={jsonMode} onModeChange={setJsonMode} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 <ClipboardTextPreview as="div" text={displayedText} className="clipboard-detail-text" data-tauri-drag-region="false" />
                 {smart?.kind === 'color' && <ClipboardColorCard color={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'datetime' && <ClipboardDateTimeCard dateTime={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'url' && <ClipboardUrlCard url={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'jwt' && <ClipboardJwtCard jwt={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'decoded' && <ClipboardDecodedCard decoded={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
               </>)
           : singleImage
             ? <>

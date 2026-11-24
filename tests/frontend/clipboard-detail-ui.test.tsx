@@ -544,10 +544,11 @@ it('renders L2 color, JSON, timestamp, and QR code views in details without modi
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '{\n  "b": 2,\n  "a": 1\n}' }));
   expect(first().text).toBe('{"b":2,"a":1}');
 
-  // Timestamp local + ISO copy
+  // Timestamp local + ISO copy + relative time
   first().text = '1700000000';
   await emit('clipboard_changed', 3);
   const copyIso = await within(pane()).findByRole('button', { name: 'Copy ISO' });
+  expect(within(pane()).getByText('Relative')).toBeTruthy();
   fireEvent.click(copyIso);
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '2023-11-14T22:13:20.000Z' }));
 
@@ -558,10 +559,12 @@ it('renders L2 color, JSON, timestamp, and QR code views in details without modi
   expect(qrToggle.closest('.history-row-actions')).toBeTruthy();
   expect(qrToggle.classList.contains('icon-button')).toBe(true);
   fireEvent.click(qrToggle);
+  expect(pane().dataset.qrView).toBe('true');
   expect(within(pane()).getByRole('img', { name: 'QR Code' })).toBeTruthy();
   const hideQr = within(pane()).getByRole('button', { name: 'Hide QR Code' });
   expect(hideQr.classList.contains('record-active')).toBe(true);
   fireEvent.click(hideQr);
+  expect(pane().dataset.qrView).toBeUndefined();
   expect(within(pane()).queryByRole('img', { name: 'QR Code' })).toBeNull();
 
   // Ordinary long plain text shows no extra smart cards or QR toggle
@@ -637,4 +640,80 @@ it('shows a detail toolbar open-target action for openable files and links and o
   expect(openLinkBtn.closest('.history-row-actions')).toBeTruthy();
   fireEvent.click(openLinkBtn);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: undefined }));
+});
+
+it('renders URL, DateTime, JWT, and decoded text smart cards with consistent icon copy actions', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_text_copy') return null;
+    return baseInvoke(name, args);
+  });
+
+  // URL card: Clean URL + Decoded URL + query param copy
+  first().text = 'https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&utm_source=share&q=%E6%B5%8B%E8%AF%95';
+  direct();
+  const copyClean = await within(pane()).findByRole('button', { name: 'Copy Clean URL' });
+  expect(copyClean.classList.contains('icon-button')).toBe(true);
+  fireEvent.click(copyClean);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: 'https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&q=%E6%B5%8B%E8%AF%95',
+  }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Decoded' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: 'https://example.test/wiki/中文?id=42&utm_source=share&q=测试',
+  }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy q' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '测试' }));
+  const paramsList = pane().querySelector('.clipboard-smart-params');
+  expect(paramsList).toBeTruthy();
+  expect(getComputedStyle(paramsList!).overflowY).not.toBe('auto');
+
+  // DateTime card: ISO UTC -> Local, Unix (s), Unix (ms), Relative
+  first().text = '2026-11-25T00:22:55Z';
+  await emit('clipboard_changed', 2);
+  const copyUnixSec = await within(pane()).findByRole('button', { name: 'Copy Unix (s)' });
+  expect(within(pane()).getByText('Relative')).toBeTruthy();
+  fireEvent.click(copyUnixSec);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: String(Date.UTC(2026, 10, 25, 0, 22, 55) / 1000) }));
+
+  // JWT card: status badge, Payload/Header toggle, copy active JSON
+  const b64u = (obj: object) => {
+    const bytes = new TextEncoder().encode(JSON.stringify(obj));
+    let bin = '';
+    for (const byte of bytes) bin += String.fromCharCode(byte);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  };
+  first().text = `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u({ sub: 'u_1', exp: 1600000000 })}.signature_part`;
+  await emit('clipboard_changed', 3);
+  expect(await within(pane()).findByText('Expired')).toBeTruthy();
+  expect(within(pane()).getByText('HS256')).toBeTruthy();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Header' }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Header' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: '{\n  "alg": "HS256",\n  "typ": "JWT"\n}',
+  }));
+
+  // Base64 JSON decoded card: defaults to formatted JSON and toggles to original
+  first().text = 'eyJ1c2VyIjoibmFtaSIsInJvbGUiOiJhZG1pbiJ9';
+  await emit('clipboard_changed', 4);
+  expect(await within(pane()).findByText('Base64')).toBeTruthy();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Base64' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: '{\n  "user": "nami",\n  "role": "admin"\n}',
+  }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Original' }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Base64' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: '{"user":"nami","role":"admin"}',
+  }));
+
+  // Unicode escape decoded card
+  first().text = '\\u4f60\\u597d\\u4e16\\u754c';
+  await emit('clipboard_changed', 5);
+  expect(await within(pane()).findByText('Unescaped')).toBeTruthy();
+  expect(within(pane()).getByText('你好世界')).toBeTruthy();
+  // Smart cards rely on the outer detail HistoryList scrollbar rather than nested scroll containers.
+  const codeBlock = pane().querySelector('.clipboard-smart-code');
+  expect(codeBlock).toBeTruthy();
+  expect(getComputedStyle(codeBlock!).overflowY).not.toBe('auto');
 });

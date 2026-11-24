@@ -3,7 +3,18 @@ import { CircleCheck, ExternalLink, ScanQrCode } from 'lucide-react';
 import type { Translate } from '../shared/i18n';
 import { HistoryIcon } from '../translation/HistoryIcon';
 import { encodeQrCode } from './qrEncoder';
-import { isOpenableQrLink, type SmartColor, type SmartJson, type SmartTimestamp } from './smartDetail';
+import {
+  formatLocalTimestamp,
+  formatRelativeTime,
+  isOpenableQrLink,
+  type SmartColor,
+  type SmartDateTime,
+  type SmartDecoded,
+  type SmartJson,
+  type SmartJwt,
+  type SmartTimestamp,
+  type SmartUrl,
+} from './smartDetail';
 
 function useCopiedKey() {
   const [copied, setCopied] = useState<string | null>(null);
@@ -94,8 +105,9 @@ export function ClipboardJsonBar({ json, mode, onModeChange, canCopy, onCopy, t 
   </div>;
 }
 
-export function ClipboardTimestampCard({ timestamp, canCopy, onCopy, t }: {
+export function ClipboardTimestampCard({ timestamp, locale, canCopy, onCopy, t }: {
   timestamp: SmartTimestamp;
+  locale: 'zh-CN' | 'en';
   canCopy: boolean;
   onCopy: (text: string) => Promise<boolean>;
   t: Translate;
@@ -105,6 +117,7 @@ export function ClipboardTimestampCard({ timestamp, canCopy, onCopy, t }: {
     { key: 'local', label: t('clipboardTimestampLocal'), value: timestamp.local },
     { key: 'iso', label: t('clipboardTimestampIso'), value: timestamp.iso },
   ];
+  const relative = formatRelativeTime(timestamp.epochMs, locale);
   return <div className="clipboard-smart-card" data-tauri-drag-region="false">
     <div className="clipboard-smart-rows">
       {rows.map((row) => <div className="clipboard-smart-row" key={row.key}>
@@ -113,7 +126,163 @@ export function ClipboardTimestampCard({ timestamp, canCopy, onCopy, t }: {
         <SmartCopyButton active={copied === row.key} disabled={!canCopy} label={`${t('copy')} ${row.label}`}
           onClick={() => { void copyValue(row.key, row.value, onCopy); }} />
       </div>)}
+      <div className="clipboard-smart-row">
+        <span className="clipboard-smart-key">{t('clipboardTimestampRelative')}</span>
+        <span className="clipboard-smart-value clipboard-smart-value-plain">{relative}</span>
+      </div>
     </div>
+  </div>;
+}
+
+export function ClipboardDateTimeCard({ dateTime, locale, canCopy, onCopy, t }: {
+  dateTime: SmartDateTime;
+  locale: 'zh-CN' | 'en';
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  const rows: Array<{ key: string; label: string; value: string }> = [];
+  if (dateTime.showLocal) rows.push({ key: 'local', label: t('clipboardTimestampLocal'), value: dateTime.local });
+  if (dateTime.showIso) rows.push({ key: 'iso', label: t('clipboardTimestampIso'), value: dateTime.iso });
+  rows.push({ key: 'unix-s', label: t('clipboardUnixSeconds'), value: dateTime.unixSeconds });
+  rows.push({ key: 'unix-ms', label: t('clipboardUnixMilliseconds'), value: dateTime.unixMilliseconds });
+  const relative = formatRelativeTime(dateTime.epochMs, locale);
+  return <div className="clipboard-smart-card" data-tauri-drag-region="false">
+    <div className="clipboard-smart-rows">
+      {rows.map((row) => <div className="clipboard-smart-row" key={row.key}>
+        <span className="clipboard-smart-key">{row.label}</span>
+        <code className="clipboard-smart-value">{row.value}</code>
+        <SmartCopyButton active={copied === row.key} disabled={!canCopy} label={`${t('copy')} ${row.label}`}
+          onClick={() => { void copyValue(row.key, row.value, onCopy); }} />
+      </div>)}
+      <div className="clipboard-smart-row">
+        <span className="clipboard-smart-key">{t('clipboardTimestampRelative')}</span>
+        <span className="clipboard-smart-value clipboard-smart-value-plain">{relative}</span>
+      </div>
+    </div>
+  </div>;
+}
+
+export function ClipboardUrlCard({ url, canCopy, onCopy, t }: {
+  url: SmartUrl;
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  const hasTopRows = url.cleanUrl !== null || url.decodedUrl !== null;
+  const remaining = url.totalParams - url.params.length;
+  return <div className="clipboard-smart-card clipboard-smart-url" data-tauri-drag-region="false">
+    {hasTopRows && <div className="clipboard-smart-rows">
+      {url.cleanUrl !== null && <div className="clipboard-smart-row">
+        <span className="clipboard-smart-key">{t('clipboardUrlClean')}</span>
+        <code className="clipboard-smart-value" title={url.cleanUrl}>{url.cleanUrl}</code>
+        <SmartCopyButton active={copied === 'clean'} disabled={!canCopy} label={`${t('copy')} ${t('clipboardUrlClean')}`}
+          onClick={() => { void copyValue('clean', url.cleanUrl!, onCopy); }} />
+      </div>}
+      {url.decodedUrl !== null && <div className="clipboard-smart-row">
+        <span className="clipboard-smart-key">{t('clipboardUrlDecoded')}</span>
+        <code className="clipboard-smart-value" title={url.decodedUrl}>{url.decodedUrl}</code>
+        <SmartCopyButton active={copied === 'decoded'} disabled={!canCopy} label={`${t('copy')} ${t('clipboardUrlDecoded')}`}
+          onClick={() => { void copyValue('decoded', url.decodedUrl!, onCopy); }} />
+      </div>}
+    </div>}
+    {url.params.length > 0 && <div className={`clipboard-smart-rows${hasTopRows ? ' clipboard-smart-divider' : ''} clipboard-smart-params`}>
+      {url.params.map((param, index) => {
+        const key = `param-${index}`;
+        return <div className="clipboard-smart-row" key={`${index}:${param.key}`}>
+          <span className="clipboard-smart-key clipboard-smart-param-key" title={param.key}>{param.key}</span>
+          <code className="clipboard-smart-value" title={param.value}>{param.value}</code>
+          <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${param.key}`}
+            onClick={() => { void copyValue(key, param.value, onCopy); }} />
+        </div>;
+      })}
+      {remaining > 0 && <div className="clipboard-smart-more">{t('clipboardUrlMoreParams').replace('{count}', String(remaining))}</div>}
+    </div>}
+  </div>;
+}
+
+export function ClipboardJwtCard({ jwt, locale, canCopy, onCopy, t }: {
+  jwt: SmartJwt;
+  locale: 'zh-CN' | 'en';
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  const [tab, setTab] = useState<'payload' | 'header'>('payload');
+  useEffect(() => { setTab('payload'); }, [jwt]);
+
+  const now = Date.now();
+  const status = jwt.expiresAtMs !== null
+    ? (jwt.expiresAtMs <= now ? 'expired' : jwt.notBeforeMs !== null && jwt.notBeforeMs > now ? 'pending' : 'valid')
+    : jwt.notBeforeMs !== null && jwt.notBeforeMs > now ? 'pending' : null;
+  const activeJson = tab === 'payload' ? jwt.payloadPretty : jwt.headerPretty;
+  const activeLabel = tab === 'payload' ? t('clipboardJwtPayload') : t('clipboardJwtHeader');
+  const metaRows: Array<{ key: string; label: string; value: string }> = [];
+  if (jwt.algorithm) metaRows.push({ key: 'alg', label: 'ALG', value: jwt.algorithm });
+  if (jwt.expiresAtMs !== null) {
+    metaRows.push({
+      key: 'exp',
+      label: 'EXP',
+      value: `${formatLocalTimestamp(new Date(jwt.expiresAtMs))} · ${formatRelativeTime(jwt.expiresAtMs, locale, now)}`,
+    });
+  }
+  if (jwt.issuedAtMs !== null) metaRows.push({ key: 'iat', label: 'IAT', value: formatLocalTimestamp(new Date(jwt.issuedAtMs)) });
+  if (jwt.notBeforeMs !== null) metaRows.push({ key: 'nbf', label: 'NBF', value: formatLocalTimestamp(new Date(jwt.notBeforeMs)) });
+
+  return <div className="clipboard-smart-card clipboard-smart-jwt" data-tauri-drag-region="false">
+    <div className="clipboard-smart-header">
+      <div className="clipboard-detail-mode" role="group" aria-label="JWT">
+        <button type="button" aria-pressed={tab === 'payload'} onClick={() => setTab('payload')}>{t('clipboardJwtPayload')}</button>
+        <button type="button" aria-pressed={tab === 'header'} onClick={() => setTab('header')}>{t('clipboardJwtHeader')}</button>
+      </div>
+      {status && <span className={`clipboard-smart-badge clipboard-smart-badge-${status}`}>
+        {t(status === 'expired' ? 'clipboardJwtExpired' : status === 'pending' ? 'clipboardJwtNotActive' : 'clipboardJwtValid')}
+      </span>}
+      <SmartCopyButton active={copied === tab} disabled={!canCopy} label={`${t('copy')} ${activeLabel}`}
+        onClick={() => { void copyValue(tab, activeJson, onCopy); }} />
+    </div>
+    {metaRows.length > 0 && <div className="clipboard-smart-rows">
+      {metaRows.map((row) => <div className="clipboard-smart-row" key={row.key}>
+        <span className="clipboard-smart-key">{row.label}</span>
+        <code className="clipboard-smart-value" title={row.value}>{row.value}</code>
+      </div>)}
+    </div>}
+    <pre className="clipboard-smart-code">{activeJson}</pre>
+  </div>;
+}
+
+export function ClipboardDecodedCard({ decoded, canCopy, onCopy, t }: {
+  decoded: SmartDecoded;
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  const [jsonView, setJsonView] = useState(decoded.jsonPretty !== null);
+  useEffect(() => { setJsonView(decoded.jsonPretty !== null); }, [decoded]);
+
+  const title = decoded.encoding === 'base64'
+    ? t('clipboardDecodedBase64')
+    : decoded.encoding === 'url'
+      ? t('clipboardDecodedUrl')
+      : t('clipboardDecodedEscape');
+  const activeText = decoded.jsonPretty !== null && jsonView ? decoded.jsonPretty : decoded.text;
+  const copyKey = decoded.jsonPretty !== null && jsonView ? 'json' : 'text';
+
+  return <div className="clipboard-smart-card clipboard-smart-decoded" data-tauri-drag-region="false">
+    <div className="clipboard-smart-header">
+      <span className="clipboard-smart-heading">{title}</span>
+      {decoded.jsonPretty !== null && <div className="clipboard-detail-mode" role="group" aria-label={title}>
+        <button type="button" aria-pressed={jsonView} onClick={() => setJsonView(true)}>{t('clipboardJsonFormat')}</button>
+        <button type="button" aria-pressed={!jsonView} onClick={() => setJsonView(false)}>{t('clipboardJsonOriginal')}</button>
+      </div>}
+      <SmartCopyButton active={copied === copyKey} disabled={!canCopy} label={`${t('copy')} ${title}`}
+        onClick={() => { void copyValue(copyKey, activeText, onCopy); }} />
+    </div>
+    <pre className="clipboard-smart-code">{activeText}</pre>
   </div>;
 }
 

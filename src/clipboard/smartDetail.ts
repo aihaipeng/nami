@@ -24,14 +24,80 @@ export interface SmartTimestamp {
   iso: string;
 }
 
-export type SmartDetailMatch = SmartColor | SmartJson | SmartTimestamp;
+export interface SmartDateTime {
+  kind: 'datetime';
+  epochMs: number;
+  unixSeconds: string;
+  unixMilliseconds: string;
+  local: string;
+  iso: string;
+  showLocal: boolean;
+  showIso: boolean;
+}
+
+export interface SmartUrlParam {
+  key: string;
+  value: string;
+}
+
+export interface SmartUrl {
+  kind: 'url';
+  cleanUrl: string | null;
+  removedTrackingCount: number;
+  decodedUrl: string | null;
+  params: SmartUrlParam[];
+  totalParams: number;
+}
+
+export interface SmartJwt {
+  kind: 'jwt';
+  algorithm: string | null;
+  headerPretty: string;
+  payloadPretty: string;
+  issuedAtMs: number | null;
+  notBeforeMs: number | null;
+  expiresAtMs: number | null;
+}
+
+export interface SmartDecoded {
+  kind: 'decoded';
+  encoding: 'escape' | 'base64' | 'url';
+  text: string;
+  jsonPretty: string | null;
+}
+
+export type SmartDetailMatch =
+  | SmartColor
+  | SmartJson
+  | SmartTimestamp
+  | SmartDateTime
+  | SmartUrl
+  | SmartJwt
+  | SmartDecoded;
 
 const MAX_SMART_TEXT_CHARS = 200_000;
+const MAX_URL_PARAMS = 24;
 const NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
 const PERCENT_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)%$/;
 const ANGLE_RE = /^([+-]?(?:\d+\.?\d*|\.\d+))(deg|rad|grad|turn)?$/i;
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const CONTROL_RE = /[\x00-\x1f\x7f\u2028\u2029]/;
+const DECODED_CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd]/;
+const TRACKING_PARAMS = new Set([
+  'fbclid', 'gclid', 'gbraid', 'wbraid', 'dclid', 'msclkid', 'twclid', 'ttclid', 'yclid', 'li_fat_id',
+  'mc_cid', 'mc_eid', 'igshid', 'igsh', 'si', 'spm', 'spm_id_from', 'from_spmid', 'vd_source',
+  'share_source', 'share_medium', 'share_plat', 'share_session_id', 'share_tag', 'share_times',
+  'share_from', 'is_story_h5', 'buvid', 'up_id', 'ref_src', 'ref_url', '_hsenc', '_hsmi', 'mkt_tok',
+  'oly_anon_id', 'oly_enc_id', 'rb_clickid', 'wickedid', 's_kwcid', 'ef_id', 'guccounter',
+  'guce_referrer', 'guce_referrer_sig',
+]);
+const RFC2822_MONTHS: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+const COMMON_URL_ENCODED_TOKENS = new Set([
+  '%20', '%2f', '%3a', '%3d', '%3f', '%26', '%2b', '%40', '%23', '%25', '%2c',
+]);
 
 const MIN_UNIX_SECONDS = 1_000_000_000; // 2001-09-09T01:46:40Z
 const MAX_UNIX_SECONDS = 4_102_444_800; // 2100-01-01T00:00:00Z
@@ -262,9 +328,22 @@ export function parseSmartJson(trimmed: string): SmartJson | null {
   }
 }
 
-function formatLocalTimestamp(date: Date): string {
+export function formatLocalTimestamp(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+export function formatRelativeTime(epochMs: number, locale: 'zh-CN' | 'en', nowMs = Date.now()): string {
+  const diffSec = Math.round((epochMs - nowMs) / 1000);
+  if (Math.abs(diffSec) < 5) return locale === 'zh-CN' ? '刚刚' : 'just now';
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+  const abs = Math.abs(diffSec);
+  if (abs < 60) return rtf.format(diffSec, 'second');
+  if (abs < 3600) return rtf.format(Math.round(diffSec / 60), 'minute');
+  if (abs < 86_400) return rtf.format(Math.round(diffSec / 3600), 'hour');
+  if (abs < 86_400 * 30) return rtf.format(Math.round(diffSec / 86_400), 'day');
+  if (abs < 86_400 * 365) return rtf.format(Math.round(diffSec / (86_400 * 30)), 'month');
+  return rtf.format(Math.round(diffSec / (86_400 * 365)), 'year');
 }
 
 export function parseSmartTimestamp(trimmed: string): SmartTimestamp | null {
@@ -280,11 +359,382 @@ export function parseSmartTimestamp(trimmed: string): SmartTimestamp | null {
   return { kind: 'timestamp', unit, epochMs, local: formatLocalTimestamp(date), iso: date.toISOString() };
 }
 
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (year < 1970 || year > 2100 || month < 1 || month > 12 || day < 1) return false;
+  const maxDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= maxDay;
+}
+
+function isValidTime(hour: number, minute: number, second: number): boolean {
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59;
+}
+
+function parseTimezoneOffsetMs(token: string): number | null {
+  const upper = token.toUpperCase();
+  if (upper === 'Z' || upper === 'GMT' || upper === 'UTC') return 0;
+  const match = /^([+-])(\d{2}):?(\d{2})$/.exec(token);
+  if (!match) return null;
+  const sign = match[1] === '+' ? 1 : -1;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3]);
+  if (hours > 14 || minutes > 59 || (hours === 14 && minutes > 0)) return null;
+  return sign * (hours * 60 + minutes) * 60_000;
+}
+
+function buildSmartDateTime(epochMs: number, trimmed: string): SmartDateTime | null {
+  if (!Number.isFinite(epochMs)) return null;
+  const date = new Date(epochMs);
+  if (Number.isNaN(date.getTime())) return null;
+  const local = formatLocalTimestamp(date);
+  const iso = date.toISOString();
+  const isAlreadyIsoUtc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z$/i.test(trimmed);
+  return {
+    kind: 'datetime',
+    epochMs,
+    unixSeconds: String(Math.floor(epochMs / 1000)),
+    unixMilliseconds: String(epochMs),
+    local,
+    iso,
+    showLocal: local !== trimmed,
+    showIso: !isAlreadyIsoUtc && iso !== trimmed,
+  };
+}
+
+export function parseSmartDateTime(trimmed: string): SmartDateTime | null {
+  if (trimmed.length < 10 || trimmed.length > 64 || /[\r\n]/.test(trimmed)) return null;
+
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/i.exec(trimmed);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    if (!isValidCalendarDate(year, month, day)) return null;
+    const hasTime = isoMatch[4] !== undefined;
+    const hour = hasTime ? Number(isoMatch[4]) : 0;
+    const minute = hasTime ? Number(isoMatch[5]) : 0;
+    const second = isoMatch[6] !== undefined ? Number(isoMatch[6]) : 0;
+    const ms = isoMatch[7] !== undefined ? Number(isoMatch[7].slice(0, 3).padEnd(3, '0')) : 0;
+    if (!isValidTime(hour, minute, second)) return null;
+    if (isoMatch[8]) {
+      const offsetMs = parseTimezoneOffsetMs(isoMatch[8]);
+      if (offsetMs === null) return null;
+      return buildSmartDateTime(Date.UTC(year, month - 1, day, hour, minute, second, ms) - offsetMs, trimmed);
+    }
+    return buildSmartDateTime(new Date(year, month - 1, day, hour, minute, second, ms).getTime(), trimmed);
+  }
+
+  const slashMatch = /^(\d{4})\/(\d{1,2})\/(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed);
+  if (slashMatch) {
+    const year = Number(slashMatch[1]);
+    const month = Number(slashMatch[2]);
+    const day = Number(slashMatch[3]);
+    const hour = Number(slashMatch[4]);
+    const minute = Number(slashMatch[5]);
+    const second = slashMatch[6] !== undefined ? Number(slashMatch[6]) : 0;
+    if (!isValidCalendarDate(year, month, day) || !isValidTime(hour, minute, second)) return null;
+    return buildSmartDateTime(new Date(year, month - 1, day, hour, minute, second, 0).getTime(), trimmed);
+  }
+
+  const rfcMatch = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*)?(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s+(GMT|UTC|[+-]\d{4})$/i.exec(trimmed);
+  if (rfcMatch) {
+    const day = Number(rfcMatch[1]);
+    const month = RFC2822_MONTHS[rfcMatch[2].toLowerCase()];
+    const year = Number(rfcMatch[3]);
+    const hour = Number(rfcMatch[4]);
+    const minute = Number(rfcMatch[5]);
+    const second = rfcMatch[6] !== undefined ? Number(rfcMatch[6]) : 0;
+    const offsetMs = parseTimezoneOffsetMs(rfcMatch[7]);
+    if (!month || offsetMs === null || !isValidCalendarDate(year, month, day) || !isValidTime(hour, minute, second)) return null;
+    return buildSmartDateTime(Date.UTC(year, month - 1, day, hour, minute, second, 0) - offsetMs, trimmed);
+  }
+
+  return null;
+}
+
+function isTrackingParam(key: string): boolean {
+  const lower = key.toLowerCase();
+  return lower.startsWith('utm_') || TRACKING_PARAMS.has(lower);
+}
+
+export function parseSmartUrl(trimmed: string): SmartUrl | null {
+  if (!trimmed || trimmed.length > 8192 || CONTROL_RE.test(trimmed) || /\s/.test(trimmed) || trimmed.includes('\\')) return null;
+  const lower = trimmed.toLowerCase();
+  const hasScheme = lower.startsWith('http://') || lower.startsWith('https://');
+  const hasWww = !hasScheme && lower.startsWith('www.');
+  if (!hasScheme && !hasWww) return null;
+  if (hasScheme && trimmed[trimmed.indexOf('://') + 3] === '/') return null;
+
+  let url: URL;
+  try {
+    url = new URL(hasWww ? `https://${trimmed}` : trimmed);
+  } catch {
+    return null;
+  }
+  if (!url.hostname || url.username || url.password) return null;
+  if (hasWww && !url.hostname.slice(4).includes('.')) return null;
+
+  const allParams = Array.from(url.searchParams.entries());
+  let removedTrackingCount = 0;
+  const kept: Array<[string, string]> = [];
+  for (const [key, value] of allParams) {
+    if (isTrackingParam(key)) removedTrackingCount += 1;
+    else kept.push([key, value]);
+  }
+
+  let cleanUrl: string | null = null;
+  if (removedTrackingCount > 0) {
+    const clean = new URL(url.toString());
+    clean.search = '';
+    for (const [key, value] of kept) clean.searchParams.append(key, value);
+    const serialized = clean.toString();
+    if (serialized !== trimmed) cleanUrl = serialized;
+  }
+
+  let decodedUrl: string | null = null;
+  if (/%[0-9A-Fa-f]{2}/.test(trimmed)) {
+    try {
+      const decoded = decodeURI(trimmed);
+      if (decoded !== trimmed && !CONTROL_RE.test(decoded)) decodedUrl = decoded;
+    } catch {
+      // Ignore malformed percent sequences outside valid UTF-8.
+    }
+  }
+
+  if (cleanUrl === null && decodedUrl === null && allParams.length === 0) return null;
+  return {
+    kind: 'url',
+    cleanUrl,
+    removedTrackingCount,
+    decodedUrl,
+    params: allParams.slice(0, MAX_URL_PARAMS).map(([key, value]) => ({ key, value })),
+    totalParams: allParams.length,
+  };
+}
+
+function decodeBase64Bytes(input: string, urlSafe: boolean): Uint8Array | null {
+  if (input.length === 0 || input.length % 4 === 1) return null;
+  const normalized = urlSafe ? input.replace(/-/g, '+').replace(/_/g, '/') : input;
+  const padLen = (4 - (normalized.length % 4)) % 4;
+  const padded = padLen ? `${normalized}${'='.repeat(padLen)}` : normalized;
+  try {
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function decodeUtf8Strict(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function parseJwtClaimEpochMs(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (value < 0 || value > MAX_UNIX_SECONDS) return null;
+  return Math.round(value * 1000);
+}
+
+export function parseSmartJwt(trimmed: string): SmartJwt | null {
+  if (trimmed.length < 20 || trimmed.length > MAX_SMART_TEXT_CHARS || /[\s]/.test(trimmed)) return null;
+  const match = /^([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]*)$/.exec(trimmed);
+  if (!match) return null;
+  const headerBytes = decodeBase64Bytes(match[1], true);
+  const payloadBytes = decodeBase64Bytes(match[2], true);
+  if (!headerBytes || !payloadBytes) return null;
+  const headerText = decodeUtf8Strict(headerBytes);
+  const payloadText = decodeUtf8Strict(payloadBytes);
+  if (!headerText || !payloadText) return null;
+  try {
+    const header: unknown = JSON.parse(headerText);
+    const payload: unknown = JSON.parse(payloadText);
+    if (typeof header !== 'object' || header === null || Array.isArray(header)) return null;
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
+    const headerRecord = header as Record<string, unknown>;
+    const payloadRecord = payload as Record<string, unknown>;
+    if (typeof headerRecord.alg !== 'string' && typeof headerRecord.typ !== 'string') return null;
+    return {
+      kind: 'jwt',
+      algorithm: typeof headerRecord.alg === 'string' ? headerRecord.alg : null,
+      headerPretty: JSON.stringify(headerRecord, null, 2),
+      payloadPretty: JSON.stringify(payloadRecord, null, 2),
+      issuedAtMs: parseJwtClaimEpochMs(payloadRecord.iat),
+      notBeforeMs: parseJwtClaimEpochMs(payloadRecord.nbf),
+      expiresAtMs: parseJwtClaimEpochMs(payloadRecord.exp),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isPrintableDecodedText(text: string, strictReadable = false): boolean {
+  if (text.length < (strictReadable ? 3 : 2) || DECODED_CONTROL_RE.test(text)) return false;
+  if (!strictReadable) return true;
+  let readable = 0;
+  let total = 0;
+  for (const ch of text) {
+    total += 1;
+    const code = ch.codePointAt(0)!;
+    if (
+      code === 0x09 || code === 0x0a || code === 0x0d
+      || (code >= 0x20 && code <= 0x7e)
+      || (code >= 0x00a0 && code <= 0x024f)
+      || (code >= 0x2000 && code <= 0x206f)
+      || (code >= 0x3000 && code <= 0x30ff)
+      || (code >= 0x4e00 && code <= 0x9fff)
+      || (code >= 0xac00 && code <= 0xd7af)
+      || (code >= 0xff00 && code <= 0xffef)
+      || (code >= 0x1f300 && code <= 0x1faff)
+    ) {
+      readable += 1;
+    }
+  }
+  return total > 0 && readable / total >= 0.9;
+}
+
+function tryPrettyJson(text: string): string | null {
+  const json = parseSmartJson(text.trim());
+  return json ? json.pretty : null;
+}
+
+function unescapeTextSequences(input: string): { text: string; unicodeCount: number; strongCount: number; standardCount: number; unknownCount: number } {
+  let out = '';
+  let unicodeCount = 0;
+  let strongCount = 0;
+  let standardCount = 0;
+  let unknownCount = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch !== '\\' || i + 1 >= input.length) {
+      out += ch;
+      continue;
+    }
+    const next = input[i + 1];
+    if (next === 'u') {
+      if (input[i + 2] === '{') {
+        const end = input.indexOf('}', i + 3);
+        const hex = end > i + 3 ? input.slice(i + 3, end) : '';
+        if (/^[0-9a-fA-F]{1,6}$/.test(hex)) {
+          const cp = parseInt(hex, 16);
+          if (cp <= 0x10ffff) {
+            out += String.fromCodePoint(cp);
+            unicodeCount += 1;
+            i = end;
+            continue;
+          }
+        }
+      } else {
+        const hex = input.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          unicodeCount += 1;
+          i += 5;
+          continue;
+        }
+      }
+      unknownCount += 1;
+      out += '\\u';
+      i += 1;
+    } else if (next === 'n') {
+      out += '\n'; strongCount += 1; standardCount += 1; i += 1;
+    } else if (next === 'r') {
+      out += '\r'; strongCount += 1; standardCount += 1; i += 1;
+    } else if (next === 't') {
+      out += '\t'; strongCount += 1; standardCount += 1; i += 1;
+    } else if (next === 'b') {
+      out += '\b'; standardCount += 1; i += 1;
+    } else if (next === 'f') {
+      out += '\f'; standardCount += 1; i += 1;
+    } else if (next === '"') {
+      out += '"'; strongCount += 1; standardCount += 1; i += 1;
+    } else if (next === '\'' || next === '\\' || next === '/') {
+      out += next; standardCount += 1; i += 1;
+    } else {
+      unknownCount += 1;
+      out += `\\${next}`;
+      i += 1;
+    }
+  }
+  return { text: out, unicodeCount, strongCount, standardCount, unknownCount };
+}
+
+export function parseSmartEscape(trimmed: string): SmartDecoded | null {
+  if (trimmed.length < 4 || trimmed.length > MAX_SMART_TEXT_CHARS || !trimmed.includes('\\')) return null;
+  if (/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('\\\\') || /^\/.+\/[dgimsuvy]*$/.test(trimmed)) return null;
+
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 6 && /\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])/.test(trimmed)) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (typeof parsed === 'string' && parsed !== trimmed.slice(1, -1) && isPrintableDecodedText(parsed)) {
+        return { kind: 'decoded', encoding: 'escape', text: parsed, jsonPretty: tryPrettyJson(parsed) };
+      }
+    } catch {
+      // Fall through to unquoted escape handling.
+    }
+  }
+
+  const unescaped = unescapeTextSequences(trimmed);
+  if (unescaped.unicodeCount === 0 && (unescaped.strongCount < 1 || unescaped.standardCount < 2 || unescaped.unknownCount > 0)) return null;
+  if (unescaped.text === trimmed || !isPrintableDecodedText(unescaped.text)) return null;
+  return { kind: 'decoded', encoding: 'escape', text: unescaped.text, jsonPretty: tryPrettyJson(unescaped.text) };
+}
+
+export function parseSmartPercentEncoded(trimmed: string): SmartDecoded | null {
+  if (trimmed.length < 3 || trimmed.length > MAX_SMART_TEXT_CHARS || !trimmed.includes('%') || /[\r\n]/.test(trimmed)) return null;
+  const matches = trimmed.match(/%[0-9A-Fa-f]{2}/g);
+  if (!matches) return null;
+  if (matches.length < 2 && !COMMON_URL_ENCODED_TOKENS.has(matches[0].toLowerCase())) return null;
+  try {
+    const decoded = decodeURIComponent(trimmed);
+    if (decoded === trimmed || !isPrintableDecodedText(decoded)) return null;
+    return { kind: 'decoded', encoding: 'url', text: decoded, jsonPretty: tryPrettyJson(decoded) };
+  } catch {
+    return null;
+  }
+}
+
+export function parseSmartBase64(trimmed: string): SmartDecoded | null {
+  if (trimmed.length < 8 || trimmed.length > MAX_SMART_TEXT_CHARS || /[ \t]/.test(trimmed)) return null;
+  const compact = trimmed.replace(/[\r\n]+/g, '');
+  if (compact.length < 8 || compact.length % 4 === 1) return null;
+
+  const isStandard = /^[A-Za-z0-9+/]+={0,2}$/.test(compact);
+  const isUrlSafe = !isStandard && /^[A-Za-z0-9_-]+={0,2}$/.test(compact);
+  if (!isStandard && !isUrlSafe) return null;
+
+  const padded = compact.endsWith('=');
+  if (!padded) {
+    if (compact.length < 16) return null;
+    if (/^[0-9a-fA-F]+$/.test(compact)) return null;
+    if (/^[a-z]+$/.test(compact) || /^[A-Z]+$/.test(compact)) return null;
+    if (/^[a-z0-9]+(?:[-_][a-z0-9]+)+$/.test(compact)) return null;
+  }
+
+  const bytes = decodeBase64Bytes(compact, isUrlSafe);
+  if (!bytes || bytes.length < 3) return null;
+  const decoded = decodeUtf8Strict(bytes);
+  if (!decoded || decoded === trimmed || !isPrintableDecodedText(decoded, true)) return null;
+  return { kind: 'decoded', encoding: 'base64', text: decoded, jsonPretty: tryPrettyJson(decoded) };
+}
+
 export function analyzeSmartDetail(raw: string): SmartDetailMatch | null {
   if (!raw || raw.length > MAX_SMART_TEXT_CHARS) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  return parseSmartColor(trimmed) ?? parseSmartTimestamp(trimmed) ?? parseSmartJson(trimmed);
+  return parseSmartColor(trimmed)
+    ?? parseSmartTimestamp(trimmed)
+    ?? parseSmartDateTime(trimmed)
+    ?? parseSmartJwt(trimmed)
+    ?? parseSmartUrl(trimmed)
+    ?? parseSmartJson(trimmed)
+    ?? parseSmartEscape(trimmed)
+    ?? parseSmartPercentEncoded(trimmed)
+    ?? parseSmartBase64(trimmed);
 }
 
 export function canEncodeQr(raw: string): boolean {
