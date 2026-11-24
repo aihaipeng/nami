@@ -297,6 +297,8 @@ pub struct ClipboardSummary {
     pub source_app_id: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_text_match: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_file_paths: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -361,8 +363,19 @@ pub fn all_file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
     file_entries_with_limit(text, MAX_FILE_COUNT)
 }
 
+pub fn file_entries_from_paths(paths: Vec<String>) -> Result<Vec<FileEntry>, String> {
+    file_entries_from_paths_with_limit(paths, MAX_FILE_COUNT)
+}
+
 fn file_entries_with_limit(text: &str, limit: usize) -> Result<Vec<FileEntry>, String> {
     let paths: Vec<String> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
+    file_entries_from_paths_with_limit(paths, limit)
+}
+
+fn file_entries_from_paths_with_limit(
+    paths: Vec<String>,
+    limit: usize,
+) -> Result<Vec<FileEntry>, String> {
     if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
         return Err("storage_corrupt".into());
     }

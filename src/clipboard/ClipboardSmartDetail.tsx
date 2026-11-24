@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { CircleCheck, ExternalLink, ScanQrCode } from 'lucide-react';
+import { CircleCheck, ExternalLink, FolderOpen, ScanQrCode } from 'lucide-react';
 import type { Translate } from '../shared/i18n';
 import { HistoryIcon } from '../translation/HistoryIcon';
+import { FileIcon, type FileEntry } from './ClipboardMedia';
 import { encodeQrCode } from './qrEncoder';
 import {
   formatLocalTimestamp,
@@ -161,6 +162,60 @@ export function ClipboardDateTimeCard({ dateTime, locale, canCopy, onCopy, t }: 
         <span className="clipboard-smart-value clipboard-smart-value-plain">{relative}</span>
       </div>
     </div>
+  </div>;
+}
+
+export function ClipboardFilesCard({ entries, canCopy, onCopy, onReveal, revealLabel, t }: {
+  entries: ReadonlyArray<FileEntry>;
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  onReveal?: (index: number) => void;
+  revealLabel?: string;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  if (entries.length === 0) return null;
+  if (entries.length === 1) {
+    const single = entries[0];
+    return <div className="clipboard-smart-card clipboard-smart-files" data-tauri-drag-region="false">
+      <div className="clipboard-smart-rows">
+        <div className="clipboard-smart-row clipboard-smart-row-wrap">
+          <span className="clipboard-smart-key">{t('clipboardFilePath')}</span>
+          <code className="clipboard-smart-value clipboard-smart-value-wrap" title={single.path}>{single.path}</code>
+          <SmartCopyButton active={copied === 'path'} disabled={!canCopy} label={`${t('copy')} ${t('clipboardFilePath')}`}
+            onClick={() => { void copyValue('path', single.path, onCopy); }} />
+        </div>
+      </div>
+    </div>;
+  }
+  return <div className="clipboard-smart-files-list" data-tauri-drag-region="false">
+    {entries.map((entry, index) => {
+      const key = `file-${index}`;
+      return <div className="clipboard-smart-card clipboard-smart-files clipboard-smart-file-item" key={`${index}:${entry.path}`}>
+        <div className="clipboard-smart-row clipboard-smart-file-head">
+          <span className="clipboard-file" title={entry.path} data-missing={!entry.exists}>
+            <FileIcon entry={entry} />
+            <span className="clipboard-file-name">{entry.name}</span>
+          </span>
+          {onReveal && <button
+            type="button"
+            className="icon-button clipboard-smart-icon-button"
+            data-action="reveal-file"
+            aria-label={`${revealLabel}: ${entry.name}`}
+            title={revealLabel}
+            disabled={!entry.exists}
+            onClick={() => onReveal(index)}
+          >
+            <FolderOpen aria-hidden="true" />
+          </button>}
+        </div>
+        <div className="clipboard-smart-row clipboard-smart-row-wrap clipboard-smart-divider">
+          <code className="clipboard-smart-value clipboard-smart-value-wrap" title={entry.path}>{entry.path}</code>
+          <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${entry.name}`}
+            onClick={() => { void copyValue(key, entry.path, onCopy); }} />
+        </div>
+      </div>;
+    })}
   </div>;
 }
 

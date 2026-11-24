@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 export interface ClipboardRecord {
   title?: string;
   imageTextMatch?: boolean;
+  hasFilePaths?: boolean;
   id: string;
   kind: 'text' | 'image' | 'files';
   text: string;

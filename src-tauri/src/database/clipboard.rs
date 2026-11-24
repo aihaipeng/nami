@@ -697,7 +697,7 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_file_representations f WHERE f.sequence=r.sequence) FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -773,6 +773,7 @@ impl HistoryDatabase {
                 is_pinned: row.get(6).map_err(storage_error)?,
                 source_app_id: row.get(7).map_err(storage_error)?,
                 image_text_match: row.get(10).map_err(storage_error)?,
+                has_file_paths: row.get(11).map_err(storage_error)?,
             };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
@@ -3129,6 +3130,40 @@ mod tests {
                 .unwrap()
                 .total_records,
             3
+        );
+    }
+
+    #[test]
+    fn clipboard_summary_reports_has_file_paths_for_local_images_only() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let local_image = image_record("local-image");
+        let original = representation(&local_image, "original.png");
+        let raw_image = ClipboardRecord {
+            id: "raw-image".into(),
+            image_path: Some("clipboard-images/raw.png".into()),
+            fingerprint: crate::clipboard::fingerprint("image", b"raw-image"),
+            ..local_image.clone()
+        };
+        db.clipboard_insert(&raw_image).unwrap();
+        db.clipboard_insert_with_file_representation(&local_image, Some(&original))
+            .unwrap();
+        let page = db
+            .clipboard_page_filtered("", false, Some("image"), None, 10)
+            .unwrap();
+        assert!(
+            page.records
+                .iter()
+                .find(|row| row.id == local_image.id)
+                .unwrap()
+                .has_file_paths
+        );
+        assert!(
+            !page
+                .records
+                .iter()
+                .find(|row| row.id == raw_image.id)
+                .unwrap()
+                .has_file_paths
         );
     }
 

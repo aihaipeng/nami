@@ -26,28 +26,35 @@ impl OpenTarget {
     }
 }
 
+pub fn resolve_paths(
+    paths: &[String],
+    file_index: Option<usize>,
+) -> Result<Option<OpenTarget>, String> {
+    if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
+        return Err("storage_corrupt".into());
+    }
+    if file_index.is_none() && paths.len() > 1 {
+        return Ok(Some(OpenTarget::ChooseFile));
+    }
+    let path = paths
+        .get(file_index.unwrap_or(0))
+        .ok_or("invalid_argument")?;
+    let path = PathBuf::from(path);
+    if path.is_absolute() && !path.to_string_lossy().contains('\0') {
+        Ok(Some(OpenTarget::File(path)))
+    } else {
+        Err("storage_corrupt".into())
+    }
+}
+
 pub fn resolve(
     kind: &str,
     text: &str,
     file_index: Option<usize>,
 ) -> Result<Option<OpenTarget>, String> {
     if kind == "files" {
-        let paths: Vec<PathBuf> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
-        if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
-            return Err("storage_corrupt".into());
-        }
-        if file_index.is_none() && paths.len() > 1 {
-            return Ok(Some(OpenTarget::ChooseFile));
-        }
-        let path = paths
-            .into_iter()
-            .nth(file_index.unwrap_or(0))
-            .ok_or("invalid_argument")?;
-        return if path.is_absolute() && !path.to_string_lossy().contains('\0') {
-            Ok(Some(OpenTarget::File(path)))
-        } else {
-            Err("storage_corrupt".into())
-        };
+        let paths: Vec<String> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
+        return resolve_paths(&paths, file_index);
     }
     if file_index.is_some() {
         return Err("invalid_argument".into());
@@ -182,5 +189,17 @@ mod tests {
         assert!(resolve("files", files, Some(2)).is_err());
         assert!(resolve("files", r#"["relative.txt"]"#, None).is_err());
         assert!(resolve("text", "/tmp/first.txt", Some(0)).is_err());
+        assert_eq!(
+            resolve_paths(&["/tmp/photo.png".into()], None).unwrap(),
+            Some(OpenTarget::File("/tmp/photo.png".into()))
+        );
+        assert_eq!(
+            resolve_paths(&["/tmp/photo.png".into()], Some(0)).unwrap(),
+            Some(OpenTarget::File("/tmp/photo.png".into()))
+        );
+        assert!(resolve_paths(&[], None).is_err());
+        assert!(resolve_paths(&["relative.png".into()], None).is_err());
+        assert!(resolve_paths(&["/tmp/bad\0.png".into()], None).is_err());
+        assert!(resolve_paths(&["/tmp/photo.png".into()], Some(1)).is_err());
     }
 }

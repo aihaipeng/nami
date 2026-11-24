@@ -63,6 +63,29 @@ pub(crate) enum PayloadMode {
     FilePaths,
 }
 
+fn file_paths_payload(
+    record: &ClipboardRecord,
+    representation: Option<&ClipboardFileRepresentation>,
+) -> Result<platform::ClipboardPayload, String> {
+    let paths: Vec<String> = match record.kind.as_str() {
+        "files" => serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?,
+        "image" => match representation {
+            Some(value) => value.paths.clone(),
+            None => return Err("invalid_argument".into()),
+        },
+        _ => return Err("invalid_argument".into()),
+    };
+    if paths.is_empty()
+        || paths.len() > clipboard::MAX_FILE_COUNT
+        || paths
+            .iter()
+            .any(|path| !Path::new(path).is_absolute() || path.contains('\0'))
+    {
+        return Err("storage_corrupt".into());
+    }
+    Ok(platform::ClipboardPayload::Text(paths.join("\n")))
+}
+
 // Caller holds clipboard_writes while reading the record and its image files.
 pub(crate) async fn payload(
     app: &AppHandle,
@@ -72,7 +95,9 @@ pub(crate) async fn payload(
     let root = image_root(app)?;
     let (record, files, formatting) = database(app, move |database| {
         let record = database.clipboard_record(&id)?;
-        let files = if matches!(mode, PayloadMode::Restore { .. }) && record.kind != "text" {
+        let files = if matches!(mode, PayloadMode::Restore { .. } | PayloadMode::FilePaths)
+            && record.kind != "text"
+        {
             database.clipboard_file_representation(&id)?
         } else {
             None
@@ -91,20 +116,10 @@ pub(crate) async fn payload(
         PayloadMode::PlainText if record.kind == "text" => {
             return Ok(platform::ClipboardPayload::Text(record.text));
         }
-        PayloadMode::FilePaths if record.kind == "files" => {
-            let paths: Vec<String> =
-                serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?;
-            if paths.is_empty()
-                || paths.len() > clipboard::MAX_FILE_COUNT
-                || paths
-                    .iter()
-                    .any(|path| !Path::new(path).is_absolute() || path.contains('\0'))
-            {
-                return Err("storage_corrupt".into());
-            }
-            return Ok(platform::ClipboardPayload::Text(paths.join("\n")));
+        PayloadMode::FilePaths => {
+            return file_paths_payload(&record, files.as_ref());
         }
-        PayloadMode::PlainText | PayloadMode::FilePaths => return Err("invalid_argument".into()),
+        PayloadMode::PlainText => return Err("invalid_argument".into()),
         _ => (),
     }
     if let Some(formatting) = formatting {
@@ -1753,6 +1768,52 @@ mod tests {
             &platform::ClipboardPayload::Files(vec!["/tmp/tok-1234".into()]),
             matches
         ));
+    }
+
+    #[test]
+    fn file_paths_payload_supports_files_and_local_image_representations_only() {
+        let local_image = ClipboardRecord {
+            id: "local-img".into(),
+            kind: "image".into(),
+            text: String::new(),
+            date: "2026-11-25T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: Some("clipboard-images/local.png".into()),
+            fingerprint: "fp-local-img".into(),
+        };
+        let representation = ClipboardFileRepresentation {
+            paths: vec!["/Users/apple/Pictures/photo.png".into()],
+            image_path: "clipboard-images/local.png".into(),
+        };
+        assert_eq!(
+            file_paths_payload(&local_image, Some(&representation)).unwrap(),
+            platform::ClipboardPayload::Text("/Users/apple/Pictures/photo.png".into())
+        );
+        assert_eq!(
+            file_paths_payload(&local_image, None).unwrap_err(),
+            "invalid_argument"
+        );
+        let text_record = ClipboardRecord {
+            kind: "text".into(),
+            text: "/Users/apple/Pictures/photo.png".into(),
+            ..local_image.clone()
+        };
+        assert_eq!(
+            file_paths_payload(&text_record, None).unwrap_err(),
+            "invalid_argument"
+        );
+        let files_record = ClipboardRecord {
+            kind: "files".into(),
+            text: r#"["/tmp/a.txt","/tmp/b.txt"]"#.into(),
+            image_path: None,
+            ..local_image
+        };
+        assert_eq!(
+            file_paths_payload(&files_record, None).unwrap(),
+            platform::ClipboardPayload::Text("/tmp/a.txt\n/tmp/b.txt".into())
+        );
     }
 
     #[test]

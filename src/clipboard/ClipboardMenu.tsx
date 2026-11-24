@@ -24,7 +24,8 @@ export function ClipboardMenu({ record, snapshot, x, y, canPaste, canCopy, canSa
   ];
   const remove: Item[] = [{ action: 'delete', label: 'Delete', destructive: true, icon: <HistoryIcon name="trash" />, disabled: busy }];
   const groups: Item[][] = record.kind === 'image' ? [
-    [copy, paste, { action: 'save', label: t('clipboardSaveImage'), icon: <Save aria-hidden="true" />, disabled: !canSave }],
+    [copy, paste, ...(record.hasFilePaths ? [{ action: 'pastePaths' as const, label: t('clipboardPastePaths'), icon: pasteIcon, disabled: !canPaste }] : []), { action: 'save', label: t('clipboardSaveImage'), icon: <Save aria-hidden="true" />, disabled: !canSave }],
+    ...(record.hasFilePaths ? [[{ action: 'openTarget' as const, label: t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager'), icon: <FolderOpen aria-hidden="true" />, disabled: !canOpenTarget }]] : []),
     marks,
     [
       ...(canTranslate ? [{ action: 'translate' as const, label: 'Translate', description: t('clipboardTranslatePrivacy'), icon: <HistoryIcon name="languages" />, disabled: busy }] : []),

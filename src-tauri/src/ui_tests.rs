@@ -6834,12 +6834,12 @@ window.__openTypes=null;Promise.all(['web','mail','plain'].map(id=>invoke('clipb
             )?;
             samples.push(wait_records(app, r#"return {ready:JSON.stringify(window.__openTypes)===JSON.stringify(['link','email',null]),openTypes:window.__openTypes};"#)?);
             let choose = r#"
-const buttons=[...document.querySelectorAll('.clipboard-detail button.clipboard-file')];return {ready:buttons.length===2&&buttons[1].getAttribute('aria-label')==='Show in Finder: second file.txt'&&!buttons[1].disabled,action:'Choose either file in details'};
+const buttons=[...document.querySelectorAll('.clipboard-detail button[data-action=reveal-file]')];return {ready:buttons.length===2&&buttons[1].getAttribute('aria-label')==='Show in Finder: second file.txt'&&!buttons[1].disabled,action:'Choose either file in details'};
 "#;
             samples.push(wait_dom(app, choose)?);
             // Removing the second file after details load catches routing to the wrong index.
             std::fs::remove_file(&second).map_err(|error| error.to_string())?;
-            evaluate_view_dom(app, "translation", "document.querySelectorAll('.clipboard-detail button.clipboard-file')[1].click();return true;")?;
+            evaluate_view_dom(app, "translation", "document.querySelectorAll('.clipboard-detail button[data-action=reveal-file]')[1].click();return true;")?;
             samples.push(wait_dom(app, r#"
 const pane=document.querySelector('.clipboard-detail');return {ready:pane?.textContent.includes('The original file was moved or deleted and cannot be located'),action:'Revalidate the selected file at execution time'};
 "#)?);

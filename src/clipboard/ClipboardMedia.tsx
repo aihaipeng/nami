@@ -58,7 +58,7 @@ export function ImagePreview({ recordId, native, fallback }: { recordId: string;
   return <span ref={element} className="clipboard-image-preview">{url ? <img src={url} alt="Image" onError={() => { loaded.current = null; setUrl(null); setFailed(true); }} /> : failed ? fallback ?? <span className="clipboard-media-placeholder" role="img" aria-label="Image unavailable"><Image /></span> : <span className="clipboard-media-placeholder"><ActivityBeam label="Working" /></span>}</span>;
 }
 
-function FileIcon({ entry }: { entry: FileEntry }) {
+export function FileIcon({ entry }: { entry: FileEntry }) {
   const [failed, setFailed] = useState(false);
   return entry.iconDataUrl && !failed ? <img src={entry.iconDataUrl} alt="" onError={() => setFailed(true)} /> : entry.isDir ? <Folder aria-hidden="true" /> : <File aria-hidden="true" />;
 }

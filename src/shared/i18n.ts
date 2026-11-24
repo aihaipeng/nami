@@ -253,6 +253,7 @@ export const messages = {
   clipboardUrlClean: ['净化链接', 'Clean URL'],
   clipboardUrlDecoded: ['解码链接', 'Decoded'],
   clipboardUrlMoreParams: ['另有 {count} 项参数', '+{count} more params'],
+  clipboardFilePath: ['路径', 'Path'],
   clipboardJwtPayload: ['Payload', 'Payload'],
   clipboardJwtHeader: ['Header', 'Header'],
   clipboardJwtValid: ['有效', 'Valid'],

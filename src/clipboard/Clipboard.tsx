@@ -437,7 +437,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;
-    if (action === 'openTarget') { if (record.kind !== 'image') void openRecordTarget(record.id); }
+    if (action === 'openTarget') { if (record.kind !== 'image' || record.hasFilePaths) void openRecordTarget(record.id); }
     else if (action === 'pastePlain') { if (record.kind === 'text') { previewRecord(record.id, true); void useRecord(record.id, 'pastePlain'); } }
     else if (action === 'saveImage') { if (record.kind === 'image') void saveImage(record.id); }
     else if (action === 'note') setEditing({ id: record.id });

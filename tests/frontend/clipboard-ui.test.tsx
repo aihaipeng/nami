@@ -2688,6 +2688,43 @@ describe('clipboard open target', () => {
     expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'pinned', execute: true });
   });
 
+  it('exposes Paste as Path and Show in Finder for local image files while keeping pixel screenshots unchanged', async () => {
+    records = [
+      { ...records[0], id: 'local-img', kind: 'image', text: '', hasFilePaths: true, isPinned: false, isFavorite: false },
+      { ...records[0], id: 'raw-img', kind: 'image', text: '', isPinned: false, isFavorite: false },
+    ];
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'file' : original(name, args));
+    await mount('clipboard');
+    await waitFor(() => expect(row('local-img')).toBeTruthy());
+
+    // Local image context menu includes Paste as Path and Show in Finder.
+    fireEvent.contextMenu(row('local-img'));
+    const localMenu = screen.getByRole('menu');
+    expect(within(localMenu).getByRole('menuitem', { name: 'Paste as Path' })).toBeTruthy();
+    expect(within(localMenu).getByRole('menuitem', { name: 'Show in Finder' })).toBeTruthy();
+    fireEvent.click(within(localMenu).getByRole('menuitem', { name: 'Paste as Path' }));
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'local-img', action: 'pastePaths' }));
+
+    // Cmd+O on local image dispatches clipboard_open_target.
+    const localButton = row('local-img').querySelector<HTMLButtonElement>('.history-row-select')!;
+    localButton.focus();
+    fireEvent.keyDown(localButton, { key: 'o', code: 'KeyO', metaKey: true });
+    await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toMatchObject({ recordId: 'local-img', execute: true }));
+
+    // Pure screenshot context menu omits Paste as Path and Show in Finder, and Cmd+O is a no-op.
+    const countBefore = calls('clipboard_open_target').length;
+    fireEvent.contextMenu(row('raw-img'));
+    const rawMenu = screen.getByRole('menu');
+    expect(within(rawMenu).queryByRole('menuitem', { name: 'Paste as Path' })).toBeNull();
+    expect(within(rawMenu).queryByRole('menuitem', { name: 'Show in Finder' })).toBeNull();
+    fireEvent.pointerDown(document.body);
+    const rawButton = row('raw-img').querySelector<HTMLButtonElement>('.history-row-select')!;
+    rawButton.focus();
+    fireEvent.keyDown(rawButton, { key: 'o', code: 'KeyO', metaKey: true });
+    expect(calls('clipboard_open_target')).toHaveLength(countBefore);
+  });
+
   it('exposes VoiceOver live announcements, pinned landmark, row metadata and focus restoration for menu and inline actions', async () => {
     records = [
       { ...records[1], id: 'pinned-file', kind: 'files', text: 'report.pdf', title: 'Quarterly report', isPinned: true, isFavorite: true },

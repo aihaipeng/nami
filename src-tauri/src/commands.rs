@@ -1842,26 +1842,30 @@ pub async fn clipboard_record_detail(
 ) -> Result<nami::clipboard::ClipboardDetail, String> {
     authorize(&window, &["clipboard", "translation"])?;
     let status_app = app.clone();
-    let (detail, measure_files) = crate::clipboard_runtime::database(&app, move |database| {
-        let mut detail = database.clipboard_detail(&record_id)?;
-        if detail.kind == "image" && platform::capabilities().image_ocr {
-            let state = status_app.state::<AppState>();
-            let jobs = state.image_index_jobs.lock().unwrap();
-            detail.image_index_status = Some(match database.clipboard_ocr_text(&record_id)? {
-                Some(text) if text.trim().is_empty() => "empty",
-                Some(_) => "indexed",
-                None => jobs.status(&record_id),
-            });
-        }
-        let measure_files = database
-            .clipboard_file_representation(&record_id)?
-            .is_none();
-        Ok((detail, measure_files))
-    })
-    .await?;
+    let (detail, measure_files, image_file_paths) =
+        crate::clipboard_runtime::database(&app, move |database| {
+            let mut detail = database.clipboard_detail(&record_id)?;
+            if detail.kind == "image" && platform::capabilities().image_ocr {
+                let state = status_app.state::<AppState>();
+                let jobs = state.image_index_jobs.lock().unwrap();
+                detail.image_index_status =
+                    Some(match database.clipboard_ocr_text(&record_id)? {
+                        Some(text) if text.trim().is_empty() => "empty",
+                        Some(_) => "indexed",
+                        None => jobs.status(&record_id),
+                    });
+            }
+            let representation = database.clipboard_file_representation(&record_id)?;
+            let measure_files = representation.is_none();
+            let image_file_paths = (detail.kind == "image")
+                .then(|| representation.map(|value| value.paths))
+                .flatten();
+            Ok((detail, measure_files, image_file_paths))
+        })
+        .await?;
     let root = crate::clipboard_runtime::image_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        crate::clipboard_detail::enrich(detail, &root, measure_files)
+        crate::clipboard_detail::enrich(detail, &root, measure_files, image_file_paths)
     })
     .await
     .map_err(|_| "storage_worker")?
@@ -2053,15 +2057,26 @@ pub async fn clipboard_open_target(
     if !platform::capabilities().clipboard_open_target {
         return Err("platform_unavailable".into());
     }
-    let record = crate::clipboard_runtime::database(&app, move |database| {
-        database.clipboard_record(&record_id)
+    let (record, image_paths) = crate::clipboard_runtime::database(&app, move |database| {
+        let record = database.clipboard_record(&record_id)?;
+        let image_paths = if record.kind == "image" {
+            database
+                .clipboard_file_representation(&record_id)?
+                .map(|value| value.paths)
+        } else {
+            None
+        };
+        Ok((record, image_paths))
     })
     .await?;
     let target =
         tauri::async_runtime::spawn_blocking(move || -> Result<Option<OpenTarget>, String> {
-            let target = open_target::resolve(&record.kind, &record.text, file_index)?;
+            let target = match (&record.kind[..], image_paths.as_deref()) {
+                ("image", Some(paths)) => open_target::resolve_paths(paths, file_index)?,
+                _ => open_target::resolve(&record.kind, &record.text, file_index)?,
+            };
             if let Some(OpenTarget::File(path)) = &target {
-                if (execute || record.kind == "text") && !path.exists() {
+                if (execute || record.kind != "files") && !path.exists() {
                     return if execute {
                         Err("clipboard_file_missing".into())
                     } else {
