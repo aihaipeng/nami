@@ -912,3 +912,132 @@ it('aligns detail key-value rows on a shared grid with centered keys and left-al
   expect(cronGrid.querySelectorAll('.clipboard-smart-row')).toHaveLength(4);
   expect(cronGrid.querySelector('.clipboard-smart-key')?.getAttribute('title')).toBe('Schedule');
 });
+
+it('copies plain text from the detail toolbar after switching a rich-text record to Plain view', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_record_detail') {
+      const record = first();
+      return {
+        ...record,
+        richTextFormat: 'html',
+        richTextHtml: '<p><strong>Styled</strong> text</p>',
+        files: [],
+      };
+    }
+    return baseInvoke(name, args);
+  });
+
+  direct();
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
+
+  const richCopy = within(pane()).getByRole('button', { name: 'Copy' });
+  fireEvent.click(richCopy);
+  await waitFor(() => expect(richCopy.querySelector('.copy-success')).toBeTruthy());
+  expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
+
+  const modeGroup = within(pane()).getByRole('group', { name: 'Preview Format' });
+  fireEvent.click(within(modeGroup).getByRole('button', { name: 'Plain' }));
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+
+  const plainCopy = within(pane()).getByRole('button', { name: 'Copy as Plain Text' });
+  expect(plainCopy.querySelector('.copy-success')).toBeNull();
+  fireEvent.click(plainCopy);
+  await waitFor(() => expect(plainCopy.querySelector('.copy-success')).toBeTruthy());
+  expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copyPlain' });
+
+  fireEvent.click(within(modeGroup).getByRole('button', { name: 'Rich' }));
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
+  const richCopyAgain = within(pane()).getByRole('button', { name: 'Copy' });
+  expect(richCopyAgain.querySelector('.copy-success')).toBeNull();
+  fireEvent.click(richCopyAgain);
+  await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
+});
+
+it('extracts a 48x48 offscreen image palette below single images alongside QR and path cards and copies HEX on click', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_image') return { bytes: [137, 80, 78, 71], mime: 'image/png' };
+    if (name === 'clipboard_image_qr_codes') return ['https://example.test/img-qr'];
+    if (name === 'clipboard_text_copy') return true;
+    return baseInvoke(name, args);
+  });
+
+  const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:nami-test-image');
+  const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+  let sampledCanvasSize: [number, number] | null = null;
+  const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    sampledCanvasSize = [this.width, this.height];
+    const pixelCount = this.width * this.height;
+    const data = new Uint8ClampedArray(pixelCount * 4);
+    const palette: Array<[number, number, number]> = [
+      [30, 41, 59],
+      [56, 189, 248],
+      [129, 140, 248],
+      [244, 114, 182],
+      [250, 204, 21],
+    ];
+    for (let i = 0; i < pixelCount; i += 1) {
+      const color = palette[i % palette.length];
+      data[i * 4] = color[0];
+      data[i * 4 + 1] = color[1];
+      data[i * 4 + 2] = color[2];
+      data[i * 4 + 3] = 255;
+    }
+    return {
+      drawImage: vi.fn(),
+      getImageData: vi.fn(() => ({ data })),
+    } as unknown as CanvasRenderingContext2D;
+  });
+
+  try {
+    Object.assign(first(), {
+      kind: 'image',
+      text: '',
+      width: 1920,
+      height: 1080,
+      size: 204800,
+      characterCount: null,
+      files: [{ path: '/Users/apple/Desktop/shot.png', name: 'shot.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }],
+    });
+    direct();
+
+    const img = await waitFor(() => {
+      const node = pane().querySelector<HTMLImageElement>('.clipboard-image-preview img');
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    Object.defineProperties(img, {
+      naturalWidth: { value: 1920, configurable: true },
+      naturalHeight: { value: 1080, configurable: true },
+    });
+    fireEvent.load(img);
+
+    const paletteGroup = await within(pane()).findByRole('group', { name: 'Color Palette' });
+    expect(sampledCanvasSize).toEqual([48, 27]);
+    const swatches = within(paletteGroup).getAllByRole('button');
+    expect(swatches).toHaveLength(5);
+
+    // Ordering under single image: ImagePreview -> Color Palette -> QR -> Compact Path card
+    const qrCard = pane().querySelector('.clipboard-smart-qr-list')!;
+    const pathCard = pane().querySelector('.clipboard-smart-files')!;
+    expect(img.compareDocumentPosition(paletteGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(paletteGroup.compareDocumentPosition(qrCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(qrCard.compareDocumentPosition(pathCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const skySwatch = within(paletteGroup).getByRole('button', { name: 'Copy #38BDF8' });
+    fireEvent.click(skySwatch);
+    await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '#38BDF8' }));
+    await waitFor(() => expect(skySwatch.classList.contains('record-copied')).toBe(true));
+    expect(skySwatch.querySelector('.copy-success')).toBeTruthy();
+
+    // Switching back to a text record clears the extracted image palette.
+    Object.assign(first(), { kind: 'text', text: 'Plain text record', files: [] });
+    await emit('clipboard_changed', 2);
+    await waitFor(() => expect(pane().querySelector('.clipboard-smart-palette')).toBeNull());
+  } finally {
+    getContext.mockRestore();
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
+  }
+});

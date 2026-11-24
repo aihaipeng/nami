@@ -897,13 +897,35 @@ impl HistoryDatabase {
     }
 
     pub fn clipboard_duplicate(&mut self, id: &str) -> Result<(), String> {
+        self.duplicate_clipboard_record(id, false)
+    }
+
+    pub fn clipboard_duplicate_plain_text(&mut self, id: &str) -> Result<(), String> {
+        self.duplicate_clipboard_record(id, true)
+    }
+
+    fn duplicate_clipboard_record(&mut self, id: &str, plain_text: bool) -> Result<(), String> {
         let mut record = self.clipboard_record(id)?;
-        let representation = self.clipboard_file_representation(id)?;
-        let formatting = self.clipboard_text_formatting(id)?;
+        if plain_text && record.kind != "text" {
+            return Err("invalid_argument".into());
+        }
+        let representation = if plain_text {
+            None
+        } else {
+            self.clipboard_file_representation(id)?
+        };
+        let formatting = if plain_text {
+            None
+        } else {
+            self.clipboard_text_formatting(id)?
+        };
         record.id = uuid::Uuid::new_v4().to_string();
         record.date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         record.is_favorite = false;
         record.is_pinned = false;
+        if plain_text {
+            record.fingerprint = crate::clipboard::fingerprint("text", record.text.as_bytes());
+        }
         self.insert_clipboard_record(
             &record,
             representation.as_ref(),
@@ -3130,6 +3152,71 @@ mod tests {
                 .unwrap()
                 .total_records,
             3
+        );
+    }
+
+    #[test]
+    fn clipboard_duplicate_plain_text_strips_rich_formatting_while_keeping_original() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let formatting = ClipboardTextFormatting {
+            html: Some(b"<p><strong>Rich</strong> hello</p>".to_vec()),
+            rtf: Some(br#"{\rtf1\ansi \b Rich\b0  hello}"#.to_vec()),
+        };
+        let mut rich = record("rich-src", "Rich hello");
+        rich.fingerprint = formatting.fingerprint(&rich.text);
+        db.clipboard_insert_capture(&rich, None, Some(&formatting))
+            .unwrap();
+        db.clipboard_edit("rich-src", "Styled note", None).unwrap();
+        db.clipboard_update("rich-src", "favorite").unwrap();
+
+        // Standard duplicate keeps rich formatting.
+        db.clipboard_duplicate("rich-src").unwrap();
+        // Plain-text duplicate drops HTML/RTF formatting and uses plain-text fingerprint.
+        db.clipboard_duplicate_plain_text("rich-src").unwrap();
+
+        let page = db.clipboard_page("", false, None, 100).unwrap();
+        assert_eq!(page.total_records, 3);
+        let plain_copy_id = &page.records[0].id;
+        let rich_copy_id = &page.records[1].id;
+        assert_eq!(page.records[2].id, "rich-src");
+
+        let plain_record = db.clipboard_record(plain_copy_id).unwrap();
+        let plain_detail = db.clipboard_detail(plain_copy_id).unwrap();
+        assert_eq!(plain_record.text, "Rich hello");
+        assert_eq!(
+            plain_record.fingerprint,
+            crate::clipboard::fingerprint("text", b"Rich hello")
+        );
+        assert_eq!(db.clipboard_text_formatting(plain_copy_id).unwrap(), None);
+        assert_eq!(plain_detail.rich_text_format, None);
+        assert_eq!(plain_detail.rich_text_html, None);
+        assert!(
+            plain_detail.title.is_empty() && !plain_detail.is_favorite && !plain_detail.is_pinned
+        );
+
+        let rich_copy_detail = db.clipboard_detail(rich_copy_id).unwrap();
+        assert_eq!(
+            db.clipboard_text_formatting(rich_copy_id).unwrap(),
+            Some(formatting.clone())
+        );
+        assert_eq!(rich_copy_detail.rich_text_format, Some("html+rtf"));
+
+        // Original rich record remains intact.
+        let original_detail = db.clipboard_detail("rich-src").unwrap();
+        assert_eq!(original_detail.rich_text_format, Some("html+rtf"));
+        assert_eq!(original_detail.title, "Styled note");
+        assert!(original_detail.is_favorite);
+        assert_eq!(
+            db.clipboard_text_formatting("rich-src").unwrap(),
+            Some(formatting)
+        );
+
+        // Non-text records cannot be duplicated as plain text.
+        let img = image_record("img-src");
+        db.clipboard_insert(&img).unwrap();
+        assert_eq!(
+            db.clipboard_duplicate_plain_text("img-src").unwrap_err(),
+            "invalid_argument"
         );
     }
 

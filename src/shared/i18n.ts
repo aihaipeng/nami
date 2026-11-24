@@ -265,6 +265,7 @@ export const messages = {
   clipboardImagePreview: ['预览', 'Preview'],
   clipboardImageSource: ['源码', 'Source'],
   clipboardImagePreviewError: ['无法预览此图片数据', 'Unable to preview this image data'],
+  clipboardImagePalette: ['主色调', 'Color Palette'],
   clipboardCronSchedule: ['含义', 'Schedule'],
   clipboardCronNextRun: ['第 {index} 次', 'Next {index}'],
   clipboardMathResult: ['结果', 'Result'],

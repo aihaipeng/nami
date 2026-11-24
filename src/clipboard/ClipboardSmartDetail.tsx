@@ -542,6 +542,37 @@ export function ClipboardQrPreview({ text }: { text: string }) {
   </div>;
 }
 
+export function ClipboardImagePalette({ colors, canCopy, onCopy, t }: {
+  colors: string[];
+  canCopy: boolean;
+  onCopy: (text: string) => Promise<boolean>;
+  t: Translate;
+}) {
+  const { copied, copyValue } = useCopiedKey();
+  if (!colors.length) return null;
+  return <div className="clipboard-smart-card clipboard-smart-palette" role="group" aria-label={t('clipboardImagePalette')} data-tauri-drag-region="false">
+    <div className="clipboard-palette-grid">
+      {colors.map((hex) => {
+        const active = copied === hex;
+        return <button
+          key={hex}
+          type="button"
+          className={`clipboard-palette-swatch${active ? ' record-copied' : ''}`}
+          disabled={!canCopy}
+          aria-label={`${t('copy')} ${hex}`}
+          title={`${t('copy')} ${hex}`}
+          onClick={() => { void copyValue(hex, hex, onCopy); }}
+        >
+          <span className="clipboard-palette-chip" style={{ '--swatch-color': hex } as CSSProperties} aria-hidden="true">
+            {active && <span className="clipboard-palette-check"><CircleCheck className="copy-success" /></span>}
+          </span>
+          <code className="clipboard-palette-hex">{hex}</code>
+        </button>;
+      })}
+    </div>
+  </div>;
+}
+
 export function ClipboardImageQrBar({ codes, canCopy, canOpen, onCopy, onOpenUrl, t }: {
   codes: string[];
   canCopy: boolean;
@@ -556,16 +587,18 @@ export function ClipboardImageQrBar({ codes, canCopy, canOpen, onCopy, onOpenUrl
     {codes.map((code, index) => {
       const link = canOpen && isOpenableQrLink(code);
       const key = `qr-${index}`;
-      return <div className="clipboard-smart-row" key={`${index}:${code}`}>
+      return <div className="clipboard-smart-row clipboard-smart-row-wrap" key={`${index}:${code}`}>
         <ScanQrCode className="clipboard-smart-icon" aria-hidden="true" />
         <code className="clipboard-smart-value clipboard-smart-value-wrap" title={code}>{code}</code>
-        <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${t('clipboardQrDetected')}`}
-          onClick={() => { void copyValue(key, code, onCopy); }} />
-        {link && <button type="button" className="icon-button clipboard-smart-icon-button"
-          aria-label={t('clipboardQrOpenLink')} title={t('clipboardQrOpenLink')}
-          onClick={() => { void onOpenUrl(code.trim()); }}>
-          <ExternalLink aria-hidden="true" />
-        </button>}
+        <span className="clipboard-smart-actions">
+          <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${t('clipboardQrDetected')}`}
+            onClick={() => { void copyValue(key, code, onCopy); }} />
+          {link && <button type="button" className="icon-button clipboard-smart-icon-button"
+            aria-label={t('clipboardQrOpenLink')} title={t('clipboardQrOpenLink')}
+            onClick={() => { void onOpenUrl(code.trim()); }}>
+            <ExternalLink aria-hidden="true" />
+          </button>}
+        </span>
       </div>;
     })}
   </div>;

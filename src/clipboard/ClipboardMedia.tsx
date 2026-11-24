@@ -28,7 +28,12 @@ function previewPixelLimit() {
   return Math.min(2048, Math.max(320, Math.ceil(window.innerWidth * scale / 256) * 256));
 }
 
-export function ImagePreview({ recordId, native, fallback }: { recordId: string; native: boolean; fallback?: ReactNode }) {
+export function ImagePreview({ recordId, native, fallback, onImageLoad }: {
+  recordId: string;
+  native: boolean;
+  fallback?: ReactNode;
+  onImageLoad?: (img: HTMLImageElement) => void;
+}) {
   const { element, visible } = useVisible(native, true);
   const loaded = useRef<string | null>(null);
   const [url, setUrl] = useState<string | null>(null);
@@ -55,7 +60,7 @@ export function ImagePreview({ recordId, native, fallback }: { recordId: string;
     }).catch(() => { if (!disposed) setFailed(true); });
     return () => { disposed = true; };
   }, [visible, recordId, maxPixels]);
-  return <span ref={element} className="clipboard-image-preview">{url ? <img src={url} alt="Image" onError={() => { loaded.current = null; setUrl(null); setFailed(true); }} /> : failed ? fallback ?? <span className="clipboard-media-placeholder" role="img" aria-label="Image unavailable"><Image /></span> : <span className="clipboard-media-placeholder"><ActivityBeam label="Working" /></span>}</span>;
+  return <span ref={element} className="clipboard-image-preview">{url ? <img src={url} alt="Image" onLoad={(event) => onImageLoad?.(event.currentTarget)} onError={() => { loaded.current = null; setUrl(null); setFailed(true); }} /> : failed ? fallback ?? <span className="clipboard-media-placeholder" role="img" aria-label="Image unavailable"><Image /></span> : <span className="clipboard-media-placeholder"><ActivityBeam label="Working" /></span>}</span>;
 }
 
 export function FileIcon({ entry }: { entry: FileEntry }) {

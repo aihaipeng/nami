@@ -21,7 +21,7 @@ export function RecordActions({ t, favorite, pinned, native, canCopy, copyLabel,
   useEffect(() => {
     ++copyGeneration.current; copying.current = false; setCopied(false);
     return () => { ++copyGeneration.current; clearTimeout(copyTimer.current); };
-  }, [recordId]);
+  }, [recordId, copyLabel]);
   async function copy() {
     if (copying.current || copied) return;
     copying.current = true;

@@ -751,6 +751,7 @@ pub async fn clipboard_record_use(
     let state = app.state::<AppState>();
     let write = state.clipboard_writes.lock().await;
     let used_id = record_id.clone();
+    let duplicate_plain = matches!(mode, PayloadMode::PlainText);
     let payload = crate::clipboard_runtime::payload(&app, record_id, mode).await?;
     // Transcode TIFF before taking the main thread. PNG bytes are left unchanged.
     let payload =
@@ -826,12 +827,12 @@ pub async fn clipboard_record_use(
     let (target, version, written_at, return_session) = match initial {
         Ok(values) => {
             // Clicking a row writes the clipboard before it pastes. That write is the same copy.
-            save_record_use(&app, used_id, false).await?;
+            save_record_use(&app, used_id, false, false).await?;
             values
         }
         Err(result) => {
             if result.copy_status == "current" {
-                save_record_use(&app, used_id, result.status == "copied").await?;
+                save_record_use(&app, used_id, result.status == "copied", duplicate_plain).await?;
             }
             drop(write);
             reveal_failure(&app, operation, &result).await?;
@@ -952,10 +953,19 @@ pub async fn clipboard_record_use(
     Ok(result)
 }
 
-async fn save_record_use(app: &AppHandle, id: String, copied: bool) -> Result<(), String> {
+async fn save_record_use(
+    app: &AppHandle,
+    id: String,
+    copied: bool,
+    plain_text: bool,
+) -> Result<(), String> {
     crate::clipboard_runtime::database(app, move |database| {
         if copied {
-            database.clipboard_duplicate(&id)
+            if plain_text {
+                database.clipboard_duplicate_plain_text(&id)
+            } else {
+                database.clipboard_duplicate(&id)
+            }
         } else {
             database.clipboard_promote(&id)
         }
