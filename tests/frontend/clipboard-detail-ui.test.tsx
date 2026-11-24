@@ -805,3 +805,110 @@ it('shows unified file+path cards for single files, local images, and multi-file
   fireEvent.click(within(blocks[1] as HTMLElement).getByRole('button', { name: 'Copy b.txt' }));
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Desktop/b.txt' }));
 });
+
+it('renders inline SVG/data-URI preview toggle, Cron schedule, safe math, and radix/chmod cards', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_text_copy') return true;
+    return baseInvoke(name, args);
+  });
+
+  // Inline SVG: defaults to Preview rendered inside <img>, toggles to Source
+  const svgSource = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>';
+  first().text = svgSource;
+  direct();
+  const svgImg = await within(pane()).findByRole('img', { name: 'SVG Preview' }) as HTMLImageElement;
+  expect(svgImg.src.startsWith('data:image/svg+xml;charset=utf-8,')).toBe(true);
+  expect(pane().querySelector('.clipboard-smart-meta')?.textContent).toContain('SVG ·');
+  expect(pane().querySelector('.clipboard-detail-text')).toBeNull();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Source' }));
+  expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(svgSource);
+  expect(within(pane()).queryByRole('img', { name: 'SVG Preview' })).toBeNull();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Preview' }));
+  const reloadedImg = await within(pane()).findByRole('img', { name: 'SVG Preview' });
+  fireEvent.error(reloadedImg);
+  expect(await within(pane()).findByText('Unable to preview this image data')).toBeTruthy();
+
+  // data:image/png;base64,... URI preview
+  first().text = 'data:image/png;base64,iVBORw0KGgo=';
+  await emit('clipboard_changed', 2);
+  const pngImg = await within(pane()).findByRole('img', { name: 'PNG Preview' }) as HTMLImageElement;
+  expect(pngImg.src).toBe('data:image/png;base64,iVBORw0KGgo=');
+  expect(pane().querySelector('.clipboard-smart-meta')?.textContent).toBe('PNG · 8 B');
+
+  // Cron expression: natural description + 3 future runs with one-click copy
+  first().text = '*/15 9-18 * * 1-5';
+  await emit('clipboard_changed', 3);
+  expect(await within(pane()).findByText('Every 15 minutes, 09:00–18:59, Mon–Fri')).toBeTruthy();
+  expect(within(pane()).getByText('Next 1')).toBeTruthy();
+  expect(within(pane()).getByText('Next 2')).toBeTruthy();
+  expect(within(pane()).getByText('Next 3')).toBeTruthy();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Schedule' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({
+    text: 'Every 15 minutes, 09:00–18:59, Mon–Fri',
+  }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Next 1' }));
+  await waitFor(() => expect((calls('clipboard_text_copy').at(-1)?.[1] as { text: string }).text).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/));
+
+  // Safe arithmetic: Result + Formatted with one-click copy
+  first().text = '(1920 * 1080) / 1024';
+  await emit('clipboard_changed', 4);
+  expect(await within(pane()).findByText('2,025')).toBeTruthy();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Result' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '2025' }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Formatted' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '2,025' }));
+
+  // Radix & Unix permissions: 0xFF and chmod 755
+  first().text = '0xFF';
+  await emit('clipboard_changed', 5);
+  expect(await within(pane()).findByText('0b11111111')).toBeTruthy();
+  expect(within(pane()).queryByText('Permissions')).toBeNull();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy DEC' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '255' }));
+
+  first().text = 'chmod 755';
+  await emit('clipboard_changed', 6);
+  expect(await within(pane()).findByText('rwxr-xr-x')).toBeTruthy();
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Permissions' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'rwxr-xr-x' }));
+});
+
+it('aligns detail key-value rows on a shared grid with centered keys and left-aligned wrapping values for long labels and results', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_text_copy') return true;
+    return baseInvoke(name, args);
+  });
+
+  const longKey = 'very_long_tracking_parameter_name_for_alignment_test';
+  const longVal = 'https://example.test/very/long/value/'.repeat(6);
+  first().text = `https://example.test/page?${longKey}=${encodeURIComponent(longVal)}&utm_source=share&id=1`;
+  direct();
+
+  await within(pane()).findByRole('button', { name: 'Copy Clean URL' });
+  const urlGrid = pane().querySelector('.clipboard-smart-url > .clipboard-smart-rows')!;
+  expect(urlGrid).toBeTruthy();
+  // Top section (Clean URL) and bottom section (params) share one grid container so columns align across the divider.
+  expect(urlGrid.querySelectorAll('.clipboard-smart-section')).toHaveLength(2);
+  expect(urlGrid.querySelector('.clipboard-smart-section.clipboard-smart-divider.clipboard-smart-params')).toBeTruthy();
+
+  const keyNodes = [...urlGrid.querySelectorAll<HTMLElement>('.clipboard-smart-key')];
+  expect(keyNodes.map((node) => node.getAttribute('title'))).toContain(longKey);
+  expect(keyNodes.map((node) => node.getAttribute('title'))).toContain('Clean URL');
+
+  const valueNodes = [...urlGrid.querySelectorAll<HTMLElement>('.clipboard-smart-value')];
+  expect(valueNodes.map((node) => node.getAttribute('title'))).toContain(longVal);
+
+  // Footer metadata retains label/value structure.
+  expect(pane().querySelector('.clipboard-detail-metadata > div > span:first-child')?.textContent).toBe('Application');
+
+  // Cron schedule and next runs also share one grid container across the divider.
+  first().text = '*/15 9-18 * * 1-5';
+  await emit('clipboard_changed', 2);
+  await within(pane()).findByText('Next 1');
+  const cronGrid = pane().querySelector('.clipboard-smart-cron > .clipboard-smart-rows')!;
+  expect(cronGrid.querySelector('.clipboard-smart-section.clipboard-smart-divider')).toBeTruthy();
+  expect(cronGrid.querySelectorAll('.clipboard-smart-row')).toHaveLength(4);
+  expect(cronGrid.querySelector('.clipboard-smart-key')?.getAttribute('title')).toBe('Schedule');
+});

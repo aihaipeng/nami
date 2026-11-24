@@ -1,4 +1,28 @@
 import { MAX_QR_UTF8_BYTES } from './qrEncoder';
+import {
+  computeNextCronRuns,
+  describeCron,
+  formatCronRunTime,
+  parseSmartCron,
+  type CronField,
+  type SmartCron,
+} from './smartCron';
+import {
+  parseSmartMath,
+  parseSmartNumber,
+  type SmartMath,
+  type SmartNumber,
+} from './smartMath';
+
+export {
+  computeNextCronRuns,
+  describeCron,
+  formatCronRunTime,
+  parseSmartCron,
+  parseSmartMath,
+  parseSmartNumber,
+};
+export type { CronField, SmartCron, SmartMath, SmartNumber };
 
 export interface SmartColor {
   kind: 'color';
@@ -66,6 +90,14 @@ export interface SmartDecoded {
   jsonPretty: string | null;
 }
 
+export interface SmartImageData {
+  kind: 'imageData';
+  sourceKind: 'svg' | 'data-uri';
+  format: string;
+  src: string;
+  estimatedBytes: number;
+}
+
 export type SmartDetailMatch =
   | SmartColor
   | SmartJson
@@ -73,6 +105,10 @@ export type SmartDetailMatch =
   | SmartDateTime
   | SmartUrl
   | SmartJwt
+  | SmartImageData
+  | SmartNumber
+  | SmartMath
+  | SmartCron
   | SmartDecoded;
 
 const MAX_SMART_TEXT_CHARS = 200_000;
@@ -722,6 +758,120 @@ export function parseSmartBase64(trimmed: string): SmartDecoded | null {
   return { kind: 'decoded', encoding: 'base64', text: decoded, jsonPretty: tryPrettyJson(decoded) };
 }
 
+const IMAGE_DATA_URI_RE = /^data:image\/(png|jpe?g|gif|webp|svg\+xml|avif|bmp|x-icon|vnd\.microsoft\.icon|ico)((?:;[a-z0-9.+-]+=[a-z0-9.+-]+)*)(;base64)?,([\s\S]+)$/i;
+
+const IMAGE_FORMAT_LABELS: Record<string, string> = {
+  png: 'PNG',
+  jpg: 'JPEG',
+  jpeg: 'JPEG',
+  gif: 'GIF',
+  webp: 'WebP',
+  'svg+xml': 'SVG',
+  avif: 'AVIF',
+  bmp: 'BMP',
+  'x-icon': 'ICO',
+  'vnd.microsoft.icon': 'ICO',
+  ico: 'ICO',
+};
+
+function ensureSvgXmlns(svg: string): string {
+  const openEnd = svg.indexOf('>');
+  if (openEnd === -1) return svg;
+  const openTag = svg.slice(0, openEnd + 1);
+  if (/\bxmlns\s*=/i.test(openTag)) return svg;
+  return `${svg.slice(0, 4)} xmlns="http://www.w3.org/2000/svg"${svg.slice(4)}`;
+}
+
+function stripSvgProlog(raw: string): string {
+  let rest = raw.trim();
+  while (true) {
+    if (rest.startsWith('<?xml')) {
+      const end = rest.indexOf('?>');
+      if (end === -1) return '';
+      rest = rest.slice(end + 2).trimStart();
+    } else if (/^<!DOCTYPE\s+svg\b/i.test(rest)) {
+      const end = rest.indexOf('>');
+      if (end === -1) return '';
+      rest = rest.slice(end + 1).trimStart();
+    } else if (rest.startsWith('<!--')) {
+      const end = rest.indexOf('-->');
+      if (end === -1) return '';
+      rest = rest.slice(end + 3).trimStart();
+    } else {
+      break;
+    }
+  }
+  while (rest.endsWith('-->')) {
+    const start = rest.lastIndexOf('<!--');
+    if (start === -1) break;
+    rest = rest.slice(0, start).trimEnd();
+  }
+  return rest;
+}
+
+export function parseSmartImageData(trimmed: string): SmartImageData | null {
+  if (trimmed.length < 15 || trimmed.length > MAX_SMART_TEXT_CHARS) return null;
+
+  if (/^data:image\//i.test(trimmed)) {
+    const match = IMAGE_DATA_URI_RE.exec(trimmed);
+    if (!match) return null;
+    const subtype = match[1].toLowerCase();
+    const params = match[2] ?? '';
+    const isBase64 = Boolean(match[3]);
+    const payload = match[4];
+    const format = IMAGE_FORMAT_LABELS[subtype] ?? subtype.toUpperCase();
+
+    if (isBase64) {
+      const clean = payload.replace(/\s+/g, '');
+      if (clean.length < 8 || clean.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(clean)) return null;
+      const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+      const estimatedBytes = Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+      return {
+        kind: 'imageData',
+        sourceKind: 'data-uri',
+        format,
+        src: `data:image/${subtype}${params};base64,${clean}`,
+        estimatedBytes,
+      };
+    }
+
+    if (subtype !== 'svg+xml') return null;
+    let decoded = payload;
+    try {
+      decoded = decodeURIComponent(payload);
+    } catch {
+      // Allow unencoded inline SVG inside data:image/svg+xml,...
+    }
+    const svg = stripSvgProlog(decoded);
+    if (!/^<svg(?=[\s>])/i.test(svg) || !/<\/svg>$/i.test(svg)) return null;
+    const normalizedSvg = ensureSvgXmlns(svg);
+    return {
+      kind: 'imageData',
+      sourceKind: 'data-uri',
+      format: 'SVG',
+      src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(normalizedSvg)}`,
+      estimatedBytes: new TextEncoder().encode(decoded).length,
+    };
+  }
+
+  if (trimmed[0] === '<') {
+    const svg = stripSvgProlog(trimmed);
+    if (svg.length < 11 || !/^<svg(?=[\s>])/i.test(svg) || !/<\/svg>$/i.test(svg)) return null;
+    const openEnd = svg.indexOf('>');
+    if (openEnd === -1) return null;
+    const normalizedSvg = ensureSvgXmlns(svg);
+    return {
+      kind: 'imageData',
+      sourceKind: 'svg',
+      format: 'SVG',
+      src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(normalizedSvg)}`,
+      estimatedBytes: new TextEncoder().encode(trimmed).length,
+    };
+  }
+
+  return null;
+}
+
 export function analyzeSmartDetail(raw: string): SmartDetailMatch | null {
   if (!raw || raw.length > MAX_SMART_TEXT_CHARS) return null;
   const trimmed = raw.trim();
@@ -731,7 +881,11 @@ export function analyzeSmartDetail(raw: string): SmartDetailMatch | null {
     ?? parseSmartDateTime(trimmed)
     ?? parseSmartJwt(trimmed)
     ?? parseSmartUrl(trimmed)
+    ?? parseSmartImageData(trimmed)
     ?? parseSmartJson(trimmed)
+    ?? parseSmartNumber(trimmed)
+    ?? parseSmartMath(trimmed)
+    ?? parseSmartCron(trimmed)
     ?? parseSmartEscape(trimmed)
     ?? parseSmartPercentEncoded(trimmed)
     ?? parseSmartBase64(trimmed);

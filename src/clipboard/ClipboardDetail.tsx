@@ -12,15 +12,21 @@ import { ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import { ClipboardRichText } from './ClipboardRichText';
 import {
   ClipboardColorCard,
+  ClipboardCronCard,
   ClipboardDateTimeCard,
   ClipboardDecodedCard,
   ClipboardFilesCard,
+  ClipboardImageDataBar,
+  ClipboardImageDataPreview,
   ClipboardImageQrBar,
   ClipboardJsonBar,
   ClipboardJwtCard,
+  ClipboardMathCard,
+  ClipboardNumberCard,
   ClipboardQrPreview,
   ClipboardTimestampCard,
   ClipboardUrlCard,
+  type ImageDataViewMode,
   type JsonViewMode,
 } from './ClipboardSmartDetail';
 import { ClipboardTextPreview } from './ClipboardTextPreview';
@@ -62,6 +68,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const [busy, setBusy] = useState(false);
   const [textViewMode, setTextViewMode] = useState<'rich' | 'plain'>('rich');
   const [jsonMode, setJsonMode] = useState<JsonViewMode>('original');
+  const [imageDataMode, setImageDataMode] = useState<ImageDataViewMode>('preview');
+  const [imageDataDims, setImageDataDims] = useState<{ width: number; height: number } | null>(null);
   const [showQr, setShowQr] = useState(false);
   const [qrCodes, setQrCodes] = useState<string[]>([]);
   const [openTargetKind, setOpenTargetKind] = useState<'file' | 'link' | 'email' | null>(null);
@@ -71,7 +79,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const list = useRef<HTMLDivElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    ++operation.current; processing.current = false; setBusy(false); setFeedback(null); setFailed(null); setTextViewMode('rich'); setJsonMode('original'); setShowQr(false); setQrCodes([]); setOpenTargetKind(null);
+    ++operation.current; processing.current = false; setBusy(false); setFeedback(null); setFailed(null); setTextViewMode('rich'); setJsonMode('original'); setImageDataMode('preview'); setImageDataDims(null); setShowQr(false); setQrCodes([]); setOpenTargetKind(null);
     list.current?.scrollTo(0, 0);
     if (!active || !native || !id) { setDetail(null); setLoading(false); return; }
     let disposed = false;
@@ -103,6 +111,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const [indexingId, setIndexingId] = useState<string | null>(null);
   const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
   const smart = useMemo(() => (current?.kind === 'text' ? analyzeSmartDetail(current.text) : null), [current?.kind, current?.text]);
+  const imageDataSrc = smart?.kind === 'imageData' ? smart.src : null;
+  useEffect(() => { setImageDataDims(null); }, [imageDataSrc]);
   const canShowQr = Boolean(current?.kind === 'text' && canEncodeQr(current.text));
   useEffect(() => {
     if (!active || !native || !current || current.kind !== 'text' || !snapshot.capabilities.clipboardOpenTarget) { setOpenTargetKind(null); return; }
@@ -253,12 +263,18 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
               ? <ClipboardRichText html={current.richTextHtml} />
               : <>
                 {smart?.kind === 'json' && <ClipboardJsonBar json={smart} mode={jsonMode} onModeChange={setJsonMode} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                <ClipboardTextPreview as="div" text={displayedText} className="clipboard-detail-text" data-tauri-drag-region="false" />
+                {smart?.kind === 'imageData' && <ClipboardImageDataBar imageData={smart} mode={imageDataMode} onModeChange={setImageDataMode} dimensions={imageDataDims} t={t} />}
+                {smart?.kind === 'imageData' && imageDataMode === 'preview'
+                  ? <ClipboardImageDataPreview imageData={smart} onDimensions={setImageDataDims} t={t} />
+                  : <ClipboardTextPreview as="div" text={displayedText} className="clipboard-detail-text" data-tauri-drag-region="false" />}
                 {smart?.kind === 'color' && <ClipboardColorCard color={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'datetime' && <ClipboardDateTimeCard dateTime={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'url' && <ClipboardUrlCard url={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'jwt' && <ClipboardJwtCard jwt={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'cron' && <ClipboardCronCard cron={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'math' && <ClipboardMathCard math={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'number' && <ClipboardNumberCard number={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'decoded' && <ClipboardDecodedCard decoded={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
               </>)
           : singleImage

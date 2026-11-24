@@ -51,6 +51,17 @@ def test_detail_metadata_height_stays_three_rows():
     assert '.clipboard-detail-metadata { position: relative; flex: 0 0 auto;' in clipboard
 
 
+def test_detail_key_value_fields_use_shared_grid_with_centered_keys_and_left_values():
+    clipboard = (ROOT / 'src/clipboard/clipboard.css').read_text()
+    assert '.clipboard-smart-rows { display: grid; grid-template-columns: minmax(52px, max-content) minmax(0, 1fr) auto;' in clipboard
+    assert '.clipboard-smart-section { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid;' in clipboard
+    assert '.clipboard-smart-rows .clipboard-smart-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid;' in clipboard
+    assert 'max-width: 104px;' in clipboard
+    assert 'text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' in clipboard
+    assert '.clipboard-smart-rows .clipboard-smart-value { margin: 3px 0; line-height: 18px; white-space: normal; overflow-wrap: anywhere;' in clipboard
+    assert '.clipboard-detail-metadata > div > span:first-child { color: var(--history-secondary); flex: 0 0 72px; text-align: center;' in clipboard
+
+
 def test_loading_glow_pulses_in_place_and_reduced_motion_stops_it():
     styles = (ROOT / 'src/styles.css').read_text()
     assert 'beam-breathe 1200ms ease-in-out infinite' in styles

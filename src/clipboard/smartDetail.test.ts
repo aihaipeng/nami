@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { encodeQrCode, MAX_QR_UTF8_BYTES } from './qrEncoder';
-import { analyzeSmartDetail, canEncodeQr, formatRelativeTime, isOpenableQrLink } from './smartDetail';
+import {
+  analyzeSmartDetail,
+  canEncodeQr,
+  computeNextCronRuns,
+  describeCron,
+  formatCronRunTime,
+  formatRelativeTime,
+  isOpenableQrLink,
+} from './smartDetail';
 
 describe('smartDetail', () => {
   it('parses and converts hex, rgb, hsl, and oklch colors including alpha', () => {
@@ -244,6 +252,232 @@ describe('smartDetail', () => {
       '/////wAAAQID',
     ]) {
       expect(analyzeSmartDetail(nonB64)).toBeNull();
+    }
+  });
+
+  it('recognizes inline SVG and data:image/* URIs safely while rejecting non-image data URIs', () => {
+    const rawSvg = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>';
+    const svg = analyzeSmartDetail(rawSvg);
+    expect(svg?.kind).toBe('imageData');
+    if (svg?.kind === 'imageData') {
+      expect(svg.sourceKind).toBe('svg');
+      expect(svg.format).toBe('SVG');
+      expect(svg.src.startsWith('data:image/svg+xml;charset=utf-8,')).toBe(true);
+      expect(decodeURIComponent(svg.src)).toContain('xmlns="http://www.w3.org/2000/svg"');
+      expect(svg.estimatedBytes).toBe(new TextEncoder().encode(rawSvg).length);
+    }
+
+    const withProlog = '<?xml version="1.0"?><!-- icon --><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>';
+    const svgWithXmlns = analyzeSmartDetail(withProlog);
+    expect(svgWithXmlns?.kind).toBe('imageData');
+    if (svgWithXmlns?.kind === 'imageData') {
+      const decoded = decodeURIComponent(svgWithXmlns.src);
+      expect(decoded.match(/xmlns=/g)).toHaveLength(1);
+    }
+
+    const pngUri = 'data:image/png;base64,iVBORw0KGgo=\n';
+    const png = analyzeSmartDetail(pngUri);
+    expect(png).toEqual({
+      kind: 'imageData',
+      sourceKind: 'data-uri',
+      format: 'PNG',
+      src: 'data:image/png;base64,iVBORw0KGgo=',
+      estimatedBytes: 8,
+    });
+
+    const encodedSvgUri = 'data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2010%2010%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%2F%3E%3C%2Fsvg%3E';
+    const svgUri = analyzeSmartDetail(encodedSvgUri);
+    expect(svgUri?.kind).toBe('imageData');
+    if (svgUri?.kind === 'imageData') {
+      expect(svgUri.format).toBe('SVG');
+      expect(decodeURIComponent(svgUri.src)).toContain('xmlns="http://www.w3.org/2000/svg"');
+    }
+
+    for (const nonImage of [
+      'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==',
+      'data:image/png,not-base64',
+      '<div class="svg">not an svg</div>',
+      '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/>',
+    ]) {
+      expect(analyzeSmartDetail(nonImage)).toBeNull();
+    }
+  });
+
+  it('parses strict 5-field Cron expressions, describes them bilingually, and computes future runs accurately', () => {
+    const cron = analyzeSmartDetail('*/15 9-18 * * 1-5');
+    expect(cron?.kind).toBe('cron');
+    if (cron?.kind === 'cron') {
+      expect(describeCron(cron, 'zh-CN')).toBe('工作日 09:00–18:59 每 15 分钟');
+      expect(describeCron(cron, 'en')).toBe('Every 15 minutes, 09:00–18:59, Mon–Fri');
+
+      // Wednesday 2026-11-25 08:50 local -> 09:00, 09:15, 09:30
+      const wedMorning = new Date(2026, 10, 25, 8, 50, 0).getTime();
+      expect(computeNextCronRuns(cron, wedMorning, 3).map(formatCronRunTime)).toEqual([
+        '2026-11-25 09:00',
+        '2026-11-25 09:15',
+        '2026-11-25 09:30',
+      ]);
+
+      // Friday 2026-11-27 18:50 local -> skips weekend to Monday 2026-11-30 09:00
+      const friEvening = new Date(2026, 10, 27, 18, 50, 0).getTime();
+      expect(computeNextCronRuns(cron, friEvening, 2).map(formatCronRunTime)).toEqual([
+        '2026-11-30 09:00',
+        '2026-11-30 09:15',
+      ]);
+    }
+
+    const daily = analyzeSmartDetail('30 8 * * *');
+    expect(daily?.kind).toBe('cron');
+    if (daily?.kind === 'cron') {
+      expect(describeCron(daily, 'zh-CN')).toBe('每天 08:30');
+      expect(describeCron(daily, 'en')).toBe('Every day at 08:30');
+    }
+
+    const leapDay = analyzeSmartDetail('0 0 29 2 *');
+    expect(leapDay?.kind).toBe('cron');
+    if (leapDay?.kind === 'cron') {
+      const base = new Date(2026, 0, 1, 0, 0, 0).getTime();
+      expect(computeNextCronRuns(leapDay, base, 1).map(formatCronRunTime)).toEqual(['2028-02-29 00:00']);
+    }
+
+    const aliased = analyzeSmartDetail('0 10 * JAN-MAR FRI-SUN');
+    expect(aliased?.kind).toBe('cron');
+    if (aliased?.kind === 'cron') {
+      expect(aliased.dow.values).toEqual([0, 5, 6]);
+      expect(describeCron(aliased, 'zh-CN')).toContain('1–3 月');
+      expect(describeCron(aliased, 'en')).toContain('Jan–Mar');
+    }
+
+    for (const nonCron of [
+      '1 2 3 4 5',
+      '60 * * * *',
+      '0 24 * * *',
+      '0 0 31 2 *',
+      '*/0 * * * *',
+      '0 9 * * * *',
+      'hello world * * *',
+    ]) {
+      expect(analyzeSmartDetail(nonCron)).toBeNull();
+    }
+  });
+
+  it('evaluates safe arithmetic expressions without eval and avoids dates, IDs, and overflows', () => {
+    expect(analyzeSmartDetail('(1920 * 1080) / 1024')).toEqual({
+      kind: 'math',
+      result: '2025',
+      formatted: '2,025',
+    });
+    expect(analyzeSmartDetail('3980 * 0.85')).toEqual({
+      kind: 'math',
+      result: '3383',
+      formatted: '3,383',
+    });
+    expect(analyzeSmartDetail('0.1 + 0.2')).toEqual({
+      kind: 'math',
+      result: '0.3',
+      formatted: null,
+    });
+    expect(analyzeSmartDetail('-(3 + 4) * 2 + 100 % 7')).toEqual({
+      kind: 'math',
+      result: '-12',
+      formatted: null,
+    });
+    expect(analyzeSmartDetail('2 ** 10')).toEqual({
+      kind: 'math',
+      result: '1024',
+      formatted: '1,024',
+    });
+    expect(analyzeSmartDetail('1920 × 1080')).toEqual({
+      kind: 'math',
+      result: '2073600',
+      formatted: '2,073,600',
+    });
+    // Multiplication with 3 operands must be recognized as math, not 5-field Cron.
+    expect(analyzeSmartDetail('2 * 3 * 4')).toEqual({
+      kind: 'math',
+      result: '24',
+      formatted: null,
+    });
+
+    for (const nonMath of [
+      '42',
+      '(123)',
+      '10 / 0',
+      '10 % 0',
+      '2026-11',
+      '11-25',
+      '400-800-1234',
+      '01-02',
+      '2026/11/25',
+      '11/25/2026',
+      '9 ** 9 ** 9',
+      'alert(1) + 2',
+      `${'('.repeat(40)}1+1${')'.repeat(40)}`,
+    ]) {
+      expect(analyzeSmartDetail(nonMath)).toBeNull();
+    }
+  });
+
+  it('converts radix literals and Unix octal permissions cleanly', () => {
+    expect(analyzeSmartDetail('0xFF')).toEqual({
+      kind: 'number',
+      dec: '255',
+      hex: '0xFF',
+      bin: '0b11111111',
+      oct: '0o377',
+      permissions: null,
+      preferPermissionsFirst: false,
+    });
+    expect(analyzeSmartDetail('0b1010')).toEqual({
+      kind: 'number',
+      dec: '10',
+      hex: '0xA',
+      bin: '0b1010',
+      oct: '0o12',
+      permissions: null,
+      preferPermissionsFirst: false,
+    });
+    expect(analyzeSmartDetail('0o755')).toEqual({
+      kind: 'number',
+      dec: '493',
+      hex: '0x1ED',
+      bin: '0b111101101',
+      oct: '0o755',
+      permissions: 'rwxr-xr-x',
+      preferPermissionsFirst: false,
+    });
+    expect(analyzeSmartDetail('0755')).toEqual({
+      kind: 'number',
+      dec: '493',
+      hex: '0x1ED',
+      bin: '0b111101101',
+      oct: '0o755',
+      permissions: 'rwxr-xr-x',
+      preferPermissionsFirst: true,
+    });
+    expect(analyzeSmartDetail('chmod 755')).toMatchObject({
+      kind: 'number',
+      oct: '0o755',
+      permissions: 'rwxr-xr-x',
+      preferPermissionsFirst: true,
+    });
+    expect(analyzeSmartDetail('sudo chmod -R 0644 ./keys')).toMatchObject({
+      kind: 'number',
+      oct: '0o644',
+      permissions: 'rw-r--r--',
+      preferPermissionsFirst: true,
+    });
+    expect(analyzeSmartDetail('0o4755')).toMatchObject({ kind: 'number', permissions: 'rwsr-xr-x' });
+    expect(analyzeSmartDetail('0o2755')).toMatchObject({ kind: 'number', permissions: 'rwxr-sr-x' });
+    expect(analyzeSmartDetail('0o1777')).toMatchObject({ kind: 'number', permissions: 'rwxrwxrwt' });
+    expect(analyzeSmartDetail('0o4644')).toMatchObject({ kind: 'number', permissions: 'rwSr--r--' });
+    expect(analyzeSmartDetail('0xFFFFFFFFFFFFFFFF')).toMatchObject({
+      kind: 'number',
+      dec: '18446744073709551615',
+    });
+
+    for (const nonNumber of ['0xZZ', '0b102', '0o89', '0888', 'chmod 999', 'chmod +x script.sh', '1234']) {
+      expect(analyzeSmartDetail(nonNumber)).toBeNull();
     }
   });
 });
