@@ -165,8 +165,9 @@ export function ClipboardDateTimeCard({ dateTime, locale, canCopy, onCopy, t }: 
   </div>;
 }
 
-export function ClipboardFilesCard({ entries, canCopy, onCopy, onReveal, revealLabel, t }: {
+export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, onReveal, revealLabel, t }: {
   entries: ReadonlyArray<FileEntry>;
+  compact?: boolean;
   canCopy: boolean;
   onCopy: (text: string) => Promise<boolean>;
   onReveal?: (index: number) => void;
@@ -175,15 +176,28 @@ export function ClipboardFilesCard({ entries, canCopy, onCopy, onReveal, revealL
 }) {
   const { copied, copyValue } = useCopiedKey();
   if (entries.length === 0) return null;
-  if (entries.length === 1) {
+  if (compact && entries.length === 1) {
     const single = entries[0];
     return <div className="clipboard-smart-card clipboard-smart-files" data-tauri-drag-region="false">
       <div className="clipboard-smart-rows">
         <div className="clipboard-smart-row clipboard-smart-row-wrap">
           <span className="clipboard-smart-key">{t('clipboardFilePath')}</span>
           <code className="clipboard-smart-value clipboard-smart-value-wrap" title={single.path}>{single.path}</code>
-          <SmartCopyButton active={copied === 'path'} disabled={!canCopy} label={`${t('copy')} ${t('clipboardFilePath')}`}
-            onClick={() => { void copyValue('path', single.path, onCopy); }} />
+          <span className="clipboard-smart-actions">
+            {onReveal && <button
+              type="button"
+              className="icon-button clipboard-smart-icon-button"
+              data-action="reveal-file"
+              aria-label={`${revealLabel}: ${single.name}`}
+              title={revealLabel}
+              disabled={!single.exists}
+              onClick={() => onReveal(0)}
+            >
+              <FolderOpen aria-hidden="true" />
+            </button>}
+            <SmartCopyButton active={copied === 'file-0'} disabled={!canCopy} label={`${t('copy')} ${single.name}`}
+              onClick={() => { void copyValue('file-0', single.path, onCopy); }} />
+          </span>
         </div>
       </div>
     </div>;

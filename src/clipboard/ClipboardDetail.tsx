@@ -8,7 +8,7 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
-import { FileList, ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
+import { ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import { ClipboardRichText } from './ClipboardRichText';
 import {
   ClipboardColorCard,
@@ -104,17 +104,14 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
   const smart = useMemo(() => (current?.kind === 'text' ? analyzeSmartDetail(current.text) : null), [current?.kind, current?.text]);
   const canShowQr = Boolean(current?.kind === 'text' && canEncodeQr(current.text));
-  const singleExistingFile = Boolean((current?.kind === 'files' || current?.kind === 'image') && current.files.length === 1 && current.files[0].exists);
   useEffect(() => {
-    if (!active || !native || !current || !snapshot.capabilities.clipboardOpenTarget) { setOpenTargetKind(null); return; }
-    if (singleExistingFile) { setOpenTargetKind('file'); return; }
-    if (current.kind !== 'text') { setOpenTargetKind(null); return; }
+    if (!active || !native || !current || current.kind !== 'text' || !snapshot.capabilities.clipboardOpenTarget) { setOpenTargetKind(null); return; }
     let disposed = false;
     void clipboardOpenTarget(current.id, false)
       .then((kind) => { if (!disposed) setOpenTargetKind(kind === 'file' || kind === 'link' || kind === 'email' ? kind : null); })
       .catch(() => { if (!disposed) setOpenTargetKind(null); });
     return () => { disposed = true; };
-  }, [active, native, current?.id, current?.kind, current?.text, singleExistingFile, snapshot.capabilities.clipboardOpenTarget]);
+  }, [active, native, current?.id, current?.kind, current?.text, snapshot.capabilities.clipboardOpenTarget]);
   useEffect(() => {
     if (!active || !native || !current || !singleImage || !snapshot.capabilities.imageOcr) { setQrCodes([]); return; }
     let disposed = false;
@@ -128,7 +125,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     setFeedback(null);
-    try { await clipboardOpenTarget(current.id, true, singleExistingFile ? 0 : undefined); }
+    try { await clipboardOpenTarget(current.id, true); }
     catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
     }
@@ -268,16 +265,13 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
             ? <>
               <ImagePreview key={current.id} recordId={current.id} native={native} />
               <ClipboardImageQrBar codes={qrCodes} canCopy={canCopyDerived} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onCopy={copyDerivedText} onOpenUrl={openQrUrl} t={t} />
-              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-            </>
-            : current.files.length > 1
-              ? <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText}
+              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact canCopy={canCopyDerived} onCopy={copyDerivedText}
                 onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
-                revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />
-              : <>
-                <FileList entries={current.files} />
-                {current.files.length > 0 && <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-              </>}
+                revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
+            </>
+            : <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText}
+              onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
+              revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
     {current && (indexStatus === 'unindexed' || indexStatus === 'failed') && <div className="clipboard-image-index-action">

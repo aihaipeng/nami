@@ -236,9 +236,10 @@ describe('clipboard details', () => {
     await waitFor(() => expect(within(pane()).getByText('a.txt')).toBeTruthy());
     expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
     expect(within(pane()).queryByRole('button', { name: 'Show QR Code' })).toBeNull();
-    expect(within(pane()).getByRole('button', { name: 'Show in Finder' })).toBeTruthy();
+    expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
+    expect(within(pane()).getByRole('button', { name: 'Show in Finder: a.txt' })).toBeTruthy();
     expect(pane().querySelectorAll('[data-action="delete"]')).toHaveLength(1);
-    expect(pane().querySelectorAll('.history-action')).toHaveLength(6);
+    expect(pane().querySelectorAll('.history-action')).toHaveLength(5);
   });
 
   it('disables every retained detail action while a new record loads and delays the shared activity beam', async () => {
@@ -598,7 +599,7 @@ it('displays locally detected QR codes on images and opens links only on explici
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'plain-qr-payload' }));
 });
 
-it('shows a detail toolbar open-target action for openable files and links and omits it for missing files', async () => {
+it('shows detail toolbar open-target actions for text links and paths while local files reveal inside their cards', async () => {
   const baseInvoke = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_open_target') {
@@ -613,25 +614,28 @@ it('shows a detail toolbar open-target action for openable files and links and o
     return baseInvoke(name, args);
   });
 
-  // Single existing file (including single image file) gets Show in Finder action in RecordActions.
+  // Single existing local file reveals inside its unified card and does not show a toolbar open button.
   Object.assign(first(), {
     kind: 'files',
     text: '["/tmp/photo.png"]',
     files: [{ path: '/tmp/photo.png', name: 'photo.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }],
   });
   direct();
-  const revealFileBtn = await within(pane()).findByRole('button', { name: 'Show in Finder' });
-  expect(revealFileBtn.closest('.history-row-actions')).toBeTruthy();
+  const revealFileBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
+  expect(revealFileBtn.closest('.history-row-actions')).toBeNull();
+  expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
   expect(revealFileBtn.classList.contains('icon-button')).toBe(true);
   fireEvent.click(revealFileBtn);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
 
-  // Missing single file omits the toolbar open button.
+  // Missing single file disables its card reveal button and still shows no toolbar open button.
   Object.assign(first(), {
     files: [{ path: '/tmp/missing.png', name: 'missing.png', exists: false, isDir: false, isImage: true, iconDataUrl: null }],
   });
   await emit('clipboard_changed', 2);
-  await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull());
+  const missingRevealBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: missing.png' });
+  expect((missingRevealBtn as HTMLButtonElement).disabled).toBe(true);
+  expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
 
   // Openable text link shows Open Link in RecordActions.
   Object.assign(first(), { kind: 'text', text: 'https://example.test/open', files: [] });
@@ -640,6 +644,12 @@ it('shows a detail toolbar open-target action for openable files and links and o
   expect(openLinkBtn.closest('.history-row-actions')).toBeTruthy();
   fireEvent.click(openLinkBtn);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: undefined }));
+
+  // Openable plain-text absolute path still shows Show in Finder in RecordActions.
+  Object.assign(first(), { kind: 'text', text: '/tmp/plain-path.txt', files: [] });
+  await emit('clipboard_changed', 4);
+  const openPathBtn = await within(pane()).findByRole('button', { name: 'Show in Finder' });
+  expect(openPathBtn.closest('.history-row-actions')).toBeTruthy();
 });
 
 it('renders URL, DateTime, JWT, and decoded text smart cards with consistent icon copy actions', async () => {
@@ -718,7 +728,7 @@ it('renders URL, DateTime, JWT, and decoded text smart cards with consistent ico
   expect(getComputedStyle(codeBlock!).overflowY).not.toBe('auto');
 });
 
-it('shows local file path smart cards for files and local images without extra per-file open buttons', async () => {
+it('shows unified file+path cards for single files, local images, and multi-file groups without toolbar file reveal buttons', async () => {
   const original = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name, args) => {
     if (name === 'clipboard_text_copy') return true;
@@ -728,37 +738,46 @@ it('shows local file path smart cards for files and local images without extra p
     return original(name, args);
   });
 
-  // Single regular file: Path row only, copy-only button in card.
+  // Single regular file: unified file+path card with reveal on file row and copy on path row; no top toolbar open button.
   const record = first();
   record.kind = 'files';
   record.text = JSON.stringify(['/Users/apple/Downloads/report.pdf']);
   record.files = [{ path: '/Users/apple/Downloads/report.pdf', name: 'report.pdf', exists: true, isDir: false, isImage: false, iconDataUrl: null }];
   direct();
-  const copyPath = await within(pane()).findByRole('button', { name: 'Copy Path' });
-  fireEvent.click(copyPath);
+  const copyReport = await within(pane()).findByRole('button', { name: 'Copy report.pdf' });
+  expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
+  expect(pane().querySelector('.clipboard-files')).toBeNull();
+  const singleBlocks = pane().querySelectorAll('.clipboard-smart-file-item');
+  expect(singleBlocks).toHaveLength(1);
+  fireEvent.click(within(singleBlocks[0] as HTMLElement).getByRole('button', { name: 'Show in Finder: report.pdf' }));
+  await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
+  fireEvent.click(copyReport);
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Downloads/report.pdf' }));
-  expect(within(pane()).queryByRole('button', { name: 'Copy Folder' })).toBeNull();
-  const card = pane().querySelector('.clipboard-smart-files')!;
-  expect(card.querySelectorAll('button')).toHaveLength(1);
 
-  // Local single image (kind === 'image' with original local file entry): shows top Show in Finder + path card.
+  // Local single image (kind === 'image' with original local file entry): keeps ImagePreview + compact Path card with Open left of Copy; no top toolbar open button.
   record.kind = 'image';
   record.text = '';
   record.files = [{ path: '/Users/apple/Pictures/photo.png', name: 'photo.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }];
   await emit('clipboard_changed', 2);
-  const revealImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder' });
+  const revealImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
+  const copyImgBtn = within(pane()).getByRole('button', { name: 'Copy photo.png' });
+  expect(pane().querySelector('img')).toBeTruthy();
+  expect(within(pane()).getByText('Path')).toBeTruthy();
+  expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
+  expect(revealImgBtn.compareDocumentPosition(copyImgBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(revealImgBtn);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
-  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Path' }));
+  fireEvent.click(copyImgBtn);
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Pictures/photo.png' }));
 
-  // Missing local image file hides top Show in Finder but keeps path card copyable.
+  // Missing local image file disables card reveal button but keeps path copyable.
   record.files = [{ path: '/Users/apple/Pictures/photo.png', name: 'photo.png', exists: false, isDir: false, isImage: true, iconDataUrl: null }];
   await emit('clipboard_changed', 3);
-  await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull());
-  expect(within(pane()).getByRole('button', { name: 'Copy Path' })).toBeTruthy();
+  const missingImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
+  expect((missingImgBtn as HTMLButtonElement).disabled).toBe(true);
+  expect(within(pane()).getByRole('button', { name: 'Copy photo.png' })).toBeTruthy();
 
-  // Pure pixel screenshot (kind === 'image' with empty files): no path card, no Show in Finder.
+  // Pure pixel screenshot (kind === 'image' with empty files): no file card, no Show in Finder.
   record.files = [];
   await emit('clipboard_changed', 4);
   await waitFor(() => expect(pane().querySelector('.clipboard-smart-files')).toBeNull());

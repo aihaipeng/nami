@@ -123,6 +123,8 @@
 
 .clipboard-smart-card { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 10px; border-radius: 10px; border: 1px solid hsl(var(--foreground) / .09); background: hsl(var(--foreground) / .04); }
 .clipboard-smart-files-list { display: flex; flex-direction: column; gap: 10px; }
+.clipboard-detail-content > .clipboard-smart-files-list:not(:first-child) { margin-top: 12px; }
+.clipboard-smart-actions { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .clipboard-smart-file-item { margin-top: 0; }
 .clipboard-smart-file-head { justify-content: space-between; }
 .clipboard-smart-file-head .clipboard-file { flex: 1; min-width: 0; gap: 6px; }
