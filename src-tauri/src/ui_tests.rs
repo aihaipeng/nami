@@ -2421,35 +2421,42 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
             return Err("settings clipboard navigation did not connect".into());
         }
         samples.push(wait_view_dom(app, "settings", r#"
-const capture=document.querySelector('#clipboard-capture-heading'), excluded=document.querySelector('#clipboard-excluded-heading');
+const capture=document.querySelector('#clipboard-capture-heading'), ignoreRules=document.querySelector('#clipboard-ignore-rules-heading');
 const row=document.querySelector('.clipboard-recording-types .settings-field');
-const button=document.querySelector('[aria-label="About Excluded Apps"]'), list=document.querySelector('.clipboard-excluded-list');
-if(!row||!button||!list)return {ready:false};
-const rowSize=parseFloat(getComputedStyle(row).fontSize), sizes=[capture,excluded].map(heading=>parseFloat(getComputedStyle(heading).fontSize));
-const clean=!excluded.closest('section').textContent.includes('Checks the active app only.');
+const list=document.querySelector('.clipboard-excluded-list');
+if(!row||!ignoreRules||!list)return {ready:false};
+const section=ignoreRules.closest('section');
+const blocks=[...section.querySelectorAll('.clipboard-ignore-block')];
+const addButtons=[...section.querySelectorAll('.clipboard-ignore-add')];
+const chips=[...list.querySelectorAll('.clipboard-ignore-chip')];
+const rowSize=parseFloat(getComputedStyle(row).fontSize), sizes=[capture,ignoreRules].map(heading=>parseFloat(getComputedStyle(heading).fontSize));
+const clean=!section.textContent.includes('Checks the active app only.')&&!section.querySelector('.clipboard-tip-trigger');
 const sizesOfIcons=[...list.querySelectorAll('img.clipboard-excluded-icon')].filter(img=>img.naturalWidth).map(img=>[img.naturalWidth,img.naturalHeight]);
 if(!sizesOfIcons.length)return {ready:false,iconCount:list.querySelectorAll('img').length};
 if(sizesOfIcons.some(size=>Math.max(...size)>40))throw Error('excluded app icon exceeds the thumbnail size');
+if(blocks.length!==3||section.querySelectorAll('.settings-group').length!==1||addButtons.length!==3||section.querySelector('.clipboard-rule-input'))throw Error('ignore rules must group apps, pasteboard types, and regex into one card with on-demand inputs');
+const addRights=addButtons.map(btn=>btn.getBoundingClientRect().right);
+if(addRights.some(right=>Math.abs(right-addRights[0])>0.5))throw Error('ignore rule add buttons must share a right edge');
+if(chips.length>=2&&Math.abs(chips[0].getBoundingClientRect().top-chips[1].getBoundingClientRect().top)>1)throw Error('excluded app chips should flow inline');
 if(capture.parentElement.querySelector('[role=switch]')||sizes.some(size=>size<=rowSize)||!clean)throw Error('clipboard section hierarchy or disclosure is incorrect');
 if(document.querySelector('.settings-recorder'))throw Error('clipboard preferences still contain shortcut recorders');
 const icons=[...document.querySelectorAll('.clipboard-settings .clipboard-icon-button')];
 const iconColor=getComputedStyle(icons[0]).color;
 if(icons.length<2||iconColor===getComputedStyle(row).color||icons.some(icon=>getComputedStyle(icon).color!==iconColor))throw Error('app remove and storage refresh must share a muted icon color');
 window.__clipboardMutedIcon=iconColor;
-button.click();
+addButtons[1].click();
 return {ready:true,sizes,rowSize,clean,sizesOfIcons,iconColor};
 "#)?);
         samples.push(wait_view_dom(app, "settings", r#"
-const panel=document.querySelector('.clipboard-tip-panel');if(!panel)return {ready:false};
-const height=panel.getBoundingClientRect().height;
-if(panel.textContent!=='Checks the active app only.'||panel.querySelector('button')||height>40)throw Error('excluded app tip is not compact');
-document.querySelector('[aria-label="About Excluded Apps"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
-return {ready:true,helpVisible:true,height};
+const input=document.querySelector('#clipboard-ignore-rules-heading')?.closest('section')?.querySelector('.clipboard-rule-input');
+if(!input||document.activeElement!==input)return {ready:false};
+input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+return {ready:true,placeholder:input.placeholder};
 "#)?);
         wait_view_dom(
             app,
             "settings",
-            r#"return {ready:!document.querySelector('.clipboard-tip-panel')&&document.querySelector('[aria-label="About Excluded Apps"]').getAttribute('aria-expanded')==='false'};"#,
+            r#"return {ready:!document.querySelector('.clipboard-rule-input')};"#,
         )?;
         samples.push(wait_view_dom(app, "settings", r#"
 const types=[...document.querySelectorAll('.clipboard-recording-types .settings-checkbox')];

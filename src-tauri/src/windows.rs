@@ -837,6 +837,13 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
             }
         }
         WindowEvent::Focused(false) => {
+            if handle
+                .state::<AppState>()
+                .clipboard_dragging
+                .load(Ordering::SeqCst)
+            {
+                return;
+            }
             // A save sheet takes key status without leaving the records window.
             if handle
                 .get_window(&owned_label)
@@ -1350,22 +1357,51 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     };
     let mut top = position.y;
     let mut height = size.height;
-    if let Some(monitor) = window.current_monitor().map_err(|_| "window_geometry")? {
-        let work = monitor.work_area();
-        let origin = work.position.to_logical::<f64>(scale);
-        let available = work.size.to_logical::<f64>(scale);
-        target.left = target.left.clamp(
-            origin.x,
-            (origin.x + available.width - target.history - target.translation).max(origin.x),
-        );
-        height = height.min(available.height);
-        top = top.clamp(
-            origin.y,
-            (origin.y + available.height - height).max(origin.y),
-        );
+    let mut ns_y_override: Option<f64> = None;
+    if !visible {
+        let mode = *app.state::<AppState>().window_position_mode.lock().unwrap();
+        let pending_anchor = app
+            .state::<AppState>()
+            .pending_window_anchor
+            .lock()
+            .unwrap()
+            .take();
+        if mode != nami::model::WindowPositionMode::LastPosition {
+            let anchor = pending_anchor.or_else(|| platform::capture_window_anchor(mode));
+            if let Some(anchor) = anchor {
+                height = height.min(anchor.visible_frame.height);
+                if let Some(origin) = nami::model::compute_window_origin(
+                    mode,
+                    target.history + target.translation,
+                    height,
+                    anchor,
+                ) {
+                    target.left = origin.x;
+                    ns_y_override = Some(origin.y);
+                }
+            }
+        }
     }
-    let current_ns = native_translation_frame(&window)?;
-    let ns_y = current_ns.origin.y + current_ns.size.height - height + position.y - top;
+    let ns_y = if let Some(ns_y) = ns_y_override {
+        ns_y
+    } else {
+        if let Some(monitor) = window.current_monitor().map_err(|_| "window_geometry")? {
+            let work = monitor.work_area();
+            let origin = work.position.to_logical::<f64>(scale);
+            let available = work.size.to_logical::<f64>(scale);
+            target.left = target.left.clamp(
+                origin.x,
+                (origin.x + available.width - target.history - target.translation).max(origin.x),
+            );
+            height = height.min(available.height);
+            top = top.clamp(
+                origin.y,
+                (origin.y + available.height - height).max(origin.y),
+            );
+        }
+        let current_ns = native_translation_frame(&window)?;
+        current_ns.origin.y + current_ns.size.height - height + position.y - top
+    };
     window
         .set_min_size(Some(LogicalSize::new(1.0, 440.0)))
         .map_err(|_| "window_geometry")?;
@@ -1616,6 +1652,22 @@ pub fn resume_navigation(app: &AppHandle, target: &str) -> Result<(), String> {
 fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String> {
     if !["translation", "clipboard", "settings"].contains(&target) {
         return Err("invalid_argument".into());
+    }
+    if target != "settings" {
+        let hidden = app
+            .get_window("translation")
+            .and_then(|window| window.is_visible().ok())
+            != Some(true);
+        if hidden {
+            let state = app.state::<AppState>();
+            let mode = *state.window_position_mode.lock().unwrap();
+            if mode != nami::model::WindowPositionMode::LastPosition {
+                let mut slot = state.pending_window_anchor.lock().unwrap();
+                if slot.is_none() {
+                    *slot = platform::capture_window_anchor(mode);
+                }
+            }
+        }
     }
     let paste_target = (capture && target != "settings").then(platform::capture_target);
     if target != "settings"

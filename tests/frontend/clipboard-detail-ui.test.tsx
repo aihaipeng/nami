@@ -126,6 +126,47 @@ describe('clipboard details', () => {
     expect(row('first').querySelector('button')?.getAttribute('aria-pressed')).toBe('false');
   });
 
+  it('follows pointer movement across records after expanding details with Space and collapses on second Space', async () => {
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    bridge.snapshot.clipboardControls = {
+      ...bridge.snapshot.clipboardControls,
+      activation,
+      shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } },
+    };
+    await mount('translation');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+    act(() => row('first').querySelector<HTMLButtonElement>('.history-row-select')!.focus());
+    fireEvent.keyDown(document.activeElement!, { key: ' ', code: 'Space' });
+    await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+    expect(bridge.snapshot.window.recordsBrowsing).toBe(true);
+
+    fireEvent.mouseMove(row('second'), { clientX: 40, clientY: 80 });
+    await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('second');
+
+    fireEvent.mouseMove(row('pinned'), { clientX: 40, clientY: 20 });
+    await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
+    expect(bridge.snapshot.window.clipboardDetailId).toBe('pinned');
+
+    fireEvent.keyDown(document.activeElement!, { key: ' ', code: 'Space' });
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+  });
+
+  it('follows pointer movement even when programmatic row focus does not emit a focus event', async () => {
+    await open();
+    const firstButton = row('first').querySelector<HTMLButtonElement>('.history-row-select')!;
+    const secondButton = row('second').querySelector<HTMLButtonElement>('.history-row-select')!;
+    act(() => firstButton.focus());
+    const silentFocus = vi.spyOn(secondButton, 'focus').mockImplementation(() => {});
+    try {
+      fireEvent.mouseMove(row('second'), { clientX: 40, clientY: 90 });
+      await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
+      expect(bridge.snapshot.window.clipboardDetailId).toBe('second');
+    } finally {
+      silentFocus.mockRestore();
+    }
+  });
+
   it('keeps marks available during processing without releasing its processing guard', async () => {
     const original = bridge.invoke.getMockImplementation()!;
     let finish!: () => void;
@@ -402,4 +443,33 @@ it('reveals only the chosen file and reports when it disappears after loading de
   fireEvent.click(await within(pane()).findByRole('button', { name: 'Show in Finder: b.txt' }));
   expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 1 });
   expect(await within(pane()).findByText('The original file was moved or deleted and cannot be located')).toBeTruthy();
+});
+
+it('renders L1 visual cues in the detail pane without altering exact textContent', async () => {
+  first().text = '  #0ea5e9  ';
+  direct();
+  await waitFor(() => expect(pane().querySelector<HTMLElement>('.clipboard-detail-text')?.dataset.contentKind).toBe('color'));
+  const textNode = pane().querySelector<HTMLElement>('.clipboard-detail-text')!;
+  expect(textNode.textContent).toBe('  #0ea5e9  ');
+  const swatch = textNode.querySelector<HTMLElement>('.clipboard-color-swatch')!;
+  expect(swatch.style.getPropertyValue('--swatch-color')).toBe('#0ea5e9');
+  expect(swatch.getAttribute('aria-hidden')).toBe('true');
+
+  first().text = 'const sum = (a: number, b: number) => a + b;';
+  await emit('clipboard_changed', 2);
+  await waitFor(() => expect(pane().querySelector<HTMLElement>('.clipboard-detail-text')?.dataset.contentKind).toBe('code'));
+  expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text);
+});
+
+it('toggles details closed with the preview shortcut when focus is inside the detail pane', async () => {
+  const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+  bridge.snapshot.clipboardControls = {
+    ...bridge.snapshot.clipboardControls,
+    activation,
+    shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } },
+  };
+  direct();
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
+  expect(fireEvent.keyDown(pane().querySelector('.clipboard-detail-text')!, { key: ' ', code: 'Space' })).toBe(false);
+  expect(calls('records_details_toggle')).toHaveLength(1);
 });

@@ -353,6 +353,7 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
         *state.target.lock().unwrap() = paste_target;
     }
     let window = create(app, target)?;
+    let was_hidden = window.is_visible().ok() != Some(true);
     if target != "settings" {
         {
             let state = app.state::<AppState>();
@@ -365,6 +366,12 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
             }
         }
         apply_translation(app)?;
+        if was_hidden {
+            let mode = *app.state::<AppState>().window_position_mode.lock().unwrap();
+            if mode != nami::model::WindowPositionMode::LastPosition {
+                let _ = window.center();
+            }
+        }
     }
     window.show().map_err(|_| "window_show")?;
     #[cfg(feature = "ui-tests")]

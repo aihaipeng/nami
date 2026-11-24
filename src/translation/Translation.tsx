@@ -11,6 +11,7 @@ import { editsText, matchesBinding, type ShortcutAction } from '../shared/shortc
 import { translationShortcutEnabled, type TranslationPreferences } from '../shared/contracts';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
+import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
 import { HistoryIcon } from './HistoryIcon';
 import { RecordFeedback } from '../shared/RecordFeedback';
@@ -412,6 +413,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       .catch(() => { if (operation === copyOperation.current) setCopyFailed(true); })
       .finally(() => { if (copying.current.get(index) === operation) copying.current.delete(index); });
   }
+
+  useRecordsPreviewShortcut({
+    active: state.historyVisible && state.translationVisible && !clipboardDetails,
+    blocked: popup !== null || snapshot.window.recordsEditorOpen === true,
+    excludedContainers: '.records-workspace, .clipboard-detail, .preview-bar',
+    snapshot,
+    native,
+    onPreview: () => { void command('records_details_toggle'); },
+  });
 
   function focusInput() {
     setPopup(null);

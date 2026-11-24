@@ -238,6 +238,13 @@ unsafe extern "C" {
         attribute: *const c_void,
         value: *mut *const c_void,
     ) -> i32;
+    fn AXUIElementCopyParameterizedAttributeValue(
+        element: *const c_void,
+        attribute: *const c_void,
+        parameter: *const c_void,
+        value: *mut *const c_void,
+    ) -> i32;
+    fn AXValueGetValue(value: *const c_void, kind: i32, out: *mut c_void) -> bool;
     fn AXUIElementGetPid(element: *const c_void, pid: *mut i32) -> i32;
 }
 
@@ -706,6 +713,101 @@ pub(crate) fn write_image_export(
         .ok_or_else(|| "clipboard_save_failed".into())
 }
 
+pub(crate) fn pick_backup_save_path(
+    window: &tauri::Window,
+    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
+    unsafe {
+        let parent = window.ns_window().map_err(|_| "backup_dialog_failed")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("backup_dialog_failed".into());
+        }
+        let panel: Retained<AnyObject> = msg_send![class!(NSSavePanel), savePanel];
+        let backup_type: Option<Retained<AnyObject>> =
+            msg_send![class!(UTType), typeWithFilenameExtension: ns_string!("namibak")];
+        if let Some(backup_type) = backup_type {
+            let types = NSArray::from_retained_slice(&[backup_type]);
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+        let _: () = msg_send![&*panel, setAllowsOtherFileTypes: false];
+        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
+        let name = chrono::Local::now()
+            .format("Nami_Backup_%Y-%m-%d_%H-%M-%S.namibak")
+            .to_string();
+        let _: () = msg_send![&*panel, setNameFieldStringValue: &*NSString::from_str(&name)];
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            complete(match response {
+                1 => {
+                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
+                    url.and_then(|url| url.path())
+                        .map(|path| Some(path.to_string().into()))
+                        .ok_or_else(|| "backup_dialog_failed".into())
+                }
+                0 => Ok(None),
+                _ => Err("backup_dialog_failed".into()),
+            });
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
+    }
+    Ok(())
+}
+
+pub(crate) fn pick_backup_open_path(
+    window: &tauri::Window,
+    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
+    unsafe {
+        let parent = window.ns_window().map_err(|_| "backup_dialog_failed")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("backup_dialog_failed".into());
+        }
+        let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![&*panel, setCanChooseFiles: true];
+        let _: () = msg_send![&*panel, setCanChooseDirectories: false];
+        let _: () = msg_send![&*panel, setAllowsMultipleSelection: false];
+        let backup_type: Option<Retained<AnyObject>> =
+            msg_send![class!(UTType), typeWithFilenameExtension: ns_string!("namibak")];
+        if let Some(backup_type) = backup_type {
+            let types = NSArray::from_retained_slice(&[backup_type]);
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            complete(match response {
+                1 => {
+                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
+                    url.and_then(|url| url.path())
+                        .map(|path| Some(path.to_string().into()))
+                        .ok_or_else(|| "backup_dialog_failed".into())
+                }
+                0 => Ok(None),
+                _ => Err("backup_dialog_failed".into()),
+            });
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
+    }
+    Ok(())
+}
+
 pub(crate) fn pick_excluded_app(
     window: &tauri::Window,
     complete: impl FnOnce(Result<Option<crate::clipboard_preferences::ExcludedApp>, String>) + 'static,
@@ -1064,6 +1166,450 @@ fn png_data_url(data: &NSData) -> String {
     let encoded: Retained<NSString> =
         unsafe { msg_send![data, base64EncodedStringWithOptions: 0usize] };
     format!("data:image/png;base64,{encoded}")
+}
+
+unsafe fn primary_screen_height() -> Option<f64> {
+    let screens: Option<Retained<NSArray<AnyObject>>> = msg_send![class!(NSScreen), screens];
+    let screens = screens?;
+    let first = screens.firstObject()?;
+    let frame: NSRect = msg_send![&*first, frame];
+    (frame.size.height > 0.0).then_some(frame.size.height)
+}
+
+unsafe fn screen_visible_frame_for_point(
+    point: Option<NSPoint>,
+) -> Option<nami::model::ScreenRect> {
+    let screens: Option<Retained<NSArray<AnyObject>>> = msg_send![class!(NSScreen), screens];
+    let to_rect = |rect: NSRect| nami::model::ScreenRect {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+    };
+    if let (Some(point), Some(screens)) = (point, &screens) {
+        for index in 0..screens.count() {
+            let screen = screens.objectAtIndex(index);
+            let frame: NSRect = msg_send![&*screen, frame];
+            if point.x >= frame.origin.x
+                && point.x <= frame.origin.x + frame.size.width
+                && point.y >= frame.origin.y
+                && point.y <= frame.origin.y + frame.size.height
+            {
+                let visible: NSRect = msg_send![&*screen, visibleFrame];
+                return Some(to_rect(visible));
+            }
+        }
+    }
+    let main: Option<Retained<AnyObject>> = msg_send![class!(NSScreen), mainScreen];
+    if let Some(main) = main {
+        let visible: NSRect = msg_send![&*main, visibleFrame];
+        return Some(to_rect(visible));
+    }
+    screens.and_then(|screens| {
+        screens.firstObject().map(|screen| {
+            let visible: NSRect = msg_send![&*screen, visibleFrame];
+            to_rect(visible)
+        })
+    })
+}
+
+unsafe fn focused_caret_rect() -> Option<nami::model::ScreenRect> {
+    const K_AX_VALUE_CGPOINT_TYPE: i32 = 1;
+    const K_AX_VALUE_CGSIZE_TYPE: i32 = 2;
+    const K_AX_VALUE_CGRECT_TYPE: i32 = 3;
+
+    if !AXIsProcessTrusted() {
+        return None;
+    }
+    let primary_height = primary_screen_height()?;
+    let system = AXUIElementCreateSystemWide();
+    if system.is_null() {
+        return None;
+    }
+    let _ = AXUIElementSetMessagingTimeout(system, 0.08);
+    let mut focused: *const c_void = std::ptr::null();
+    let status = AXUIElementCopyAttributeValue(
+        system,
+        (ns_string!("AXFocusedUIElement") as *const NSString).cast(),
+        &mut focused,
+    );
+    CFRelease(system);
+    if status != 0 || focused.is_null() {
+        return None;
+    }
+    let _ = AXUIElementSetMessagingTimeout(focused, 0.08);
+
+    let mut range: *const c_void = std::ptr::null();
+    let range_ok = AXUIElementCopyAttributeValue(
+        focused,
+        (ns_string!("AXSelectedTextRange") as *const NSString).cast(),
+        &mut range,
+    ) == 0
+        && !range.is_null();
+
+    let mut cg_rect: Option<NSRect> = None;
+    if range_ok {
+        let mut bounds_val: *const c_void = std::ptr::null();
+        let bounds_ok = AXUIElementCopyParameterizedAttributeValue(
+            focused,
+            (ns_string!("AXBoundsForRange") as *const NSString).cast(),
+            range,
+            &mut bounds_val,
+        ) == 0
+            && !bounds_val.is_null();
+        CFRelease(range);
+        if bounds_ok {
+            let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+            if AXValueGetValue(
+                bounds_val,
+                K_AX_VALUE_CGRECT_TYPE,
+                (&mut rect as *mut NSRect).cast(),
+            ) && rect.size.height > 0.0
+                && rect.origin.x.is_finite()
+                && rect.origin.y.is_finite()
+            {
+                cg_rect = Some(rect);
+            }
+            CFRelease(bounds_val);
+        }
+    }
+
+    if cg_rect.is_none() {
+        // Fallback for compact single-line inputs that expose AXPosition/AXSize without range bounds.
+        let mut pos_val: *const c_void = std::ptr::null();
+        let mut size_val: *const c_void = std::ptr::null();
+        let pos_ok = AXUIElementCopyAttributeValue(
+            focused,
+            (ns_string!("AXPosition") as *const NSString).cast(),
+            &mut pos_val,
+        ) == 0
+            && !pos_val.is_null();
+        let size_ok = AXUIElementCopyAttributeValue(
+            focused,
+            (ns_string!("AXSize") as *const NSString).cast(),
+            &mut size_val,
+        ) == 0
+            && !size_val.is_null();
+        if pos_ok && size_ok {
+            let mut pos = NSPoint::new(0.0, 0.0);
+            let mut size = NSSize::new(0.0, 0.0);
+            if AXValueGetValue(
+                pos_val,
+                K_AX_VALUE_CGPOINT_TYPE,
+                (&mut pos as *mut NSPoint).cast(),
+            ) && AXValueGetValue(
+                size_val,
+                K_AX_VALUE_CGSIZE_TYPE,
+                (&mut size as *mut NSSize).cast(),
+            ) && size.height > 0.0
+                && size.height <= 64.0
+                && pos.x.is_finite()
+                && pos.y.is_finite()
+            {
+                cg_rect = Some(NSRect::new(pos, size));
+            }
+        }
+        if !pos_val.is_null() {
+            CFRelease(pos_val);
+        }
+        if !size_val.is_null() {
+            CFRelease(size_val);
+        }
+    }
+
+    CFRelease(focused);
+    let rect = cg_rect?;
+    // Convert CoreGraphics global coordinates (origin at primary screen top-left, y down)
+    // to AppKit global coordinates (origin at primary screen bottom-left, y up).
+    Some(nami::model::ScreenRect {
+        x: rect.origin.x,
+        y: primary_height - (rect.origin.y + rect.size.height),
+        width: rect.size.width.max(1.0),
+        height: rect.size.height,
+    })
+}
+
+pub fn capture_window_anchor(
+    mode: nami::model::WindowPositionMode,
+) -> Option<nami::model::PlacementAnchor> {
+    if mode == nami::model::WindowPositionMode::LastPosition {
+        return None;
+    }
+    unsafe {
+        let mouse_pt: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let mouse = (mouse_pt.x.is_finite() && mouse_pt.y.is_finite()).then_some(
+            nami::model::ScreenPoint {
+                x: mouse_pt.x,
+                y: mouse_pt.y,
+            },
+        );
+        let caret = if mode == nami::model::WindowPositionMode::Cursor {
+            focused_caret_rect()
+        } else {
+            None
+        };
+        let reference = caret
+            .map(|rect| NSPoint::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0))
+            .or_else(|| mouse.map(|point| NSPoint::new(point.x, point.y)));
+        let visible_frame = screen_visible_frame_for_point(reference)?;
+        Some(nami::model::PlacementAnchor {
+            visible_frame,
+            mouse,
+            caret,
+        })
+    }
+}
+
+struct DragSourceState {
+    on_end: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+objc2::define_class!(
+    #[unsafe(super = objc2_foundation::NSObject)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = DragSourceState]
+    struct NamiDragSource;
+
+    impl NamiDragSource {
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn source_operation_mask(&self, _session: *mut AnyObject, _context: isize) -> usize {
+            // NSDragOperationCopy = 1 so external drops copy files instead of moving them.
+            1
+        }
+
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn session_ended(&self, _session: *mut AnyObject, _point: NSPoint, _operation: usize) {
+            let callback = objc2::DefinedClass::ivars(self).on_end.borrow_mut().take();
+            ACTIVE_DRAG_SOURCES.with(|sources| {
+                sources
+                    .borrow_mut()
+                    .retain(|item| !std::ptr::eq(Retained::as_ptr(item), self as *const Self));
+            });
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+);
+
+thread_local! {
+    static ACTIVE_DRAG_SOURCES: std::cell::RefCell<Vec<Retained<NamiDragSource>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+unsafe fn drag_image_for_file(
+    path: &std::path::Path,
+    preview: bool,
+) -> Option<(Retained<AnyObject>, NSSize)> {
+    let path_str = path.to_str()?;
+    let ns_path = NSString::from_str(path_str);
+    if preview {
+        let alloc: Allocated<AnyObject> = msg_send![class!(NSImage), alloc];
+        let image: Option<Retained<AnyObject>> =
+            msg_send![alloc, initWithContentsOfFile: &*ns_path];
+        if let Some(image) = image {
+            let size: NSSize = msg_send![&*image, size];
+            if size.width > 0.0 && size.height > 0.0 {
+                let scale = (96.0 / size.width.max(size.height)).min(1.0);
+                let target = NSSize::new(
+                    (size.width * scale).max(24.0),
+                    (size.height * scale).max(24.0),
+                );
+                let _: () = msg_send![&*image, setSize: target];
+                return Some((image, target));
+            }
+        }
+    }
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let icon: Option<Retained<AnyObject>> = msg_send![workspace, iconForFile: &*ns_path];
+    if let Some(icon) = icon {
+        let target = NSSize::new(48.0, 48.0);
+        let _: () = msg_send![&*icon, setSize: target];
+        return Some((icon, target));
+    }
+    None
+}
+
+unsafe fn drag_image_for_text() -> Option<(Retained<AnyObject>, NSSize)> {
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let plain_type: Option<Retained<AnyObject>> =
+        msg_send![class!(UTType), typeWithIdentifier: ns_string!("public.plain-text")];
+    let icon: Option<Retained<AnyObject>> = if let Some(ut_type) = plain_type {
+        msg_send![workspace, iconForContentType: &*ut_type]
+    } else {
+        None
+    };
+    let icon = icon?;
+    let target = NSSize::new(36.0, 36.0);
+    let _: () = msg_send![&*icon, setSize: target];
+    Some((icon, target))
+}
+
+unsafe fn drag_trigger_event(ns_window: *mut AnyObject) -> Option<Retained<AnyObject>> {
+    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    let current: Option<Retained<AnyObject>> = msg_send![app, currentEvent];
+    if let Some(event) = current {
+        let kind: usize = msg_send![&*event, type];
+        let event_window: *mut AnyObject = msg_send![&*event, window];
+        // NSEventTypeLeftMouseDown = 1, NSEventTypeLeftMouseDragged = 6
+        if (kind == 1 || kind == 6) && event_window == ns_window {
+            return Some(event);
+        }
+    }
+    let screen_pt: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+    let screen_rect = NSRect::new(screen_pt, NSSize::new(0.0, 0.0));
+    let win_rect: NSRect = msg_send![ns_window, convertRectFromScreen: screen_rect];
+    let flags: usize = msg_send![class!(NSEvent), modifierFlags];
+    let info: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+    let timestamp: f64 = msg_send![info, systemUptime];
+    let window_number: isize = msg_send![ns_window, windowNumber];
+    let event: Option<Retained<AnyObject>> = msg_send![
+        class!(NSEvent),
+        mouseEventWithType: 6usize,
+        location: win_rect.origin,
+        modifierFlags: flags,
+        timestamp: timestamp,
+        windowNumber: window_number,
+        context: std::ptr::null::<AnyObject>(),
+        eventNumber: 0isize,
+        clickCount: 1isize,
+        pressure: 1.0_f32
+    ];
+    event
+}
+
+pub(crate) fn start_clipboard_drag(
+    webview: &tauri::Webview,
+    item: super::DragItem,
+    on_end: impl FnOnce() + Send + 'static,
+    complete: impl FnOnce(Result<(), String>) + Send + 'static,
+) -> Result<(), String> {
+    let pressed: usize = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };
+    if (pressed & 1) == 0 {
+        return Err("cancelled".into());
+    }
+    let mut on_end = Some(Box::new(on_end) as Box<dyn FnOnce() + Send>);
+    let mut complete = Some(complete);
+    webview
+        .with_webview(move |wv| unsafe {
+            let mut finish = |res: Result<(), String>| {
+                if let Some(cb) = complete.take() {
+                    cb(res);
+                }
+            };
+            let Some(marker) = objc2::MainThreadMarker::new() else {
+                finish(Err("main_thread_unavailable".into()));
+                return;
+            };
+            let view = wv.inner().cast::<AnyObject>();
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if view.is_null() || ns_window.is_null() {
+                finish(Err("window_unavailable".into()));
+                return;
+            }
+            let Some(event) = drag_trigger_event(ns_window) else {
+                finish(Err("clipboard_drag_failed".into()));
+                return;
+            };
+            let location_in_window: NSPoint = msg_send![&*event, locationInWindow];
+            let cursor: NSPoint = msg_send![view, convertPoint: location_in_window, fromView: std::ptr::null::<AnyObject>()];
+
+            let mut dragging_items: Vec<Retained<AnyObject>> = Vec::new();
+            match &item {
+                super::DragItem::Text(text) => {
+                    let pb_item: Retained<AnyObject> = msg_send![class!(NSPasteboardItem), new];
+                    let ns_text = NSString::from_str(text);
+                    let ok: bool = msg_send![
+                        &*pb_item,
+                        setString: &*ns_text,
+                        forType: ns_string!("public.utf8-plain-text")
+                    ];
+                    if !ok {
+                        finish(Err("clipboard_drag_failed".into()));
+                        return;
+                    }
+                    let alloc: Allocated<AnyObject> = msg_send![class!(NSDraggingItem), alloc];
+                    let dragging_item: Retained<AnyObject> =
+                        msg_send![alloc, initWithPasteboardWriter: &*pb_item];
+                    if let Some((image, size)) = drag_image_for_text() {
+                        let frame = NSRect::new(
+                            NSPoint::new(cursor.x - size.width / 2.0, cursor.y - size.height / 2.0),
+                            size,
+                        );
+                        let _: () =
+                            msg_send![&*dragging_item, setDraggingFrame: frame, contents: &*image];
+                    } else {
+                        let frame = NSRect::new(cursor, NSSize::new(32.0, 32.0));
+                        let _: () = msg_send![&*dragging_item, setDraggingFrame: frame, contents: std::ptr::null::<AnyObject>()];
+                    }
+                    dragging_items.push(dragging_item);
+                }
+                super::DragItem::Files {
+                    paths,
+                    preview_image,
+                } => {
+                    for (index, path) in paths.iter().enumerate() {
+                        let Some(path_str) = path.to_str() else {
+                            finish(Err("clipboard_file_missing".into()));
+                            return;
+                        };
+                        let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
+                        let alloc: Allocated<AnyObject> = msg_send![class!(NSDraggingItem), alloc];
+                        let dragging_item: Retained<AnyObject> =
+                            msg_send![alloc, initWithPasteboardWriter: &*url];
+                        let is_preview = preview_image.as_deref() == Some(path.as_path());
+                        let offset = (index.min(4) as f64) * 6.0;
+                        if let Some((image, size)) = drag_image_for_file(path, is_preview) {
+                            let frame = NSRect::new(
+                                NSPoint::new(
+                                    cursor.x - size.width / 2.0 + offset,
+                                    cursor.y - size.height / 2.0 - offset,
+                                ),
+                                size,
+                            );
+                            let _: () = msg_send![&*dragging_item, setDraggingFrame: frame, contents: &*image];
+                        } else {
+                            let frame = NSRect::new(
+                                NSPoint::new(cursor.x + offset, cursor.y - offset),
+                                NSSize::new(48.0, 48.0),
+                            );
+                            let _: () = msg_send![&*dragging_item, setDraggingFrame: frame, contents: std::ptr::null::<AnyObject>()];
+                        }
+                        dragging_items.push(dragging_item);
+                    }
+                }
+            }
+            if dragging_items.is_empty() {
+                finish(Err("invalid_argument".into()));
+                return;
+            }
+            let end_cb = on_end.take().map(|cb| cb as Box<dyn FnOnce()>);
+            let source = <NamiDragSource as objc2::MainThreadOnly>::alloc(marker).set_ivars(
+                DragSourceState {
+                    on_end: std::cell::RefCell::new(end_cb),
+                },
+            );
+            let source: Retained<NamiDragSource> = msg_send![super(source), init];
+            ACTIVE_DRAG_SOURCES.with(|sources| sources.borrow_mut().push(source.clone()));
+            let array = NSArray::from_retained_slice(&dragging_items);
+            let session: Option<Retained<AnyObject>> = msg_send![
+                view,
+                beginDraggingSessionWithItems: &*array,
+                event: &*event,
+                source: &*source
+            ];
+            if session.is_some() {
+                finish(Ok(()));
+            } else {
+                ACTIVE_DRAG_SOURCES.with(|sources| {
+                    sources.borrow_mut().retain(|item| {
+                        !std::ptr::eq(Retained::as_ptr(item), Retained::as_ptr(&source))
+                    });
+                });
+                finish(Err("clipboard_drag_failed".into()));
+            }
+        })
+        .map_err(|_| "clipboard_drag_failed".into())
 }
 
 #[cfg(test)]

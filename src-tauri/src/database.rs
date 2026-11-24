@@ -1,6 +1,8 @@
+mod backup;
 mod clipboard;
 mod retention;
 
+pub use backup::{inspect_backup, BackupImportMode, BackupImportReport, BackupSummary};
 pub use clipboard::unlink_pending_clipboard_images;
 
 use crate::model::HistoryRecord;

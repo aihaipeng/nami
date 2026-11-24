@@ -3,9 +3,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { Check, ClipboardList, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
 import type { ViewProps } from '../App';
 import type { RecordsOpenFocus } from '../shared/clipboardShortcuts';
-import type { Locale } from '../shared/contracts';
+import type { Locale, WindowPositionMode } from '../shared/contracts';
 import './settings.css';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
+import { BackupSettings } from './BackupSettings';
 import { HotKeySettings } from './HotKeySettings';
 import { ClipboardSettings } from './ClipboardSettings';
 import { TranslationSettings } from './TranslationSettings';
@@ -20,7 +21,7 @@ const pages = [
 
 export function Settings({ t, snapshot, command, native }: ViewProps) {
   const [page, setPage] = useState<typeof pages[number]['value']>('general');
-  const [openDropdown, setOpenDropdown] = useState<'language' | 'recordsFocus' | 'clipboardPreviewLines' | 'translationPreviewLines' | null>(null);
+  const [openDropdown, setOpenDropdown] = useState<'language' | 'windowPosition' | 'recordsFocus' | 'clipboardPreviewLines' | 'translationPreviewLines' | null>(null);
   const [savingLaunch, setSavingLaunch] = useState(false);
   const [launchError, setLaunchError] = useState(false);
   const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
@@ -78,6 +79,19 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
             </div>
             {launchError && <p className="settings-field-note" role="alert">{t('launchAtLoginFailed')}</p>}
             <div className="settings-field">
+              <label className="settings-field-content" htmlFor="window-position-mode">{t('windowPosition')}</label>
+              {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
+                <SearchableDropdown id="window-position-mode" value={snapshot.windowPositionMode ?? 'lastPosition'}
+                  onChange={(mode) => void command('window_position_mode_set', { mode: mode as WindowPositionMode })}
+                  label={t('windowPosition')} items={[
+                    { code: 'lastPosition', name: t('windowPositionLast') },
+                    { code: 'center', name: t('windowPositionCenter') },
+                    { code: 'mouse', name: t('windowPositionMouse') },
+                    { code: 'cursor', name: t('windowPositionCursor') },
+                  ]}
+                  open={openDropdown === 'windowPosition'} onOpenChange={(open) => setOpenDropdown(open ? 'windowPosition' : null)} t={t} side="bottom" searchable={false} settings />}
+            </div>
+            <div className="settings-field">
               <label className="settings-field-content" htmlFor="records-open-focus">{t('recordsOpenFocus')}</label>
               {native && snapshot.storageError ? <span className="settings-badge">{t('platformUnavailable')}</span> :
                 <SearchableDropdown id="records-open-focus" value={snapshot.clipboardControls.recordsOpenFocus ?? 'list'}
@@ -112,6 +126,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
               <div className="settings-field settings-permission-actions"><button type="button" className="settings-action" disabled={!native} onClick={() => void command('permission_request')}>{t('requestPermission')}</button><button type="button" className="settings-action" disabled={!native} onClick={() => void command('app_snapshot')}>{t('refreshPermission')}</button></div>
             </div> : <p className="settings-callout">{t('settingsPermissionUnavailable')}</p>}
           </section>
+          <BackupSettings t={t} available={native && !snapshot.storageError && snapshot.capabilities.localBackup} />
           <section aria-labelledby="settings-data">
             <h2 id="settings-data">{t('settingsDataHandling')}</h2>
             <div className="settings-group">

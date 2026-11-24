@@ -920,6 +920,37 @@ describe('unified records workspace', () => {
     await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
   });
 
+  it('keeps Space preview working in translation history after copy, pin, favorite, and focus loss', async () => {
+    await mount('clipboard'); await switchView('translation');
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } } });
+    const history = panel('translation');
+    const secondArticle = history.querySelectorAll<HTMLElement>('.history-row')[1];
+    const secondId = secondArticle.dataset.recordId!;
+    const pressSpace = (target: Document | Element | Window) => fireEvent.keyDown(target, { key: ' ', code: 'Space' });
+
+    // Copy button click + WebKit-style blur to document.body still opens details for the copied translation.
+    fireEvent.click(within(secondArticle).getByRole('button', { name: 'Copy source text' }));
+    await waitFor(() => expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: secondId, part: 'source' }));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(pressSpace(document.body)).toBe(false);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    expect(calls('history_sample_select').at(-1)?.[1]).toMatchObject({ sampleId: secondId });
+
+    // Press Space from documentElement to close details.
+    expect(pressSpace(document.documentElement)).toBe(false);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+
+    // Toggling Pin moves the record between pinned/unpinned sections; Space still opens details for that record.
+    const pinButton = within(secondArticle).getByRole('button', { name: /Pin record|Unpin record/ });
+    fireEvent.click(pinButton);
+    await waitFor(() => expect(calls('history_record_update').at(-1)?.[1]).toEqual({ recordId: secondId, action: 'pin' }));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(pressSpace(document.body)).toBe(false);
+    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(true));
+    expect(calls('history_sample_select').at(-1)?.[1]).toMatchObject({ sampleId: secondId });
+  });
+
   it('keeps translation keyboard navigation in the record pane until Return and respects IME before hiding', async () => {
     await mount('clipboard'); await switchView('translation');
     const input = search('translation');

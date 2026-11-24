@@ -24,6 +24,15 @@ pub struct ClipboardCapture {
     pub source_app: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DragItem {
+    Text(String),
+    Files {
+        paths: Vec<std::path::PathBuf>,
+        preview_image: Option<std::path::PathBuf>,
+    },
+}
+
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 mod clipboard;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
@@ -61,6 +70,8 @@ pub struct Capabilities {
     pub auto_paste: bool,
     pub clipboard_open_target: bool,
     pub clipboard_image_save: bool,
+    pub clipboard_drag: bool,
+    pub local_backup: bool,
     pub launch_at_login: bool,
     pub accessibility_permission: bool,
     pub primary_modifier: &'static str,
@@ -88,6 +99,8 @@ pub fn capabilities() -> Capabilities {
         auto_paste: native,
         clipboard_open_target: native,
         clipboard_image_save: native,
+        clipboard_drag: native,
+        local_backup: native,
         launch_at_login: native,
         accessibility_permission: native,
         primary_modifier: if macos { "meta" } else { "control" },

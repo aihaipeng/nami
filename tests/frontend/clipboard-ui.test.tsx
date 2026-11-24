@@ -2728,4 +2728,142 @@ describe('clipboard open target', () => {
     await waitFor(() => expect(listRows()).toHaveLength(2));
     expect(document.activeElement).toBe(within(row('second-text')).getByRole('button', { name: 'Clipboard: Second entry' }));
   });
+
+  it('initiates native drag-out on dragstart, surfaces missing-file errors, and respects platform capability', async () => {
+    const view = await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const selectButton = within(row('first')).getByRole('button', { name: /Clipboard: Saved text/ });
+    expect(selectButton.getAttribute('draggable')).toBe('true');
+
+    const dragEvent = new Event('dragstart', { bubbles: true, cancelable: true });
+    selectButton.dispatchEvent(dragEvent);
+    expect(dragEvent.defaultPrevented).toBe(true);
+    await waitFor(() => expect(calls('clipboard_record_drag').at(-1)?.[1]).toEqual({ recordId: 'first' }));
+
+    const previous = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) =>
+      name === 'clipboard_record_drag' ? Promise.reject('clipboard_file_missing') : previous(name, args),
+    );
+    fireEvent.dragStart(selectButton);
+    expect(await screen.findByText('The original file was moved or deleted and cannot be restored')).toBeTruthy();
+
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) =>
+      name === 'clipboard_record_drag' ? Promise.reject('cancelled') : previous(name, args),
+    );
+    fireEvent.dragStart(selectButton);
+    await waitFor(() => expect(document.querySelector('.clipboard-panel .record-feedback')).toBeNull());
+    view.unmount();
+
+    bridge.snapshot.capabilities.clipboardDrag = false;
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const disabledButton = within(row('first')).getByRole('button', { name: /Clipboard: Saved text/ });
+    expect(disabledButton.getAttribute('draggable')).toBe('false');
+    const before = calls('clipboard_record_drag').length;
+    fireEvent.dragStart(disabledButton);
+    expect(calls('clipboard_record_drag')).toHaveLength(before);
+  });
+
+  it('renders L1 inline visual recognition for colors, links, emails, and code while preserving exact text', async () => {
+    records = [
+      { id: 'color-alpha', kind: 'text', text: 'rgba(255, 128, 0, 0.5)', date: '2026-11-24T00:05:00Z', isFavorite: false, isPinned: false },
+      { id: 'link-row', kind: 'text', text: 'https://github.com/aihaipeng/nami', date: '2026-11-24T00:04:00Z', isFavorite: false, isPinned: false },
+      { id: 'email-row', kind: 'text', text: 'hello@example.test', date: '2026-11-24T00:03:00Z', isFavorite: false, isPinned: false },
+      { id: 'code-row', kind: 'text', text: '{"name":"nami","v":1}', date: '2026-11-24T00:02:00Z', isFavorite: false, isPinned: false },
+      { id: 'plain-row', kind: 'text', text: 'Just an ordinary sentence', date: '2026-11-24T00:01:00Z', isFavorite: false, isPinned: false },
+    ];
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(5));
+
+    const colorPreview = row('color-alpha').querySelector<HTMLElement>('.history-text-preview')!;
+    expect(colorPreview.dataset.contentKind).toBe('color');
+    expect(colorPreview.textContent).toBe('rgba(255, 128, 0, 0.5)');
+    const swatch = colorPreview.querySelector<HTMLElement>('.clipboard-color-swatch')!;
+    expect(swatch.getAttribute('aria-hidden')).toBe('true');
+    expect(swatch.dataset.alpha).toBe('true');
+    expect(swatch.style.getPropertyValue('--swatch-color')).toBe('rgb(255 128 0 / 0.5)');
+
+    const linkPreview = row('link-row').querySelector<HTMLElement>('.history-text-preview')!;
+    expect(linkPreview.dataset.contentKind).toBe('link');
+    expect(linkPreview.textContent).toBe('https://github.com/aihaipeng/nami');
+    expect(linkPreview.querySelector('.clipboard-inline-icon')?.getAttribute('aria-hidden')).toBe('true');
+    expect(linkPreview.querySelector('.clipboard-link-muted')?.textContent).toBe('https://');
+    expect(linkPreview.querySelector('.clipboard-link-host')?.textContent).toBe('github.com');
+    expect(linkPreview.querySelector('.clipboard-link-rest')?.textContent).toBe('/aihaipeng/nami');
+
+    const emailPreview = row('email-row').querySelector<HTMLElement>('.history-text-preview')!;
+    expect(emailPreview.dataset.contentKind).toBe('email');
+    expect(emailPreview.textContent).toBe('hello@example.test');
+    expect(emailPreview.querySelector('.clipboard-inline-icon')?.getAttribute('aria-hidden')).toBe('true');
+    expect(emailPreview.querySelector('.clipboard-link-host')?.textContent).toBe('hello');
+
+    const codePreview = row('code-row').querySelector<HTMLElement>('.history-text-preview')!;
+    expect(codePreview.dataset.contentKind).toBe('code');
+    expect(codePreview.textContent).toBe('{"name":"nami","v":1}');
+
+    const plainPreview = row('plain-row').querySelector<HTMLElement>('.history-text-preview')!;
+    expect(plainPreview.dataset.contentKind).toBeUndefined();
+    expect(plainPreview.querySelector('.clipboard-color-swatch')).toBeNull();
+    expect(plainPreview.querySelector('.clipboard-inline-icon')).toBeNull();
+    expect(plainPreview.textContent).toBe('Just an ordinary sentence');
+  });
+
+  it('keeps Space and custom preview shortcuts working after copy, pin, favorite, filter, and body/scrollbar focus loss', async () => {
+    bridge.snapshot.window.translationVisible = false;
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', {
+      activation,
+      shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } },
+    });
+
+    const pressSpace = (target: Document | Element | Window, repeat = false) =>
+      fireEvent.keyDown(target, { key: ' ', code: 'Space', repeat });
+
+    // Clicking Copy and dropping focus to document.body (macOS WebKit button-click behavior) still toggles details.
+    const copyButton = within(row('first')).getByRole('button', { name: 'Copy' });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(pressSpace(document.body)).toBe(false);
+    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
+
+    // Clicking Pin moves the record to the pinned section and drops focus; Space still opens details for that record.
+    const pinButton = within(row('first')).getByRole('button', { name: 'Pin record' });
+    fireEvent.click(pinButton);
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'pin' }));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(pressSpace(document.documentElement)).toBe(false);
+    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
+
+    // Clicking Favorite or a footer filter button does not break Space, and Space on a focused action button does not re-trigger it.
+    const favoriteButton = within(row('pinned')).getByRole('button', { name: 'Remove favorite' });
+    const updatesBefore = calls('clipboard_record_update').length;
+    act(() => favoriteButton.focus());
+    expect(pressSpace(favoriteButton)).toBe(false);
+    expect(calls('clipboard_record_update')).toHaveLength(updatesBefore);
+    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
+
+    // Repeat Space prevents scrolling without firing a second toggle.
+    const togglesBeforeRepeat = calls('records_details_toggle').length;
+    expect(pressSpace(document.body, true)).toBe(false);
+    expect(calls('records_details_toggle')).toHaveLength(togglesBeforeRepeat);
+
+    // Typing Space in the search box still edits text normally.
+    const search = screen.getByRole('searchbox');
+    act(() => search.focus());
+    expect(pressSpace(search)).toBe(true);
+    expect(calls('records_details_toggle')).toHaveLength(togglesBeforeRepeat);
+
+    // Even when details is open and a filter yields zero records, Space still collapses details.
+    bridge.snapshot.window.translationVisible = true;
+    await emit('window://state', { ...bridge.snapshot.window });
+    fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
+    await waitFor(() => expect(listRows()).toHaveLength(0));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(pressSpace(document.body)).toBe(false);
+    expect(calls('records_details_toggle').at(-1)?.[1]).toBeUndefined();
+  });
 });

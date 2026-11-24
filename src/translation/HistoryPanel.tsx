@@ -1,4 +1,5 @@
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
+import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { HistoryIcon } from './HistoryIcon';
 import { RecordToolbar } from '../shared/RecordToolbar';
@@ -51,6 +52,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
   const pinnedList = useRef<HTMLDivElement>(null);
   const listHandle = useRef<HistoryListHandle>(null);
   const pendingFocus = useRef<{ id: string; scroll: boolean } | null>(null);
+  const refocusRow = useRef<{ id: string; previous: HTMLElement } | null>(null);
   const state = snapshot.window;
   const lastQuery = useRef({ query: '', favoritesOnly: false });
   const [followQuery, setFollowQuery] = useState<{ query: string; favoritesOnly: boolean; selectedId: string | null; selectionRevision: number } | null>(null);
@@ -164,6 +166,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
 
   async function copyRecord(id: string, part: 'source' | 'primary' | 'secondary' = 'source') {
     if (!native || !snapshot.capabilities.clipboardWrite || !active) return false;
+    setTarget(id);
     const version = actionVersion.current;
     const ready = history.whenReady(query, favoritesOnly, id);
     if (!(typeof ready === 'boolean' ? ready : await ready) || version !== actionVersion.current || !actionContext.current.active) return false;
@@ -197,6 +200,14 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
         if (neighbor) focusRow(neighbor);
         else search.current?.focus({ preventScroll: true });
       }
+    } else {
+      setTarget(id);
+      if (action === 'pin') {
+        const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        if (origin?.closest<HTMLElement>('article[data-record-id]')?.dataset.recordId === id) {
+          refocusRow.current = { id, previous: origin };
+        }
+      }
     }
     if (await history.update(id, action) && version === actionVersion.current && actionContext.current.active) setFollowQuery(follow);
   }
@@ -215,16 +226,6 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     const target = record ?? filtered.find((item) => !item.isPinned) ?? filtered[0];
     if (target) whenReady(target.id, () => onSelect(target));
     else await command('records_details_toggle');
-  }
-
-  function previewKeyDown(key: globalThis.KeyboardEvent, rowId?: string) {
-    if (key.defaultPrevented || key.isComposing || key.keyCode === 229 || key.key === 'Dead'
-      || !active || !state.historyVisible || editing || menu || panel.current?.querySelector('.history-shortcuts-panel')) return;
-    key.preventDefault();
-    if (key.repeat) return;
-    if (state.translationVisible) { void toggleDetails(); return; }
-    const record = filtered.find(({ id }) => id === (rowId ?? keyboardId));
-    if (focusReady && record) void toggleDetails(record);
   }
 
   function retranslateKeyDown(key: globalThis.KeyboardEvent, rowId: string | undefined, preventDefault: () => void) {
@@ -255,8 +256,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       || editing || menu || panel.current?.querySelector('.history-shortcuts-panel')) return;
     if (copyTranslationKeyDown(event, keyboardId, () => event.preventDefault())) return;
     const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot, sharedRecordActions), event);
-    if (action === 'preview') previewKeyDown(event);
-    else if (!action) retranslateKeyDown(event, focusedId, () => event.preventDefault());
+    if (!action) retranslateKeyDown(event, focusedId, () => event.preventDefault());
   });
   useEffect(() => {
     if (!active || !state.historyVisible) return;
@@ -264,6 +264,20 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
   }, [active, state.historyVisible]);
+
+  useRecordsPreviewShortcut({
+    active: active && state.historyVisible,
+    blocked: Boolean(editing || menu),
+    canTrigger: state.translationVisible || (focusReady && filtered.length > 0),
+    excludedContainers: '.translation-panel, .clipboard-detail, .preview-bar',
+    snapshot,
+    native,
+    onPreview: (rowId) => {
+      if (state.translationVisible) { void toggleDetails(); return; }
+      const record = filtered.find(({ id }) => id === (rowId ?? keyboardId)) ?? filtered.find((item) => !item.isPinned) ?? filtered[0];
+      if (focusReady && record) void toggleDetails(record);
+    },
+  });
 
   function focusRow(id: string, scroll = false) {
     const buttons = [pinnedList.current, list.current].flatMap((element) => [...(element?.querySelectorAll<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select') ?? [])]);
@@ -290,6 +304,17 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       button.focus({ preventScroll: !pending.scroll });
     }
   });
+  useLayoutEffect(() => {
+    const pending = refocusRow.current;
+    if (!pending) return;
+    if (!active || (document.activeElement !== pending.previous && document.activeElement !== document.body)) {
+      refocusRow.current = null;
+      return;
+    }
+    if (pending.previous.isConnected) return;
+    refocusRow.current = null;
+    if (filtered.some(({ id }) => id === pending.id)) focusRow(pending.id);
+  });
 
   function recordKeyDown(event: KeyboardEvent<HTMLElement>) {
     onKeyDown(event);
@@ -302,10 +327,7 @@ export function HistoryPanel({ t, snapshot, command, native, selectedId, onSelec
       && copyTranslationKeyDown(key, row?.dataset.recordId ?? keyboardId, () => event.preventDefault())) return;
     const action = clipboardKeyAction(clipboardPanelShortcuts(snapshot, sharedRecordActions), key);
     if (row && !action && retranslateKeyDown(key, row.dataset.recordId, () => event.preventDefault())) return;
-    if (action === 'preview') {
-      previewKeyDown(key, row?.dataset.recordId);
-      return;
-    }
+    if (action === 'preview') return;
     if (!row && !fromSearch && !target.closest('.history-toolbar, .history-footer')) return;
     const plain = !key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey;
     if (plain && !action && (key.key === 'ArrowLeft' || key.key === 'ArrowRight') && (!fromSearch || !query)) {

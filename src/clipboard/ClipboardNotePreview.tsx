@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { motion, useReducedMotion } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ActivityBeam } from '../shared/ActivityBeam';
+import { ClipboardTextPreview } from './ClipboardTextPreview';
 import type { ClipboardRecord } from './useClipboard';
 
 export function ClipboardNotePreview({ record, revealed, native, media }: { record: ClipboardRecord; revealed: boolean; native: boolean; media?: ReactNode }) {
@@ -39,7 +40,7 @@ export function ClipboardNotePreview({ record, revealed, native, media }: { reco
     <motion.span ref={title} className="clipboard-record-title" aria-hidden={expanded} initial={false} animate={{ opacity: expanded ? 0 : 1 }} transition={transition}>{record.title}</motion.span>
     <ActivityBeam label="Working" active={revealed && !ready} />
     <motion.span ref={content} className="clipboard-record-content" aria-hidden={!expanded} initial={false} animate={{ opacity: expanded ? 1 : 0 }} transition={transition}><span className="clipboard-record-original">
-      {failed === record ? <span role="alert">Could not load content. Hover again to retry.</span> : record.kind !== 'text' ? media : <span className="history-preview history-text-preview">{text}</span>}
+      {failed === record ? <span role="alert">Could not load content. Hover again to retry.</span> : record.kind !== 'text' ? media : <ClipboardTextPreview text={text} className="history-preview history-text-preview" />}
     </span></motion.span>
   </motion.span>;
 }

@@ -161,6 +161,142 @@ pub(crate) fn save_image_export(
     platform::write_image_export(&destination, png)
 }
 
+const DRAG_EXPORT_TTL_SECS: u64 = 600;
+
+fn prune_stale_drag_exports(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let expired = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age.as_secs() >= DRAG_EXPORT_TTL_SECS);
+        if expired {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn prepare_drag_payload(
+    cache_dir: &Path,
+    payload: platform::ClipboardPayload,
+) -> Result<platform::DragItem, String> {
+    match payload {
+        platform::ClipboardPayload::Text(text)
+        | platform::ClipboardPayload::RichText { text, .. } => {
+            if text.is_empty() {
+                return Err("invalid_argument".into());
+            }
+            Ok(platform::DragItem::Text(text))
+        }
+        platform::ClipboardPayload::Files(paths)
+        | platform::ClipboardPayload::FilesImage {
+            paths,
+            image_fallback: false,
+            ..
+        } => {
+            if paths.is_empty() || paths.len() > clipboard::MAX_FILE_COUNT {
+                return Err("storage_corrupt".into());
+            }
+            let mut resolved = Vec::with_capacity(paths.len());
+            for path in paths {
+                if path.contains('\0') {
+                    return Err("storage_corrupt".into());
+                }
+                let candidate = PathBuf::from(&path);
+                if !candidate.is_absolute() {
+                    return Err("storage_corrupt".into());
+                }
+                if !candidate.exists() {
+                    return Err("clipboard_file_missing".into());
+                }
+                resolved.push(candidate);
+            }
+            let preview_image = (resolved.len() == 1)
+                .then(|| resolved[0].clone())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| {
+                                matches!(
+                                    ext.to_ascii_lowercase().as_str(),
+                                    "png"
+                                        | "jpg"
+                                        | "jpeg"
+                                        | "webp"
+                                        | "gif"
+                                        | "bmp"
+                                        | "tif"
+                                        | "tiff"
+                                        | "heic"
+                                )
+                            })
+                });
+            Ok(platform::DragItem::Files {
+                paths: resolved,
+                preview_image,
+            })
+        }
+        image_payload @ (platform::ClipboardPayload::Image { .. }
+        | platform::ClipboardPayload::FilesImage {
+            image_fallback: true,
+            ..
+        }) => {
+            let png = export_png(image_payload)?;
+            let directory = cache_dir.join("drag-exports");
+            std::fs::create_dir_all(&directory).map_err(|_| "clipboard_drag_failed")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700));
+            }
+            prune_stale_drag_exports(&directory);
+            let filename = format!(
+                "Nami_{}_{}.png",
+                chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let target = directory.join(filename);
+            std::fs::write(&target, png).map_err(|_| "clipboard_drag_failed")?;
+            Ok(platform::DragItem::Files {
+                paths: vec![target.clone()],
+                preview_image: Some(target),
+            })
+        }
+    }
+}
+
+pub(crate) async fn prepare_drag_item(
+    app: &AppHandle,
+    id: String,
+) -> Result<platform::DragItem, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| "storage_unavailable")?;
+    let payload = {
+        let state = app.state::<AppState>();
+        let _write = state.clipboard_writes.lock().await;
+        payload(app, id, PayloadMode::Stored).await?
+    };
+    tauri::async_runtime::spawn_blocking(move || prepare_drag_payload(&cache_dir, payload))
+        .await
+        .map_err(|_| "storage_worker")?
+}
+
 fn record_payload(
     root: &Path,
     record: ClipboardRecord,
@@ -1617,5 +1753,75 @@ mod tests {
             &platform::ClipboardPayload::Files(vec!["/tmp/tok-1234".into()]),
             matches
         ));
+    }
+
+    #[test]
+    fn drag_payload_prepares_text_files_images_and_rejects_missing() {
+        let root = std::env::temp_dir().join(format!("nami-drag-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("sample.txt");
+        std::fs::write(&existing, b"hello").unwrap();
+
+        assert_eq!(
+            prepare_drag_payload(&root, platform::ClipboardPayload::Text("hello drag".into()))
+                .unwrap(),
+            platform::DragItem::Text("hello drag".into())
+        );
+        assert_eq!(
+            prepare_drag_payload(&root, platform::ClipboardPayload::Text(String::new()))
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            prepare_drag_payload(
+                &root,
+                platform::ClipboardPayload::Files(vec![existing.to_string_lossy().into_owned()])
+            )
+            .unwrap(),
+            platform::DragItem::Files {
+                paths: vec![existing.clone()],
+                preview_image: None,
+            }
+        );
+        assert_eq!(
+            prepare_drag_payload(
+                &root,
+                platform::ClipboardPayload::Files(vec![root
+                    .join("missing.txt")
+                    .to_string_lossy()
+                    .into_owned()])
+            )
+            .unwrap_err(),
+            "clipboard_file_missing"
+        );
+
+        let png = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, b'I', b'D', b'A', b'T', 0x08,
+            0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
+            0xE7, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let image_item = prepare_drag_payload(
+            &root,
+            platform::ClipboardPayload::Image {
+                bytes: png.clone(),
+                extension: "png".into(),
+            },
+        )
+        .unwrap();
+        match image_item {
+            platform::DragItem::Files {
+                paths,
+                preview_image,
+            } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(preview_image.as_deref(), Some(paths[0].as_path()));
+                assert_eq!(std::fs::read(&paths[0]).unwrap(), png);
+            }
+            other => panic!("unexpected drag item: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

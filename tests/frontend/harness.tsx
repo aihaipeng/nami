@@ -78,7 +78,7 @@ beforeEach(() => {
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
   bridge.snapshot.clipboardControls.shortcuts = defaultClipboardShortcuts('meta');
-  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, clipboardDrag: true, localBackup: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.snapshot.translationEngine = 'edge';
   bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, selectionEnabled: true, disabledShortcuts: [], shortcuts: defaultTranslationShortcuts('meta') };
   bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null, totalRecords: historySamples.length, hasMore: false, generation: 0 };
@@ -116,6 +116,12 @@ beforeEach(() => {
       deliver('launch_at_login_changed', bridge.snapshot.launchAtLogin);
       return bridge.snapshot.launchAtLogin;
     }
+    if (name === 'window_position_mode_set') {
+      const mode = (args as { mode: typeof bridge.snapshot.windowPositionMode }).mode;
+      bridge.snapshot.windowPositionMode = mode;
+      deliver('window_position_mode_changed', mode);
+      return;
+    }
     if (name === 'history_snapshot') return historySnapshot();
     if (name === 'history_query') {
       const { query, favoritesOnly } = args as { query: string; favoritesOnly: boolean };
@@ -151,6 +157,7 @@ beforeEach(() => {
       const { view } = args as { view: 'clipboard' | 'translation' };
       const keep = bridge.snapshot.window.historyVisible && bridge.snapshot.window.translationVisible;
       bridge.snapshot.window.recordView = view;
+      if (view === 'clipboard') bridge.snapshot.window.recordsBrowsing = true;
       bridge.snapshot.window.historyVisible = true;
       bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
       if (!keep) {
@@ -170,7 +177,7 @@ beforeEach(() => {
     if (name === 'records_details_toggle') {
       const recordId = (args as { recordId?: string } | undefined)?.recordId;
       const state = bridge.snapshot.window;
-      state.recordsBrowsing = !recordId;
+      state.recordsBrowsing = true;
       state.translationVisible = !state.translationVisible || Boolean(recordId && state.clipboardDetailId !== recordId);
       if (recordId) state.clipboardDetailId = recordId;
       state.translationExtent = state.translationVisible ? state.translationWidth : 0;

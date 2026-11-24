@@ -74,4 +74,73 @@ describe('Settings', () => {
     await mount('settings');
     expect(screen.queryByRole('button', { name: /^Interface language:/i })).toBeNull();
   });
+
+  it('persists window position strategy via window_position_mode_set and syncs events', async () => {
+    bridge.snapshot.windowPositionMode = 'mouse';
+    const view = await mount('settings');
+    const picker = screen.getByRole('button', { name: /^Window Position:/i });
+    expect(picker.textContent).toContain('Follow Mouse');
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'Follow Text Cursor' }));
+    expect(calls('window_position_mode_set').at(-1)?.[1]).toEqual({ mode: 'cursor' });
+    await emit('window_position_mode_changed', 'center');
+    expect(screen.getByRole('button', { name: /^Window Position:/i }).textContent).toContain('Screen Center');
+    view.unmount();
+
+    bridge.snapshot.storageError = 'storage_unavailable';
+    await mount('settings');
+    expect(screen.queryByRole('button', { name: /^Window Position:/i })).toBeNull();
+  });
+
+  it('exports backups, previews and applies merge/replace imports, and handles errors and unsupported hosts', async () => {
+    const baseInvoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'backup_export') {
+        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 3, clipboardCount: 12, imageCount: 2, fileSize: 4096 };
+      }
+      if (name === 'backup_import_pick') {
+        return {
+          token: 'tok-backup-1',
+          fileName: 'Nami_Backup_2026-11-24.namibak',
+          summary: { exportedAt: '2026-11-24T10:00:00Z', translationCount: 3, clipboardCount: 12, imageCount: 2, fileSize: 4096 },
+        };
+      }
+      if (name === 'backup_import_apply') {
+        const { mode } = args as { token: string; mode: 'merge' | 'replace' };
+        return { mode, importedTranslations: 3, skippedTranslations: 0, importedClipboard: 10, skippedClipboard: 2, restoredImages: 2 };
+      }
+      return baseInvoke(name, args);
+    });
+
+    const view = await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    const backupSection = screen.getByRole('region', { name: 'Backup & Migration' });
+
+    fireEvent.click(within(backupSection).getByRole('button', { name: 'Export Backup' }));
+    expect(await within(backupSection).findByRole('status')).toBeTruthy();
+    expect(within(backupSection).getByRole('status').textContent).toContain('Backup exported');
+    expect(within(backupSection).getByRole('status').textContent).toContain('12 Clipboard');
+
+    fireEvent.click(within(backupSection).getByRole('button', { name: 'Import Backup' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Import Backup' });
+    expect(dialog.textContent).toContain('Nami_Backup_2026-11-24.namibak');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Merge' }));
+    expect(calls('backup_import_apply').at(-1)?.[1]).toEqual({ token: 'tok-backup-1', mode: 'merge' });
+    expect(await within(backupSection).findByRole('status')).toBeTruthy();
+    expect(within(backupSection).getByRole('status').textContent).toContain('Import complete');
+
+    // Invalid backup error surfaces clearly.
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) =>
+      name === 'backup_import_pick' ? Promise.reject('backup_invalid') : baseInvoke(name, args),
+    );
+    fireEvent.click(within(backupSection).getByRole('button', { name: 'Import Backup' }));
+    expect((await within(backupSection).findByRole('alert')).textContent).toBe('Backup file is invalid or corrupted.');
+    view.unmount();
+
+    // Unsupported platform disables backup actions cleanly.
+    bridge.snapshot.capabilities.localBackup = false;
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    expect(within(screen.getByRole('region', { name: 'Backup & Migration' })).queryByRole('button', { name: 'Export Backup' })).toBeNull();
+  });
 });

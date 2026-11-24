@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { AppWindow, Info, X } from 'lucide-react';
+import { AppWindow, Info, Plus, X } from 'lucide-react';
 import { FloatingPanel } from '../shared/FloatingPanel';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import type { MessageKey, Translate } from '../shared/i18n';
@@ -48,8 +48,10 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
   const apps = state.options?.excludedApps;
   const ignoredTypes = state.options?.ignoredPasteboardTypes ?? [];
   const ignoredRegexps = state.options?.ignoredRegexps ?? [];
+  const [typeOpen, setTypeOpen] = useState(false);
   const [typeDraft, setTypeDraft] = useState('');
   const [typeError, setTypeError] = useState<MessageKey | null>(null);
+  const [regexOpen, setRegexOpen] = useState(false);
   const [regexDraft, setRegexDraft] = useState('');
   const [regexError, setRegexError] = useState<MessageKey | null>(null);
 
@@ -88,13 +90,14 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
     finally { pending.current = false; setBusy(false); }
   }
 
-  async function removeType(pasteboardType: string) {
+  async function removeType(pasteboardType: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) {
     if (pending.current) return;
     pending.current = true;
     setBusy(true);
     setTypeError(null);
     try {
       const next = await invoke<string[]>('clipboard_ignored_type_remove', { pasteboardType });
+      if (trigger && trigger === document.activeElement) fallback?.focus({ preventScroll: true });
       state.setOptions((previous) => previous && { ...previous, ignoredPasteboardTypes: next });
     } catch { setTypeError('clipboardSettingsSaveFailed'); }
     finally { pending.current = false; setBusy(false); }
@@ -114,106 +117,152 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
     finally { pending.current = false; setBusy(false); }
   }
 
-  async function removeRegex(pattern: string) {
+  async function removeRegex(pattern: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) {
     if (pending.current) return;
     pending.current = true;
     setBusy(true);
     setRegexError(null);
     try {
       const next = await invoke<string[]>('clipboard_ignored_regex_remove', { pattern });
+      if (trigger && trigger === document.activeElement) fallback?.focus({ preventScroll: true });
       state.setOptions((previous) => previous && { ...previous, ignoredRegexps: next });
     } catch { setRegexError('clipboardSettingsSaveFailed'); }
     finally { pending.current = false; setBusy(false); }
   }
 
-  return <>
-    <section aria-labelledby="clipboard-excluded-heading">
-      <div className="settings-section-heading clipboard-section-heading">
-        <div className="clipboard-section-title">
-          <h2 id="clipboard-excluded-heading">{t('clipboardExcludedAppsHeading')}</h2>
-          <ClipboardSettingTip label={t('clipboardAboutExcludedApps')} text={t('clipboardExcludedAppsDescription')} />
+  return <section aria-labelledby="clipboard-ignore-rules-heading">
+    <div className="settings-section-heading clipboard-section-heading">
+      <h2 id="clipboard-ignore-rules-heading">{t('clipboardIgnoreRulesHeading')}</h2>
+      {!available && <span className="settings-badge">{t('platformUnavailable')}</span>}
+    </div>
+    {available && <div className="settings-group clipboard-ignore-group">
+      <div className="clipboard-ignore-block">
+        <div className="settings-field clipboard-ignore-row">
+          <span id="clipboard-excluded-heading" className="settings-field-content" title={t('clipboardExcludedAppsDescription')}>{t('clipboardExcludedAppsHeading')}</span>
+          <button type="button" ref={add} className="settings-action clipboard-icon-button clipboard-ignore-add" disabled={!apps} aria-disabled={busy || undefined}
+            title={t('clipboardAddApp')} aria-label={t('clipboardAddApp')} aria-description={t('clipboardExcludedAppsDescription')}
+            onClick={() => void change()}><Plus aria-hidden="true" /></button>
         </div>
-        {available ? <button type="button" ref={add} className="settings-action" disabled={!apps} aria-disabled={busy || undefined}
-          onClick={() => void change()}>{t('clipboardAddApp')}</button>
-          : <span className="settings-badge">{t('platformUnavailable')}</span>}
-      </div>
-      {available && !!apps?.length && <ul className="settings-group clipboard-excluded-list" role="list" aria-labelledby="clipboard-excluded-heading">
-        {apps.map(({ bundleId, name, iconDataUrl }) => {
-          const duplicate = apps.some((app) => app.bundleId !== bundleId && app.name === name);
-          const identity = duplicate ? `${name} (${bundleId})` : name;
-          const remove = t('clipboardRemoveApp').replace('{app}', identity);
-          return <li key={bundleId}>
-            <div className="clipboard-excluded-name">
+        {!!apps?.length && <ul className="clipboard-ignore-chips clipboard-excluded-list" role="list" aria-labelledby="clipboard-excluded-heading">
+          {apps.map(({ bundleId, name, iconDataUrl }) => {
+            const duplicate = apps.some((app) => app.bundleId !== bundleId && app.name === name);
+            const identity = duplicate ? `${name} (${bundleId})` : name;
+            const remove = t('clipboardRemoveApp').replace('{app}', identity);
+            return <li className="clipboard-ignore-chip" key={bundleId}>
               <ExcludedAppIcon url={iconDataUrl} />
-              <strong title={bundleId}>{name}</strong>
+              <span className="clipboard-excluded-label" title={bundleId}>{name}</span>
               {duplicate && <ClipboardSettingTip label={t('clipboardAboutExcludedApp').replace('{app}', identity)} text={bundleId} />}
-            </div>
-            <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button" title={remove}
-              aria-label={remove} onClick={(event) => void change(bundleId, event.currentTarget)}><X aria-hidden="true" /></button>
-          </li>;
-        })}
-      </ul>}
-      {error && <p className="clipboard-setting-note" role="alert">{t('clipboardManageAppsFailed')}</p>}
-    </section>
-
-    <section aria-labelledby="clipboard-ignored-types-heading">
-      <div className="settings-section-heading clipboard-section-heading">
-        <div className="clipboard-section-title">
-          <h2 id="clipboard-ignored-types-heading">{t('clipboardIgnoredTypesHeading')}</h2>
-          <ClipboardSettingTip label={t('clipboardIgnoredTypesHeading')} text={t('clipboardIgnoredTypesNote')} />
-        </div>
-        {!available && <span className="settings-badge">{t('platformUnavailable')}</span>}
-      </div>
-      {available && <div className="settings-group">
-        <form className="settings-field clipboard-rule-form" onSubmit={(event) => { event.preventDefault(); void submitType(); }}>
-          <input type="text" className="settings-text-input clipboard-rule-input" value={typeDraft} disabled={!state.options} readOnly={busy}
-            aria-label={t('clipboardIgnoredTypesHeading')} aria-invalid={typeError ? true : undefined}
-            placeholder={t('clipboardIgnoredTypesPlaceholder')} onChange={(event) => { setTypeDraft(event.target.value); setTypeError(null); }} />
-          <button type="submit" className="settings-action" disabled={!state.options || !typeDraft.trim()} aria-disabled={busy || undefined}>{t('clipboardAddRule')}</button>
-        </form>
-        {!!ignoredTypes.length && <ul className="clipboard-rule-list" role="list" aria-labelledby="clipboard-ignored-types-heading">
-          {ignoredTypes.map((kind) => {
-            const remove = t('clipboardRemoveType').replace('{type}', kind);
-            return <li key={kind}>
-              <code className="clipboard-rule-value">{kind}</code>
-              <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button" title={remove}
-                aria-label={remove} onClick={() => void removeType(kind)}><X aria-hidden="true" /></button>
+              <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button clipboard-chip-remove" title={remove}
+                aria-label={remove} onClick={(event) => void change(bundleId, event.currentTarget)}><X aria-hidden="true" /></button>
             </li>;
           })}
         </ul>}
-        {typeError && <p className="clipboard-setting-note" role="alert">{t(typeError)}</p>}
-      </div>}
-    </section>
-
-    <section aria-labelledby="clipboard-ignored-regex-heading">
-      <div className="settings-section-heading clipboard-section-heading">
-        <div className="clipboard-section-title">
-          <h2 id="clipboard-ignored-regex-heading">{t('clipboardIgnoredRegexHeading')}</h2>
-          <ClipboardSettingTip label={t('clipboardIgnoredRegexHeading')} text={t('clipboardIgnoredRegexNote')} />
-        </div>
-        {!available && <span className="settings-badge">{t('platformUnavailable')}</span>}
+        {error && <p className="clipboard-setting-note" role="alert">{t('clipboardManageAppsFailed')}</p>}
       </div>
-      {available && <div className="settings-group">
-        <form className="settings-field clipboard-rule-form" onSubmit={(event) => { event.preventDefault(); void submitRegex(); }}>
-          <input type="text" className="settings-text-input clipboard-rule-input" value={regexDraft} disabled={!state.options} readOnly={busy}
-            aria-label={t('clipboardIgnoredRegexHeading')} aria-invalid={regexError ? true : undefined}
-            placeholder={t('clipboardIgnoredRegexPlaceholder')} onChange={(event) => { setRegexDraft(event.target.value); setRegexError(null); }} />
-          <button type="submit" className="settings-action" disabled={!state.options || !regexDraft.trim()} aria-disabled={busy || undefined}>{t('clipboardAddRule')}</button>
-        </form>
-        {!!ignoredRegexps.length && <ul className="clipboard-rule-list" role="list" aria-labelledby="clipboard-ignored-regex-heading">
-          {ignoredRegexps.map((pattern) => {
-            const remove = t('clipboardRemoveRegex').replace('{pattern}', pattern);
-            return <li key={pattern}>
-              <code className="clipboard-rule-value">{pattern}</code>
-              <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button" title={remove}
-                aria-label={remove} onClick={() => void removeRegex(pattern)}><X aria-hidden="true" /></button>
-            </li>;
-          })}
-        </ul>}
-        {regexError && <p className="clipboard-setting-note" role="alert">{t(regexError)}</p>}
-      </div>}
-    </section>
-  </>;
+
+      <IgnoreRuleBlock
+        headingId="clipboard-ignored-types-heading"
+        heading={t('clipboardIgnoredTypesHeading')}
+        note={t('clipboardIgnoredTypesNote')}
+        addLabel={t('clipboardAddType')}
+        submitLabel={t('clipboardAddRule')}
+        placeholder={t('clipboardIgnoredTypesPlaceholder')}
+        items={ignoredTypes}
+        removeLabel={(value) => t('clipboardRemoveType').replace('{type}', value)}
+        open={typeOpen}
+        onOpenChange={(next) => { setTypeOpen(next); if (!next) { setTypeDraft(''); setTypeError(null); } }}
+        draft={typeDraft}
+        onDraftChange={(value) => { setTypeDraft(value); setTypeError(null); }}
+        error={typeError ? t(typeError) : null}
+        ready={Boolean(state.options)}
+        busy={busy}
+        onSubmit={submitType}
+        onRemove={removeType}
+      />
+
+      <IgnoreRuleBlock
+        headingId="clipboard-ignored-regex-heading"
+        heading={t('clipboardIgnoredRegexHeading')}
+        note={t('clipboardIgnoredRegexNote')}
+        addLabel={t('clipboardAddRegex')}
+        submitLabel={t('clipboardAddRule')}
+        placeholder={t('clipboardIgnoredRegexPlaceholder')}
+        items={ignoredRegexps}
+        removeLabel={(value) => t('clipboardRemoveRegex').replace('{pattern}', value)}
+        open={regexOpen}
+        onOpenChange={(next) => { setRegexOpen(next); if (!next) { setRegexDraft(''); setRegexError(null); } }}
+        draft={regexDraft}
+        onDraftChange={(value) => { setRegexDraft(value); setRegexError(null); }}
+        error={regexError ? t(regexError) : null}
+        ready={Boolean(state.options)}
+        busy={busy}
+        onSubmit={submitRegex}
+        onRemove={removeRegex}
+      />
+    </div>}
+  </section>;
+}
+
+function IgnoreRuleBlock({
+  headingId, heading, note, addLabel, submitLabel, placeholder, items, removeLabel,
+  open, onOpenChange, draft, onDraftChange, error, ready, busy, onSubmit, onRemove,
+}: {
+  headingId: string; heading: string; note: string; addLabel: string; submitLabel: string; placeholder: string;
+  items: string[]; removeLabel: (value: string) => string; open: boolean; onOpenChange: (open: boolean) => void;
+  draft: string; onDraftChange: (value: string) => void; error: string | null; ready: boolean; busy: boolean;
+  onSubmit: () => Promise<void>; onRemove: (value: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) => Promise<void>;
+}) {
+  const addButton = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (open) inputRef.current?.focus({ preventScroll: true });
+  }, [open]);
+
+  function close(restoreFocus = false) {
+    onOpenChange(false);
+    if (restoreFocus) addButton.current?.focus({ preventScroll: true });
+  }
+
+  return <div className="clipboard-ignore-block">
+    <div className="settings-field clipboard-ignore-row">
+      <span id={headingId} className="settings-field-content" title={note}>{heading}</span>
+      <button type="button" ref={addButton} className="settings-action clipboard-icon-button clipboard-ignore-add"
+        title={addLabel} aria-label={addLabel} aria-description={note} aria-expanded={open}
+        disabled={!ready} aria-disabled={busy || undefined}
+        onClick={() => onOpenChange(!open)}><Plus aria-hidden="true" /></button>
+    </div>
+    {!!items.length && <ul className="clipboard-ignore-chips clipboard-rule-list" role="list" aria-labelledby={headingId}>
+      {items.map((value) => {
+        const remove = removeLabel(value);
+        return <li className="clipboard-ignore-chip" key={value}>
+          <code className="clipboard-rule-value" title={value}>{value}</code>
+          <button type="button" aria-disabled={busy || undefined} className="settings-action clipboard-icon-button clipboard-chip-remove" title={remove}
+            aria-label={remove} onClick={(event) => void onRemove(value, event.currentTarget, addButton.current)}><X aria-hidden="true" /></button>
+        </li>;
+      })}
+    </ul>}
+    {open && <form className="clipboard-rule-composer"
+      onSubmit={(event) => { event.preventDefault(); void onSubmit(); }}
+      onBlur={(event) => {
+        if (busy || draft.trim() || error) return;
+        const next = event.relatedTarget as Node | null;
+        if (!event.currentTarget.contains(next) && next !== addButton.current) close();
+      }}>
+      <input ref={inputRef} type="text" className="settings-text-input clipboard-rule-input" value={draft}
+        disabled={!ready} readOnly={busy} spellCheck={false} autoComplete="off"
+        aria-label={heading} aria-description={note} aria-invalid={error ? true : undefined}
+        placeholder={placeholder} onChange={(event) => onDraftChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            close(true);
+          }
+        }} />
+      <button type="submit" className="settings-action clipboard-composer-submit" disabled={!ready || !draft.trim()} aria-disabled={busy || undefined}>{submitLabel}</button>
+    </form>}
+    {error && <p className="clipboard-setting-note" role="alert">{error}</p>}
+  </div>;
 }
 
 function ExcludedAppIcon({ url }: { url?: string }) {

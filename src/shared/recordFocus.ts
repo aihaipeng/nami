@@ -21,8 +21,14 @@ export function useRecordPointer() {
     const focusedRow = document.activeElement?.closest('.history-row');
     if (focusedRow && focusedRow !== currentTarget && focusedRow.closest('.history-panel') === currentTarget.closest('.history-panel')) {
       const button = currentTarget.querySelector<HTMLButtonElement>('.history-row-select');
-      button?.focus({ preventScroll: true });
-      if (button && document.activeElement === button) return;
+      if (button) {
+        let focused = false;
+        const mark = () => { focused = true; };
+        button.addEventListener('focus', mark, { once: true });
+        button.focus({ preventScroll: true });
+        button.removeEventListener('focus', mark);
+        if (focused) return;
+      }
     }
     onTarget();
   };

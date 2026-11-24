@@ -61,6 +61,11 @@ pub(crate) fn toggle_translation_history(app: &AppHandle) -> Result<(), String> 
         (regions.history_visible, regions.translation_visible)
     };
     if was_hidden {
+        let mode = *state.window_position_mode.lock().unwrap();
+        if mode != nami::model::WindowPositionMode::LastPosition {
+            *state.pending_window_anchor.lock().unwrap() =
+                crate::platform::capture_window_anchor(mode);
+        }
         *state.target.lock().unwrap() = crate::platform::capture_target();
         windows::prewarm_records(app)?;
     }

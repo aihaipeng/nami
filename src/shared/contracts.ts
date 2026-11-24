@@ -2,6 +2,7 @@ import { defaultClipboardShortcuts, type ClipboardControls } from './clipboardSh
 import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from './shortcuts';
 
 export type Locale = 'system' | 'zh-CN' | 'en';
+export type WindowPositionMode = 'lastPosition' | 'center' | 'mouse' | 'cursor';
 export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
 export type WindowTarget = Exclude<Region, 'history'>;
 
@@ -35,6 +36,8 @@ export interface PlatformCapabilities {
   autoPaste: boolean;
   clipboardOpenTarget: boolean;
   clipboardImageSave: boolean;
+  clipboardDrag: boolean;
+  localBackup: boolean;
   launchAtLogin: boolean;
   accessibilityPermission: boolean;
   primaryModifier: 'meta' | 'control';
@@ -59,6 +62,7 @@ export function translationShortcutEnabled(preferences: TranslationPreferences, 
 export interface AppSnapshot {
   capabilities: PlatformCapabilities;
   locale: Locale;
+  windowPositionMode: WindowPositionMode;
   launchAtLogin: boolean;
   translationEngine: 'edge' | 'google';
   translationPreferences: TranslationPreferences;
@@ -80,8 +84,9 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
+  windowPositionMode: 'lastPosition',
   launchAtLogin: false,
   translationEngine: 'edge',
   translationPreferences: {

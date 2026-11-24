@@ -415,9 +415,9 @@ describe('clipboard privacy, retention and behavior', () => {
     await screen.findByText('4 kB');
   }
 
-  it('gives recording and exclusion separate headings and limits recording controls to content types', async () => {
+  it('groups apps, pasteboard types, and text patterns under one Ignore Rules heading with compact chips and on-demand inputs', async () => {
     await openSettings();
-    for (const name of ['Clipboard Recording', 'Excluded Apps', 'History & Storage', 'Behavior']) {
+    for (const name of ['Clipboard Recording', 'Ignore Rules', 'History & Storage', 'Search', 'Behavior']) {
       expect(screen.getByRole('region', { name })).toBeTruthy();
     }
     const heading = screen.getByRole('heading', { level: 2, name: 'Clipboard Recording' });
@@ -425,7 +425,36 @@ describe('clipboard privacy, retention and behavior', () => {
     const types = screen.getByRole('group', { name: 'Content types' });
     expect(within(types).getAllByRole('checkbox')).toHaveLength(3);
     expect(within(types).queryByRole('switch')).toBeNull();
-    expect(screen.getByRole('heading', { level: 2, name: 'Excluded Apps' })).toBeTruthy();
+    const ignoreRules = screen.getByRole('region', { name: 'Ignore Rules' });
+    expect(within(ignoreRules).getAllByRole('heading')).toHaveLength(1);
+    expect(ignoreRules.querySelectorAll('.settings-group')).toHaveLength(1);
+    expect(ignoreRules.querySelectorAll('.clipboard-ignore-block')).toHaveLength(3);
+    expect(ignoreRules.querySelectorAll('.clipboard-tip-trigger')).toHaveLength(0);
+    expect(within(ignoreRules).queryAllByRole('textbox')).toHaveLength(0);
+    expect(ignoreRules.textContent).not.toContain('Checks the active app only.');
+    expect(ignoreRules.textContent).not.toContain('Built-in concealed');
+    expect(ignoreRules.textContent).not.toContain('Matches newly copied');
+    expect(within(ignoreRules).getByRole('button', { name: 'Add App' }).getAttribute('aria-description')).toBe('Checks the active app only.');
+    const addType = within(ignoreRules).getByRole('button', { name: 'Add Pasteboard Type' });
+    fireEvent.click(addType);
+    const typeInput = within(ignoreRules).getByRole<HTMLInputElement>('textbox', { name: 'Pasteboard Types' });
+    expect(typeInput.placeholder).toBe('org.example.SecretType');
+    expect(document.activeElement).toBe(typeInput);
+    fireEvent.keyDown(typeInput, { key: 'Escape' });
+    expect(within(ignoreRules).queryByRole('textbox', { name: 'Pasteboard Types' })).toBeNull();
+    expect(document.activeElement).toBe(addType);
+    const addRegex = within(ignoreRules).getByRole('button', { name: 'Add Text Pattern' });
+    fireEvent.click(addRegex);
+    const regexInput = within(ignoreRules).getByRole<HTMLInputElement>('textbox', { name: 'Text Patterns' });
+    expect(regexInput.placeholder).toBe('^sk-[A-Za-z0-9]+$');
+    fireEvent.blur(regexInput);
+    expect(within(ignoreRules).queryByRole('textbox', { name: 'Text Patterns' })).toBeNull();
+    await emit('locale_changed', 'zh-CN');
+    expect(screen.getByRole('heading', { level: 2, name: '忽略规则' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加应用' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加粘贴板类型' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加文本正则' })).toBeTruthy();
+    await emit('locale_changed', 'en');
   });
 
   it('does not expose the retired automatic image indexing toggle', async () => {
@@ -436,28 +465,18 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('clipboard_auto_image_index_set')).toHaveLength(0);
   });
 
-  it('opens a one-line tip without a confirmation button and keeps keyboard focus on its trigger', async () => {
+  it('omits empty app lists and renders no extra hint tooltips when app names are unique', async () => {
     await openSettings([]);
     expect(screen.queryByRole('tooltip')).toBeNull();
-    expect(screen.queryByRole('list', { name: 'Excluded Apps' })).toBeNull();
-    const tip = screen.getByRole('button', { name: 'About Excluded Apps' });
-    fireEvent.click(tip);
-    const panel = screen.getByRole('tooltip');
-    expect(panel.textContent).toBe('Checks the active app only.');
-    expect(within(panel).queryByRole('button')).toBeNull();
-    expect(tip.getAttribute('aria-describedby')).toBe(panel.id);
-    expect(document.activeElement).toBe(tip);
-    fireEvent.keyDown(tip, { key: 'Escape' });
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.click(tip);
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Add App' }));
-    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Apps' })).toBeNull();
+    const ignoreRules = screen.getByRole('region', { name: 'Ignore Rules' });
+    expect(ignoreRules.querySelector('.clipboard-tip-trigger')).toBeNull();
   });
 
   it('shows the native icon next to the app name and falls back when the icon is absent or fails to load', async () => {
     const icon = 'data:image/png;base64,c3ludGhldGlj';
     await openSettings([{ ...excludedApps[0], iconDataUrl: icon }, excludedApps[1]]);
-    const list = screen.getByRole('list', { name: 'Excluded Apps' });
+    const list = screen.getByRole('list', { name: 'Apps' });
     const known = screen.getByText('Passwords').closest('li')!;
     const missing = screen.getByText('Keychain Access').closest('li')!;
     const image = known.querySelector('img')!;
@@ -471,12 +490,12 @@ describe('clipboard privacy, retention and behavior', () => {
 
   it('shows and manages excluded apps directly even when recording is off', async () => {
     await openSettings();
-    const list = await screen.findByRole('list', { name: 'Excluded Apps' });
+    const list = await screen.findByRole('list', { name: 'Apps' });
     expect(list.textContent).toContain('Passwords');
     expect(list.textContent).toContain('Keychain Access');
     expect(list.textContent).not.toContain('com.apple.Passwords');
     expect(screen.getByText('Passwords').title).toBe('com.apple.Passwords');
-    expect(screen.queryByRole('dialog', { name: 'Excluded Apps' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Apps' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Add App' }));
     await screen.findByText('Synthetic App');
     fireEvent.click(screen.getByRole('button', { name: 'Remove Synthetic App' }));
@@ -484,14 +503,22 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('clipboard_excluded_app_remove')[0][1]).toEqual({ bundleId: 'com.example.synthetic' });
   });
 
-  it('discloses ambiguous app identifiers on demand and still removes by the exact identifier', async () => {
+  it('discloses ambiguous app identifiers on demand with keyboard-dismissible tips and removes by exact identifier', async () => {
     await openSettings([...excludedApps, { bundleId: 'com.example.passwords', name: 'Passwords' }]);
     for (const bundleId of ['com.apple.Passwords', 'com.example.passwords']) {
       expect(screen.queryByText(bundleId)).toBeNull();
-      fireEvent.click(screen.getByRole('button', { name: `About Passwords (${bundleId})` }));
+      const tip = screen.getByRole('button', { name: `About Passwords (${bundleId})` });
+      fireEvent.click(tip);
       const panel = screen.getByRole('tooltip');
       expect(within(panel).getByText(bundleId)).toBeTruthy();
-      fireEvent.click(screen.getByRole('button', { name: `About Passwords (${bundleId})` }));
+      expect(within(panel).queryByRole('button')).toBeNull();
+      expect(tip.getAttribute('aria-describedby')).toBe(panel.id);
+      expect(document.activeElement).toBe(tip);
+      fireEvent.keyDown(tip, { key: 'Escape' });
+      expect(screen.queryByRole('tooltip')).toBeNull();
+      fireEvent.click(tip);
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Add App' }));
+      expect(screen.queryByRole('tooltip')).toBeNull();
     }
     fireEvent.click(screen.getByRole('button', { name: 'Remove Passwords (com.example.passwords)' }));
     await waitFor(() => expect(screen.getAllByText('Passwords')).toHaveLength(1));
@@ -713,25 +740,38 @@ describe('clipboard privacy, retention and behavior', () => {
     await waitFor(() => expect(calls('clipboard_capture_set').at(-1)?.[1]).toEqual({ enabled: true }));
     expect(recordToggle.checked).toBe(true);
 
-    const typeSection = within(screen.getByRole('region', { name: 'Ignored Pasteboard Types' }));
-    fireEvent.change(typeSection.getByRole('textbox', { name: 'Ignored Pasteboard Types' }), { target: { value: 'bad type' } });
+    const ignoreRules = screen.getByRole('region', { name: 'Ignore Rules' });
+    const addType = within(ignoreRules).getByRole('button', { name: 'Add Pasteboard Type' });
+    fireEvent.click(addType);
+    const typeInput = within(ignoreRules).getByRole('textbox', { name: 'Pasteboard Types' });
+    const typeSection = within(typeInput.closest('.clipboard-ignore-block')! as HTMLElement);
+    fireEvent.change(typeInput, { target: { value: 'bad type' } });
     fireEvent.click(typeSection.getByRole('button', { name: 'Add' }));
     await typeSection.findByRole('alert');
-    fireEvent.change(typeSection.getByRole('textbox', { name: 'Ignored Pasteboard Types' }), { target: { value: 'org.example.SecretType' } });
+    fireEvent.change(typeInput, { target: { value: 'org.example.SecretType' } });
     fireEvent.click(typeSection.getByRole('button', { name: 'Add' }));
     await typeSection.findByText('org.example.SecretType');
-    fireEvent.click(typeSection.getByRole('button', { name: 'Remove org.example.SecretType' }));
+    const removeType = typeSection.getByRole('button', { name: 'Remove org.example.SecretType' });
+    removeType.focus();
+    fireEvent.click(removeType);
     await waitFor(() => expect(typeSection.queryByText('org.example.SecretType')).toBeNull());
+    expect(document.activeElement).toBe(addType);
 
-    const regexSection = within(screen.getByRole('region', { name: 'Ignored Text Patterns' }));
-    fireEvent.change(regexSection.getByRole('textbox', { name: 'Ignored Text Patterns' }), { target: { value: '[invalid' } });
+    const addRegex = within(ignoreRules).getByRole('button', { name: 'Add Text Pattern' });
+    fireEvent.click(addRegex);
+    const regexInput = within(ignoreRules).getByRole('textbox', { name: 'Text Patterns' });
+    const regexSection = within(regexInput.closest('.clipboard-ignore-block')! as HTMLElement);
+    fireEvent.change(regexInput, { target: { value: '[invalid' } });
     fireEvent.click(regexSection.getByRole('button', { name: 'Add' }));
     await regexSection.findByRole('alert');
-    fireEvent.change(regexSection.getByRole('textbox', { name: 'Ignored Text Patterns' }), { target: { value: '^sk-[0-9]+$' } });
+    fireEvent.change(regexInput, { target: { value: '^sk-[0-9]+$' } });
     fireEvent.click(regexSection.getByRole('button', { name: 'Add' }));
     await regexSection.findByText('^sk-[0-9]+$');
-    fireEvent.click(regexSection.getByRole('button', { name: 'Remove ^sk-[0-9]+$' }));
+    const removeRegex = regexSection.getByRole('button', { name: 'Remove ^sk-[0-9]+$' });
+    removeRegex.focus();
+    fireEvent.click(removeRegex);
     await waitFor(() => expect(regexSection.queryByText('^sk-[0-9]+$')).toBeNull());
+    expect(document.activeElement).toBe(addRegex);
 
     fireEvent.click(screen.getByRole('button', { name: 'General' }));
     const launch = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Launch at Login' });

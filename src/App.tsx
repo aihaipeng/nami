@@ -4,7 +4,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { initialSnapshot, translationShortcutEnabled, type AppSnapshot, type Locale, type TranslationPreferences, type WindowState, type WindowTarget } from './shared/contracts';
+import { initialSnapshot, translationShortcutEnabled, type AppSnapshot, type Locale, type TranslationPreferences, type WindowPositionMode, type WindowState, type WindowTarget } from './shared/contracts';
 import { resolveLanguage, translator } from './shared/i18n';
 import { Translation } from './translation/Translation';
 import { HistoryView } from './translation/HistoryView';
@@ -42,6 +42,7 @@ export default function App() {
     const removers: (() => void)[] = [];
     let latestWindow: WindowState | undefined;
     let latestLocale: Locale | undefined;
+    let latestWindowPositionMode: WindowPositionMode | undefined;
     let latestEngine: AppSnapshot['translationEngine'] | undefined;
     let latestPreferences: TranslationPreferences | undefined;
     let latestCapture: boolean | undefined;
@@ -87,6 +88,10 @@ export default function App() {
           latestLocale = payload;
           if (!disposed) setSnapshot((current) => ({ ...current, locale: payload }));
         }),
+        () => listen<WindowPositionMode>('window_position_mode_changed', ({ payload }) => {
+          latestWindowPositionMode = payload;
+          if (!disposed) setSnapshot((current) => ({ ...current, windowPositionMode: payload }));
+        }),
       ]) {
         const remove = await subscribe();
         if (disposed) { remove(); return; }
@@ -96,7 +101,7 @@ export default function App() {
       if (!disposed) {
         document.documentElement.dataset.nativeMaterial = String(data.capabilities.nativeMaterial);
         document.documentElement.dataset.nativeHistory = String(data.capabilities.nativeHistory);
-        setSnapshot({ ...data, launchAtLogin: latestLaunchAtLogin ?? data.launchAtLogin, clipboardControls: latestClipboardControls ?? data.clipboardControls, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, clipboardRecordingTypes: latestRecordingTypes ?? data.clipboardRecordingTypes, clipboardBinding: latestClipboardBinding ? latestClipboardBinding.binding : data.clipboardBinding, clipboardShortcutEnabled: latestClipboardBinding?.enabled ?? data.clipboardShortcutEnabled, shortcutErrors: latestClipboardBinding?.shortcutErrors ?? data.shortcutErrors, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
+        setSnapshot({ ...data, launchAtLogin: latestLaunchAtLogin ?? data.launchAtLogin, windowPositionMode: latestWindowPositionMode ?? data.windowPositionMode, clipboardControls: latestClipboardControls ?? data.clipboardControls, clipboardCaptureEnabled: latestCapture ?? data.clipboardCaptureEnabled, clipboardRecordingTypes: latestRecordingTypes ?? data.clipboardRecordingTypes, clipboardBinding: latestClipboardBinding ? latestClipboardBinding.binding : data.clipboardBinding, clipboardShortcutEnabled: latestClipboardBinding?.enabled ?? data.clipboardShortcutEnabled, shortcutErrors: latestClipboardBinding?.shortcutErrors ?? data.shortcutErrors, locale: latestLocale ?? data.locale, translationEngine: latestEngine ?? data.translationEngine, translationPreferences: latestPreferences ?? data.translationPreferences, window: latestWindow ?? data.window });
         setConnected(true);
       }
     }
@@ -120,14 +125,15 @@ export default function App() {
     setError(false);
     if (!native) {
       if (name === 'records_view_set') setSnapshot((value) => {
+        const view = args?.view as 'clipboard' | 'translation';
         const keep = value.window.historyVisible && value.window.translationVisible;
-        return { ...value, window: { ...value.window, recordView: args?.view as 'clipboard' | 'translation', historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: keep && value.window.translationVisible, translationExtent: keep ? value.window.translationExtent : 0, clipboardDetailId: keep ? value.window.clipboardDetailId : null } };
+        return { ...value, window: { ...value.window, recordView: view, historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: keep && value.window.translationVisible, translationExtent: keep ? value.window.translationExtent : 0, clipboardDetailId: keep ? value.window.clipboardDetailId : null, ...(view === 'clipboard' ? { recordsBrowsing: true } : {}) } };
       });
       if (name === 'clipboard_details_select') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardDetailId: String(args?.recordId) } }));
       if (name === 'records_details_toggle') setSnapshot((value) => {
         const recordId = args?.recordId as string | undefined;
         const visible = !value.window.translationVisible || Boolean(recordId && value.window.clipboardDetailId !== recordId);
-        return { ...value, window: { ...value.window, translationVisible: visible, translationExtent: visible ? value.window.translationWidth : 0, ...(recordId ? { clipboardDetailId: recordId, recordsBrowsing: false } : {}) } };
+        return { ...value, window: { ...value.window, translationVisible: visible, translationExtent: visible ? value.window.translationWidth : 0, recordsBrowsing: true, ...(recordId ? { clipboardDetailId: recordId } : {}) } };
       });
       if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {
         const visible = name === 'history_toggle' ? value.window.recordView !== 'translation' || !value.window.historyVisible : Boolean(args?.visible);
@@ -139,6 +145,7 @@ export default function App() {
       if (name === 'window_pin') setSnapshot((value) => ({ ...value, window: { ...value.window, [`${String(args?.region)}Pinned`]: Boolean(args?.pinned) } }));
       if (name === 'records_open_focus_set') setSnapshot((value) => ({ ...value, clipboardControls: { ...value.clipboardControls, recordsOpenFocus: args?.focus as 'search' | 'list' } }));
       if (name === 'locale_set') setSnapshot((value) => ({ ...value, locale: args?.locale as Locale }));
+      if (name === 'window_position_mode_set') setSnapshot((value) => ({ ...value, windowPositionMode: args?.mode as WindowPositionMode }));
       if (name === 'translation_preferences_set') setSnapshot((value) => {
         const next = { ...value.translationPreferences, ...args, engine: (args?.engine as TranslationPreferences['engine']) ?? value.translationPreferences.engine };
         return { ...value, translationEngine: next.engine, translationPreferences: next };
@@ -150,13 +157,13 @@ export default function App() {
       if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
       return;
     }
-    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'locale_set', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
+    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'locale_set', 'window_position_mode_set', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);
       if (showsActivity) {
         const refreshed = await invoke<AppSnapshot>('app_snapshot');
-        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, launchAtLogin: refreshed.launchAtLogin, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, locale: refreshed.locale, translationEngine: refreshed.translationEngine, translationPreferences: refreshed.translationPreferences, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
+        setSnapshot((current) => ({ ...current, capabilities: refreshed.capabilities, launchAtLogin: refreshed.launchAtLogin, windowPositionMode: refreshed.windowPositionMode, accessibility: refreshed.accessibility, shortcutErrors: refreshed.shortcutErrors, locale: refreshed.locale, translationEngine: refreshed.translationEngine, translationPreferences: refreshed.translationPreferences, storageError: refreshed.storageError, clipboardCaptureEnabled: refreshed.clipboardCaptureEnabled }));
       }
     } catch {
       setError(true);

@@ -1,3 +1,4 @@
+mod backup_runtime;
 mod clipboard_detail;
 mod clipboard_preferences;
 mod clipboard_runtime;
@@ -48,6 +49,7 @@ pub struct AppState {
     clipboard_shortcut: Mutex<ClipboardShortcut>,
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
+    clipboard_dragging: AtomicBool,
     clipboard_writes: tokio::sync::Mutex<()>,
     image_text: tokio::sync::Mutex<clipboard_text::ImageTextCache>,
     image_text_operation: AtomicU64,
@@ -61,6 +63,8 @@ pub struct AppState {
     history_query_revision: AtomicU64,
     history_loading_more: AtomicBool,
     windows: Mutex<WindowState>,
+    window_position_mode: Mutex<model::WindowPositionMode>,
+    pending_window_anchor: Mutex<Option<model::PlacementAnchor>>,
     locale: Mutex<String>,
     shortcut_errors: Mutex<Vec<String>>,
     target: Mutex<Option<platform::Target>>,
@@ -81,6 +85,7 @@ pub struct AppState {
     selection_busy: AtomicBool,
     selection_copy_busy: AtomicBool,
     selection_origin: Mutex<Option<selection::SelectionOrigin>>,
+    pending_backup_import: Mutex<Option<backup_runtime::PendingBackupImport>>,
 }
 
 impl Default for AppState {
@@ -103,6 +108,7 @@ impl Default for AppState {
             }),
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
+            clipboard_dragging: AtomicBool::new(false),
             clipboard_writes: tokio::sync::Mutex::new(()),
             image_text: tokio::sync::Mutex::new(clipboard_text::ImageTextCache::default()),
             image_text_operation: AtomicU64::new(0),
@@ -116,6 +122,8 @@ impl Default for AppState {
             history_query_revision: AtomicU64::new(0),
             history_loading_more: AtomicBool::new(false),
             windows: Mutex::new(windows),
+            window_position_mode: Mutex::new(model::WindowPositionMode::default()),
+            pending_window_anchor: Mutex::new(None),
             locale: Mutex::new("en".into()),
             shortcut_errors: Mutex::new(Vec::new()),
             target: Mutex::new(None),
@@ -138,6 +146,7 @@ impl Default for AppState {
             selection_busy: AtomicBool::new(false),
             selection_copy_busy: AtomicBool::new(false),
             selection_origin: Mutex::new(None),
+            pending_backup_import: Mutex::new(None),
         }
     }
 }
@@ -177,9 +186,9 @@ fn record_lifecycle(app: &tauri::AppHandle, event: &str, code: Option<i32>) {
 }
 
 #[derive(Clone)]
-struct ClipboardShortcut {
-    binding: Option<KeyBinding>,
-    enabled: bool,
+pub(crate) struct ClipboardShortcut {
+    pub(crate) binding: Option<KeyBinding>,
+    pub(crate) enabled: bool,
 }
 
 fn clipboard_shortcut(state: &AppState) -> Option<Shortcut> {
@@ -208,14 +217,14 @@ fn binding_shortcut(binding: &KeyBinding) -> Result<Shortcut, String> {
     Ok(Shortcut::new(Some(modifiers), code))
 }
 
-fn parse_ui_locale(stored: Option<&str>) -> String {
+pub(crate) fn parse_ui_locale(stored: Option<&str>) -> String {
     match stored {
         Some(locale @ ("system" | "zh-CN" | "en")) => locale.to_owned(),
         _ => "en".to_owned(),
     }
 }
 
-fn load_clipboard_binding(
+pub(crate) fn load_clipboard_binding(
     stored: Option<&str>,
     translation: &shortcuts::TranslationShortcuts,
 ) -> Option<KeyBinding> {
@@ -428,6 +437,7 @@ fn main() {
             commands::clipboard_open_target,
             commands::clipboard_record_has_text,
             commands::clipboard_image_save,
+            commands::clipboard_record_drag,
             commands::clipboard_record_process,
             commands::clipboard_translation_take,
             commands::clipboard_record_update,
@@ -452,7 +462,11 @@ fn main() {
             commands::clipboard_image,
             commands::clipboard_files,
             commands::locale_set,
+            commands::window_position_mode_set,
             commands::launch_at_login_set,
+            backup_runtime::backup_export,
+            backup_runtime::backup_import_pick,
+            backup_runtime::backup_import_apply,
             commands::permission_request,
         ])
         .setup(|app| {
@@ -517,6 +531,9 @@ fn main() {
                     database::PAGE_SIZE,
                 )?;
                 let ui_locale = parse_ui_locale(database.preference("ui_locale")?.as_deref());
+                let window_position_mode = model::WindowPositionMode::parse(
+                    database.preference("window_position_mode")?.as_deref(),
+                );
                 let capture = database.clipboard_capture_enabled()?;
                 let preferences = translation::Preferences::from_store(
                     |key| database.preference(key).ok().flatten(),
@@ -558,6 +575,7 @@ fn main() {
                     database,
                     page,
                     ui_locale,
+                    window_position_mode,
                     capture,
                     preferences,
                     recording_types,
@@ -573,6 +591,7 @@ fn main() {
                     database,
                     page,
                     ui_locale,
+                    window_position_mode,
                     capture,
                     preferences,
                     recording_types,
@@ -580,6 +599,8 @@ fn main() {
                     clipboard_options,
                 )) => {
                     *app.state::<AppState>().locale.lock().unwrap() = ui_locale;
+                    *app.state::<AppState>().window_position_mode.lock().unwrap() =
+                        window_position_mode;
                     *app.state::<AppState>().clipboard_options.lock().unwrap() = clipboard_options;
                     *app.state::<AppState>()
                         .clipboard_recording_types
@@ -819,6 +840,45 @@ mod shortcut_tests {
         assert_eq!(
             parse_ui_locale(database.preference("ui_locale").unwrap().as_deref()),
             "system"
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn window_position_mode_persists_across_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("nami-window-pos-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.sqlite3");
+
+        let mut database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            model::WindowPositionMode::parse(
+                database
+                    .preference("window_position_mode")
+                    .unwrap()
+                    .as_deref()
+            ),
+            model::WindowPositionMode::LastPosition
+        );
+        database
+            .preference_set(
+                "window_position_mode",
+                model::WindowPositionMode::Cursor.as_str(),
+            )
+            .unwrap();
+        drop(database);
+
+        let database = database::HistoryDatabase::open(&path).unwrap();
+        assert_eq!(
+            model::WindowPositionMode::parse(
+                database
+                    .preference("window_position_mode")
+                    .unwrap()
+                    .as_deref()
+            ),
+            model::WindowPositionMode::Cursor
         );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();

@@ -116,24 +116,35 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .clipboard-cleanup-count { margin-inline-start: auto; color: var(--settings-secondary); font-variant-numeric: tabular-nums; }
 .clipboard-section-heading { padding-inline-end: 2px; }
 .clipboard-section-heading:has(> .settings-checkbox) { padding-inline-end: var(--settings-group-inset); }
-.clipboard-section-title, .clipboard-excluded-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.clipboard-section-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .clipboard-section-heading > .settings-action { flex: none; }
 .settings-shell .clipboard-tip-trigger { flex: none; width: 26px; min-height: 26px; padding: 0; color: var(--settings-secondary); }
 .clipboard-tip-trigger svg { width: 14px; height: 14px; }
 .clipboard-tip-panel { z-index: 20; padding: 6px 9px; font-size: 12px; line-height: 1.4; border-radius: 8px; overflow-wrap: anywhere; }
-.clipboard-excluded-list { margin: 0; list-style: none; }
-.clipboard-excluded-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding-block: 3px; }
-.clipboard-excluded-list li + li { border-top: 1px solid var(--settings-stroke); }
-.clipboard-excluded-icon { display: block; flex: none; width: 20px; height: 20px; object-fit: contain; }
+.clipboard-ignore-block + .clipboard-ignore-block { border-top: 1px solid var(--settings-stroke); }
+.clipboard-ignore-block:has(> :is(.clipboard-ignore-chips, .clipboard-rule-composer)) > .clipboard-ignore-row { min-height: 36px; padding-bottom: 4px; }
+.clipboard-ignore-block .clipboard-setting-note { padding: 0 0 10px; }
+.clipboard-ignore-add { flex: none; }
+.clipboard-ignore-add svg { width: 14px; height: 14px; }
+.clipboard-ignore-add[aria-expanded=true] svg { transform: rotate(45deg); }
+.clipboard-ignore-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; padding: 0; list-style: none; }
+.clipboard-ignore-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 2px 3px 2px 8px; border: 1px solid hsl(var(--foreground) / .08); border-radius: 8px; background: hsl(var(--foreground) / .05); }
+.clipboard-ignore-chip:hover { background: hsl(var(--foreground) / .075); border-color: hsl(var(--foreground) / .12); }
+.settings-shell .clipboard-chip-remove { flex: none; width: 20px; min-width: 20px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 5px; }
+.settings-shell .clipboard-chip-remove:not(:disabled, [aria-disabled=true]):hover { background: hsl(var(--foreground) / .11); color: hsl(var(--foreground)); border-color: transparent; }
+.clipboard-chip-remove svg { width: 11px; height: 11px; }
+.settings-shell .clipboard-ignore-chip .clipboard-tip-trigger { width: 20px; min-height: 20px; border-radius: 5px; }
+.clipboard-ignore-chip .clipboard-tip-trigger svg { width: 12px; height: 12px; }
+.clipboard-excluded-icon { display: block; flex: none; width: 16px; height: 16px; border-radius: 3.5px; object-fit: contain; }
 .clipboard-icon-fallback { color: var(--settings-secondary); }
-.clipboard-excluded-name strong { min-width: 0; overflow-wrap: anywhere; font-weight: 550; }
-.clipboard-excluded-list .clipboard-icon-button { flex: none; }
-.clipboard-rule-form { gap: 8px; }
-.settings-shell .clipboard-rule-input { flex: 1; text-align: start; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.clipboard-rule-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--settings-stroke); }
-.clipboard-rule-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding-block: 3px; }
-.clipboard-rule-list li + li { border-top: 1px solid var(--settings-stroke); }
-.clipboard-rule-value { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.clipboard-excluded-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; line-height: 1.25; font-weight: 450; }
+.clipboard-rule-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.25; }
+.clipboard-rule-composer { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
+.settings-shell .clipboard-rule-input { flex: 1; grid-column: auto; grid-row: auto; min-height: 30px; padding-inline: 10px; border-color: hsl(var(--foreground) / .10); background: hsl(var(--foreground) / .04); text-align: start; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.settings-shell .clipboard-rule-input:focus { border-color: hsl(var(--foreground) / .24); background: hsl(var(--foreground) / .065); }
+.settings-shell .clipboard-rule-input::placeholder { color: hsl(var(--foreground) / .38); }
+.settings-shell .clipboard-composer-submit { flex: none; min-height: 30px; padding-inline: 11px; background: hsl(var(--foreground) / .08); border-color: hsl(var(--foreground) / .08); }
+.settings-shell .clipboard-composer-submit:disabled { background: transparent; border-color: transparent; }
 
 .settings-dialog { box-sizing: border-box; width: min(410px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 20px; border: 0; border-radius: 12px; background: rgb(var(--settings-page)); color: hsl(var(--foreground)); box-shadow: 0 18px 50px rgb(0 0 0 / .25); }
 .settings-dialog::backdrop { background: rgb(0 0 0 / .32); }
@@ -144,7 +155,8 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .settings-shell .clipboard-confirm-action { color: hsl(var(--destructive)); }
 
 @media (prefers-reduced-motion: no-preference) {
-  .settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder) { transition: background-color 120ms ease-out, border-color 120ms ease-out; }
+  .settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder, .clipboard-ignore-chip) { transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out; }
+  .clipboard-ignore-add svg { transition: transform 150ms ease-out; }
   .settings-shell :is(.settings-action, .settings-dropdown, .settings-recorder):active { transition-duration: 0s; }
   .settings-popover, .settings-dialog[open] { animation: settings-appear 110ms ease-out; }
   @keyframes settings-appear { from { opacity: .68; } }
@@ -180,3 +192,6 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .settings-cleanup-dialog .clipboard-cleanup-categories { margin-top: 6px; }
 .settings-cleanup-dialog .clipboard-cleanup-category { min-height: 28px; padding-block: 2px; }
 .settings-cleanup-dialog .settings-dialog-actions { margin-top: 8px; gap: 4px; }
+.settings-backup-actions { justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+.settings-backup-status { color: var(--settings-secondary); }
+.settings-backup-summary { margin-top: 8px; font-size: 12.5px; color: var(--settings-secondary); }

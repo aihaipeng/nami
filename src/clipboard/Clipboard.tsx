@@ -1,5 +1,6 @@
 import { clipboardOpenError, clipboardOpenTarget } from './openTarget';
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
+import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -21,6 +22,7 @@ import { matchesBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
 import { ClipboardNotePreview } from './ClipboardNotePreview';
+import { ClipboardTextPreview } from './ClipboardTextPreview';
 import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
@@ -239,6 +241,23 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
   }
 
+  async function dragRecord(recordId: string) {
+    if (!native || !snapshot.capabilities.clipboardDrag) return;
+    const current = ++operation.current;
+    setFeedback(null);
+    setProcessingError(null);
+    try {
+      await invoke('clipboard_record_drag', { recordId });
+    } catch (error) {
+      if (!mounted.current || operation.current !== current) return;
+      const code = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+      if (code === 'cancelled') return;
+      setFeedback(code === 'clipboard_file_missing' || code === 'clipboard_image_missing' || code === 'storage_corrupt'
+        ? clipboardUseError(error)
+        : 'clipboardDragFailed');
+    }
+  }
+
   async function processRecord(recordId: string, action: 'translate' | 'ocr') {
     if (!native || processing !== null) return;
     const current = ++operation.current;
@@ -335,8 +354,25 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       const origin = source ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
       if (origin?.closest('article')) refocus.current = { id: record.id, previous: origin };
     }
+    setSelected(record.id);
     void clipboard.update(record.id, action);
   }
+
+  const canPreview = snapshot.window.translationVisible || (clipboard.displayReady && ordered.length > 0);
+  useRecordsPreviewShortcut({
+    active,
+    blocked: Boolean(editing || menu),
+    canTrigger: canPreview,
+    excludedContainers: '.translation-panel, .clipboard-detail, .preview-bar',
+    snapshot,
+    native,
+    onPreview: (rowId) => {
+      const targetId = rowId ?? keyboardId;
+      const record = clipboard.displayReady ? (ordered.find(({ id }) => id === targetId) ?? first) : undefined;
+      if (record) void command('records_details_toggle', { recordId: record.id });
+      else if (snapshot.window.translationVisible) void command('records_details_toggle');
+    },
+  });
 
   function recordKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     const key = event.nativeEvent;
@@ -372,7 +408,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
     const activate = (fromSearch || fromRecord) && !action && plain && key.key === 'Enter';
     // The row button must not paste on Space or activate a stale result on Return.
-    if (fromRecord && (key.key === ' ' || activate)) event.preventDefault();
+    if (fromRecord && ((key.key === ' ' && !(action === 'preview' && canPreview)) || activate)) event.preventDefault();
     const index = ordered.findIndex((record) => record.id === id);
     const record = ordered[index];
     if (!clipboard.displayReady || !record) return;
@@ -394,12 +430,11 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }
       return;
     }
-    if (!action || action === 'switchView') return;
+    if (!action || action === 'switchView' || action === 'preview') return;
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;
-    if (action === 'preview') { void command('records_details_toggle', { recordId: record.id }); }
-    else if (action === 'openTarget') { if (record.kind !== 'image') void openRecordTarget(record.id); }
+    if (action === 'openTarget') { if (record.kind !== 'image') void openRecordTarget(record.id); }
     else if (action === 'pastePlain') { if (record.kind === 'text') { previewRecord(record.id, true); void useRecord(record.id, 'pastePlain'); } }
     else if (action === 'saveImage') { if (record.kind === 'image') void saveImage(record.id); }
     else if (action === 'note') setEditing({ id: record.id });
@@ -456,9 +491,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!active || editing || menu || !clipboard.displayReady || !visibleIds.has(record.id)) return;
       targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); });
     }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
-      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={slot >= 0 ? `Meta+${slot + 1}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
+      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={slot >= 0 ? `Meta+${slot + 1}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
         <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={active && showQuickPasteHints && !menu && !editing && slot >= 0 ? slot + 1 : undefined} />
-        {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <span className="history-preview history-text-preview">{historyPreview(record.text)}</span>}
+        {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <ClipboardTextPreview text={historyPreview(record.text)} className="history-preview history-text-preview" />}
         {record.imageTextMatch && <span className="clipboard-search-match">{t('clipboardImageTextMatch')}</span>}
       </button>
       <RecordActions allowMarkedDelete recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} deleteLabel={t('deleteClipboard')}

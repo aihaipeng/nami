@@ -75,6 +75,129 @@ pub fn translation_sample_text(id: &str, part: &str) -> Option<String> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum WindowPositionMode {
+    #[default]
+    LastPosition,
+    Center,
+    Mouse,
+    Cursor,
+}
+
+impl WindowPositionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LastPosition => "lastPosition",
+            Self::Center => "center",
+            Self::Mouse => "mouse",
+            Self::Cursor => "cursor",
+        }
+    }
+
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("center") => Self::Center,
+            Some("mouse") => Self::Mouse,
+            Some("cursor") => Self::Cursor,
+            _ => Self::LastPosition,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacementAnchor {
+    pub visible_frame: ScreenRect,
+    pub mouse: Option<ScreenPoint>,
+    pub caret: Option<ScreenRect>,
+}
+
+/// Computes the target window origin (bottom-left in AppKit coordinates, logical points)
+/// clamped within `anchor.visible_frame`. Returns `None` for `LastPosition`.
+pub fn compute_window_origin(
+    mode: WindowPositionMode,
+    width: f64,
+    height: f64,
+    anchor: PlacementAnchor,
+) -> Option<ScreenPoint> {
+    const MOUSE_X_OFFSET: f64 = 24.0;
+    const MOUSE_Y_OFFSET: f64 = 16.0;
+    const CARET_GAP: f64 = 8.0;
+
+    if mode == WindowPositionMode::LastPosition {
+        return None;
+    }
+    let screen = anchor.visible_frame;
+    if !width.is_finite()
+        || !height.is_finite()
+        || !screen.x.is_finite()
+        || !screen.y.is_finite()
+        || !screen.width.is_finite()
+        || !screen.height.is_finite()
+        || screen.width <= 0.0
+        || screen.height <= 0.0
+    {
+        return None;
+    }
+    let clamped_w = width.max(0.0).min(screen.width);
+    let clamped_h = height.max(0.0).min(screen.height);
+    let max_x = (screen.x + screen.width - clamped_w).max(screen.x);
+    let max_y = (screen.y + screen.height - clamped_h).max(screen.y);
+
+    let clamp = |x: f64, y: f64| ScreenPoint {
+        x: x.clamp(screen.x, max_x).round(),
+        y: y.clamp(screen.y, max_y).round(),
+    };
+    let center = || {
+        clamp(
+            screen.x + (screen.width - clamped_w) / 2.0,
+            screen.y + (screen.height - clamped_h) / 2.0,
+        )
+    };
+    let from_mouse = |mouse: ScreenPoint| {
+        clamp(
+            mouse.x - MOUSE_X_OFFSET,
+            mouse.y + MOUSE_Y_OFFSET - clamped_h,
+        )
+    };
+
+    match mode {
+        WindowPositionMode::LastPosition => None,
+        WindowPositionMode::Center => Some(center()),
+        WindowPositionMode::Mouse => Some(anchor.mouse.map(from_mouse).unwrap_or_else(center)),
+        WindowPositionMode::Cursor => {
+            if let Some(caret) = anchor.caret {
+                let below_y = caret.y - CARET_GAP - clamped_h;
+                let above_y = caret.y + caret.height + CARET_GAP;
+                let space_below = caret.y - screen.y;
+                let space_above = (screen.y + screen.height) - (caret.y + caret.height);
+                let y = if below_y >= screen.y || space_below >= space_above {
+                    below_y
+                } else {
+                    above_y
+                };
+                Some(clamp(caret.x, y))
+            } else {
+                Some(anchor.mouse.map(from_mouse).unwrap_or_else(center))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RecordView {
     #[default]
     Clipboard,
@@ -187,6 +310,8 @@ impl WindowState {
         let keep_details = self.history_visible && self.translation_visible;
         if view == RecordView::Translation {
             self.restore_translation_width();
+        } else {
+            self.records_browsing = true;
         }
         self.record_view = view;
         if keep_details && view == RecordView::Clipboard {
@@ -215,7 +340,7 @@ impl WindowState {
         if !self.translation_visible || self.clipboard_detail_id.as_ref() == Some(&record_id) {
             self.toggle_record_details();
         }
-        self.records_browsing = false;
+        self.records_browsing = true;
         self.clipboard_detail_id = Some(record_id);
     }
 
@@ -231,6 +356,7 @@ impl WindowState {
         let ended = self.records_open && !open;
         if ended {
             self.records_session += 1;
+            self.records_browsing = true;
             self.records_editor_open = false;
             self.clipboard_detail_id = None;
         }
@@ -438,14 +564,19 @@ mod tests {
     #[test]
     fn keyboard_preview_toggles_the_same_item_and_selects_another_without_closing() {
         let mut state = WindowState::default();
+        state.summon_translation();
+        assert!(!state.records_browsing);
         state.set_record_view(RecordView::Clipboard);
+        assert!(state.records_browsing);
+        state.records_browsing = false;
         state.preview_clipboard_record("first".into());
-        assert!(state.translation_visible && !state.records_browsing);
+        assert!(state.translation_visible && state.records_browsing);
+        state.records_browsing = false;
         state.preview_clipboard_record("second".into());
-        assert!(state.translation_visible && !state.records_browsing);
+        assert!(state.translation_visible && state.records_browsing);
         assert_eq!(state.clipboard_detail_id.as_deref(), Some("second"));
         state.preview_clipboard_record("second".into());
-        assert!(!state.translation_visible);
+        assert!(!state.translation_visible && state.records_browsing);
     }
 
     #[test]
@@ -961,5 +1092,103 @@ mod tests {
         );
         assert!(sample("arbitrary user text").is_none());
         assert!(sample("multiline").unwrap().ends_with('\n'));
+    }
+
+    #[test]
+    fn window_position_mode_parses_and_computes_origins_safely() {
+        use super::{
+            compute_window_origin, PlacementAnchor, ScreenPoint, ScreenRect, WindowPositionMode,
+        };
+
+        assert_eq!(
+            WindowPositionMode::parse(None),
+            WindowPositionMode::LastPosition
+        );
+        assert_eq!(
+            WindowPositionMode::parse(Some("unknown")),
+            WindowPositionMode::LastPosition
+        );
+        assert_eq!(
+            WindowPositionMode::parse(Some("center")),
+            WindowPositionMode::Center
+        );
+        assert_eq!(
+            WindowPositionMode::parse(Some("mouse")),
+            WindowPositionMode::Mouse
+        );
+        assert_eq!(
+            WindowPositionMode::parse(Some("cursor")),
+            WindowPositionMode::Cursor
+        );
+
+        let screen = ScreenRect {
+            x: 100.0,
+            y: 40.0,
+            width: 1400.0,
+            height: 900.0,
+        };
+        let anchor = PlacementAnchor {
+            visible_frame: screen,
+            mouse: Some(ScreenPoint { x: 400.0, y: 700.0 }),
+            caret: Some(ScreenRect {
+                x: 320.0,
+                y: 680.0,
+                width: 2.0,
+                height: 20.0,
+            }),
+        };
+
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::LastPosition, 360.0, 620.0, anchor),
+            None
+        );
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Center, 360.0, 620.0, anchor),
+            Some(ScreenPoint { x: 620.0, y: 180.0 })
+        );
+        // Mouse mode offsets slightly and stays inside screen bounds.
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Mouse, 360.0, 620.0, anchor),
+            Some(ScreenPoint { x: 376.0, y: 96.0 })
+        );
+        // Mouse near bottom-right corner clamps cleanly inside visible_frame.
+        let corner_anchor = PlacementAnchor {
+            visible_frame: screen,
+            mouse: Some(ScreenPoint { x: 1490.0, y: 50.0 }),
+            caret: None,
+        };
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Mouse, 360.0, 620.0, corner_anchor),
+            Some(ScreenPoint { x: 1140.0, y: 40.0 })
+        );
+        // Cursor near top places window below caret; near bottom flips above caret.
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, anchor),
+            Some(ScreenPoint { x: 320.0, y: 52.0 })
+        );
+        let low_caret_anchor = PlacementAnchor {
+            visible_frame: screen,
+            mouse: Some(ScreenPoint { x: 400.0, y: 100.0 }),
+            caret: Some(ScreenRect {
+                x: 320.0,
+                y: 80.0,
+                width: 2.0,
+                height: 20.0,
+            }),
+        };
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, low_caret_anchor),
+            Some(ScreenPoint { x: 320.0, y: 108.0 })
+        );
+        // Cursor mode falls back to mouse when caret is unavailable.
+        let fallback_anchor = PlacementAnchor {
+            visible_frame: screen,
+            mouse: Some(ScreenPoint { x: 500.0, y: 750.0 }),
+            caret: None,
+        };
+        assert_eq!(
+            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, fallback_anchor),
+            Some(ScreenPoint { x: 476.0, y: 146.0 })
+        );
     }
 }

@@ -82,6 +82,7 @@ pub(crate) fn authorize(window: &Webview, labels: &[&str]) -> Result<(), String>
 pub struct Snapshot {
     capabilities: platform::Capabilities,
     locale: String,
+    window_position_mode: nami::model::WindowPositionMode,
     launch_at_login: bool,
     accessibility: bool,
     shortcut_errors: Vec<String>,
@@ -107,6 +108,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
     let snapshot = Snapshot {
         capabilities: platform::capabilities(),
         locale: state.locale.lock().unwrap().clone(),
+        window_position_mode: *state.window_position_mode.lock().unwrap(),
         launch_at_login: platform::launch_at_login_enabled(),
         accessibility: platform::accessibility(),
         shortcut_errors: state.shortcut_errors.lock().unwrap().clone(),
@@ -654,6 +656,30 @@ pub async fn locale_set(window: Webview, app: AppHandle, locale: String) -> Resu
         if let Some(window) = app.get_webview(label) {
             window
                 .emit("locale_changed", &locale)
+                .map_err(|_| "event_emit")?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn window_position_mode_set(
+    window: Webview,
+    app: AppHandle,
+    mode: nami::model::WindowPositionMode,
+) -> Result<(), String> {
+    authorize(&window, &["settings"])?;
+    let state = app.state::<AppState>();
+    let _write = state.shortcut_writes.lock().await;
+    let stored = mode.as_str().to_owned();
+    crate::clipboard_runtime::database(&app, move |database| {
+        database.preference_set("window_position_mode", &stored)
+    })
+    .await?;
+    *state.window_position_mode.lock().unwrap() = mode;
+    for label in ["translation", "history", "clipboard", "settings"] {
+        if let Some(view) = app.get_webview(label) {
+            view.emit("window_position_mode_changed", mode)
                 .map_err(|_| "event_emit")?;
         }
     }
@@ -1868,6 +1894,59 @@ pub async fn clipboard_image_save(
     .await
     .map_err(|_| "storage_worker")??;
     Ok(true)
+}
+
+#[tauri::command]
+pub async fn clipboard_record_drag(
+    window: Webview,
+    app: AppHandle,
+    record_id: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_drag {
+        return Err("platform_unavailable".into());
+    }
+    let item = crate::clipboard_runtime::prepare_drag_item(&app, record_id).await?;
+    let drag_view = window.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let dispatched = on_main(&app, move |app| {
+        let state = app.state::<AppState>();
+        if state.clipboard_dragging.swap(true, Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
+        let end_app = app.clone();
+        let fail_app = app.clone();
+        let result = platform::start_clipboard_drag(
+            &drag_view,
+            item,
+            move || {
+                let state = end_app.state::<AppState>();
+                state.clipboard_dragging.store(false, Ordering::SeqCst);
+                if let Some(win) = end_app.get_window("translation") {
+                    if win.is_focused().ok() == Some(false) {
+                        state.windows.lock().unwrap().blur();
+                        let _ = windows::apply_translation(&end_app);
+                    }
+                }
+            },
+            move |outcome| {
+                if outcome.is_err() {
+                    fail_app
+                        .state::<AppState>()
+                        .clipboard_dragging
+                        .store(false, Ordering::SeqCst);
+                }
+                let _ = sender.send(outcome);
+            },
+        );
+        if result.is_err() {
+            state.clipboard_dragging.store(false, Ordering::SeqCst);
+        }
+        result
+    })
+    .await?;
+    dispatched?;
+    receiver.await.map_err(|_| "clipboard_drag_failed")?
 }
 
 #[tauri::command]

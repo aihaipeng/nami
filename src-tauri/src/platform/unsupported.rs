@@ -162,3 +162,32 @@ pub(crate) fn pick_image_save_path(
 pub(crate) fn write_image_export(_: &std::path::Path, _: Vec<u8>) -> Result<(), String> {
     Err(UNAVAILABLE.into())
 }
+
+pub(crate) fn pick_backup_save_path(
+    _: &tauri::Window,
+    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub(crate) fn pick_backup_open_path(
+    _: &tauri::Window,
+    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub fn capture_window_anchor(
+    _: nami::model::WindowPositionMode,
+) -> Option<nami::model::PlacementAnchor> {
+    None
+}
+
+pub(crate) fn start_clipboard_drag(
+    _: &tauri::Webview,
+    _: super::DragItem,
+    _: impl FnOnce() + Send + 'static,
+    _: impl FnOnce(Result<(), String>) + Send + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}

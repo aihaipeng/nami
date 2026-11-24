@@ -24,6 +24,15 @@ pub fn prepare_selected(app: &AppHandle) {
         return;
     }
     let target = platform::capture_selection_target();
+    let mode = *state.window_position_mode.lock().unwrap();
+    if mode != nami::model::WindowPositionMode::LastPosition
+        && app
+            .get_window("translation")
+            .and_then(|window| window.is_visible().ok())
+            != Some(true)
+    {
+        *state.pending_window_anchor.lock().unwrap() = platform::capture_window_anchor(mode);
+    }
     crate::record_lifecycle(
         app,
         if target.is_some() {
@@ -374,6 +383,16 @@ pub fn show_selected(app: &AppHandle, open_when_empty: bool) -> Result<(), Strin
         .take()
         .unwrap_or_else(|| {
             let target = platform::capture_selection_target();
+            let mode = *state.window_position_mode.lock().unwrap();
+            if mode != nami::model::WindowPositionMode::LastPosition
+                && app
+                    .get_window("translation")
+                    .and_then(|window| window.is_visible().ok())
+                    != Some(true)
+            {
+                *state.pending_window_anchor.lock().unwrap() =
+                    platform::capture_window_anchor(mode);
+            }
             SelectionOrigin { target }
         });
     let SelectionOrigin { target } = origin;
