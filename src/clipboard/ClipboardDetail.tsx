@@ -52,7 +52,7 @@ export interface ClipboardDetailData extends ClipboardRecord {
 }
 
 function richFormatLabel(format: NonNullable<ClipboardDetailData['richTextFormat']>) {
-  return format === 'html+rtf' ? 'Rich Text (HTML, RTF)' : format === 'html' ? 'Rich Text (HTML)' : 'Rich Text (RTF)';
+  return format === 'html+rtf' ? 'Rich Text (HTML + RTF)' : format === 'html' ? 'Rich Text (HTML)' : 'Rich Text (RTF)';
 }
 
 function formatSize(bytes: number) {

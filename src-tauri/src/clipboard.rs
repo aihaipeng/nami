@@ -299,6 +299,8 @@ pub struct ClipboardSummary {
     pub image_text_match: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_file_paths: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_rich_text: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -520,6 +520,38 @@ it('renders sanitized rich text preview by default, blocks script/external media
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-rich')).toBeTruthy());
 });
 
+it('displays exact Rich Text subtype labels (HTML, RTF, HTML + RTF) in the detail metadata footer', async () => {
+  let format: 'html' | 'rtf' | 'html+rtf' | undefined = 'html';
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_record_detail') {
+      const record = first();
+      return {
+        ...record,
+        richTextFormat: format,
+        richTextHtml: format ? '<p>Styled</p>' : undefined,
+        files: [],
+      };
+    }
+    return baseInvoke(name, args);
+  });
+
+  direct();
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-metadata')?.textContent).toContain('Rich Text (HTML)'));
+
+  format = 'rtf';
+  await emit('clipboard_changed', 2);
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-metadata')?.textContent).toContain('Rich Text (RTF)'));
+
+  format = 'html+rtf';
+  await emit('clipboard_changed', 3);
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-metadata')?.textContent).toContain('Rich Text (HTML + RTF)'));
+
+  format = undefined;
+  await emit('clipboard_changed', 4);
+  await waitFor(() => expect(pane().querySelector('.clipboard-detail-metadata')?.textContent).not.toContain('Format'));
+});
+
 it('renders L2 color, JSON, timestamp, and QR code views in details without modifying the stored record', async () => {
   // Color card + one-click HEX/RGB/HSL copy using shared icon-button and record-copied feedback
   first().text = '#0ea5e9';

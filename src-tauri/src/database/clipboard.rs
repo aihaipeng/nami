@@ -697,7 +697,7 @@ impl HistoryDatabase {
         } else {
             ""
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_file_representations f WHERE f.sequence=r.sequence) FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_file_representations f WHERE f.sequence=r.sequence),r.kind='text' AND EXISTS (SELECT 1 FROM clipboard_text_formatting t WHERE t.sequence=r.sequence) FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -774,6 +774,7 @@ impl HistoryDatabase {
                 source_app_id: row.get(7).map_err(storage_error)?,
                 image_text_match: row.get(10).map_err(storage_error)?,
                 has_file_paths: row.get(11).map_err(storage_error)?,
+                has_rich_text: row.get(12).map_err(storage_error)?,
             };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
@@ -3251,6 +3252,70 @@ mod tests {
                 .find(|row| row.id == raw_image.id)
                 .unwrap()
                 .has_file_paths
+        );
+    }
+
+    #[test]
+    fn clipboard_summary_reports_has_rich_text_and_groups_with_text_kind() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let plain = record("plain-text", "Plain text");
+        let formatting = ClipboardTextFormatting {
+            html: Some(b"<p><strong>Rich</strong></p>".to_vec()),
+            rtf: Some(br#"{\rtf1\ansi \b Rich}"#.to_vec()),
+        };
+        let mut rich = record("rich-text", "Rich");
+        rich.fingerprint = formatting.fingerprint(&rich.text);
+        let img = image_record("img");
+        db.clipboard_insert(&plain).unwrap();
+        db.clipboard_insert_capture(&rich, None, Some(&formatting))
+            .unwrap();
+        db.clipboard_insert(&img).unwrap();
+
+        let text_page = db
+            .clipboard_page_filtered("", false, Some("text"), None, 10)
+            .unwrap();
+        assert_eq!(text_page.total_records, 2);
+        assert!(
+            text_page
+                .records
+                .iter()
+                .find(|row| row.id == "rich-text")
+                .unwrap()
+                .has_rich_text
+        );
+        assert!(
+            !text_page
+                .records
+                .iter()
+                .find(|row| row.id == "plain-text")
+                .unwrap()
+                .has_rich_text
+        );
+
+        let all_page = db.clipboard_page("", false, None, 10).unwrap();
+        assert!(
+            !all_page
+                .records
+                .iter()
+                .find(|row| row.id == "img")
+                .unwrap()
+                .has_rich_text
+        );
+
+        // Plain-text copy of a rich record appears as plain text in summaries while original stays rich.
+        db.clipboard_duplicate_plain_text("rich-text").unwrap();
+        let updated = db
+            .clipboard_page_filtered("", false, Some("text"), None, 10)
+            .unwrap();
+        assert_eq!(updated.total_records, 3);
+        assert!(!updated.records[0].has_rich_text);
+        assert!(
+            updated
+                .records
+                .iter()
+                .find(|row| row.id == "rich-text")
+                .unwrap()
+                .has_rich_text
         );
     }
 

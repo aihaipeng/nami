@@ -2935,4 +2935,22 @@ describe('clipboard open target', () => {
     fireEvent.contextMenu(row('pic'));
     expect(screen.queryByRole('menuitem', { name: 'Copy as Plain Text' })).toBeNull();
   });
+
+  it('distinguishes Plain Text and Rich Text row headings while grouping both under the Text filter', async () => {
+    records = [
+      { ...records[0], id: 'plain-1', kind: 'text', text: 'Plain item', isPinned: false, isFavorite: false },
+      { ...records[0], id: 'rich-1', kind: 'text', text: 'Rich item', hasRichText: true, isPinned: false, isFavorite: false },
+      { ...records[0], id: 'img-1', kind: 'image', text: '', isPinned: false, isFavorite: false },
+    ];
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(3));
+    expect(row('plain-1').querySelector('.history-languages')?.textContent).toBe('Plain Text');
+    expect(row('rich-1').querySelector('.history-languages')?.textContent).toBe('Rich Text');
+    expect(row('img-1').querySelector('.history-languages')?.textContent).toBe('Image');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Text clipboard records' }));
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    expect(row('plain-1').querySelector('.history-languages')?.textContent).toBe('Plain Text');
+    expect(row('rich-1').querySelector('.history-languages')?.textContent).toBe('Rich Text');
+  });
 });

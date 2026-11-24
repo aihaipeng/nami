@@ -480,7 +480,13 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const canTranslate = canTranslateRecord(record);
     const canOcr = canOcrRecord(record);
     const media = record.kind !== 'text' && <ClipboardMedia record={record} native={native} active={active} onImageFile={onImageFile} />;
-    const kind = record.kind === 'image' ? t('clipboardImage') : record.kind === 'files' ? t('clipboardFiles') : t('text');
+    const kind = record.kind === 'image'
+      ? t('clipboardImage')
+      : record.kind === 'files'
+        ? t('clipboardFiles')
+        : record.hasRichText
+          ? t('clipboardRichText')
+          : t('clipboardPlainText');
     const keyboardCurrent = keyboardId === record.id;
     const slot = quickPaste && clipboard.displayReady && !clipboard.error ? quickPasteCandidates.findIndex(({ id }) => id === record.id) : -1;
     const description = [

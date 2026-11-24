@@ -34,6 +34,8 @@ export const messages = {
   deleteClipboard: ['删除这条剪贴板记录', 'Delete clipboard record'],
   clipboardImage: ['图片', 'Image'],
   clipboardFiles: ['文件', 'Files'],
+  clipboardPlainText: ['纯文本', 'Plain Text'],
+  clipboardRichText: ['富文本', 'Rich Text'],
   clipboardEmpty: ['复制的文本、图片和文件会出现在这里', 'Copied text, images, and files will appear here'],
   clipboardFavoritesEmpty: ['暂无收藏的剪贴板记录', 'No favorite clipboard records yet'],
   clipboardTextEmpty: ['暂无文本剪贴板记录', 'No text clipboard records yet'],
