@@ -386,6 +386,62 @@ describe('clipboard attached translate pane', () => {
     expect(within(metadata()).getByText('Microsoft Edge Translate')).toBeTruthy();
   });
 
+  it('keeps supported targets working when switching to Edge with a Google-only language, and retranslates on Settings engine change', async () => {
+    const user = userEvent.setup();
+    bridge.snapshot.translationEngine = 'google';
+    bridge.snapshot.translationPreferences.engine = 'google';
+    bridge.snapshot.translationPreferences.sourceLanguage = 'eo';
+    bridge.snapshot.translationPreferences.primaryLanguage = 'zh-CN';
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'eo';
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    await waitFor(() => expect(within(translatePane()).getByText('Synthetic translation 1')).toBeTruthy());
+
+    // Switching temporarily to Edge falls back unsupported manual source to auto and still translates supported primary (zh-CN)
+    await user.click(within(translatePane()).getByRole('button', { name: 'Translation Service: Google Translate' }));
+    await user.click(screen.getByRole('option', { name: 'Microsoft Edge Translate' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
+    expect(calls('translation_run')[1][1]).toEqual({
+      text: 'Hello world',
+      source: 'auto',
+      targets: ['zh-CN'],
+      scope: 'clipboard',
+      retryEngine: 'edge',
+    });
+    expect(within(translatePane()).getByText('Synthetic translation 1')).toBeTruthy();
+    expect(within(translatePane()).queryByText(/not supported/)).toBeNull();
+
+    // Unsupported secondary tab shows languageNotSupported; switching it to an Edge-only language works locally without persisting invalid global preference
+    await user.click(within(translatePane()).getByRole('button', { name: /Esperanto/ }));
+    expect(within(translatePane()).getByText(/not supported/)).toBeTruthy();
+    await user.click(within(translatePane()).getByRole('button', { name: /Secondary language:/ }));
+    await user.click(screen.getByRole('option', { name: 'Chinese (Literary)' }));
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(3));
+    expect(calls('translation_run')[2][1]).toEqual({
+      text: 'Hello world',
+      source: 'auto',
+      targets: ['zh-CN', 'lzh'],
+      scope: 'clipboard',
+      reuseTargetIndex: 1,
+      retryEngine: 'edge',
+    });
+    expect(calls('translation_preferences_set')).toHaveLength(0);
+
+    // Changing global default engine from Settings while pane is open automatically retranslates instead of blanking
+    bridge.snapshot.translationEngine = 'edge';
+    bridge.snapshot.translationPreferences.engine = 'edge';
+    await emit('translation_engine_changed', 'edge');
+    await waitFor(() => expect(calls('translation_run')).toHaveLength(4));
+    expect(calls('translation_run')[3][1]).toEqual({
+      text: 'Hello world',
+      source: 'auto',
+      targets: ['zh-CN', 'lzh'],
+      scope: 'clipboard',
+    });
+  });
+
   it('cancels pending clipboard translation and resets state when session ends', async () => {
     await mount('translation');
     await waitFor(() => expect(listRow('first')).toBeTruthy());

@@ -1575,38 +1575,44 @@ where
             .iter()
             .enumerate()
             .filter_map(|(index, error)| error.as_ref().map(|_| index))
+            .filter(|&index| {
+                crate::translation::validate_options(
+                    "edge",
+                    source,
+                    std::slice::from_ref(&missing[index]),
+                )
+                .is_ok()
+            })
             .collect();
         if !failed_indices.is_empty() {
             let failed_targets: Vec<String> = failed_indices
                 .iter()
                 .map(|&index| missing[index].clone())
                 .collect();
-            if crate::translation::validate_options("edge", source, &failed_targets).is_ok() {
-                match execute("edge", &failed_targets).await {
-                    Ok(fallback) => {
-                        for (slot_index, (text, error)) in failed_indices
-                            .into_iter()
-                            .zip(fallback.translations.into_iter().zip(fallback.errors))
-                        {
-                            if error.is_none() {
-                                translations[slot_index] = text;
-                                errors[slot_index] = None;
-                                engines[slot_index] = "edge".to_string();
-                            }
-                        }
-                        if detections.is_empty() && !fallback.detections.is_empty() {
-                            detections = fallback.detections;
-                        }
-                        if (source_language == source || source_language == "auto")
-                            && !fallback.source_language.is_empty()
-                            && fallback.source_language != "auto"
-                        {
-                            source_language = fallback.source_language;
+            match execute("edge", &failed_targets).await {
+                Ok(fallback) => {
+                    for (slot_index, (text, error)) in failed_indices
+                        .into_iter()
+                        .zip(fallback.translations.into_iter().zip(fallback.errors))
+                    {
+                        if error.is_none() {
+                            translations[slot_index] = text;
+                            errors[slot_index] = None;
+                            engines[slot_index] = "edge".to_string();
                         }
                     }
-                    Err(error) if error == "cancelled" => return Err(error),
-                    Err(_) => {}
+                    if detections.is_empty() && !fallback.detections.is_empty() {
+                        detections = fallback.detections;
+                    }
+                    if (source_language == source || source_language == "auto")
+                        && !fallback.source_language.is_empty()
+                        && fallback.source_language != "auto"
+                    {
+                        source_language = fallback.source_language;
+                    }
                 }
+                Err(error) if error == "cancelled" => return Err(error),
+                Err(_) => {}
             }
         }
     }
@@ -2573,6 +2579,51 @@ mod tests {
         assert_eq!(called, vec![("google".into(), vec!["ab".into()])]);
         assert_eq!(batch.errors, vec![Some("google_down".into())]);
         assert_eq!(batch.engines, vec!["google"]);
+    }
+
+    #[test]
+    fn google_fallback_skips_unsupported_target_and_falls_back_supported_target_to_edge() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "google",
+                "auto",
+                &["zh-CN".into(), "ab".into()],
+                |engine, targets| {
+                    called.push((engine.to_string(), targets.to_vec()));
+                    let engine = engine.to_string();
+                    let targets = targets.to_vec();
+                    async move {
+                        if engine == "google" {
+                            Err("google_down".into())
+                        } else {
+                            Ok(crate::translation::TranslationResult {
+                                translations: targets
+                                    .iter()
+                                    .map(|target| format!("edge:{target}"))
+                                    .collect(),
+                                errors: vec![None; targets.len()],
+                                source_language: "en".into(),
+                                detections: Vec::new(),
+                            })
+                        }
+                    }
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            called,
+            vec![
+                ("google".into(), vec!["zh-CN".into(), "ab".into()]),
+                ("edge".into(), vec!["zh-CN".into()]),
+            ]
+        );
+        assert_eq!(batch.translations, vec!["edge:zh-CN", ""]);
+        assert_eq!(batch.errors, vec![None, Some("google_down".into())]);
+        assert_eq!(batch.engines, vec!["edge", "google"]);
     }
 
     #[test]

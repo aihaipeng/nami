@@ -609,10 +609,11 @@ fn context_groups<'a>(
     input: &'a str,
     units: &[text::Unit<'a>],
     detections: &[Option<crate::model::LanguageDetection>],
+    mode: text::ProtectionMode,
 ) -> Vec<(text::Unit<'a>, std::ops::Range<usize>)> {
     let mut groups = Vec::new();
     let mut cursor = 0;
-    for line in text::units(input, false)
+    for line in text::units_with_mode(input, false, mode)
         .into_iter()
         .filter(|unit| unit.translate)
     {
@@ -667,7 +668,8 @@ pub async fn translate(
     let deadline = Instant::now() + TRANSLATION_BUDGET;
     validate_text(input)?;
     validate_options(engine, source, targets)?;
-    let units = text::units(input, source == "auto");
+    let mode = text::ProtectionMode::for_engine(engine);
+    let units = text::units_with_mode(input, source == "auto", mode);
     let prepared: Vec<&str> = units
         .iter()
         .map(|unit| {
@@ -754,7 +756,12 @@ async fn translate_target(
             break 'context;
         }
         // Rejoin same-language sentences to retain pronouns and paragraph context.
-        let groups = context_groups(input, units, &target_detections);
+        let groups = context_groups(
+            input,
+            units,
+            &target_detections,
+            text::ProtectionMode::for_engine(engine),
+        );
         let prepared: Vec<&str> = groups
             .iter()
             .map(|(unit, _)| unit.prepared.as_str())
@@ -1451,7 +1458,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "explicit synthetic network smoke"]
     async fn live_services_mixed_text_and_protected_code() {
-        let input = "今天的会议取消了。Please send the report tomorrow.\r\n请执行 `npm run build` 并访问 https://example.com/test?a=1&b=2 。";
+        let input = "今天的会议取消了。Please send the report tomorrow.\r\n请执行 `npm run build` 并访问 https://example.com/test?a=1&b=2 。\nPlease run `cargo test` and visit https://example.com/docs today.";
         for engine in ["google", "edge"] {
             let result = translate(
                 engine,
@@ -1472,8 +1479,16 @@ mod tests {
                     "{engine}: command changed"
                 );
                 assert!(
+                    translated.contains("`cargo test`"),
+                    "{engine}: English code changed"
+                );
+                assert!(
                     translated.contains("https://example.com/test?a=1&b=2"),
                     "{engine}: URL changed"
+                );
+                assert!(
+                    translated.contains("https://example.com/docs"),
+                    "{engine}: English URL changed"
                 );
                 assert_eq!(translated.matches("\r\n").count(), 1);
                 assert!(!translated.contains("<span") && !translated.contains("nami-code-"));
@@ -1577,7 +1592,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let context = context_groups(input, &units, &detections);
+        let context = context_groups(input, &units, &detections, text::ProtectionMode::Html);
         assert_eq!(context.len(), 1);
         assert_eq!(
             context[0].0.original,
@@ -1587,13 +1602,13 @@ mod tests {
         for detection in unknown.iter_mut().flatten() {
             detection.score = Some(0.0);
         }
-        assert!(context_groups(input, &units, &unknown).is_empty());
+        assert!(context_groups(input, &units, &unknown, text::ProtectionMode::Html).is_empty());
     }
 
     #[tokio::test]
     async fn optional_context_keeps_validated_first_round_on_failure() {
         let input = "First sentence. Second sentence.\nRun `npm run build`. Then continue.";
-        let units = text::units(input, true);
+        let units = text::units_with_mode(input, true, text::ProtectionMode::PlainText);
         let prepared: Vec<_> = units.iter().map(|unit| unit.prepared.as_str()).collect();
         let plan = batches(&prepared);
         let client = translation_client("", false).unwrap();
@@ -1694,7 +1709,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let groups = context_groups(input, &units, &detections);
+        let groups = context_groups(input, &units, &detections, text::ProtectionMode::Html);
         assert_eq!(groups.len(), 2);
         let mut outputs = units
             .iter()

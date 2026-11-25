@@ -1,14 +1,36 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProtectionMode {
+    Html,
+    PlainText,
+}
+
+impl ProtectionMode {
+    pub(super) fn for_engine(engine: &str) -> Self {
+        match engine {
+            "edge" => Self::PlainText,
+            _ => Self::Html,
+        }
+    }
+}
+
 pub(super) struct Unit<'a> {
     pub original: &'a str,
     pub prepared: String,
     pub translate: bool,
+    mode: ProtectionMode,
+    placeholder_prefix: String,
     protections: Vec<&'a str>,
 }
 
+#[cfg(test)]
 pub(super) fn units(text: &str, auto: bool) -> Vec<Unit<'_>> {
+    units_with_mode(text, auto, ProtectionMode::Html)
+}
+
+pub(super) fn units_with_mode(text: &str, auto: bool, mode: ProtectionMode) -> Vec<Unit<'_>> {
     let mut result = Vec::new();
     let mut start = 0;
     let mut fence: Option<(u8, usize)> = None;
@@ -29,7 +51,7 @@ pub(super) fn units(text: &str, auto: bool) -> Vec<Unit<'_>> {
         let line = &text[start..end];
         let marker = fence_marker(line);
         if let Some((character, width)) = fence {
-            literal(&mut result, &text[start..next]);
+            literal(&mut result, &text[start..next], mode);
             if marker.is_some_and(|(found, count, rest)| {
                 found == character && count >= width && rest.trim().is_empty()
             }) {
@@ -37,10 +59,10 @@ pub(super) fn units(text: &str, auto: bool) -> Vec<Unit<'_>> {
             }
         } else if let Some((character, width, _)) = marker {
             fence = Some((character, width));
-            literal(&mut result, &text[start..next]);
+            literal(&mut result, &text[start..next], mode);
         } else {
-            split_line(&mut result, line, auto);
-            literal(&mut result, &text[end..next]);
+            split_line(&mut result, line, auto, mode);
+            literal(&mut result, &text[end..next], mode);
         }
         sentence_count += result[previous_count..]
             .iter()
@@ -48,7 +70,7 @@ pub(super) fn units(text: &str, auto: bool) -> Vec<Unit<'_>> {
             .count();
         // Dense short sentences retain line context instead of multiplying network batches.
         if auto && sentence_count > 2_048 {
-            return units(text, false);
+            return units_with_mode(text, false, mode);
         }
         start = next;
     }
@@ -65,18 +87,20 @@ fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
     (width >= 3).then(|| (character, width, &line[width..]))
 }
 
-fn literal<'a>(result: &mut Vec<Unit<'a>>, original: &'a str) {
+fn literal<'a>(result: &mut Vec<Unit<'a>>, original: &'a str, mode: ProtectionMode) {
     if !original.is_empty() {
         result.push(Unit {
             original,
             prepared: String::new(),
             translate: false,
+            mode,
+            placeholder_prefix: String::new(),
             protections: Vec::new(),
         });
     }
 }
 
-fn split_line<'a>(result: &mut Vec<Unit<'a>>, line: &'a str, auto: bool) {
+fn split_line<'a>(result: &mut Vec<Unit<'a>>, line: &'a str, auto: bool, mode: ProtectionMode) {
     let ranges = protected_ranges(line);
     let mut start = 0;
     let mut index = 0;
@@ -106,11 +130,11 @@ fn split_line<'a>(result: &mut Vec<Unit<'a>>, line: &'a str, auto: bool) {
                 }
                 index += closing.len_utf8();
             }
-            push_unit(result, &line[start..index]);
+            push_unit(result, &line[start..index], mode);
             start = index;
         }
     }
-    push_unit(result, &line[start..]);
+    push_unit(result, &line[start..], mode);
 }
 
 fn abbreviation(prefix: &str) -> bool {
@@ -129,43 +153,73 @@ fn abbreviation(prefix: &str) -> bool {
     ) || word.len() == 2 && word.as_bytes()[0].is_ascii_alphabetic()
 }
 
-fn push_unit<'a>(result: &mut Vec<Unit<'a>>, text: &'a str) {
+fn plain_placeholder_prefix(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let mut prefix = String::from("NAMI");
+    while lower.contains(&prefix.to_ascii_lowercase()) {
+        prefix.push('X');
+    }
+    prefix
+}
+
+fn push_unit<'a>(result: &mut Vec<Unit<'a>>, text: &'a str, mode: ProtectionMode) {
     let body = text.trim();
     if body.is_empty() {
-        literal(result, text);
+        literal(result, text, mode);
         return;
     }
     let leading = text.len() - text.trim_start().len();
-    literal(result, &text[..leading]);
+    literal(result, &text[..leading], mode);
     let ranges = protected_ranges(body);
     let mut prepared = String::new();
     let mut protections = Vec::with_capacity(ranges.len());
+    let placeholder_prefix = if mode == ProtectionMode::PlainText && !ranges.is_empty() {
+        plain_placeholder_prefix(body)
+    } else {
+        String::new()
+    };
     let mut cursor = 0;
     let mut has_letters = false;
     for range in ranges {
         let ordinary = &body[cursor..range.start];
         has_letters |= ordinary.chars().any(char::is_alphabetic);
-        escape_into(&mut prepared, ordinary);
-        prepared.push_str(&format!(
-            "<span translate=\"no\" id=\"nami-code-{}\">",
-            protections.len()
-        ));
         let original = &body[range.clone()];
-        escape_into(&mut prepared, original);
-        prepared.push_str("</span>");
+        match mode {
+            ProtectionMode::Html => {
+                escape_into(&mut prepared, ordinary);
+                prepared.push_str(&format!(
+                    "<span translate=\"no\" id=\"nami-code-{}\">",
+                    protections.len()
+                ));
+                escape_into(&mut prepared, original);
+                prepared.push_str("</span>");
+            }
+            ProtectionMode::PlainText => {
+                prepared.push_str(ordinary);
+                prepared.push('[');
+                prepared.push_str(&placeholder_prefix);
+                prepared.push_str(&protections.len().to_string());
+                prepared.push(']');
+            }
+        }
         protections.push(original);
         cursor = range.end;
     }
     let ordinary = &body[cursor..];
     has_letters |= ordinary.chars().any(char::is_alphabetic);
-    escape_into(&mut prepared, ordinary);
+    match mode {
+        ProtectionMode::Html => escape_into(&mut prepared, ordinary),
+        ProtectionMode::PlainText => prepared.push_str(ordinary),
+    }
     result.push(Unit {
         original: body,
         prepared,
         translate: has_letters,
+        mode,
+        placeholder_prefix,
         protections,
     });
-    literal(result, &text[leading + body.len()..]);
+    literal(result, &text[leading + body.len()..], mode);
 }
 
 fn escape_into(output: &mut String, text: &str) {
@@ -322,6 +376,75 @@ impl Unit<'_> {
         if !self.translate {
             return Ok(self.original.to_string());
         }
+        match self.mode {
+            ProtectionMode::Html => self.restore_html(translated),
+            ProtectionMode::PlainText => self.restore_plain_text(translated),
+        }
+    }
+
+    fn restore_plain_text(&self, translated: &str) -> Result<String, String> {
+        if self.protections.is_empty() {
+            return Ok(translated.to_string());
+        }
+        let malformed = || "The translation service returned invalid protected text.".to_string();
+        let mut restored = String::with_capacity(translated.len());
+        let mut cursor = 0;
+        let mut seen = vec![false; self.protections.len()];
+        let prefix = self.placeholder_prefix.as_str();
+        while cursor < translated.len() {
+            let Some((relative, open)) = translated[cursor..]
+                .char_indices()
+                .find(|&(_, ch)| matches!(ch, '[' | '［' | '【'))
+            else {
+                restored.push_str(&translated[cursor..]);
+                break;
+            };
+            let start = cursor + relative;
+            let after_open = start + open.len_utf8();
+            let rest = &translated[after_open..];
+            if let Some(after_prefix) = rest.strip_prefix(prefix) {
+                let digits_len = after_prefix
+                    .bytes()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                if digits_len > 0 {
+                    let after_digits = &after_prefix[digits_len..];
+                    let expected_close = match open {
+                        '[' => ']',
+                        '［' => '］',
+                        '【' => '】',
+                        _ => unreachable!(),
+                    };
+                    if let Some(close) = after_digits
+                        .chars()
+                        .next()
+                        .filter(|&ch| ch == expected_close || matches!(ch, ']' | '］' | '】'))
+                    {
+                        let digits = &after_prefix[..digits_len];
+                        let index = digits.parse::<usize>().map_err(|_| malformed())?;
+                        if digits != index.to_string()
+                            || seen.get(index).is_none_or(|already| *already)
+                        {
+                            return Err(malformed());
+                        }
+                        restored.push_str(&translated[cursor..start]);
+                        restored.push_str(self.protections[index]);
+                        seen[index] = true;
+                        cursor = after_open + prefix.len() + digits_len + close.len_utf8();
+                        continue;
+                    }
+                }
+            }
+            restored.push_str(&translated[cursor..after_open]);
+            cursor = after_open;
+        }
+        if seen.iter().any(|seen| !seen) {
+            return Err(malformed());
+        }
+        Ok(restored)
+    }
+
+    fn restore_html(&self, translated: &str) -> Result<String, String> {
         let malformed = || "The translation service returned invalid protected text.".to_string();
         let mut restored = String::new();
         let mut cursor = 0;
@@ -719,5 +842,39 @@ mod tests {
         for unit in units.iter().filter(|unit| unit.translate) {
             assert_eq!(unit.restore(&unit.prepared).unwrap(), unit.original);
         }
+    }
+
+    #[test]
+    fn plain_text_mode_protects_code_and_urls_without_html_tags_or_entity_escaping() {
+        let input =
+            "Check `npm run build`, visit https://example.com/a?x=1&y=2, and keep a < b & c > d.";
+        let units = units_with_mode(input, true, ProtectionMode::PlainText);
+        let unit = units.iter().find(|unit| unit.translate).unwrap();
+        assert!(!unit.prepared.contains("<span"));
+        assert!(!unit.prepared.contains("&lt;"));
+        assert!(!unit.prepared.contains("&amp;"));
+        assert!(unit.prepared.contains("[NAMI0]"));
+        assert!(unit.prepared.contains("[NAMI1]"));
+        assert_eq!(
+            unit.restore("检查【NAMI1】，运行［NAMI0］，保留 a < b & c > d。")
+                .unwrap(),
+            "检查https://example.com/a?x=1&y=2，运行`npm run build`，保留 a < b & c > d。"
+        );
+        assert!(unit.restore("检查[NAMI0]，缺少第二个。").is_err());
+        assert!(unit.restore("检查[NAMI0][NAMI0][NAMI1]").is_err());
+        assert!(unit.restore("检查[NAMI0][NAMI9]").is_err());
+    }
+
+    #[test]
+    fn plain_text_mode_avoids_colliding_with_existing_nami_markers() {
+        let input = "Keep [NAMI0] literal while protecting `git status`.";
+        let units = units_with_mode(input, true, ProtectionMode::PlainText);
+        let unit = units.iter().find(|unit| unit.translate).unwrap();
+        assert!(unit.prepared.contains("[NAMI0]"));
+        assert!(unit.prepared.contains("[NAMIX0]"));
+        assert_eq!(
+            unit.restore("保留 [NAMI0] 并保护 [NAMIX0]。").unwrap(),
+            "保留 [NAMI0] 并保护 `git status`。"
+        );
     }
 }

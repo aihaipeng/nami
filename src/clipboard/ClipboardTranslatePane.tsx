@@ -64,6 +64,7 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   const secondaryRef = useRef(secondary);
   const draftRef = useRef(draft);
   const sessionEngineRef = useRef<Engine | null>(sessionEngine);
+  const previousGlobalEngine = useRef<Engine>(snapshot.translationEngine);
   const preferencesRef = useRef(snapshot.translationPreferences);
   const lastBroadcast = useRef(snapshot.translationPreferences);
   const receiveContext = useRef<(context: ClipboardTranslationContext) => void>(() => {});
@@ -77,7 +78,14 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
 
   const currentTab: Tab = secondary === 'none' && activeTab === 'secondary' ? 'primary' : activeTab;
   const effectiveEngine: Engine = sessionEngine ?? snapshot.translationEngine;
-  const languagesAvailable = supportsTranslation(effectiveEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
+  const sourceSupported = supportsLanguage(effectiveEngine, 'source', source);
+  const primarySupported = supportsLanguage(effectiveEngine, 'target', primary);
+  const secondarySupported = secondary === 'none' || supportsLanguage(effectiveEngine, 'target', secondary);
+  const activeTabSupported = currentTab === 'source'
+    ? sourceSupported
+    : currentTab === 'secondary'
+      ? sourceSupported && secondarySupported
+      : sourceSupported && primarySupported;
   const shortcutBinding = (action: ShortcutAction) => {
     const preferences = preferencesRef.current;
     return translationShortcutEnabled(preferences, action) ? preferences.shortcuts[action] : null;
@@ -149,13 +157,21 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   }, [active, state.recordsSession]);
 
   useEffect(() => {
+    if (previousGlobalEngine.current === snapshot.translationEngine) return;
+    previousGlobalEngine.current = snapshot.translationEngine;
     completedOutput.current = null;
-    cancelRequest();
     sessionEngineRef.current = null;
     setSessionEngine(null);
-    setCachedResults([]);
     setServiceError(null);
     setDetectedSource(null);
+    const text = draftRef.current;
+    if (active && text.trim()) {
+      const targets = [primaryRef.current, ...(secondaryRef.current === 'none' ? [] : [secondaryRef.current])];
+      void translateText(text, sourceRef.current, targets, undefined, undefined, snapshot.translationEngine);
+    } else {
+      cancelRequest();
+      setCachedResults([]);
+    }
   }, [snapshot.translationEngine]);
 
   useEffect(() => { setPopup(null); }, [snapshot.locale, active, currentTab]);
@@ -208,40 +224,62 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     setServiceError(null);
     setNotice(null);
     if (!preservesDetection) setDetectedSource(null);
-    if (snapshot.storageError || !supportsTranslation(targetEngine, sourceLanguage, targetLanguages)) return;
+    const supportedIndices = supportsLanguage(targetEngine, 'source', sourceLanguage)
+      ? targetLanguages.map((target, index) => supportsLanguage(targetEngine, 'target', target) ? index : -1).filter((index) => index >= 0)
+      : [];
+    if (snapshot.storageError || supportedIndices.length === 0) return;
     if (!inputWithinLimits(text)) { setNotice('inputLimit'); return; }
     if (!native) { setServiceError('Open Nami to translate.'); return; }
     const revision = requestRevision.current;
     await cancellation.current;
     if (requestRevision.current !== revision) return;
+    const requestTargets = supportedIndices.map((index) => targetLanguages[index]);
+    const fullTargets = supportedIndices.length === targetLanguages.length;
     await runTranslation(
-      { text, source: sourceLanguage, targets: targetLanguages },
+      { text, source: sourceLanguage, targets: requestTargets },
       revision,
       {
-        ...(refreshTarget !== undefined && reuse?.text === text ? { reuseTargetIndex: refreshTarget } : {}),
+        ...(fullTargets && refreshTarget !== undefined && reuse?.text === text ? { reuseTargetIndex: refreshTarget } : {}),
         ...(targetEngine !== snapshot.translationEngine ? { retryEngine: targetEngine } : {}),
       },
+      fullTargets ? undefined : { totalTargets: targetLanguages.length, targetLanguages, slotIndices: supportedIndices },
     );
   }
 
-  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; retryEngine?: Engine; reuseTargetIndex?: number }) {
+  async function runTranslation(
+    request: TranslationRequest,
+    revision: number,
+    options: { retryId?: string; retryEngine?: Engine; reuseTargetIndex?: number },
+    mapping?: { totalTargets: number; targetLanguages: string[]; slotIndices: number[] },
+  ) {
     const engine = options.retryEngine ?? (options.retryId ? partialEngine : null) ?? sessionEngineRef.current ?? snapshot.translationEngine;
     setTranslating(true);
     try {
       const result = await invoke<TranslationOutput | { partial: PartialTranslation }>('translation_run', { ...request, scope: 'clipboard', ...options });
       if (requestRevision.current !== revision) return;
       const output = 'partial' in result ? result.partial : result;
+      const expand = <T,>(values: T[], fallback: T) => {
+        if (!mapping) return values;
+        const expanded = Array.from({ length: mapping.totalTargets }, () => fallback);
+        mapping.slotIndices.forEach((slot, index) => {
+          if (index < values.length) expanded[slot] = values[index];
+        });
+        return expanded;
+      };
+      const translations = expand(output.translations, '');
       if ('partial' in result) {
         completedOutput.current = null;
         partialTicket.current = { id: result.partial.id, request, pending: false };
-        setPartial(result.partial);
+        setPartial(mapping ? { ...result.partial, translations, errors: expand(result.partial.errors, null) } : result.partial);
         setPartialEngine(engine);
       } else {
-        completedOutput.current = result;
+        completedOutput.current = mapping
+          ? { ...result, targetLanguages: mapping.targetLanguages, translations }
+          : result;
         partialTicket.current = null;
         setPartial(null);
       }
-      setCachedResults(output.translations);
+      setCachedResults(translations);
       setDetectedSource(output.sourceLanguage === 'auto' ? null : output.sourceLanguage);
     } catch (error) {
       if (requestRevision.current === revision && String(error) !== 'cancelled') {
@@ -319,7 +357,10 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     secondaryRef.current = next.secondary;
     ({ source: setSource, primary: setPrimary, secondary: setSecondary })[side](value);
     if (side === 'secondary' && value === 'none') setActiveTab((tab) => tab === 'secondary' ? 'primary' : tab);
-    void command('translation_preferences_set', side === 'source' ? { sourceLanguage: value } : side === 'primary' ? { primaryLanguage: value } : { secondaryLanguage: value });
+    const persistSide = side === 'source' ? 'source' : 'target';
+    if (value === 'auto' || value === 'none' || supportsLanguage(snapshot.translationEngine, persistSide, value)) {
+      void command('translation_preferences_set', side === 'source' ? { sourceLanguage: value } : side === 'primary' ? { primaryLanguage: value } : { secondaryLanguage: value });
+    }
     if (side === 'source') setDetectedSource(null);
     const targets = [next.primary, ...(next.secondary === 'none' ? [] : [next.secondary])];
     if (draft.trim()) {
@@ -417,9 +458,14 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     completedOutput.current = null;
     sessionEngineRef.current = nextEngine;
     setSessionEngine(nextEngine);
+    const nextSource = supportsLanguage(nextEngine, 'source', source) ? source : 'auto';
+    if (nextSource !== source) {
+      sourceRef.current = nextSource;
+      setSource(nextSource);
+    }
     const targets = [primary, ...(secondary === 'none' ? [] : [secondary])];
     if (draft.trim()) {
-      void translateText(draft, source, targets, undefined, undefined, nextEngine);
+      void translateText(draft, nextSource, targets, undefined, undefined, nextEngine);
     } else {
       cancelRequest();
       setCachedResults([]);
@@ -443,7 +489,7 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   const activeCopyText = currentTab === 'source' ? draft : cachedResults[activeIndex] ?? '';
   const activeResult = currentTab === 'source' ? '' : (notice ? '' : cachedResults[activeIndex] ?? '');
   const activePartialError = currentTab === 'source' ? null : partial?.errors[activeIndex] ?? null;
-  const taskStatus = serviceError ?? (notice ? t(notice) : !languagesAvailable ? t('languageNotSupported') : null);
+  const taskStatus = serviceError ?? (notice ? t(notice) : !activeTabSupported ? t('languageNotSupported') : null);
   const copyLabel = currentTab === 'source' ? t('copySource') : currentTab === 'secondary' ? t('copySecondary') : t('copyPrimary');
   const sourceTabTitle = activePickerDescription && currentTab === 'source'
     ? `${t('sourceLanguage')}: ${sourceLabel} (${activePickerDescription})`
