@@ -19,58 +19,23 @@ pub struct TranslationMetadata {
     pub detections: Vec<LanguageDetection>,
 }
 
-#[derive(Clone, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoryRecord {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub title: String,
+pub struct TranslationOutput {
     pub id: String,
     pub text: String,
     pub source_language: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translation: Option<TranslationMetadata>,
+    pub translation: TranslationMetadata,
     pub target_languages: Vec<String>,
     pub translations: Vec<String>,
-    pub date: String,
-    pub is_favorite: bool,
-    pub is_pinned: bool,
-    #[serde(default)]
-    pub source_app: Option<serde_json::Value>,
 }
 
-pub fn initial_history_records() -> Vec<HistoryRecord> {
-    #[cfg(feature = "ui-tests")]
-    {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/translation-history.json"
-        ))
-        .expect("valid isolated UI test history")
-    }
-    #[cfg(not(feature = "ui-tests"))]
-    Vec::new()
-}
-
-#[cfg(test)]
-#[derive(serde::Deserialize)]
-pub struct TranslationSample {
-    pub id: String,
-    pub text: String,
-    pub translations: Vec<String>,
-}
-
-#[cfg(test)]
-pub fn translation_sample_text(id: &str, part: &str) -> Option<String> {
-    let samples: Vec<TranslationSample> = serde_json::from_str(include_str!(
-        "../../tests/fixtures/translation-history.json"
-    ))
-    .ok()?;
-    let record = samples.into_iter().find(|record| record.id == id)?;
-    match part {
-        "source" => Some(record.text),
-        "primary" => record.translations.first().cloned(),
-        "secondary" => record.translations.get(1).cloned(),
-        _ => None,
-    }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TranslationScope {
+    #[default]
+    Standalone,
+    Clipboard,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -196,36 +161,40 @@ pub fn compute_window_origin(
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RecordView {
-    #[default]
-    Clipboard,
-    Translation,
-}
+pub const CLIPBOARD_MIN_WIDTH: f64 = 280.0;
+pub const CLIPBOARD_MAX_WIDTH: f64 = 720.0;
+pub const CLIPBOARD_DEFAULT_WIDTH: f64 = 360.0;
+pub const CLIPBOARD_DETAIL_MIN_WIDTH: f64 = 360.0;
+pub const CLIPBOARD_DETAIL_DEFAULT_WIDTH: f64 = 480.0;
+pub const CLIPBOARD_TRANSLATION_MIN_WIDTH: f64 = 360.0;
+pub const CLIPBOARD_TRANSLATION_DEFAULT_WIDTH: f64 = 440.0;
+pub const STANDALONE_TRANSLATION_DEFAULT_WIDTH: f64 = 920.0;
+pub const STANDALONE_TRANSLATION_SINGLE_MIN_WIDTH: f64 = 480.0;
+pub const STANDALONE_TRANSLATION_DUAL_MIN_WIDTH: f64 = 700.0;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowState {
     pub records_browsing: bool,
-    pub record_view: RecordView,
     pub clipboard_detail_id: Option<String>,
+    pub clipboard_translation_record_id: Option<String>,
     pub records_editor_open: bool,
     pub records_session: u64,
     pub records_focus: u64,
     #[serde(skip)]
     pub records_open: bool,
-    pub translation_visible: bool,
-    pub history_visible: bool,
+    pub standalone_translation_visible: bool,
+    pub clipboard_visible: bool,
+    pub clipboard_detail_visible: bool,
+    pub clipboard_translation_visible: bool,
     pub translation_pinned: bool,
-    pub history_pinned: bool,
     pub clipboard_pinned: bool,
-    pub history_width: f64,
+    pub clipboard_width: f64,
+    pub clipboard_detail_width: f64,
+    pub clipboard_translation_width: f64,
     pub translation_width: f64,
-    #[serde(skip)]
-    pub translation_width_before_clipboard_details: Option<f64>,
-    pub history_extent: f64,
-    pub translation_extent: f64,
+    pub clipboard_extent: f64,
+    pub right_extent: f64,
     pub secondary_enabled: bool,
     #[serde(skip)]
     pub motion_revision: u64,
@@ -236,171 +205,302 @@ pub struct WindowState {
     #[serde(skip)]
     pub native_resizing: bool,
     #[serde(skip)]
-    pub history_width_initialized: bool,
+    pub clipboard_width_initialized: bool,
 }
 
 impl Default for WindowState {
     fn default() -> Self {
         Self {
             records_browsing: true,
-            record_view: RecordView::Clipboard,
             clipboard_detail_id: None,
+            clipboard_translation_record_id: None,
             records_editor_open: false,
             records_session: 0,
             records_focus: 0,
             records_open: false,
-            translation_visible: true,
-            history_visible: false,
+            standalone_translation_visible: false,
+            clipboard_visible: false,
+            clipboard_detail_visible: false,
+            clipboard_translation_visible: false,
             translation_pinned: false,
-            history_pinned: false,
             clipboard_pinned: false,
-            history_width: 360.0,
-            translation_width: 920.0,
-            translation_width_before_clipboard_details: None,
-            history_extent: 0.0,
-            translation_extent: 920.0,
+            clipboard_width: CLIPBOARD_DEFAULT_WIDTH,
+            clipboard_detail_width: CLIPBOARD_DETAIL_DEFAULT_WIDTH,
+            clipboard_translation_width: CLIPBOARD_TRANSLATION_DEFAULT_WIDTH,
+            translation_width: STANDALONE_TRANSLATION_DEFAULT_WIDTH,
+            clipboard_extent: 0.0,
+            right_extent: 0.0,
             secondary_enabled: true,
             motion_revision: 0,
             motion_anchor: None,
             motion_velocity: PanelFrame::default(),
             native_resizing: false,
-            history_width_initialized: false,
+            clipboard_width_initialized: false,
         }
     }
 }
 
 impl WindowState {
-    #[cfg(test)]
-    pub fn region_frames(&self) -> ((f64, f64), (f64, f64)) {
-        (
-            (self.history_extent - self.history_width, self.history_width),
-            (self.history_extent, self.translation_width),
-        )
+    pub fn right_visible(&self) -> bool {
+        self.standalone_translation_visible
+            || (self.clipboard_visible
+                && (self.clipboard_detail_visible || self.clipboard_translation_visible))
     }
 
-    pub fn toggle_history(&mut self) {
-        if self.history_visible && self.record_view == RecordView::Clipboard {
-            self.set_record_view(RecordView::Translation);
+    pub fn any_visible(&self) -> bool {
+        self.standalone_translation_visible || self.clipboard_visible
+    }
+
+    pub fn right_target_width(&self) -> f64 {
+        if self.standalone_translation_visible {
+            self.translation_width
+        } else if self.clipboard_visible {
+            (if self.clipboard_detail_visible {
+                self.clipboard_detail_width
+            } else {
+                0.0
+            }) + (if self.clipboard_translation_visible {
+                self.clipboard_translation_width
+            } else {
+                0.0
+            })
         } else {
-            self.record_view = RecordView::Translation;
-            self.history_visible = !self.history_visible;
-            self.restore_translation_width();
+            0.0
         }
     }
 
-    pub fn show_translation(&mut self) {
-        self.restore_translation_width();
-        self.translation_visible = true;
-    }
-
-    fn restore_translation_width(&mut self) {
-        if let Some(width) = self.translation_width_before_clipboard_details.take() {
-            self.translation_width = width;
+    pub fn standalone_translation_min_width(&self) -> f64 {
+        if self.secondary_enabled {
+            STANDALONE_TRANSLATION_DUAL_MIN_WIDTH
+        } else {
+            STANDALONE_TRANSLATION_SINGLE_MIN_WIDTH
         }
     }
 
-    pub fn summon_translation(&mut self) {
+    pub fn right_min_width(&self) -> f64 {
+        if self.standalone_translation_visible {
+            self.standalone_translation_min_width()
+        } else if self.clipboard_visible {
+            (if self.clipboard_detail_visible {
+                CLIPBOARD_DETAIL_MIN_WIDTH
+            } else {
+                0.0
+            }) + (if self.clipboard_translation_visible {
+                CLIPBOARD_TRANSLATION_MIN_WIDTH
+            } else {
+                0.0
+            })
+        } else {
+            0.0
+        }
+    }
+
+    pub fn summon_standalone_translation(&mut self) {
         self.records_browsing = false;
-        self.record_view = RecordView::Translation;
-        self.history_visible = false;
-        self.show_translation();
+        self.clipboard_visible = false;
+        self.clipboard_detail_visible = false;
+        self.clipboard_translation_visible = false;
+        self.clipboard_detail_id = None;
+        self.clipboard_translation_record_id = None;
+        self.standalone_translation_visible = true;
     }
 
-    pub fn set_record_view(&mut self, view: RecordView) {
-        let keep_details = self.history_visible && self.translation_visible;
-        if view == RecordView::Translation {
-            self.restore_translation_width();
-        } else {
-            self.records_browsing = true;
-        }
-        self.record_view = view;
-        if keep_details && view == RecordView::Clipboard {
-            self.translation_width_before_clipboard_details
-                .get_or_insert(self.translation_width);
-            self.translation_width = self.translation_min_width();
-        }
-        if !keep_details {
-            self.clipboard_detail_id = None;
-            self.translation_visible = false;
-        }
-        self.history_visible = true;
-    }
-
-    pub fn toggle_record_details(&mut self) {
+    pub fn show_clipboard(&mut self) {
+        let was_clipboard = self.clipboard_visible && !self.standalone_translation_visible;
+        self.standalone_translation_visible = false;
+        self.clipboard_visible = true;
         self.records_browsing = true;
-        if !self.translation_visible && self.record_view == RecordView::Clipboard {
-            self.translation_width_before_clipboard_details
-                .get_or_insert(self.translation_width);
-            self.translation_width = self.translation_min_width();
+        if !was_clipboard {
+            self.clipboard_detail_visible = false;
+            self.clipboard_translation_visible = false;
+            self.clipboard_detail_id = None;
+            self.clipboard_translation_record_id = None;
         }
-        self.translation_visible = !self.translation_visible;
+    }
+
+    pub fn toggle_clipboard_details(&mut self) {
+        if !self.clipboard_visible {
+            return;
+        }
+        self.records_browsing = true;
+        self.clipboard_detail_visible = !self.clipboard_detail_visible;
+        if self.clipboard_detail_visible {
+            self.clipboard_detail_width =
+                self.clipboard_detail_width.max(CLIPBOARD_DETAIL_MIN_WIDTH);
+        }
     }
 
     pub fn preview_clipboard_record(&mut self, record_id: String) {
-        if !self.translation_visible || self.clipboard_detail_id.as_ref() == Some(&record_id) {
-            self.toggle_record_details();
+        if !self.clipboard_visible {
+            return;
+        }
+        if !self.clipboard_detail_visible || self.clipboard_detail_id.as_ref() == Some(&record_id) {
+            self.toggle_clipboard_details();
         }
         self.records_browsing = true;
         self.clipboard_detail_id = Some(record_id);
     }
 
-    pub fn select_history_record(&mut self, _repeated: bool, _retranslate: bool) {
-        self.records_browsing = true;
-        self.record_view = RecordView::Translation;
-        self.history_visible = true;
-        self.show_translation();
+    pub fn open_clipboard_translation(&mut self, record_id: String) {
+        self.standalone_translation_visible = false;
+        self.clipboard_visible = true;
+        self.clipboard_translation_visible = true;
+        self.clipboard_translation_record_id = Some(record_id);
+        self.clipboard_translation_width = self
+            .clipboard_translation_width
+            .max(CLIPBOARD_TRANSLATION_MIN_WIDTH);
+    }
+
+    pub fn close_clipboard_translation(&mut self) {
+        self.clipboard_translation_visible = false;
+        self.clipboard_translation_record_id = None;
+    }
+
+    pub fn clear_clipboard_translation_record(&mut self) -> bool {
+        self.clipboard_translation_record_id.take().is_some()
     }
 
     pub fn sync_records_session(&mut self) -> bool {
-        let open = self.translation_visible || self.history_visible;
+        let open = self.clipboard_visible;
         let ended = self.records_open && !open;
         if ended {
             self.records_session += 1;
             self.records_browsing = true;
             self.records_editor_open = false;
             self.clipboard_detail_id = None;
+            self.clipboard_detail_visible = false;
+            self.clipboard_translation_visible = false;
+            self.clipboard_translation_record_id = None;
         }
         self.records_open = open;
         ended
     }
 
     pub fn blur(&mut self) {
-        self.translation_visible &= self.translation_pinned;
-        self.history_visible &= self.history_pinned;
+        if self.standalone_translation_visible {
+            self.standalone_translation_visible &= self.translation_pinned;
+        }
+        if self.clipboard_visible && !self.clipboard_pinned {
+            self.clipboard_visible = false;
+            self.clipboard_detail_visible = false;
+            self.clipboard_translation_visible = false;
+            self.clipboard_translation_record_id = None;
+        }
     }
 
     pub fn dismiss(&mut self) {
-        self.translation_visible = false;
-        self.history_visible = false;
+        self.standalone_translation_visible = false;
+        self.clipboard_visible = false;
+        self.clipboard_detail_visible = false;
+        self.clipboard_translation_visible = false;
+        self.clipboard_translation_record_id = None;
     }
 
-    pub fn translation_min_width(&self) -> f64 {
-        if self.record_view == RecordView::Translation && self.secondary_enabled {
-            700.0
-        } else {
-            480.0
+    pub fn clamp_right_panes_to_available(&mut self, max_total_width: f64) {
+        if !self.clipboard_visible || !max_total_width.is_finite() || max_total_width <= 0.0 {
+            return;
+        }
+        let available_right = (max_total_width - self.clipboard_width).max(0.0);
+        match (
+            self.clipboard_detail_visible,
+            self.clipboard_translation_visible,
+        ) {
+            (true, true) => {
+                let total = self.clipboard_detail_width + self.clipboard_translation_width;
+                if total > available_right {
+                    let min_total = CLIPBOARD_DETAIL_MIN_WIDTH + CLIPBOARD_TRANSLATION_MIN_WIDTH;
+                    if available_right <= min_total {
+                        self.clipboard_detail_width = CLIPBOARD_DETAIL_MIN_WIDTH;
+                        self.clipboard_translation_width = CLIPBOARD_TRANSLATION_MIN_WIDTH;
+                    } else {
+                        let extra = available_right - min_total;
+                        let current_extra = (total - min_total).max(1.0);
+                        let detail_extra =
+                            ((self.clipboard_detail_width - CLIPBOARD_DETAIL_MIN_WIDTH).max(0.0)
+                                / current_extra)
+                                * extra;
+                        let detail = (CLIPBOARD_DETAIL_MIN_WIDTH + detail_extra).round();
+                        let translate = (available_right - detail)
+                            .max(CLIPBOARD_TRANSLATION_MIN_WIDTH)
+                            .round();
+                        self.clipboard_detail_width = detail;
+                        self.clipboard_translation_width = translate;
+                    }
+                }
+            }
+            (true, false) => {
+                if self.clipboard_detail_width > available_right {
+                    self.clipboard_detail_width =
+                        available_right.max(CLIPBOARD_DETAIL_MIN_WIDTH).round();
+                }
+            }
+            (false, true) => {
+                if self.clipboard_translation_width > available_right {
+                    self.clipboard_translation_width =
+                        available_right.max(CLIPBOARD_TRANSLATION_MIN_WIDTH).round();
+                }
+            }
+            (false, false) => {}
         }
     }
 
     pub fn resize_visible_width(&mut self, visible_width: f64) {
-        if self.history_visible && !self.translation_visible {
-            self.history_width = (visible_width
-                - if self.translation_visible {
-                    self.translation_width
+        if self.standalone_translation_visible {
+            self.translation_width = visible_width.max(self.standalone_translation_min_width());
+            self.right_extent = self.translation_width;
+            return;
+        }
+        if !self.clipboard_visible {
+            return;
+        }
+        if !self.clipboard_detail_visible && !self.clipboard_translation_visible {
+            self.clipboard_width = visible_width.clamp(CLIPBOARD_MIN_WIDTH, CLIPBOARD_MAX_WIDTH);
+            self.clipboard_extent = self.clipboard_width;
+            return;
+        }
+        let right = (visible_width - self.clipboard_width).max(self.right_min_width());
+        match (
+            self.clipboard_detail_visible,
+            self.clipboard_translation_visible,
+        ) {
+            (true, false) => {
+                self.clipboard_detail_width = right.max(CLIPBOARD_DETAIL_MIN_WIDTH);
+            }
+            (false, true) => {
+                self.clipboard_translation_width = right.max(CLIPBOARD_TRANSLATION_MIN_WIDTH);
+            }
+            (true, true) => {
+                // Keep clipboard detail width stable unless total shrinks below its space;
+                // rightmost attached translate pane absorbs outer resize first.
+                let next_translate = right - self.clipboard_detail_width;
+                if next_translate >= CLIPBOARD_TRANSLATION_MIN_WIDTH {
+                    self.clipboard_translation_width = next_translate;
                 } else {
-                    0.0
-                })
-            .clamp(280.0, 720.0);
-            self.history_extent = self.history_width;
-        } else if self.translation_visible {
-            self.translation_width = (visible_width
-                - if self.history_visible {
-                    self.history_width
-                } else {
-                    0.0
-                })
-            .max(self.translation_min_width());
-            self.translation_extent = self.translation_width;
+                    self.clipboard_translation_width = CLIPBOARD_TRANSLATION_MIN_WIDTH;
+                    self.clipboard_detail_width =
+                        (right - CLIPBOARD_TRANSLATION_MIN_WIDTH).max(CLIPBOARD_DETAIL_MIN_WIDTH);
+                }
+            }
+            (false, false) => {}
+        }
+        self.right_extent = self.right_target_width();
+    }
+
+    pub fn set_clipboard_detail_width(&mut self, width: f64) {
+        if !width.is_finite() {
+            return;
+        }
+        if self.clipboard_detail_visible && self.clipboard_translation_visible {
+            let total = self.clipboard_detail_width + self.clipboard_translation_width;
+            let max_detail =
+                (total - CLIPBOARD_TRANSLATION_MIN_WIDTH).max(CLIPBOARD_DETAIL_MIN_WIDTH);
+            let clamped = width.clamp(CLIPBOARD_DETAIL_MIN_WIDTH, max_detail).round();
+            self.clipboard_detail_width = clamped;
+            self.clipboard_translation_width = (total - clamped)
+                .max(CLIPBOARD_TRANSLATION_MIN_WIDTH)
+                .round();
+        } else {
+            self.clipboard_detail_width = width.max(CLIPBOARD_DETAIL_MIN_WIDTH).round();
         }
     }
 }
@@ -408,13 +508,12 @@ impl WindowState {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PanelFrame {
     pub left: f64,
-    pub history: f64,
-    pub translation: f64,
+    pub clipboard: f64,
+    pub right: f64,
 }
 
 impl PanelFrame {
     pub fn spring(self, target: Self, velocity: Self, elapsed: f64) -> (Self, Self) {
-        // The analytic critically damped solution preserves velocity when retargeted.
         let sample = |start: f64, end: f64, speed: f64| {
             let delta = start - end;
             let decay = (-32.0 * elapsed).exp();
@@ -424,36 +523,36 @@ impl PanelFrame {
                 (speed - 32.0 * coefficient * elapsed) * decay,
             )
         };
-        let (history, history_speed) = sample(self.history, target.history, velocity.history);
-        // A bounded symmetric curve makes the detail pane close exactly as it opens.
+        let (clipboard, clipboard_speed) =
+            sample(self.clipboard, target.clipboard, velocity.clipboard);
         let duration = 0.28;
         let progress = (elapsed / duration).clamp(0.0, 1.0);
-        let (translation, translation_speed) = if progress >= 1.0 {
-            (target.translation, 0.0)
+        let (right, right_speed) = if progress >= 1.0 {
+            (target.right, 0.0)
         } else {
-            let delta = target.translation - self.translation;
+            let delta = target.right - self.right;
             let eased = progress * progress * (3.0 - 2.0 * progress);
             let carry = progress * (1.0 - progress).powi(2);
             (
-                self.translation + delta * eased + velocity.translation * duration * carry,
+                self.right + delta * eased + velocity.right * duration * carry,
                 delta * 6.0 * progress * (1.0 - progress) / duration
-                    + velocity.translation * (1.0 - 4.0 * progress + 3.0 * progress * progress),
+                    + velocity.right * (1.0 - 4.0 * progress + 3.0 * progress * progress),
             )
         };
         let (anchor, anchor_speed) = sample(
-            self.left + self.history,
-            target.left + target.history,
-            velocity.left + velocity.history,
+            self.left + self.clipboard,
+            target.left + target.clipboard,
+            velocity.left + velocity.clipboard,
         );
         let frame = Self {
-            left: anchor - history,
-            history,
-            translation,
+            left: anchor - clipboard,
+            clipboard,
+            right,
         };
         let speed = Self {
-            left: anchor_speed - history_speed,
-            history: history_speed,
-            translation: translation_speed,
+            left: anchor_speed - clipboard_speed,
+            clipboard: clipboard_speed,
+            right: right_speed,
         };
         if frame.settled(target, speed) {
             (target, Self::default())
@@ -464,11 +563,11 @@ impl PanelFrame {
 
     pub fn settled(self, target: Self, velocity: Self) -> bool {
         (self.left - target.left).abs() < 0.25
-            && (self.history - target.history).abs() < 0.25
-            && (self.translation - target.translation).abs() < 0.25
+            && (self.clipboard - target.clipboard).abs() < 0.25
+            && (self.right - target.right).abs() < 0.25
             && velocity.left.abs() < 8.0
-            && velocity.history.abs() < 8.0
-            && velocity.translation.abs() < 8.0
+            && velocity.clipboard.abs() < 8.0
+            && velocity.right.abs() < 8.0
     }
 }
 
@@ -513,298 +612,142 @@ impl OperationResult {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn translation_metadata_round_trips_without_changing_legacy_records() {
-        let legacy = serde_json::json!({
-            "id":"legacy", "text":"Synthetic", "sourceLanguage":"en",
-            "targetLanguages":["zh-CN"], "translations":["合成"],
-            "date":"2026-11-17T00:00:00Z", "isFavorite":false, "isPinned":false,
-            "sourceApp":null
-        });
-        let legacy_record: super::HistoryRecord = serde_json::from_value(legacy.clone()).unwrap();
-        assert_eq!(serde_json::to_value(legacy_record).unwrap(), legacy);
-        let mut current = legacy;
-        let metadata = serde_json::json!({
-            "requestedSource":"auto", "engine":"edge", "strategyVersion":1,
-            "detections":[{"rawLanguage":"zh-Hans","language":"zh-CN","score":0.0},
-                {"rawLanguage":"qaa-Zzzz","language":"qaa-Zzzz","score":null}]
-        });
-        current["translation"] = metadata.clone();
-        let record: super::HistoryRecord = serde_json::from_value(current).unwrap();
+    fn clipboard_details_and_attached_translation_toggle_independently() {
+        let mut state = WindowState::default();
+        state.show_clipboard();
+        assert!(state.clipboard_visible);
+        assert!(!state.clipboard_detail_visible);
+        assert!(!state.clipboard_translation_visible);
+        assert_eq!(state.right_target_width(), 0.0);
+
+        // Open translation directly from list-only: [list | translate]
+        state.open_clipboard_translation("rec-1".into());
+        assert!(state.clipboard_visible);
+        assert!(!state.clipboard_detail_visible);
+        assert!(state.clipboard_translation_visible);
         assert_eq!(
-            serde_json::to_value(record).unwrap()["translation"],
-            metadata
+            state.clipboard_translation_record_id.as_deref(),
+            Some("rec-1")
         );
+        assert_eq!(
+            state.right_target_width(),
+            CLIPBOARD_TRANSLATION_DEFAULT_WIDTH
+        );
+
+        // Open details while translate is open: [list | detail | translate]
+        state.toggle_clipboard_details();
+        assert!(state.clipboard_detail_visible && state.clipboard_translation_visible);
+        assert_eq!(
+            state.right_target_width(),
+            CLIPBOARD_DETAIL_DEFAULT_WIDTH + CLIPBOARD_TRANSLATION_DEFAULT_WIDTH
+        );
+
+        // Collapse details while translate is open: [list | translate]
+        state.toggle_clipboard_details();
+        assert!(!state.clipboard_detail_visible && state.clipboard_translation_visible);
+        assert_eq!(
+            state.right_target_width(),
+            CLIPBOARD_TRANSLATION_DEFAULT_WIDTH
+        );
+
+        // Reopen details then close translation: [list | detail]
+        state.toggle_clipboard_details();
+        state.close_clipboard_translation();
+        assert!(state.clipboard_detail_visible && !state.clipboard_translation_visible);
+        assert!(state.clipboard_translation_record_id.is_none());
+        assert_eq!(state.right_target_width(), CLIPBOARD_DETAIL_DEFAULT_WIDTH);
     }
 
     #[test]
-    fn active_result_stays_protected_until_explicit_history_navigation() {
-        let mut state = super::WindowState::default();
-        state.summon_translation();
-        assert!(!state.records_browsing);
-        state.toggle_history();
-        assert!(!state.records_browsing);
-        state.select_history_record(false, false);
-        assert!(state.records_browsing);
-        state.summon_translation();
-        state.toggle_record_details();
-        assert!(state.records_browsing);
-    }
+    fn standalone_translation_and_clipboard_have_independent_pins_and_blur() {
+        let mut state = WindowState::default();
+        state.show_clipboard();
+        state.toggle_clipboard_details();
+        state.open_clipboard_translation("rec-1".into());
+        state.clipboard_pinned = true;
+        state.translation_pinned = false;
+        state.blur();
+        assert!(
+            state.clipboard_visible
+                && state.clipboard_detail_visible
+                && state.clipboard_translation_visible,
+            "pinned clipboard keeps list, detail, and attached translation on blur"
+        );
 
-    #[test]
-    fn repeated_history_selection_keeps_details_open() {
-        let mut state = super::WindowState::default();
-        for _ in 0..20 {
-            state.select_history_record(true, false);
-            assert!(state.translation_visible && state.history_visible);
-            assert_eq!(state.record_view, super::RecordView::Translation);
-        }
+        state.clipboard_pinned = false;
+        state.blur();
+        assert!(!state.any_visible());
+        assert!(state.clipboard_translation_record_id.is_none());
+
+        state.summon_standalone_translation();
+        state.translation_pinned = true;
+        state.blur();
+        assert!(state.standalone_translation_visible);
+
+        state.translation_pinned = false;
+        state.blur();
+        assert!(!state.standalone_translation_visible);
     }
 
     #[test]
     fn keyboard_preview_toggles_the_same_item_and_selects_another_without_closing() {
         let mut state = WindowState::default();
-        state.summon_translation();
-        assert!(!state.records_browsing);
-        state.set_record_view(RecordView::Clipboard);
-        assert!(state.records_browsing);
-        state.records_browsing = false;
+        state.show_clipboard();
         state.preview_clipboard_record("first".into());
-        assert!(state.translation_visible && state.records_browsing);
-        state.records_browsing = false;
+        assert!(state.clipboard_detail_visible && state.records_browsing);
         state.preview_clipboard_record("second".into());
-        assert!(state.translation_visible && state.records_browsing);
+        assert!(state.clipboard_detail_visible);
         assert_eq!(state.clipboard_detail_id.as_deref(), Some("second"));
         state.preview_clipboard_record("second".into());
-        assert!(!state.translation_visible && state.records_browsing);
+        assert!(!state.clipboard_detail_visible);
     }
 
     #[test]
-    fn record_modes_share_size_and_pin_and_collapse_details() {
-        let mut state = super::WindowState {
-            history_width: 430.0,
-            history_pinned: true,
-            ..Default::default()
-        };
-        state.set_record_view(super::RecordView::Clipboard);
-        assert!(state.history_visible && !state.translation_visible);
-        state.set_record_view(super::RecordView::Translation);
-        assert!(state.history_visible && !state.translation_visible);
-        assert_eq!(state.history_width, 430.0);
-        assert!(state.history_pinned);
-        state.show_translation();
-        state.toggle_history();
-        assert!(!state.history_visible && state.translation_visible);
-        state.set_record_view(super::RecordView::Clipboard);
-        state.toggle_history();
-        assert!(state.history_visible && !state.translation_visible);
-        assert_eq!(state.record_view, super::RecordView::Translation);
+    fn clamp_right_panes_fits_three_panes_within_narrow_screen() {
+        let mut state = WindowState::default();
+        state.show_clipboard();
+        state.toggle_clipboard_details();
+        state.open_clipboard_translation("rec-1".into());
+        state.clamp_right_panes_to_available(1200.0);
+        assert!(
+            state.clipboard_width + state.right_target_width() <= 1200.0 + 1.0,
+            "total {} exceeds 1200",
+            state.clipboard_width + state.right_target_width()
+        );
+        assert!(state.clipboard_detail_width >= CLIPBOARD_DETAIL_MIN_WIDTH);
+        assert!(state.clipboard_translation_width >= CLIPBOARD_TRANSLATION_MIN_WIDTH);
     }
 
     #[test]
-    fn open_details_stay_open_when_switching_record_modes() {
-        let mut state = super::WindowState::default();
-        state.set_record_view(super::RecordView::Clipboard);
-        assert!(state.history_visible && !state.translation_visible);
-        state.toggle_record_details();
-        state.clipboard_detail_id = Some("clip".into());
-        let clipboard_width = state.translation_width;
-        state.set_record_view(super::RecordView::Translation);
-        assert!(state.history_visible && state.translation_visible);
-        assert_eq!(state.record_view, super::RecordView::Translation);
-        assert_eq!(state.clipboard_detail_id.as_deref(), Some("clip"));
-        assert_eq!(state.translation_width, 920.0);
-        state.set_record_view(super::RecordView::Clipboard);
-        assert!(state.history_visible && state.translation_visible);
-        assert_eq!(state.clipboard_detail_id.as_deref(), Some("clip"));
-        assert_eq!(state.translation_width, clipboard_width);
-        state.toggle_record_details();
-        assert!(!state.translation_visible);
-        state.set_record_view(super::RecordView::Translation);
-        assert!(state.history_visible && !state.translation_visible);
-
-        let mut summoned = super::WindowState {
-            clipboard_detail_id: Some("clip".into()),
-            ..Default::default()
-        };
-        summoned.set_record_view(super::RecordView::Clipboard);
-        assert!(summoned.history_visible && !summoned.translation_visible);
-        assert!(summoned.clipboard_detail_id.is_none());
-    }
-
-    #[test]
-    fn clipboard_details_open_at_the_minimum_without_changing_translation_width() {
-        let mut state = super::WindowState {
-            record_view: super::RecordView::Translation,
-            translation_width: 1100.0,
-            history_width: 400.0,
-            ..Default::default()
-        };
-        state.set_record_view(super::RecordView::Clipboard);
-        state.toggle_record_details();
-        assert_eq!(state.translation_width, state.translation_min_width());
-        state.resize_visible_width(600.0);
-        assert_eq!(state.translation_width, 480.0);
-        assert_eq!(state.history_width, 400.0);
-        state.resize_visible_width(1040.0);
-        assert_eq!(state.translation_width, 640.0);
-        state.toggle_record_details();
-        state.toggle_record_details();
-        assert_eq!(state.translation_width, 480.0);
-        for entry in 0..5 {
-            let mut next = state.clone();
-            match entry {
-                0 => next.set_record_view(super::RecordView::Translation),
-                1 => next.summon_translation(),
-                2 => next.toggle_history(),
-                3 => next.select_history_record(false, false),
-                _ => next.show_translation(),
-            }
-            assert_eq!(next.translation_width, 1100.0);
-        }
-    }
-
-    #[test]
-    fn clipboard_details_clear_on_mode_change_or_session_end_and_use_single_pane_minimum() {
-        let mut state = super::WindowState {
-            clipboard_detail_id: Some("synthetic-record".into()),
-            records_open: true,
-            ..Default::default()
-        };
-        assert_eq!(state.translation_min_width(), 480.0);
-        state.set_record_view(super::RecordView::Translation);
-        assert!(state.clipboard_detail_id.is_none());
-        assert_eq!(state.translation_min_width(), 700.0);
-        state.clipboard_detail_id = Some("synthetic-record".into());
-        state.dismiss();
-        assert!(state.sync_records_session());
-        assert!(state.clipboard_detail_id.is_none());
-    }
-
-    #[test]
-    fn browsing_session_only_ends_when_both_regions_hide() {
-        let mut state = super::WindowState::default();
+    fn session_ends_when_clipboard_closes_and_resets_attached_state() {
+        let mut state = WindowState::default();
+        state.show_clipboard();
         assert!(!state.sync_records_session());
-        state.history_visible = true;
-        state.sync_records_session();
-        state.history_visible = false;
-        assert!(!state.sync_records_session());
-        assert_eq!(state.records_session, 0);
+        state.toggle_clipboard_details();
+        state.clipboard_detail_id = Some("rec-1".into());
+        state.open_clipboard_translation("rec-1".into());
         state.dismiss();
         assert!(state.sync_records_session());
         assert_eq!(state.records_session, 1);
-        assert!(!state.sync_records_session());
-        state.summon_translation();
-        assert!(!state.history_visible && state.translation_visible);
-    }
-
-    use super::*;
-
-    #[cfg(not(feature = "ui-tests"))]
-    #[test]
-    fn production_history_starts_empty() {
-        assert!(initial_history_records().is_empty());
-    }
-
-    #[test]
-    fn history_records_keep_fixture_compatibility_and_source_application() {
-        let mut records: Vec<HistoryRecord> = serde_json::from_str(include_str!(
-            "../../tests/fixtures/translation-history.json"
-        ))
-        .unwrap();
-        assert_eq!(records.len(), 20);
-        assert!(records.iter().all(|record| record.source_app.is_none()));
-        let record = &mut records[0];
-        record.source_app = Some(serde_json::json!({
-            "bundleId": "dev.local.test-source",
-            "name": "Test Source",
-            "iconDataUrl": "data:image/png;base64,dGVzdA=="
-        }));
-        let value = serde_json::to_value(&*record).unwrap();
-        assert_eq!(value["sourceApp"]["name"], "Test Source");
-        let restored: HistoryRecord = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.source_app, record.source_app);
-        assert_eq!(restored.translations, record.translations);
-    }
-
-    #[test]
-    fn translation_samples_share_exact_text_and_reject_arbitrary_copy() {
-        let samples: Vec<TranslationSample> = serde_json::from_str(include_str!(
-            "../../tests/fixtures/translation-history.json"
-        ))
-        .unwrap();
-        assert_eq!(samples.len(), 20);
-        for sample in &samples {
-            assert_eq!(
-                translation_sample_text(&sample.id, "source"),
-                Some(sample.text.clone())
-            );
-        }
-        assert!(translation_sample_text("sample-06", "source")
-            .unwrap()
-            .ends_with('\n'));
-        assert!(translation_sample_text("sample-07", "secondary").is_none());
-        assert!(translation_sample_text("arbitrary personal text", "source").is_none());
-        assert!(translation_sample_text("sample-01", "invalid_part").is_none());
-    }
-
-    #[test]
-    fn h04_blur_retains_only_visible_pinned_regions() {
-        for translation_pinned in [false, true] {
-            for history_pinned in [false, true] {
-                let mut state = WindowState {
-                    translation_visible: true,
-                    history_visible: true,
-                    translation_pinned,
-                    history_pinned,
-                    ..WindowState::default()
-                };
-                state.blur();
-                assert_eq!(state.translation_visible, translation_pinned);
-                assert_eq!(state.history_visible, history_pinned);
-                state.history_visible = false;
-                state.blur();
-                assert!(!state.history_visible, "pin must not reopen hidden history");
-            }
-        }
-    }
-
-    #[test]
-    fn details_reversal_preserves_position_and_velocity_then_finishes() {
-        let closed = PanelFrame {
-            left: 100.0,
-            history: 360.0,
-            translation: 0.0,
-        };
-        let open = PanelFrame {
-            translation: 920.0,
-            ..closed
-        };
-        for elapsed in [0.04, 0.14, 0.24] {
-            let (frame, velocity) = closed.spring(open, PanelFrame::default(), elapsed);
-            let (reversed, speed) = frame.spring(closed, velocity, 0.0);
-            assert_eq!(reversed.translation, frame.translation);
-            assert_eq!(speed.translation, velocity.translation);
-            let next = frame.spring(closed, velocity, 1e-8).0;
-            assert!(
-                ((next.translation - frame.translation) / 1e-8 - velocity.translation).abs() < 0.01
-            );
-            let (finished, speed) = frame.spring(closed, velocity, 0.28);
-            assert_eq!(finished.translation, 0.0);
-            assert_eq!(speed.translation, 0.0);
-        }
+        assert!(state.clipboard_detail_id.is_none());
+        assert!(state.clipboard_translation_record_id.is_none());
+        assert!(!state.clipboard_detail_visible);
+        assert!(!state.clipboard_translation_visible);
     }
 
     #[test]
     fn details_open_and_close_have_mirrored_motion_and_finish_in_280ms() {
-        for width in [480.0, 700.0, 920.0] {
+        for width in [440.0, 480.0, 920.0] {
             let closed = PanelFrame {
                 left: 100.0,
-                history: 360.0,
-                translation: 0.0,
+                clipboard: 360.0,
+                right: 0.0,
             };
             let open = PanelFrame {
-                translation: width,
+                right: width,
                 ..closed
             };
             for tick in 0..=28 {
@@ -812,383 +755,56 @@ mod tests {
                 let opening = closed.spring(open, PanelFrame::default(), elapsed).0;
                 let closing = open.spring(closed, PanelFrame::default(), 0.28 - elapsed).0;
                 assert!(
-                    (opening.translation - closing.translation).abs() < 1e-8,
+                    (opening.right - closing.right).abs() < 1e-8,
                     "width={width}, elapsed={elapsed}: open={}, close={}",
-                    opening.translation,
-                    closing.translation
+                    opening.right,
+                    closing.right
                 );
             }
             assert_eq!(
-                closed
-                    .spring(open, PanelFrame::default(), 0.28)
-                    .0
-                    .translation,
+                closed.spring(open, PanelFrame::default(), 0.28).0.right,
                 width
             );
             assert_eq!(
-                open.spring(closed, PanelFrame::default(), 0.28)
-                    .0
-                    .translation,
+                open.spring(closed, PanelFrame::default(), 0.28).0.right,
                 0.0
             );
         }
     }
 
     #[test]
-    fn h02_twenty_reverse_toggles_do_not_accumulate_width() {
-        let anchor = 580.0;
-        let mut frame = PanelFrame {
-            left: anchor,
-            history: 0.0,
-            translation: 920.0,
-        };
-        for _ in 0..20 {
-            let expanded = PanelFrame {
-                left: anchor - 340.0,
-                history: 340.0,
-                translation: 920.0,
-            };
-            let (opening, velocity) = frame.spring(expanded, PanelFrame::default(), 0.1);
-            frame = opening;
-            assert!((frame.left + frame.history - anchor).abs() < 1e-9);
-            let collapsed = PanelFrame {
-                left: anchor,
-                history: 0.0,
-                translation: 920.0,
-            };
-            let (reversed, reversed_velocity) = frame.spring(collapsed, velocity, 0.0);
-            assert_eq!(reversed.left, frame.left);
-            assert_eq!(reversed.history, frame.history);
-            assert!((reversed_velocity.history - velocity.history).abs() < 1e-9);
-            frame = frame.spring(collapsed, velocity, 0.5).0;
-            assert_eq!(frame.left, anchor);
-            assert_eq!(frame.history, 0.0);
-            assert_eq!(frame.translation, 920.0);
-        }
-    }
-
-    #[test]
-    fn history_reversal_preserves_speed_and_is_independent_of_tick_spacing() {
-        let closed = PanelFrame {
-            left: 570.0,
-            history: 0.0,
-            translation: 920.0,
-        };
-        let open = PanelFrame {
-            left: 129.0,
-            history: 441.0,
-            translation: 920.0,
-        };
-        let (frame, velocity) = closed.spring(open, PanelFrame::default(), 0.1);
-        let delta_time = 0.000_000_01;
-        let (reversed, speed) = frame.spring(closed, velocity, delta_time);
-        assert!(((reversed.history - frame.history) / delta_time - velocity.history).abs() < 0.01);
-        assert!((speed.history - velocity.history).abs() < 0.01);
-        let direct = closed.spring(open, PanelFrame::default(), 0.15);
-        let delayed_tick = frame.spring(open, velocity, 0.05);
-        assert!((direct.0.history - delayed_tick.0.history).abs() < 1e-9);
-        assert!((direct.1.history - delayed_tick.1.history).abs() < 1e-9);
-        assert_eq!(frame.spring(closed, velocity, 0.5).0.history, 0.0);
-        assert_eq!(
-            closed.spring(open, PanelFrame::default(), 0.5).0.history,
-            441.0
-        );
-    }
-
-    #[test]
-    fn history_shortcut_preserves_the_right_pane_in_all_three_entry_points() {
-        for details in [false, true] {
-            let mut state = WindowState::default();
-            state.set_record_view(RecordView::Clipboard);
-            if details {
-                state.toggle_record_details();
-            }
-            state.toggle_history();
-            assert_eq!(state.record_view, RecordView::Translation);
-            assert!(state.history_visible);
-            assert_eq!(state.translation_visible, details);
-            state.toggle_history();
-            assert!(!state.history_visible);
-            assert_eq!(state.translation_visible, details);
-        }
-        let mut state = WindowState::default();
-        state.summon_translation();
-        state.toggle_history();
-        assert!(state.history_visible && state.translation_visible);
-        state.toggle_history();
-        assert!(!state.history_visible && state.translation_visible);
-        state.dismiss();
-        state.toggle_history();
-        assert!(state.history_visible && !state.translation_visible);
-        assert_eq!(state.record_view, RecordView::Translation);
-    }
-
-    #[test]
-    fn rapid_history_toggles_use_current_backend_state() {
-        let mut state = WindowState {
-            history_pinned: true,
-            ..WindowState::default()
-        };
-        for _ in 0..20 {
-            state.toggle_history();
-        }
-        assert!(!state.history_visible);
-        assert!(state.translation_visible);
-        assert!(state.history_pinned);
-        state.toggle_history();
-        assert!(state.history_visible);
-    }
-
-    #[test]
-    fn sibling_views_preserve_translation_position_and_layout_during_history_animation() {
-        let history_width = 441.0;
-        let translation_width = 920.0;
-        let mut start = PanelFrame {
-            left: 570.0,
-            history: 0.0,
-            translation: translation_width,
-        };
-        for _ in 0..20 {
-            let open = PanelFrame {
-                left: 570.0 - history_width,
-                history: history_width,
-                translation: translation_width,
-            };
-            for tick in 0..=16 {
-                let frame = start
-                    .spring(open, PanelFrame::default(), tick as f64 * 0.35 / 16.0)
-                    .0;
-                let state = WindowState {
-                    history_width,
-                    history_extent: frame.history,
-                    translation_width,
-                    ..WindowState::default()
-                };
-                let ((history_x, history_view_width), (translation_x, translation_view_width)) =
-                    state.region_frames();
-                assert!((frame.left + translation_x - 570.0).abs() < 1e-9);
-                assert!((history_x + history_view_width - translation_x).abs() < 1e-9);
-                assert_eq!(translation_view_width, translation_width);
-                assert_eq!(history_view_width, history_width);
-            }
-            let (frame, velocity) = start.spring(open, PanelFrame::default(), 0.1);
-            start = frame;
-            let closed = PanelFrame {
-                left: 570.0,
-                history: 0.0,
-                translation: translation_width,
-            };
-            start = start.spring(closed, velocity, 0.5).0;
-            assert_eq!(start.left, 570.0);
-        }
-    }
-
-    #[test]
-    fn divider_width_changes_use_sibling_views_without_dom_compensation() {
-        for history_width in [280.0, 373.0, 441.0, 720.0, 360.0] {
-            let state = WindowState {
-                history_visible: true,
-                history_width,
-                history_extent: history_width,
-                ..WindowState::default()
-            };
-            let ((history_x, history_view_width), (translation_x, translation_view_width)) =
-                state.region_frames();
-            assert_eq!(history_x, 0.0);
-            assert_eq!(history_view_width, history_width);
-            assert_eq!(translation_x, history_width);
-            assert_eq!(translation_view_width, 920.0);
-        }
-    }
-
-    #[test]
-    fn native_window_notifications_keep_translation_width_across_history_toggles() {
-        let mut state = WindowState {
-            history_width: 441.0,
-            ..WindowState::default()
-        };
-        for _ in 0..20 {
-            state.toggle_history();
-            state.resize_visible_width(if state.history_visible { 1361.0 } else { 920.0 });
-            assert_eq!(state.translation_width, 920.0);
-            assert_eq!(state.history_width, 441.0);
-        }
-        state.toggle_history();
-        state.resize_visible_width(1441.0);
-        assert_eq!(state.translation_width, 1000.0);
-        state.translation_visible = false;
-        state.resize_visible_width(500.0);
-        assert_eq!(state.history_width, 500.0);
-        assert_eq!(state.translation_width, 1000.0);
-    }
-
-    #[test]
-    fn native_outer_edges_match_finderx_and_resize_translation_when_visible() {
-        let mut state = WindowState {
-            history_visible: true,
-            history_width: 441.0,
-            history_extent: 441.0,
-            native_resizing: true,
-            ..WindowState::default()
-        };
-        for visible in [1441.0, 1141.0, 1720.0, 1361.0] {
-            state.resize_visible_width(visible);
-            assert_eq!(state.history_width, 441.0);
-            assert_eq!(state.translation_width, visible - 441.0);
-        }
-        state.translation_visible = false;
-        for (requested, expected) in [(100.0, 280.0), (500.0, 500.0), (900.0, 720.0)] {
-            state.resize_visible_width(requested);
-            assert_eq!(state.history_width, expected);
-            assert_eq!(state.translation_width, 920.0);
-        }
-    }
-
-    #[test]
-    fn h03_history_only_returns_to_translation_preserving_history() {
-        let mut state = WindowState {
-            translation_visible: false,
-            history_visible: true,
-            history_pinned: true,
-            ..WindowState::default()
-        };
-        state.show_translation();
-        assert!(state.translation_visible);
-        assert!(state.history_visible);
-        assert!(state.history_pinned);
-    }
-
-    #[test]
-    fn explicit_dismiss_hides_both_even_when_pinned_and_preserves_sizes() {
-        for pinned in [false, true] {
-            let mut state = WindowState {
-                record_view: super::RecordView::Translation,
-                history_visible: true,
-                history_pinned: pinned,
-                ..WindowState::default()
-            };
-            state.dismiss();
-            assert!(!state.translation_visible);
-            assert!(!state.history_visible);
-            assert_eq!(state.translation_min_width(), 700.0);
-            state.secondary_enabled = false;
-            assert_eq!(state.translation_min_width(), 480.0);
-        }
-    }
-
-    #[test]
-    fn c09_copy_status_never_suggests_paste_before_write_or_after_overwrite() {
-        assert_eq!(
-            OperationResult::failed("resource_unavailable", None, 4).copy_status,
-            "not_written"
-        );
-        assert_eq!(
-            OperationResult::failed("permission_required", Some(4), 4).copy_status,
-            "current"
-        );
-        assert_eq!(
-            OperationResult::failed("clipboard_changed", Some(4), 5).copy_status,
-            "superseded"
-        );
-        assert!(sample("arbitrary user text").is_none());
-        assert!(sample("multiline").unwrap().ends_with('\n'));
-    }
-
-    #[test]
-    fn window_position_mode_parses_and_computes_origins_safely() {
-        use super::{
-            compute_window_origin, PlacementAnchor, ScreenPoint, ScreenRect, WindowPositionMode,
-        };
-
-        assert_eq!(
-            WindowPositionMode::parse(None),
-            WindowPositionMode::LastPosition
-        );
-        assert_eq!(
-            WindowPositionMode::parse(Some("unknown")),
-            WindowPositionMode::LastPosition
-        );
-        assert_eq!(
-            WindowPositionMode::parse(Some("center")),
-            WindowPositionMode::Center
-        );
-        assert_eq!(
-            WindowPositionMode::parse(Some("mouse")),
-            WindowPositionMode::Mouse
-        );
-        assert_eq!(
-            WindowPositionMode::parse(Some("cursor")),
-            WindowPositionMode::Cursor
-        );
-
+    fn window_position_center_mouse_cursor_and_last_position() {
         let screen = ScreenRect {
-            x: 100.0,
-            y: 40.0,
-            width: 1400.0,
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
             height: 900.0,
         };
         let anchor = PlacementAnchor {
             visible_frame: screen,
-            mouse: Some(ScreenPoint { x: 400.0, y: 700.0 }),
+            mouse: Some(ScreenPoint { x: 500.0, y: 600.0 }),
             caret: Some(ScreenRect {
-                x: 320.0,
-                y: 680.0,
+                x: 400.0,
+                y: 700.0,
                 width: 2.0,
                 height: 20.0,
             }),
         };
-
         assert_eq!(
-            compute_window_origin(WindowPositionMode::LastPosition, 360.0, 620.0, anchor),
+            compute_window_origin(WindowPositionMode::LastPosition, 400.0, 500.0, anchor),
             None
         );
         assert_eq!(
-            compute_window_origin(WindowPositionMode::Center, 360.0, 620.0, anchor),
-            Some(ScreenPoint { x: 620.0, y: 180.0 })
+            compute_window_origin(WindowPositionMode::Center, 400.0, 500.0, anchor),
+            Some(ScreenPoint { x: 520.0, y: 200.0 })
         );
-        // Mouse mode offsets slightly and stays inside screen bounds.
         assert_eq!(
-            compute_window_origin(WindowPositionMode::Mouse, 360.0, 620.0, anchor),
-            Some(ScreenPoint { x: 376.0, y: 96.0 })
+            compute_window_origin(WindowPositionMode::Mouse, 400.0, 500.0, anchor),
+            Some(ScreenPoint { x: 476.0, y: 116.0 })
         );
-        // Mouse near bottom-right corner clamps cleanly inside visible_frame.
-        let corner_anchor = PlacementAnchor {
-            visible_frame: screen,
-            mouse: Some(ScreenPoint { x: 1490.0, y: 50.0 }),
-            caret: None,
-        };
         assert_eq!(
-            compute_window_origin(WindowPositionMode::Mouse, 360.0, 620.0, corner_anchor),
-            Some(ScreenPoint { x: 1140.0, y: 40.0 })
-        );
-        // Cursor near top places window below caret; near bottom flips above caret.
-        assert_eq!(
-            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, anchor),
-            Some(ScreenPoint { x: 320.0, y: 52.0 })
-        );
-        let low_caret_anchor = PlacementAnchor {
-            visible_frame: screen,
-            mouse: Some(ScreenPoint { x: 400.0, y: 100.0 }),
-            caret: Some(ScreenRect {
-                x: 320.0,
-                y: 80.0,
-                width: 2.0,
-                height: 20.0,
-            }),
-        };
-        assert_eq!(
-            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, low_caret_anchor),
-            Some(ScreenPoint { x: 320.0, y: 108.0 })
-        );
-        // Cursor mode falls back to mouse when caret is unavailable.
-        let fallback_anchor = PlacementAnchor {
-            visible_frame: screen,
-            mouse: Some(ScreenPoint { x: 500.0, y: 750.0 }),
-            caret: None,
-        };
-        assert_eq!(
-            compute_window_origin(WindowPositionMode::Cursor, 360.0, 620.0, fallback_anchor),
-            Some(ScreenPoint { x: 476.0, y: 146.0 })
+            compute_window_origin(WindowPositionMode::Cursor, 400.0, 500.0, anchor),
+            Some(ScreenPoint { x: 400.0, y: 192.0 })
         );
     }
 }

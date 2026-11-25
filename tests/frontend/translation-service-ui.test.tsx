@@ -3,27 +3,34 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
-import { historySamples } from '../../src/translation/history';
+import type { TranslationOutput } from '../../src/shared/contracts';
 
 const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
-const result = (text: string, id = 'translation-runtime') => ({ ...historySamples[0], id, text, translations: [`Translated ${text}`, 'Second result'] });
+const result = (text: string, id = 'translation-runtime'): TranslationOutput => ({
+  id,
+  text,
+  sourceLanguage: 'auto',
+  translation: { requestedSource: 'auto', engine: 'edge', strategyVersion: 1, detections: [] },
+  targetLanguages: ['en', 'zh-CN'],
+  translations: [`Translated ${text}`, 'Second result'],
+});
 const submit = (text: string) => {
   fireEvent.change(source(), { target: { value: text } });
   fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
 };
 function deferred() {
-  let resolve!: (value: ReturnType<typeof result>) => void;
-  const promise = new Promise<ReturnType<typeof result>>((done) => { resolve = done; });
+  let resolve!: (value: TranslationOutput) => void;
+  const promise = new Promise<TranslationOutput>((done) => { resolve = done; });
   return { promise, resolve };
 }
 
 describe('live translation bridge', () => {
-  it('renders translated output and copies it through the runtime history id', async () => {
+  it('renders translated output and copies it through standalone scope', async () => {
     await mount(); submit('Synthetic input');
     await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
     fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'translation-test', part: 'primary' });
-    expect(calls('translation_run').at(-1)?.[1]).toEqual({ text: 'Synthetic input', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: false });
+    expect(calls('translation_copy').at(-1)?.[1]).toEqual({ scope: 'standalone', part: 'primary' });
+    expect(calls('translation_run').at(-1)?.[1]).toEqual({ text: 'Synthetic input', source: 'auto', targets: ['en', 'zh-CN'], scope: 'standalone' });
   });
 
   it('stops responding to a disabled translation shortcut and resumes with the same keys', async () => {
@@ -37,16 +44,13 @@ describe('live translation bridge', () => {
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
   });
 
-  it('immediately retranslates the changed target and creates a new complete record', async () => {
+  it('immediately retranslates only the changed target with reuseTargetIndex', async () => {
     const user = userEvent.setup(); await mount(); submit('Switch language');
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
     await user.click(screen.getByRole('button', { name: 'Primary language: English' }));
     await user.click(screen.getByRole('option', { name: 'German' }));
     await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
-    expect(calls('translation_run')[1][1]).toEqual({ text: 'Switch language', source: 'auto', targets: ['de', 'zh-CN'], fromSelection: false, reuse: { recordId: 'translation-test', targetIndex: 0 } });
-    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['de', 'zh-CN']);
-    expect(bridge.history.records.at(-1)?.id).toBe('translation-test-2');
-    expect(bridge.history.records.find(({ id }) => id === 'translation-test')?.targetLanguages).toEqual(['en', 'zh-CN']);
+    expect(calls('translation_run')[1][1]).toEqual({ text: 'Switch language', source: 'auto', targets: ['de', 'zh-CN'], scope: 'standalone', reuseTargetIndex: 0 });
   });
 
   it('keeps the other column visible while a target switch is pending', async () => {
@@ -64,20 +68,6 @@ describe('live translation bridge', () => {
     expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe('French result');
   });
 
-  it.each(['legacy', 'other-engine', 'old-strategy'] as const)('does not retain cached output from %s metadata while changing a target', async (kind) => {
-    await mount();
-    const base = { ...result('Metadata reuse boundary'), targetLanguages: ['en', 'zh-CN'], sourceLanguage: 'en', translation: kind === 'legacy' ? undefined : { requestedSource: 'auto', engine: kind === 'other-engine' ? 'google' : 'edge', strategyVersion: kind === 'old-strategy' ? 0 : 1, detections: [] } };
-    await emit('history_sample_selected', { sampleId: base.id, retranslate: false, record: base });
-    const pending = deferred(); const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'translation_run' ? pending.promise : invoke(name, args));
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
-    await user.click(screen.getByRole('option', { name: 'French' }));
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
-    await act(async () => pending.resolve({ ...base, targetLanguages: ['en', 'fr'], translations: ['New primary', 'New secondary'] }));
-  });
-
   it('retranslates both columns when the source language changes', async () => {
     const user = userEvent.setup(); await mount(); submit('Source switch');
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
@@ -85,7 +75,7 @@ describe('live translation bridge', () => {
     await user.click(screen.getByRole('option', { name: 'German' }));
     await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
     expect(calls('translation_run')[1][1]?.source).toBe('de');
-    expect(bridge.history.records.at(-1)?.sourceLanguage).toBe('de');
+    expect(calls('translation_run')[1][1]).not.toHaveProperty('reuseTargetIndex');
   });
 
   it('does not request for an empty input or the same chosen language', async () => {
@@ -99,17 +89,17 @@ describe('live translation bridge', () => {
     expect(calls('translation_run')).toHaveLength(1);
   });
 
-  it('records disabling and enabling the secondary column without losing the primary result', async () => {
+  it('handles disabling and enabling the secondary column without losing the primary result', async () => {
     const user = userEvent.setup(); await mount(); submit('Column changes');
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
     await user.click(screen.getByRole('button', { name: 'Secondary language: Chinese (Simplified)' }));
     await user.click(screen.getByRole('option', { name: 'None' }));
     await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
-    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['en']);
+    expect(calls('translation_run')[1][1]?.targets).toEqual(['en']);
     await user.click(screen.getByRole('button', { name: 'Secondary language: None' }));
     await user.click(screen.getByRole('option', { name: 'French' }));
     await waitFor(() => expect(calls('translation_run')).toHaveLength(3));
-    expect(bridge.history.records.at(-1)?.targetLanguages).toEqual(['en', 'fr']);
+    expect(calls('translation_run')[2][1]?.targets).toEqual(['en', 'fr']);
     expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
   });
 
@@ -123,7 +113,7 @@ describe('live translation bridge', () => {
     await mount();
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
     expect(source().value).toBe('Synthetic selection');
-    expect(calls('translation_run')[0][1]).toEqual({ text: 'Synthetic selection', source: 'auto', targets: ['en', 'zh-CN'], fromSelection: true });
+    expect(calls('translation_run')[0][1]).toEqual({ text: 'Synthetic selection', source: 'auto', targets: ['en', 'zh-CN'], scope: 'standalone' });
     await emit('selection_ready', null);
     expect(calls('translation_run')).toHaveLength(1);
   });
@@ -172,30 +162,7 @@ describe('live translation bridge', () => {
     expect(calls('selection_present')[0][1]).toEqual({ presentationId: 9 });
     expect(calls('translation_run')).toHaveLength(1);
   });
-
-  it('restores runtime records supplied by native history instead of requiring a fixture', async () => {
-    await mount(); const record = result('Runtime history');
-    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
-    expect(source().value).toBe('Runtime history');
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Translated Runtime history');
-  });
-
-  it('references the original record when retranslating and drops its source after editing', async () => {
-    await mount();
-    const record = { ...result('Retranslate source', 'original-source'), sourceApp: { bundleId: 'test.source', name: 'Synthetic App', iconDataUrl: 'data:image/png;base64,c3ludGhldGlj' } };
-    bridge.history.records.push(record);
-    await emit('history_sample_selected', { sampleId: record.id, retranslate: true, record });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]).toMatchObject({ reuse: { recordId: record.id } });
-    expect(calls('translation_run')[0][1]?.reuse).not.toHaveProperty('targetIndex');
-    await waitFor(() => expect(bridge.history.records.find(({ id }) => id === 'translation-test')?.sourceApp).toEqual(record.sourceApp));
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
-    submit('Edited source');
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
-    expect(calls('translation_run')[1][1]).not.toHaveProperty('reuse');
-  });
 });
-
 
 describe('translation engine settings', () => {
   it('lists languages supported by the selected engine without silently replacing an unsupported target', async () => {
@@ -269,8 +236,6 @@ describe('translation engine settings', () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
     await user.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
-    // Free up Tab so the translation action can claim it.
-    bridge.snapshot.clipboardControls.shortcuts.switchView.binding = null;
     await user.tab();
     await waitFor(() => expect(bridge.snapshot.translationPreferences.shortcuts.translate).toEqual({ code: 'Tab', modifiers: [] }));
     bridge.invoke.mockClear();
@@ -337,17 +302,19 @@ describe('translation engine settings', () => {
     expect(input.readOnly).toBe(false);
   });
 
-  it('rebinds a shortcut without taking the clipboard shortcut', async () => {
+  it('rebinds a shortcut without taking the clipboard shortcut and hides translation history controls', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     expect(screen.getByRole('heading', { name: 'Translation' })).toBeTruthy();
     for (const name of ['Languages', 'Connection']) expect(screen.getByRole('region', { name })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'History & Storage' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Actions shortcut' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
-    expect(screen.queryByRole('button', { name: 'Actions shortcut' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Open Translation History shortcut' }));
+    expect(screen.queryByRole('button', { name: 'Open Translation History shortcut' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Switch Record View shortcut' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Primary Translation shortcut' }));
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', metaKey: true });
-    await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'toggleHistory', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
+    await waitFor(() => expect(calls('translation_shortcut_set').at(-1)?.[1]).toEqual({ action: 'copyPrimary', binding: { code: 'KeyJ', modifiers: ['meta'] } }));
     fireEvent.click(within(screen.getByRole('group', { name: 'Translation' })).getByRole('button', { name: 'Translate shortcut' }));
     fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true });
     expect((await screen.findByRole('alertdialog')).textContent).toContain('Already assigned to Open Clipboard.');

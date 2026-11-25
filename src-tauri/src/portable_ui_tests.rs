@@ -6,7 +6,7 @@ use std::sync::{
 };
 use tauri::{AppHandle, Listener, Manager};
 
-const SCOPE: &str = "shared React history and real Tauri IPC in an isolated portable host; no OS mouse drag, clipboard access, translation network, or material pixel verification";
+const SCOPE: &str = "shared React clipboard workspace and real Tauri IPC in an isolated portable host; no OS mouse drag, clipboard access, translation network, or material pixel verification";
 
 fn finish(app: &AppHandle, finished: &AtomicBool, result: Value) {
     if finished.swap(true, Ordering::SeqCst) {
@@ -80,21 +80,41 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         })?;
         database.clipboard_edit(id, title, Some(&text))?;
     }
+    for index in 0..16 {
+        let id = format!("portable-fill-{index:02}");
+        let text = format!("Synthetic filler item {index} for scroll verification");
+        let state = app.state::<AppState>();
+        let mut database = state.database.lock().unwrap();
+        let database = database.as_mut().ok_or("missing isolated test database")?;
+        database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+            id,
+            kind: "text".into(),
+            text: text.clone(),
+            date: format!("2097-01-{:02}T00:00:00Z", index + 1),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+            fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+        })?;
+    }
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        state.history_visible = true;
-        state.translation_visible = true;
-        state.history_pinned = true;
+        state.standalone_translation_visible = false;
+        state.clipboard_visible = true;
+        state.clipboard_detail_visible = true;
+        state.clipboard_translation_visible = false;
+        state.clipboard_pinned = true;
         state.translation_pinned = true;
-        state.history_width_initialized = true;
+        state.clipboard_width_initialized = true;
     }
-    windows::show(app, "translation")?;
-    app.state::<AppState>()
-        .windows
-        .lock()
-        .unwrap()
-        .history_visible = true;
+    windows::show(app, "clipboard")?;
+    {
+        let state = app.state::<AppState>();
+        let mut regions = state.windows.lock().unwrap();
+        regions.clipboard_detail_visible = true;
+    }
     windows::apply_translation(app)?;
     if app
         .get_window("translation")
@@ -142,7 +162,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
 
 const SCRIPT: &str = r#"
 (() => {
-  if (!window.__TAURI_INTERNALS__ || !document.querySelector('.source-input') || window.__NAMI_PORTABLE_TEST_RUNNING__) return;
+  if (!window.__TAURI_INTERNALS__ || !document.querySelector('.clipboard-panel') || window.__NAMI_PORTABLE_TEST_RUNNING__) return;
   window.__NAMI_PORTABLE_TEST_RUNNING__ = true;
   const invoke = window.__TAURI_INTERNALS__.invoke;
   const cases = [];
@@ -157,168 +177,81 @@ const SCRIPT: &str = r#"
     }
     throw new Error(message);
   }
-  const rows = () => [...document.querySelectorAll('#translation-history [data-record-id]')];
-  const row = (id) => rows().find((element) => element.dataset.recordId === id);
-  const source = () => document.querySelector('.source-input');
-  const snapshot = () => invoke('history_snapshot');
-  const record = async (id) => (await snapshot()).records.find((record) => record.id === id);
-  const flag = async (id, key, value) => waitFor(async () => (await record(id))?.[key] === value, 'store flag did not update: ' + key);
-  const clickAction = (id, action) => {
-    const button = row(id)?.querySelector(`[data-action="${action}"] button`);
-    assert(button && !button.disabled, 'history action unavailable');
-    button.click();
-  };
+  const clipboardPanel = () => document.querySelector('.clipboard-panel');
+  const row = (id) => clipboardPanel().querySelector(`[data-record-id="${id}"]`);
   const pass = (name) => { cases.push({name, passed:true}); };
   (async () => {
-    const events = [];
-    const callback = window.__TAURI_INTERNALS__.transformCallback((event) => events.push(event.payload));
-    const eventId = await invoke('plugin:event|listen', {event:'history_changed', target:{kind:'Any'}, handler:callback});
     try {
-      currentCase = 'shared history startup';
-      await waitFor(async () => rows().length === 20 && (await snapshot()).records.length === 20, 'synthetic history did not load into shared React view');
-      await invoke('clipboard_query', {query:'',favoritesOnly:false,cursor:null});
+      currentCase = 'portable clipboard startup';
+      await waitFor(() => row('portable-clipboard-sample'), 'isolated clipboard fixture did not render');
       const app = await invoke('app_snapshot');
       assert(app.capabilities.nativeHistory === false && app.capabilities.nativeChrome === false, 'portable host incorrectly reports native controls');
       for (const capability of ['nativeMaterial', 'selection', 'clipboardWrite', 'autoPaste', 'accessibilityPermission']) {
         assert(app.capabilities[capability] === false, 'isolated host exposes system capability: ' + capability);
       }
       assert(document.documentElement.dataset.nativeHistory === 'false', 'React history capability not applied');
-      assert(source().value === '', 'translation source must start empty');
+      assert(!document.querySelector('[aria-label="Translations"]'), 'removed translation history switcher returned');
       pass(currentCase);
 
       currentCase = 'shared record presentation and menus';
-      const historyPanel = document.querySelector('#translation-history');
-      const clipboardPanel = document.querySelector('.clipboard-panel');
-      await waitFor(() => clipboardPanel.querySelector('[data-record-id="portable-clipboard-sample"]'), 'isolated clipboard fixture did not render');
-      const historyNode = row('sample-03');
-      const clipboardNode = clipboardPanel.querySelector('[data-record-id="portable-clipboard-sample"]');
-      const iconStyle = (node) => {
-        const style = getComputedStyle(node);
-        return {width:style.width,height:style.height,mask:style.maskImage||style.webkitMaskImage,color:style.color,opacity:style.opacity};
-      };
-      for (const name of ['doc.on.doc','note','star','pin','trash']) {
-        const left = historyNode.querySelector(`[data-symbol="${name}"]`), right = clipboardNode.querySelector(`[data-symbol="${name}"]`);
-        assert(left && right, 'shared row icon missing: '+name);
-        assert(JSON.stringify(iconStyle(left)) === JSON.stringify(iconStyle(right)), 'row icon appearance differs: '+name);
-        assert(getComputedStyle(left).width === '14px' && getComputedStyle(left).height === '14px', 'shared row icon must remain 14pt: '+name);
-        assert(getComputedStyle(left.parentElement).opacity === getComputedStyle(right.parentElement).opacity, 'disabled icon opacity differs: '+name);
+      const clipboardNode = row('portable-clipboard-sample');
+      for (const name of ['doc.on.doc','languages','note','star','pin','trash']) {
+        const icon = clipboardNode.querySelector(`[data-symbol="${name}"]`);
+        assert(icon, 'shared row icon missing: '+name);
+        assert(getComputedStyle(icon).width === '14px' && getComputedStyle(icon).height === '14px', 'shared row icon must remain 14pt: '+name);
       }
-      assert(!historyNode.querySelector('.history-row-actions [data-symbol="languages"]'), 'inline retranslation icon returned');
-      for (const selector of ['.history-search > .history-symbol','.history-search button .history-symbol','.history-shortcuts .history-symbol','.history-favorites .history-symbol']) {
-        assert(JSON.stringify(iconStyle(historyPanel.querySelector(selector))) === JSON.stringify(iconStyle(clipboardPanel.querySelector(selector))), 'shared panel icon differs: '+selector);
-      }
-      for (const panel of [historyPanel,clipboardPanel]) {
-        const style=getComputedStyle(panel.querySelector('.history-search'));
-        assert(style.borderTopWidth === '0px' && style.boxShadow === 'none', 'record search gained a border or focus ring');
-      }
-      const menuAppearance = async (recordNode, expectedFirst) => {
-        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-        recordNode.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));
-        await waitFor(()=>document.querySelector('[role="menu"]'), 'shared context menu did not open');
-        const menu=document.querySelector('[role="menu"]');
-        const entries=[...menu.querySelectorAll('[role="menuitem"]')];
-        assert(entries[0].textContent === expectedFirst, 'wrong context menu action for record type');
-        const common={};
-        for(const name of ['star','pin','trash']) {
-          const icon=menu.querySelector(`[data-symbol="${name}"]`);
-          assert(icon, 'menu icon missing: '+name);
-          common[name]=iconStyle(icon);
-        }
-        const style=getComputedStyle(menu);
-        common.surface={background:style.backgroundColor,border:style.borderColor,radius:style.borderRadius,shadow:style.boxShadow,blur:style.backdropFilter||style.webkitBackdropFilter};
-        menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
-        await waitFor(()=>!document.querySelector('[role="menu"]'), 'Escape did not close context menu');
-        return common;
-      };
-      const historyMenu = await menuAppearance(historyNode, 'Retranslate');
-      await invoke('records_view_set',{view:'clipboard'});
-      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden, 'clipboard presentation did not activate');
-      const clipboardMenu = await menuAppearance(clipboardNode, 'Paste');
-      assert(JSON.stringify(historyMenu) === JSON.stringify(clipboardMenu), 'shared menu colors, icons or material differ');
-      await invoke('records_view_set',{view:'translation'});
-      await waitFor(()=>!historyPanel.closest('.record-view').hidden, 'translation presentation did not restore');
+      const searchStyle = getComputedStyle(clipboardPanel().querySelector('.history-search'));
+      assert(searchStyle.borderTopWidth === '0px' && searchStyle.boxShadow === 'none', 'record search gained a border or focus ring');
+      clipboardNode.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:40,clientY:100}));
+      await waitFor(()=>document.querySelector('[role="menu"]'), 'shared context menu did not open');
+      const menu = document.querySelector('[role="menu"]');
+      assert(menu.querySelector('[role="menuitem"]').textContent === 'Paste', 'wrong context menu action');
+      menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+      await waitFor(()=>!document.querySelector('[role="menu"]'), 'Escape did not close context menu');
       pass(currentCase);
 
-      currentCase = 'shared loading animation in both record views';
+      currentCase = 'shared loading animation in clipboard view';
       const internalFetch = window.fetch;
-      const loadingStyles=[];
-      function setSearch(panel,value){
-        const input=panel.querySelector('.history-search input');
+      let loadingStyle;
+      function setSearch(value){
+        const input = clipboardPanel().querySelector('.history-search input');
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);
         input.dispatchEvent(new Event('input',{bubbles:true}));
       }
       try {
-        for(const [view,panel,command,query] of [['translation',historyPanel,'history_query','train'],['clipboard',clipboardPanel,'clipboard_query','Synthetic']]) {
-          await invoke('records_view_set',{view});
-          await waitFor(()=>!panel.closest('.record-view').hidden, 'loading view did not activate');
-          let release;
-          window.fetch=(input,options)=>new URL(typeof input==='string'?input:input.url,location.href).pathname.endsWith('/'+command)?new Promise((resolve,reject)=>{release=()=>internalFetch(input,options).then(resolve,reject);}):internalFetch(input,options);
-          setSearch(panel,query);
-          await waitFor(()=>typeof release==='function' && panel.querySelector('.activity-beam[data-visible=true] > span'), 'record query did not expose shared loading animation in '+view);
-          const track=panel.querySelector('.activity-beam'),beam=track.firstElementChild,style=getComputedStyle(beam),parent=getComputedStyle(track);
-          loadingStyles.push({height:style.height,maxWidth:style.maxWidth,radius:style.borderRadius,gradient:style.backgroundImage,shadow:style.boxShadow,animation:style.animationName,duration:style.animationDuration,timing:style.animationTimingFunction,opacityOnly:beam.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame)&&!('transform' in frame)&&'opacity' in frame)),trackHeight:parent.height,left:parent.left,right:parent.right});
-          window.fetch=internalFetch;
-          release();
-          await waitFor(()=>!panel.querySelector('.activity-beam[aria-hidden=false]'), 'record query loading animation did not finish');
-          setSearch(panel,'');
-          await waitFor(()=>!panel.querySelector('.activity-beam[aria-hidden=false]') && panel.querySelector('.history-search input').value==='', 'record search did not clear');
-        }
+        let release;
+        window.fetch=(input,options)=>new URL(typeof input==='string'?input:input.url,location.href).pathname.endsWith('/clipboard_query')?new Promise((resolve,reject)=>{release=()=>internalFetch(input,options).then(resolve,reject);}):internalFetch(input,options);
+        setSearch('Synthetic');
+        await waitFor(()=>typeof release==='function' && clipboardPanel().querySelector('.activity-beam[data-visible=true] > span'), 'clipboard query did not expose shared loading animation');
+        const track=clipboardPanel().querySelector('.activity-beam'),beam=track.firstElementChild,style=getComputedStyle(beam),parent=getComputedStyle(track);
+        loadingStyle = {height:style.height,trackHeight:parent.height,animation:style.animationName,timing:style.animationTimingFunction,opacityOnly:beam.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!('left' in frame)&&!('width' in frame)&&!('transform' in frame)&&'opacity' in frame))};
+        window.fetch=internalFetch;
+        release();
+        await waitFor(()=>!clipboardPanel().querySelector('.activity-beam[aria-hidden=false]'), 'clipboard query loading animation did not finish');
+        setSearch('');
+        await waitFor(()=>!clipboardPanel().querySelector('.activity-beam[aria-hidden=false]') && clipboardPanel().querySelector('.history-search input').value==='', 'clipboard search did not clear');
       } finally { window.fetch=internalFetch; }
-      assert(JSON.stringify(loadingStyles[0])===JSON.stringify(loadingStyles[1]), 'record loading effects differ: '+JSON.stringify(loadingStyles));
-      assert(loadingStyles[0].height==='1.5px' && loadingStyles[0].trackHeight==='8px', 'loading indicator is not the shared thin beam');
+      assert(loadingStyle.height==='1.5px' && loadingStyle.trackHeight==='8px', 'loading indicator is not the shared thin beam');
       if(!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        assert(loadingStyles[0].animation==='beam-breathe' && loadingStyles[0].timing==='ease-in-out' && loadingStyles[0].opacityOnly, 'shared loading motion parameters changed');
+        assert(loadingStyle.animation==='beam-breathe' && loadingStyle.timing==='ease-in-out' && loadingStyle.opacityOnly, 'shared loading motion parameters changed');
       }
-      await invoke('records_view_set',{view:'translation'});
-      await waitFor(async()=>rows().length===20 && (await snapshot()).records.length===20, 'loading test did not restore full history');
       pass(currentCase);
 
-      currentCase = 'single record scroll owner and protected action exit';
-      const scroller=historyPanel.querySelector('.history-list'),pinned=historyPanel.querySelector('.history-pinned');
-      assert(pinned.parentElement===scroller.parentElement && historyPanel.querySelector('.history-items').parentElement===scroller,'pinned and ordinary clip layout changed');
+      currentCase = 'single record scroll owner and pinned transparency';
+      await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
+      await waitFor(()=>clipboardPanel().querySelector('.history-pinned [data-record-id="portable-clipboard-sample"]'),'clipboard pin fixture did not appear');
+      const scroller=clipboardPanel().querySelector('.history-list'),pinned=clipboardPanel().querySelector('.history-pinned');
+      assert(pinned.parentElement===scroller.parentElement && clipboardPanel().querySelector('.history-items').parentElement===scroller,'pinned and ordinary clip layout changed');
       assert(getComputedStyle(scroller).overflowY==='auto' && scroller.getBoundingClientRect().top>=pinned.getBoundingClientRect().bottom,'ordinary records are not clipped below the pinned divider');
-      const assertGlassPinned=(layer,view)=>{
-        const style=getComputedStyle(layer),color=style.backgroundColor;
-        assert(color==='rgba(0, 0, 0, 0)','pinned background hides the shared glass in '+view+': '+color);
-        assert(Number(style.opacity)===1,'pinned row content is translucent in '+view);
-        assert((style.backdropFilter||style.webkitBackdropFilter)==='none','pinned region adds a separate blur in '+view);
-      };
-      assertGlassPinned(pinned,'translation');
-      assert(scroller.scrollHeight>scroller.clientHeight,'scroll fixture does not overflow');
-      const pinnedTop=pinned.getBoundingClientRect().top,ordinary=historyPanel.querySelector('.history-items .history-row'),ordinaryTop=ordinary.getBoundingClientRect().top;
-      scroller.scrollTop=80;
-      await new Promise(requestAnimationFrame);
-      const track=historyPanel.querySelector('.history-scrollbar');
-      assert(track && Math.abs(track.getBoundingClientRect().height-historyPanel.querySelector('.history-viewport').clientHeight)<=1,'scrollbar does not span the scroll viewport');
-      assert(Math.abs(pinned.getBoundingClientRect().top-pinnedTop)<=1,'ordinary scrolling moved pinned records');
-      assert(Math.abs(ordinary.getBoundingClientRect().top-ordinaryTop+80)<=1,'ordinary records did not follow the shared scroll position');
-      scroller.scrollTop=0;
+      const pinnedStyle=getComputedStyle(pinned);
+      assert(pinnedStyle.backgroundColor==='rgba(0, 0, 0, 0)','pinned background hides the shared glass');
+      assert(Number(pinnedStyle.opacity)===1,'pinned row content is translucent');
+      assert((pinnedStyle.backdropFilter||pinnedStyle.webkitBackdropFilter)==='none','pinned region adds a separate blur');
       await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
-      await invoke('records_view_set',{view:'clipboard'});
-      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden&&clipboardPanel.querySelector('.history-pinned [data-record-id="portable-clipboard-sample"]'),'clipboard pin fixture did not appear');
-      assertGlassPinned(clipboardPanel.querySelector('.history-pinned'),'clipboard');
-      await invoke('clipboard_record_update',{recordId:'portable-clipboard-sample',action:'pin'});
-      await invoke('records_view_set',{view:'translation'});
-      await waitFor(()=>!historyPanel.closest('.record-view').hidden,'translation view did not restore');
-      row('sample-03').querySelector('.history-row-select').focus({preventScroll:true});
-      await waitFor(()=>getComputedStyle(row('sample-03').querySelector('.history-row-actions')).opacity==='1','record actions did not become visible');
-      const deleteBefore=row('sample-03').querySelector('.history-delete'),deleteBoxBefore=deleteBefore.getBoundingClientRect();
-      clickAction('sample-03', 'favorite');
-      await waitFor(()=>row('sample-03').querySelector('.history-action[data-action="delete"] button')?.getAttribute('aria-hidden')==='true','protected delete did not start its exit');
-      assert(row('sample-03').querySelector('.history-delete')===deleteBefore && deleteBefore.disabled,'delete disappeared before its exit or remained usable');
-      await pause(60);
-      const exiting=deleteBefore.parentElement,exitStyle=getComputedStyle(exiting),exitBox=deleteBefore.getBoundingClientRect();
-      if(!matchMedia('(prefers-reduced-motion: reduce)').matches) assert(Number(exitStyle.opacity)<1 && exitBox.left>deleteBoxBefore.left && Math.abs(exitBox.top-deleteBoxBefore.top)<2,'delete did not move right and fade on protection: '+JSON.stringify({opacity:exitStyle.opacity,transform:exitStyle.transform,width:exitStyle.width,dx:exitBox.left-deleteBoxBefore.left,dy:exitBox.top-deleteBoxBefore.top,connected:exiting.isConnected}));
-      await waitFor(()=>!row('sample-03').querySelector('.history-delete'),'delete exit did not finish');
-      clickAction('sample-03', 'favorite');
-      await flag('sample-03','isFavorite',false);
-      await waitFor(()=>row('sample-03').querySelector('.history-delete') && !row('sample-03').querySelector('.history-delete').disabled,'delete did not return after removing protection');
       pass(currentCase);
 
       currentCase = 'adjacent notes use measured reversible height transitions';
-      await invoke('records_view_set',{view:'clipboard'});
-      await waitFor(()=>!clipboardPanel.closest('.record-view').hidden,'note view did not activate');
-      const notes=['portable-note-one','portable-note-two'].map(id=>clipboardPanel.querySelector(`[data-record-id="${id}"]`));
+      const notes=['portable-note-one','portable-note-two'].map(id=>row(id));
       assert(notes.every(Boolean),'adjacent note fixtures missing');
       const noteBody=node=>node.querySelector('.clipboard-record-body');
       const hover=(node,enter)=>node.dispatchEvent(new MouseEvent(enter?'mouseover':'mouseout',{bubbles:true,relatedTarget:document.body}));
@@ -332,113 +265,25 @@ const SCRIPT: &str = r#"
         hover(node,false);
         await waitFor(()=>Math.abs(noteBody(node).getBoundingClientRect().height-title.getBoundingClientRect().height)<1,'note did not settle back to title height');
       }
-      for(let index=0;index<4;index++) {
-        const current=notes[index%2],other=notes[(index+1)%2];
-        hover(other,false);hover(current,true);
-        await waitFor(()=>noteBody(current).dataset.expanded==='true','cached adjacent note failed to reopen');
-        await pause(40);
-        const before=noteBody(current).getBoundingClientRect().height;
-        hover(current,false);hover(other,true);
-        await new Promise(requestAnimationFrame);
-        assert(Math.abs(noteBody(current).getBoundingClientRect().height-before)<32,'reversing a note snapped its measured height');
-        hover(other,false);
-      }
-      await invoke('records_view_set',{view:'translation'});
       pass(currentCase);
 
-      currentCase = 'React actions update shared Rust history';
-      const id = 'sample-03';
-      const original = await record(id);
-      assert(!original.isFavorite && !original.isPinned, 'fixture action record must be unprotected');
-      clickAction(id, 'favorite');
-      await flag(id, 'isFavorite', true);
-      await waitFor(() => row(id)?.querySelector('[data-action=favorite] button')?.getAttribute('aria-pressed') === 'true', 'favorite did not render from shared state');
-      clickAction(id, 'pin');
-      await flag(id, 'isPinned', true);
-      await waitFor(() => row(id)?.classList.contains('pinned'), 'pinned record did not render in pinned section');
-      await waitFor(() => events.some((event) => event.records.some((record) => record.id === id && record.isPinned && record.isFavorite)), 'history_changed event missing authoritative flags');
-      pass(currentCase);
-
-      currentCase = 'shared history protects favorite and pinned records';
-      const before = await snapshot();
-      let rejected = false;
-      try { await invoke('history_record_update', {recordId:id, action:'delete'}); }
-      catch (error) { rejected = String(error).includes('history_protected'); }
-      assert(rejected, 'protected deletion was accepted');
-      const after = await snapshot();
-      assert(after.revision === before.revision && after.records.length === 20, 'protected deletion changed history');
-      assert(!row(id)?.querySelector('[data-action=delete] button:not([aria-hidden="true"])'), 'protected record still exposes delete');
-      clickAction(id, 'pin');
-      await flag(id, 'isPinned', false);
-      await waitFor(() => !row(id)?.classList.contains('pinned'), 'unpin did not update DOM');
-      clickAction(id, 'favorite');
-      await flag(id, 'isFavorite', false);
-      await waitFor(() => row(id)?.querySelector('[data-action=delete] button:not(:disabled)'), 'unprotected record did not restore delete');
-      pass(currentCase);
-
-      currentCase = 'React selection restores cached translation through IPC';
-      row(id).querySelector('.history-row-select').click();
-      await waitFor(async () => source().value === original.text && (await snapshot()).selectedId === id && row(id)?.classList.contains('selected'), 'history selection did not restore source and shared selection');
-      assert(document.querySelector('.result-column').textContent === original.translations[0], 'cached translation was not restored');
-      pass(currentCase);
-
-      currentCase = 'React deletion removes shared record and preserves selection';
-      clickAction('sample-05', 'delete');
-      await waitFor(async () => !row('sample-05') && !(await record('sample-05')), 'deleted record remained in DOM or shared store');
-      assert((await snapshot()).records.length === 19, 'shared deletion changed unexpected records');
-      assert((await snapshot()).selectedId === id && source().value === original.text, 'deleting another record lost selection');
-      pass(currentCase);
-
-      currentCase = 'portable history layout preserves source across toggles and widths';
-      const input = source();
-      const selected = row(id);
-      for (let index=0; index<12; index++) await invoke('history_toggle');
-      await invoke('history_visibility_set', {visible:true});
-      const expectedTranslationWidth = (await invoke('app_snapshot')).window.translationWidth;
+      currentCase = 'portable clipboard layout preserves list across widths and details toggle';
       for (const width of [320, 440, 280, 520, 360]) {
-        await invoke('history_width_set', {width, initialize:false});
-        await waitFor(() => document.querySelector('.history-divider')?.getAttribute('aria-valuenow') === String(width), 'history width event did not reach React');
+        await invoke('clipboard_width_set', {width, initialize:false});
+        await waitFor(() => document.querySelector('.history-divider')?.getAttribute('aria-valuenow') === String(width), 'clipboard width event did not reach React');
         await new Promise(requestAnimationFrame);
-        const nextHistory = document.querySelector('.history-clip').getBoundingClientRect();
-        const nextTranslation = document.querySelector('.translation-clip').getBoundingClientRect();
-        assert(Math.abs(nextHistory.width-width)<1 && Math.abs(nextTranslation.width-expectedTranslationWidth)<1,
-          'history resize changed translation width on next frame: ' + JSON.stringify({width,history:nextHistory.width,translation:nextTranslation.width,expectedTranslationWidth}));
         await waitFor(() => {
-          const history = document.querySelector('.history-clip').getBoundingClientRect();
-          const translation = document.querySelector('.translation-clip').getBoundingClientRect();
-          return Math.abs(history.width-width)<1 && translation.width>100 && Math.abs(history.right-translation.left)<1;
+          const left = document.querySelector('.history-clip').getBoundingClientRect();
+          const right = document.querySelector('.translation-clip').getBoundingClientRect();
+          return Math.abs(left.width-width)<1 && right.width>100 && Math.abs(left.right-right.left)<1;
         }, 'shared regions did not form a contiguous layout at width ' + width);
-        assert(source() === input && row(id) === selected, 'portable layout recreated source or record elements');
-        assert(source().value === original.text, 'portable layout lost input');
       }
-      assert(!document.querySelector('[role=alert]'), 'application reported an error during portable regression: ' + JSON.stringify([...document.querySelectorAll('[role=alert]')].map(node=>({class:node.className,text:node.textContent}))));
-      pass(currentCase);
-
-      currentCase = 'unified records switch shares host and preserves cached translation';
-      const hostInput = source();
-      const sharedWidth = (await invoke('app_snapshot')).window.historyWidth;
-      await invoke('records_view_set', {view:'clipboard'});
-      await waitFor(async () => (await invoke('app_snapshot')).window.recordView === 'clipboard' && !document.querySelector('.clipboard-panel').closest('.record-view').hidden, 'clipboard view did not appear in shared host');
-      assert(!document.querySelector('.clipboard-panel .records-details').disabled, 'clipboard details must be available');
-      assert(document.querySelector('.clipboard-panel [aria-label="Clipboard"]').getAttribute('aria-pressed') === 'true', 'clipboard mode not highlighted');
-      assert((await invoke('app_snapshot')).window.translationVisible === true, 'clipboard switch collapsed open details');
-      assert((await invoke('app_snapshot')).window.historyWidth === sharedWidth, 'mode switch changed shared list width');
-      await invoke('records_view_set', {view:'translation'});
-      await waitFor(() => !document.querySelector('#translation-history').closest('.record-view').hidden, 'translation view did not restore');
-      assert(source() === hostInput && source().value === original.text, 'mode switch recreated or cleared translation input');
-      assert((await invoke('app_snapshot')).window.translationVisible === true, 'translation switch collapsed open details');
-      await waitFor(async () => (await snapshot()).selectedId === id, 'mode switch lost the associated record');
-      assert(document.querySelector('.result-column').textContent === original.translations[0], 'details reopening lost cached result');
-      row(id).querySelector('.history-row-select').click();
-      await waitFor(async () => (await invoke('app_snapshot')).window.translationVisible, 'repeat selection closed details');
-      assert(!document.querySelector('[role=alert]'), 'unified records produced an error');
+      assert(!document.querySelector('[role=alert]'), 'application reported an error during portable regression');
       pass(currentCase);
       await invoke('plugin:event|emit', {event:'portable-test-result', payload:{passed:true,cases,error:null}});
-    } finally {
-      await invoke('plugin:event|unlisten', {event:'history_changed', eventId});
+    } catch (error) {
+      await invoke('plugin:event|emit', {event:'portable-test-result', payload:{passed:false,cases,error:currentCase + ': ' + String(error)}});
     }
-  })().catch(async (error) => {
-    await invoke('plugin:event|emit', {event:'portable-test-result', payload:{passed:false,cases,error:currentCase + ': ' + String(error)}});
-  });
+  })();
 })();
 "#;

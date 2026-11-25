@@ -335,7 +335,6 @@ pub enum BackupImportMode {
 #[serde(rename_all = "camelCase")]
 pub struct BackupSummary {
     pub exported_at: String,
-    pub translation_count: usize,
     pub clipboard_count: usize,
     pub image_count: usize,
     pub file_size: u64,
@@ -345,8 +344,6 @@ pub struct BackupSummary {
 #[serde(rename_all = "camelCase")]
 pub struct BackupImportReport {
     pub mode: BackupImportMode,
-    pub imported_translations: usize,
-    pub skipped_translations: usize,
     pub imported_clipboard: usize,
     pub skipped_clipboard: usize,
     pub restored_images: usize,
@@ -416,11 +413,6 @@ pub fn inspect_backup(path: &Path) -> Result<BackupSummary, String> {
         .optional()
         .map_err(backup_error)?
         .unwrap_or_default();
-    let translation_count: i64 = conn
-        .query_row("SELECT count(*) FROM translation_records", [], |row| {
-            row.get(0)
-        })
-        .map_err(backup_error)?;
     let clipboard_count: i64 = conn
         .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
             row.get(0)
@@ -433,7 +425,6 @@ pub fn inspect_backup(path: &Path) -> Result<BackupSummary, String> {
         .map_err(backup_error)?;
     Ok(BackupSummary {
         exported_at,
-        translation_count: translation_count.max(0) as usize,
         clipboard_count: clipboard_count.max(0) as usize,
         image_count: image_count.max(0) as usize,
         file_size,
@@ -570,11 +561,6 @@ impl HistoryDatabase {
             }
 
             let exported_at = chrono::Utc::now().to_rfc3339();
-            let translation_count: i64 = backup
-                .query_row("SELECT count(*) FROM translation_records", [], |row| {
-                    row.get(0)
-                })
-                .map_err(storage_error)?;
             let clipboard_count: i64 = backup
                 .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
                     row.get(0)
@@ -609,7 +595,6 @@ impl HistoryDatabase {
                 ("app_version", env!("CARGO_PKG_VERSION").to_owned()),
                 ("schema_version", VERSION.to_string()),
                 ("exported_at", exported_at.clone()),
-                ("translation_count", translation_count.to_string()),
                 ("clipboard_count", clipboard_count.to_string()),
                 ("image_count", image_blobs.len().to_string()),
             ];
@@ -628,7 +613,6 @@ impl HistoryDatabase {
                 .len();
             Ok(BackupSummary {
                 exported_at,
-                translation_count: translation_count.max(0) as usize,
                 clipboard_count: clipboard_count.max(0) as usize,
                 image_count: image_blobs.len(),
                 file_size,
@@ -685,88 +669,11 @@ impl HistoryDatabase {
 
         if mode == BackupImportMode::Replace {
             tx.execute_batch(
-                "DELETE FROM translation_records;
-                DELETE FROM clipboard_records;
+                "DELETE FROM clipboard_records;
                 DELETE FROM source_apps;
                 DELETE FROM preferences;",
             )
             .map_err(storage_error)?;
-        }
-
-        let mut imported_translations = 0usize;
-        let mut skipped_translations = 0usize;
-        {
-            let mut stmt = backup
-                .prepare(
-                    "SELECT id, created_at, record_json, engine, is_favorite, is_pinned, source_app_id, source_folded, primary_folded, secondary_folded
-                     FROM translation_records ORDER BY sequence ASC",
-                )
-                .map_err(backup_error)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, String>(9)?,
-                    ))
-                })
-                .map_err(backup_error)?;
-            for row in rows {
-                let (
-                    id,
-                    created_at,
-                    record_json,
-                    engine,
-                    is_favorite,
-                    is_pinned,
-                    src_id,
-                    source_folded,
-                    primary_folded,
-                    secondary_folded,
-                ) = row.map_err(backup_error)?;
-                if mode == BackupImportMode::Merge {
-                    let exists: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM translation_records WHERE id = ?1)",
-                            params![&id],
-                            |r| r.get(0),
-                        )
-                        .map_err(storage_error)?;
-                    if exists {
-                        skipped_translations += 1;
-                        continue;
-                    }
-                }
-                let mapped_src = match src_id.and_then(|sid| source_map.get(&sid)) {
-                    Some(payload) => Some(resolve_source_app(&tx, payload)?),
-                    None => None,
-                };
-                tx.execute(
-                    "INSERT INTO translation_records(id, created_at, record_json, engine, is_favorite, is_pinned, source_app_id, source_folded, primary_folded, secondary_folded)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        id,
-                        created_at,
-                        record_json,
-                        engine,
-                        is_favorite,
-                        is_pinned,
-                        mapped_src,
-                        source_folded,
-                        primary_folded,
-                        secondary_folded
-                    ],
-                )
-                .map_err(storage_error)?;
-                imported_translations += 1;
-            }
         }
 
         let mut imported_clipboard = 0usize;
@@ -973,21 +880,14 @@ impl HistoryDatabase {
 
         tx.commit().map_err(storage_error)?;
 
-        let total_records: i64 = self
-            .connection
-            .query_row("SELECT count(*) FROM translation_records", [], |r| r.get(0))
-            .map_err(storage_error)?;
         let clipboard_total: i64 = self
             .connection
             .query_row("SELECT count(*) FROM clipboard_records", [], |r| r.get(0))
             .map_err(storage_error)?;
-        self.total_records = total_records.max(0) as usize;
         self.clipboard_total_records = clipboard_total.max(0) as usize;
 
         Ok(BackupImportReport {
             mode,
-            imported_translations,
-            skipped_translations,
             imported_clipboard,
             skipped_clipboard,
             restored_images,
@@ -998,8 +898,6 @@ impl HistoryDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::HistoryQuery;
-    use crate::model::HistoryRecord;
 
     fn sample_png() -> Vec<u8> {
         // Minimal valid 1x1 PNG signature + chunks.
@@ -1010,22 +908,6 @@ mod tests {
             0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
             0xE7, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
         ]
-    }
-
-    fn translation(id: &str, text: &str) -> HistoryRecord {
-        HistoryRecord {
-            title: String::new(),
-            id: id.into(),
-            text: text.into(),
-            source_language: "en".into(),
-            translation: None,
-            target_languages: vec!["zh-CN".into()],
-            translations: vec![format!("译:{text}")],
-            date: "2026-11-24T10:00:00Z".into(),
-            is_favorite: true,
-            is_pinned: false,
-            source_app: Some(serde_json::json!({"name": "Notes", "bundleId": "com.apple.Notes"})),
-        }
     }
 
     fn clip_text(id: &str, text: &str) -> clipboard::ClipboardRecord {
@@ -1066,8 +948,6 @@ mod tests {
 
         let src_db_path = root.join("src.sqlite3");
         let mut src = HistoryDatabase::open(&src_db_path).unwrap();
-        src.insert(&translation("tr-1", "hello backup"), "edge", || true)
-            .unwrap();
         src.clipboard_insert(&clip_text("cb-1", "clip text one"))
             .unwrap();
         let png = sample_png();
@@ -1080,15 +960,28 @@ mod tests {
 
         let backup_path = root.join("export.namibak");
         let summary = src.export_backup(&src_images, &backup_path).unwrap();
-        assert_eq!(summary.translation_count, 1);
         assert_eq!(summary.clipboard_count, 2);
         assert_eq!(summary.image_count, 1);
         assert!(summary.file_size > 0);
 
         let inspected = inspect_backup(&backup_path).unwrap();
-        assert_eq!(inspected.translation_count, 1);
         assert_eq!(inspected.clipboard_count, 2);
         assert_eq!(inspected.image_count, 1);
+
+        // Simulate legacy v10 backup containing a translation_records table; import must safely ignore it.
+        let legacy_path = root.join("legacy-v10.namibak");
+        std::fs::copy(&backup_path, &legacy_path).unwrap();
+        {
+            let conn = Connection::open(&legacy_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE translation_records(id TEXT PRIMARY KEY);
+                 INSERT INTO translation_records(id) VALUES('legacy-tr');
+                 PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        }
+        let legacy_summary = inspect_backup(&legacy_path).unwrap();
+        assert_eq!(legacy_summary.clipboard_count, 2);
 
         // Merge into a destination DB with one overlapping text and different locale.
         let dst_db_path = root.join("dst.sqlite3");
@@ -1100,10 +993,8 @@ mod tests {
         dst.preference_set("ui_locale", "en").unwrap();
 
         let merge = dst
-            .import_backup(&backup_path, &dst_images, BackupImportMode::Merge)
+            .import_backup(&legacy_path, &dst_images, BackupImportMode::Merge)
             .unwrap();
-        assert_eq!(merge.imported_translations, 1);
-        assert_eq!(merge.skipped_translations, 0);
         assert_eq!(merge.imported_clipboard, 1);
         assert_eq!(merge.skipped_clipboard, 1);
         assert_eq!(merge.restored_images, 1);
@@ -1111,25 +1002,11 @@ mod tests {
         assert_eq!(dst.preference("ui_locale").unwrap().as_deref(), Some("en"));
         // Restored image is readable on disk with valid hash.
         assert_eq!(clipboard::read_image(&dst_images, &rel_img).unwrap(), png);
-        // Translation FTS search works on imported record.
-        let found = dst
-            .page(
-                &HistoryQuery {
-                    text: "backup".into(),
-                    favorites_only: false,
-                },
-                None,
-                10,
-            )
-            .unwrap();
-        assert_eq!(found.records.len(), 1);
-        assert_eq!(found.records[0].id, "tr-1");
 
         // Replace overwrites records and preferences cleanly.
         let replace = dst
             .import_backup(&backup_path, &dst_images, BackupImportMode::Replace)
             .unwrap();
-        assert_eq!(replace.imported_translations, 1);
         assert_eq!(replace.imported_clipboard, 2);
         assert_eq!(
             dst.preference("ui_locale").unwrap().as_deref(),

@@ -271,10 +271,10 @@ impl Preferences {
     }
 
     pub fn global_binding(&self, action: shortcuts::ShortcutAction) -> Option<&KeyBinding> {
-        use shortcuts::ShortcutAction::{OpenTranslation, Selection, ToggleHistory};
+        use shortcuts::ShortcutAction::{OpenTranslation, Selection};
         match action {
             Selection if self.selection_enabled => self.shortcuts.get(action),
-            OpenTranslation | ToggleHistory if !self.disabled_shortcuts.contains(&action) => {
+            OpenTranslation if !self.disabled_shortcuts.contains(&action) => {
                 self.shortcuts.get(action)
             }
             _ => None,
@@ -356,32 +356,12 @@ pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Resul
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranslationReuse {
-    pub record_id: String,
-    pub target_index: Option<usize>,
-    #[serde(default)]
-    pub focus_history: bool,
-}
-
-pub fn source_app_for_translation(
-    text: &str,
-    previous: Option<&crate::model::HistoryRecord>,
-    captured: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    match previous.filter(|record| record.text == text) {
-        Some(record) => record.source_app.clone(),
-        None => captured,
-    }
-}
-
 pub fn reusable_results(
     engine: &str,
     text: &str,
     source: &str,
     targets: &[String],
-    previous: Option<&crate::model::HistoryRecord>,
+    previous: Option<&crate::model::TranslationOutput>,
     refresh_target: Option<usize>,
 ) -> Vec<Option<String>> {
     targets
@@ -392,15 +372,14 @@ pub fn reusable_results(
                 .filter(|_| refresh_target.is_some_and(|changed| changed < 2 && index != changed))
                 .filter(|record| record.text == text)
                 .filter(|record| {
-                    record.translation.as_ref().is_some_and(|metadata| {
-                        metadata
-                            .target_engines
-                            .get(index)
-                            .unwrap_or(&metadata.engine)
-                            == engine
-                            && metadata.requested_source == source
-                            && metadata.strategy_version == STRATEGY_VERSION
-                    })
+                    let metadata = &record.translation;
+                    metadata
+                        .target_engines
+                        .get(index)
+                        .unwrap_or(&metadata.engine)
+                        == engine
+                        && metadata.requested_source == source
+                        && metadata.strategy_version == STRATEGY_VERSION
                 })
                 .filter(|record| record.target_languages.get(index) == Some(target))
                 .and_then(|record| record.translations.get(index))
@@ -1067,24 +1046,19 @@ mod tests {
 
     #[test]
     fn language_switch_reuses_only_unchanged_columns() {
-        let record = crate::model::HistoryRecord {
-            title: String::new(),
+        let record = crate::model::TranslationOutput {
             id: "previous".into(),
             text: "Synthetic".into(),
             source_language: "auto".into(),
             target_languages: vec!["en".into(), "zh-CN".into()],
             translations: vec!["English".into(), "Chinese".into()],
-            date: "test".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-            translation: Some(crate::model::TranslationMetadata {
+            translation: crate::model::TranslationMetadata {
                 requested_source: "auto".into(),
                 engine: "edge".into(),
                 target_engines: Vec::new(),
                 strategy_version: STRATEGY_VERSION,
                 detections: Vec::new(),
-            }),
+            },
         };
         assert_eq!(
             reusable_results(
@@ -1105,39 +1079,6 @@ mod tests {
                 &record.target_languages,
                 Some(&record),
                 None
-            ),
-            vec![None, None]
-        );
-        let app = serde_json::json!({"bundleId": "synthetic.source", "name": "Synthetic Source", "iconDataUrl": "data:image/png;base64,c3ludGhldGlj"});
-        let mut sourced = record.clone();
-        sourced.source_app = Some(app.clone());
-        assert_eq!(
-            source_app_for_translation("Synthetic", Some(&sourced), None),
-            Some(app.clone())
-        );
-        assert_eq!(
-            source_app_for_translation("Edited", Some(&sourced), None),
-            None
-        );
-        assert_eq!(
-            source_app_for_translation("Synthetic", None, Some(app.clone())),
-            Some(app.clone())
-        );
-        assert_eq!(
-            source_app_for_translation("Synthetic", Some(&record), Some(app)),
-            None
-        );
-        let full_refresh: TranslationReuse =
-            serde_json::from_str(r#"{"recordId":"previous"}"#).unwrap();
-        assert_eq!(full_refresh.target_index, None);
-        assert_eq!(
-            reusable_results(
-                "edge",
-                "Synthetic",
-                "auto",
-                &record.target_languages,
-                Some(&sourced),
-                full_refresh.target_index
             ),
             vec![None, None]
         );
@@ -1434,10 +1375,6 @@ mod tests {
             let backend = serde_json::to_value(languages(engine)).unwrap();
             assert_eq!(backend, frontend, "{engine} catalogs diverged");
         }
-        let frontend_version = include_str!("../../src/translation/history.ts");
-        assert!(frontend_version.contains(&format!(
-            "TRANSLATION_STRATEGY_VERSION = {STRATEGY_VERSION}"
-        )));
     }
 
     #[test]
@@ -1448,9 +1385,9 @@ mod tests {
 
     #[test]
     fn reuse_requires_current_engine_request_mode_and_strategy() {
-        let mut record: crate::model::HistoryRecord = serde_json::from_value(serde_json::json!({
+        let mut record: crate::model::TranslationOutput = serde_json::from_value(serde_json::json!({
             "id":"synthetic","text":"text","sourceLanguage":"en","targetLanguages":["en","zh-CN"],
-            "translations":["text","文本"],"date":"2026-11-17T00:00:00Z","isFavorite":false,"isPinned":false,
+            "translations":["text","文本"],
             "translation":{"requestedSource":"auto","engine":"edge","strategyVersion":1,"detections":[]}
         })).unwrap();
         assert_eq!(
@@ -1497,24 +1434,12 @@ mod tests {
             ),
             [None, None]
         );
-        record.translation.as_mut().unwrap().strategy_version = 0;
+        record.translation.strategy_version = 0;
         assert_eq!(
             reusable_results(
                 "edge",
                 "text",
                 "auto",
-                &record.target_languages,
-                Some(&record),
-                Some(1)
-            ),
-            [None, None]
-        );
-        record.translation = None;
-        assert_eq!(
-            reusable_results(
-                "edge",
-                "text",
-                "en",
                 &record.target_languages,
                 Some(&record),
                 Some(1)

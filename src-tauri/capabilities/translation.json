@@ -4,8 +4,7 @@
     "translation"
   ],
   "webviews": [
-    "translation",
-    "history"
+    "translation"
   ],
   "permissions": [
     "core:event:allow-listen",

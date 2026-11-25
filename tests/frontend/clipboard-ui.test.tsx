@@ -85,7 +85,7 @@ describe('clipboard type filters', () => {
     expect(within(row('first')).getByRole('button', { name: 'Copy' }).querySelector('.copy-success')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'activate' });
-    expect(bridge.snapshot.window.historyVisible).toBe(true);
+    expect(bridge.snapshot.window.clipboardVisible).toBe(true);
   });
 
   it('copies directly with a checkmark and keeps the records window open', async () => {
@@ -96,7 +96,7 @@ describe('clipboard type filters', () => {
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
     expect(calls('window_hide')).toHaveLength(0);
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(bridge.snapshot.window.historyVisible).toBe(true);
+    expect(bridge.snapshot.window.clipboardVisible).toBe(true);
   });
 
   it('keeps the original rows and current category when a copy creates a new record', async () => {
@@ -190,7 +190,7 @@ describe('clipboard type filters', () => {
     expect(entries()).not.toHaveProperty('Copy Primary Translation');
 
     view.rerender(<HistoryFooter {...props} />);
-    expect(entries()).toMatchObject({ 'Open selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Category': '← / →', 'Open Translation': '⌘ T', 'Autofill Input': '⌘ T', Translate: '⌘ ↵', 'Open Translation History': '⌘ /', 'Copy Primary Translation': '⌘ 1' });
+    expect(entries()).toMatchObject({ 'Open selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Category': '← / →', 'Open Translation': '⌘ T', 'Autofill Input': '⌘ T', Translate: '⌘ ↵', 'Copy Primary Translation': '⌘ 1' });
     expect(entries()).not.toHaveProperty('Open Clipboard History');
     expect(entries()).not.toHaveProperty('Extract Text');
 
@@ -432,15 +432,16 @@ describe('clipboard text processing', () => {
     });
     await mount('clipboard');
     await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
-    const switchView = async (view: 'translation' | 'clipboard') => {
-      fireEvent.click(within(document.querySelector<HTMLElement>(view === 'translation' ? '.clipboard-panel .history-toolbar' : '#translation-history .history-toolbar')!).getByRole('button', { name: view === 'translation' ? 'Translations' : 'Clipboard' }));
-      await waitFor(() => expect(bridge.snapshot.window.recordView).toBe(view));
+    const reopen = async (update: () => void) => {
+      await windowState({ clipboardVisible: false, clipboardExtent: 0 });
+      update();
+      await windowState({ clipboardVisible: true, clipboardExtent: bridge.snapshot.window.clipboardWidth });
     };
-    await switchView('translation'); isImage = false; await switchView('clipboard');
+    await reopen(() => { isImage = false; });
     await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Extract text' })).toBeNull());
-    await switchView('translation'); isImage = true; await switchView('clipboard');
+    await reopen(() => { isImage = true; });
     await waitFor(() => expect(within(row('image-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy());
-    await switchView('translation'); missing = true; await switchView('clipboard');
+    await reopen(() => { missing = true; });
     await waitFor(() => expect(within(row('image-file')).queryByRole('button', { name: 'Translate' })).toBeNull());
     expect(calls('clipboard_record_has_text')).toHaveLength(0);
     expect(calls('clipboard_files')).toHaveLength(4);
@@ -600,11 +601,9 @@ describe('clipboard text processing', () => {
     expect(button.disabled).toBe(true);
     fireEvent.click(button);
     expect(calls('clipboard_record_process')).toHaveLength(1);
-    fireEvent.click(within(document.querySelector<HTMLElement>('.clipboard-panel .history-toolbar')!).getByRole('button', { name: 'Translations' }));
-    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('translation'));
+    await windowState({ clipboardVisible: false, clipboardExtent: 0 });
     await act(async () => reject(new Error('late_failure')));
-    fireEvent.click(within(document.querySelector<HTMLElement>('#translation-history .history-toolbar')!).getByRole('button', { name: 'Clipboard' }));
-    await waitFor(() => expect(bridge.snapshot.window.recordView).toBe('clipboard'));
+    await windowState({ clipboardVisible: true, clipboardExtent: bridge.snapshot.window.clipboardWidth });
     expect(document.querySelector('.record-feedback')).toBeNull();
     expect((within(row('first')).getByRole('button', { name: 'Translate' }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -636,12 +635,12 @@ describe('clipboard text processing', () => {
     const selects = calls('clipboard_details_select').length;
     records.unshift({ id: 'ocr-later', kind: 'text', text: 'Second sentence', date: '2026-11-14T14:00:00Z', isFavorite: false, isPinned: false });
     fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
-    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailVisible).toBe(false));
     await windowState({ recordsBrowsing: false, clipboardDetailId: 'ocr-later' });
     await emit('clipboard_text_created', 'ocr-later');
     await waitFor(() => expect(row('ocr-later').classList.contains('selected')).toBe(true));
     expect(calls('clipboard_details_select')).toHaveLength(selects);
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
+    expect(bridge.snapshot.window.clipboardDetailVisible).toBe(false);
   });
 
   it('does not replace an explicitly browsed record when an OCR completion arrives later', async () => {
@@ -1554,7 +1553,7 @@ describe('database clipboard history', () => {
   });
 
   it('starts with a keyboard target and runs Return, preview and record actions from search without a click', async () => {
-    bridge.snapshot.window.translationVisible = false;
+    bridge.snapshot.window.clipboardDetailVisible = false;
     bridge.snapshot.clipboardControls.recordsOpenFocus = 'search';
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
@@ -1649,7 +1648,7 @@ describe('database clipboard history', () => {
   });
 
   it('previews the focused record without restoring the record', async () => {
-    bridge.snapshot.window.translationVisible = false;
+    bridge.snapshot.window.clipboardDetailVisible = false;
     await mount('clipboard');
     await waitFor(() => expect(row('first')).toBeTruthy());
     const target = within(row('first')).getByRole('button', { name: /Clipboard: Saved text/ });
@@ -2651,7 +2650,7 @@ describe('clipboard open target', () => {
   });
 
   it('groups file actions and sends only the context row ID for path paste or reveal', async () => {
-    bridge.snapshot.window.translationVisible = false;
+    bridge.snapshot.window.clipboardDetailVisible = false;
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => name === 'clipboard_open_target' ? 'files' : original(name, args));
     await mount('clipboard');
@@ -2846,7 +2845,7 @@ describe('clipboard open target', () => {
   });
 
   it('keeps Space and custom preview shortcuts working after copy, pin, favorite, filter, and body/scrollbar focus loss', async () => {
-    bridge.snapshot.window.translationVisible = false;
+    bridge.snapshot.window.clipboardDetailVisible = false;
     await mount('clipboard');
     await waitFor(() => expect(listRows()).toHaveLength(2));
     const { activation, shortcuts } = bridge.snapshot.clipboardControls;
@@ -2895,8 +2894,7 @@ describe('clipboard open target', () => {
     expect(calls('records_details_toggle')).toHaveLength(togglesBeforeRepeat);
 
     // Even when details is open and a filter yields zero records, Space still collapses details.
-    bridge.snapshot.window.translationVisible = true;
-    await emit('window://state', { ...bridge.snapshot.window });
+    await windowState({ clipboardDetailVisible: true, rightExtent: bridge.snapshot.window.clipboardDetailWidth });
     fireEvent.click(screen.getByRole('button', { name: 'Image clipboard records' }));
     await waitFor(() => expect(listRows()).toHaveLength(0));
     (document.activeElement as HTMLElement | null)?.blur();

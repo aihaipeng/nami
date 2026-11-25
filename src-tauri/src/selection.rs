@@ -332,7 +332,7 @@ async fn capture_text(
 pub fn show_blank(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     state.selection_origin.lock().unwrap().take();
-    state.translation_revision.fetch_add(1, Ordering::SeqCst);
+    state.standalone_translation.bump_revision();
     let revision = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
     queue_input(
         app,
@@ -356,7 +356,6 @@ pub(crate) fn queue_input(
     } else {
         target.and_then(platform::target_app_info)
     };
-    *state.selection_source.lock().unwrap() = source_app.clone();
     *state.selection.lock().unwrap() = Some(SelectionContext {
         text,
         source_app,
@@ -431,7 +430,7 @@ pub fn show_selected(app: &AppHandle, open_when_empty: bool) -> Result<(), Strin
             if text.is_empty() && !open_when_empty && error.is_none() {
                 return;
             }
-            state.translation_revision.fetch_add(1, Ordering::SeqCst);
+            state.standalone_translation.bump_revision();
             if let Err(code) = queue_input(&owned, revision, target, text, error) {
                 state.shortcut_errors.lock().unwrap().push(code);
             }
@@ -502,7 +501,7 @@ pub(crate) fn test_empty_summon(app: &AppHandle, open_when_empty: bool) -> Resul
             if !open_when_empty {
                 return;
             }
-            state.translation_revision.fetch_add(1, Ordering::SeqCst);
+            state.standalone_translation.bump_revision();
             if let Err(code) = queue_input(&owned, revision, None, String::new(), None) {
                 state.shortcut_errors.lock().unwrap().push(code);
             }
@@ -541,7 +540,7 @@ mod tests {
         let old = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
         let current = state.selection_revision.fetch_add(1, Ordering::SeqCst) + 1;
         // A late context may still cancel its translation while the next AX read is running.
-        state.translation_revision.fetch_add(1, Ordering::SeqCst);
+        state.standalone_translation.bump_revision();
         assert!(selection_is_current(&state, current));
         assert!(!selection_is_current(&state, old));
     }

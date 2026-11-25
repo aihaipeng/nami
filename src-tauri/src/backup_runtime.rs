@@ -1,8 +1,8 @@
 use crate::{
     clipboard_preferences, clipboard_runtime,
     commands::{authorize, on_main},
-    history_runtime, load_clipboard_binding, parse_ui_locale, platform, sync_global_shortcuts,
-    AppState, ClipboardShortcut,
+    load_clipboard_binding, parse_ui_locale, platform, sync_global_shortcuts, AppState,
+    ClipboardShortcut,
 };
 use nami::{
     clipboard::RecordingTypes,
@@ -122,7 +122,6 @@ pub async fn backup_export(
     )));
 
     let state = app.state::<AppState>();
-    let _history_lock = state.history_writes.lock().await;
     let _clipboard_lock = state.clipboard_writes.lock().await;
 
     let staging_for_db = staging.0.clone();
@@ -332,7 +331,6 @@ pub async fn backup_import_apply(
 
     let image_root = clipboard_runtime::image_root(&app)?;
     let state = app.state::<AppState>();
-    let _history_lock = state.history_writes.lock().await;
     let _clipboard_lock = state.clipboard_writes.lock().await;
     let _shortcut_lock = state.shortcut_writes.lock().await;
 
@@ -340,17 +338,12 @@ pub async fn backup_import_apply(
     let image_root_for_import = image_root.clone();
     let primary_modifier = platform::capabilities().primary_modifier;
 
-    let (report, page, reloaded_prefs) = clipboard_runtime::database(&app, move |db| {
+    let (report, reloaded_prefs) = clipboard_runtime::database(&app, move |db| {
         let report = db.import_backup_with_password(
             &import_path,
             &image_root_for_import,
             mode,
             password.as_deref().map(String::as_str),
-        )?;
-        let page = db.page(
-            &database::HistoryQuery::default(),
-            None,
-            database::PAGE_SIZE,
         )?;
         let reloaded = if mode == BackupImportMode::Replace {
             let ui_locale = parse_ui_locale(db.preference("ui_locale")?.as_deref());
@@ -391,21 +384,10 @@ pub async fn backup_import_apply(
         } else {
             None
         };
-        Ok((report, page, reloaded))
+        Ok((report, reloaded))
     })
     .await?;
 
-    // Refresh translation history cache and notify consumers.
-    {
-        let mut paging = state.history_page.lock().unwrap();
-        paging.cache.clear();
-        paging.cursor = page.cursor.clone();
-        paging
-            .cache
-            .insert(database::HistoryQuery::default(), page.clone());
-    }
-    state.history.lock().unwrap().apply_page(page, true);
-    let _ = history_runtime::publish_history(&app);
     let _ = clipboard_runtime::changed(&app);
 
     if let Some((
@@ -450,7 +432,7 @@ pub async fn backup_import_apply(
         })
         .await;
 
-        for label in ["translation", "history", "clipboard", "settings"] {
+        for label in ["translation", "clipboard", "settings"] {
             if let Some(view) = app.get_webview(label) {
                 let _ = view.emit("locale_changed", &ui_locale);
                 let _ = view.emit("window_position_mode_changed", window_position_mode);

@@ -15,7 +15,7 @@ import pytest
 from test_cross_app_fixture import build_cross_app_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
-CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'translation-actions': 'translation action timing', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-pagination': 'shared record child pagination IPC', 'records-open': 'records open and reopen readiness', 'selection-open': 'selection empty summon and clipboard protection'}
+CASE_NAMES = {'clipboard-actions': 'clipboard action timing', 'clipboard-editor': 'clipboard editor layout', 'clipboard-media': 'clipboard media layout', 'clipboard-kind-text': 'clipboard kind filters and text actions', 'clipboard-translate': 'clipboard attached translate pane and 3-pane geometry', 'unified-records': 'unified records panel', 'records-geometry': 'records geometry', 'records-open': 'records open and reopen readiness', 'selection-open': 'selection empty summon and clipboard protection'}
 CASE_NAMES['record-display-shortcuts'] = 'record previews and macOS window shortcuts'
 CASE_NAMES['clipboard-quick-paste'] = 'scoped numbered clipboard paste'
 CASE_NAMES['clipboard-menu-paste'] = 'clipboard menu formats and file reveal'
@@ -35,7 +35,7 @@ SMOKE_CASES = (
     ('clipboard-shortcuts', True), ('clipboard-translate-shortcut', False), ('clipboard-menu-paste', False), ('selection-open', True),
     # This case measures layout and native chrome, not visible presentation frames.
     ('translation-controls', False), ('translation-partial', False), ('record-display-shortcuts', True),
-    ('clipboard-settings', False), ('clipboard-kind-text', False), ('clipboard-image-index', False),
+    ('clipboard-settings', False), ('clipboard-kind-text', False), ('clipboard-translate', False), ('clipboard-image-index', False),
     ('unified-records', False),
 )
 
@@ -226,6 +226,7 @@ def test_smoke_builds_once_and_runs_each_case_in_a_separate_report(tmp_path, mon
         ('native-ui-smoke-record-display-shortcuts-report.json', True, 'record-display-shortcuts'),
         ('native-ui-smoke-clipboard-settings-report.json', False, 'clipboard-settings'),
         ('native-ui-smoke-clipboard-kind-text-report.json', False, 'clipboard-kind-text'),
+        ('native-ui-smoke-clipboard-translate-report.json', False, 'clipboard-translate'),
         ('native-ui-smoke-clipboard-image-index-report.json', False, 'clipboard-image-index'),
         ('native-ui-smoke-unified-records-report.json', False, 'unified-records'),
     ]
@@ -339,7 +340,7 @@ def valid_report():
 
 
 @pytest.mark.dfx_diagnostics
-@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'clipboard-translate-shortcut', 'clipboard-menu-paste', 'record-display-shortcuts', 'clipboard-kind-text', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
+@pytest.mark.parametrize('selected', ['clipboard-shortcuts', 'clipboard-translate-shortcut', 'clipboard-menu-paste', 'record-display-shortcuts', 'clipboard-kind-text', 'clipboard-translate', 'clipboard-details', 'clipboard-settings', 'translation-settings', 'records-open', 'selection-open', 'records-pinned'])
 def test_selected_report_accepts_only_its_current_complete_case(selected):
     name = CASE_NAMES[selected]
     result = {'runId': 'current', 'testCase': selected, 'passed': True,

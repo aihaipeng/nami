@@ -1,7 +1,6 @@
 use crate::{
     clipboard_runtime::{changed, database, image_root},
     commands::{authorize, on_main},
-    model::RecordView,
     platform, AppState,
 };
 use nami::{
@@ -43,29 +42,18 @@ pub enum RecordsOpenFocus {
 #[derive(Clone, Serialize)]
 struct RecordPreviewLines {
     clipboard: u8,
-    translation: u8,
 }
 
 impl Default for RecordPreviewLines {
     fn default() -> Self {
-        Self {
-            clipboard: 3,
-            translation: 3,
-        }
+        Self { clipboard: 3 }
     }
 }
 
 impl RecordPreviewLines {
-    fn key(view: RecordView) -> &'static str {
-        match view {
-            RecordView::Clipboard => "clipboard_preview_lines",
-            RecordView::Translation => "translation_preview_lines",
-        }
-    }
-
-    fn load(db: &HistoryDatabase, view: RecordView) -> Result<u8, String> {
+    fn load(db: &HistoryDatabase) -> Result<u8, String> {
         Ok(db
-            .preference(Self::key(view))?
+            .preference("clipboard_preview_lines")?
             .and_then(|value| value.parse().ok())
             .filter(|lines| (1..=3).contains(lines))
             .unwrap_or(3))
@@ -163,7 +151,7 @@ impl ClipboardOptions {
         options.ignore_secrets = db
             .preference("clipboard_ignore_secrets")?
             .is_some_and(|value| value == "true");
-        options.history_policy = db.records_history_policy(RecordView::Clipboard)?;
+        options.history_policy = db.clipboard_history_policy()?;
         options.activation = db
             .preference("clipboard_activation")?
             .and_then(|value| serde_json::from_str(&value).ok())
@@ -181,8 +169,7 @@ impl ClipboardOptions {
             .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or_default();
         options.preview_lines = RecordPreviewLines {
-            clipboard: RecordPreviewLines::load(db, RecordView::Clipboard)?,
-            translation: RecordPreviewLines::load(db, RecordView::Translation)?,
+            clipboard: RecordPreviewLines::load(db)?,
         };
         options.record_shortcuts = nami::shortcuts::ClipboardRecordShortcuts::from_store(
             db.preference("clipboard_record_shortcuts")?,
@@ -719,7 +706,6 @@ pub async fn records_open_focus_set(
 pub async fn records_preview_lines_set(
     window: Webview,
     app: AppHandle,
-    view: RecordView,
     lines: u8,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
@@ -729,16 +715,15 @@ pub async fn records_preview_lines_set(
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
     database(&app, move |db| {
-        db.preference_set(RecordPreviewLines::key(view), &lines.to_string())
+        db.preference_set("clipboard_preview_lines", &lines.to_string())
     })
     .await?;
-    {
-        let mut options = state.clipboard_options.lock().unwrap();
-        match view {
-            RecordView::Clipboard => options.preview_lines.clipboard = lines,
-            RecordView::Translation => options.preview_lines.translation = lines,
-        }
-    }
+    state
+        .clipboard_options
+        .lock()
+        .unwrap()
+        .preview_lines
+        .clipboard = lines;
     publish_controls(&app, &state);
     Ok(())
 }
@@ -787,29 +772,19 @@ fn image_bytes(root: &Path) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub async fn records_storage_info(
-    window: Webview,
-    app: AppHandle,
-    view: RecordView,
-) -> Result<StorageInfo, String> {
+pub async fn records_storage_info(window: Webview, app: AppHandle) -> Result<StorageInfo, String> {
     authorize(&window, &["settings"])?;
     let (data, policy) = database(&app, move |db| {
-        let data = match view {
-            RecordView::Clipboard => db.clipboard_storage_bytes()?,
-            RecordView::Translation => db.translation_storage_bytes()?,
-        };
-        Ok((data, db.records_history_policy(view)?))
+        Ok((
+            db.clipboard_storage_bytes()?,
+            db.clipboard_history_policy()?,
+        ))
     })
     .await?;
-    let media = if view == RecordView::Clipboard {
-        // Enumerate images without holding up capture or copy.
-        let root = image_root(&app)?;
-        tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
-            .await
-            .map_err(|_| "storage_worker")??
-    } else {
-        0
-    };
+    let root = image_root(&app)?;
+    let media = tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
+        .await
+        .map_err(|_| "storage_worker")??;
     Ok(StorageInfo {
         bytes: data.saturating_add(media),
         limit: policy.limit,
@@ -829,20 +804,15 @@ pub(crate) struct CleanupResult {
 pub async fn records_cleanup_preview(
     window: Webview,
     app: AppHandle,
-    view: RecordView,
     policy: Option<HistoryPolicy>,
     recent: Option<bool>,
 ) -> Result<CleanupPreview, String> {
     authorize(&window, &["settings"])?;
     let recent_since =
         (recent == Some(true)).then(|| chrono::Utc::now().timestamp_millis() - 15 * 60_000);
-    let root = if view == RecordView::Clipboard {
-        image_root(&app).ok()
-    } else {
-        None
-    };
+    let root = image_root(&app).ok();
     database(&app, move |db| {
-        db.records_cleanup_preview_with_media(view, policy, recent_since, root.as_deref())
+        db.records_cleanup_preview_with_media(policy, recent_since, root.as_deref())
     })
     .await
 }
@@ -851,7 +821,6 @@ pub async fn records_cleanup_preview(
 pub async fn records_cleanup_apply(
     window: Webview,
     app: AppHandle,
-    view: RecordView,
     policy: Option<HistoryPolicy>,
     categories: Option<u8>,
     token: String,
@@ -862,17 +831,6 @@ pub async fn records_cleanup_apply(
         return Err("invalid_argument".into());
     }
     let categories = categories.unwrap_or(0);
-    if view == RecordView::Translation {
-        if recent_since.is_some() {
-            return Err("invalid_argument".into());
-        }
-        let removed =
-            crate::history_runtime::cleanup_translations(&app, policy, categories, token).await?;
-        return Ok(CleanupResult {
-            removed,
-            media_cleanup_failed: false,
-        });
-    }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let result = cleanup_locked(&app, policy, categories, Some(token), recent_since, true).await?;

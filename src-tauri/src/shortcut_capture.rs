@@ -79,7 +79,7 @@ pub(crate) fn install_window_shortcuts(app: &AppHandle) {
         {
             return event.as_ptr();
         }
-        let Some(window) = ["translation", "clipboard", "history", "settings"]
+        let Some(window) = ["translation", "clipboard", "settings"]
             .into_iter()
             .filter_map(|label| app.get_window(label))
             .find(|window| {

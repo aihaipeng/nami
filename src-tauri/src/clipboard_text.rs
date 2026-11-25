@@ -1,6 +1,4 @@
-use crate::{
-    clipboard_runtime, commands::on_main, platform, selection::SelectionContext, windows, AppState,
-};
+use crate::{clipboard_runtime, commands::on_main, platform, windows, AppState};
 use nami::clipboard::ClipboardRecord;
 use std::{
     collections::{HashSet, VecDeque},
@@ -231,11 +229,32 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
         return Err("invalid_argument".into());
     }
     let state = app.state::<AppState>();
+    if action == "translate" {
+        let already_translating = {
+            let regions = state.windows.lock().unwrap();
+            regions.clipboard_visible
+                && regions.clipboard_translation_visible
+                && regions.clipboard_translation_record_id.as_deref() == Some(id.as_str())
+        };
+        if already_translating {
+            state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+            state.clipboard_side_translation.bump_revision();
+            state.clipboard_translation.lock().unwrap().take();
+            on_main(app, |app| windows::close_clipboard_translation(&app)).await??;
+            return Ok(());
+        }
+    }
     let operation = state.image_text_operation.fetch_add(1, Ordering::SeqCst) + 1;
     let clipboard_operation = state.operation.fetch_add(1, Ordering::SeqCst) + 1;
-    let translation_revision = state.translation_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let translation_revision = if action == "translate" {
+        state.clipboard_side_translation.bump_revision()
+    } else {
+        0
+    };
     let session = state.windows.lock().unwrap().records_session;
-    on_main(app, |app| crate::records_runtime::protect_result(&app)).await??;
+    if action == "ocr" {
+        on_main(app, |app| crate::records_runtime::protect_result(&app)).await??;
+    }
     let (record, text) = text(app, id, false).await?;
     if action == "ocr" && record.kind == "text" {
         return Err("invalid_argument".into());
@@ -263,24 +282,20 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     }
     let copied = text.clone();
     let source = record.source_app.clone();
-    let background_source = source.clone();
+    let translated_record_id = record.id.clone();
     let is_ocr = action == "ocr";
-    let background = on_main(app, move |app| {
+    on_main(app, move |app| {
         let state = app.state::<AppState>();
         {
             let regions = state.windows.lock().unwrap();
             if state.image_text_operation.load(Ordering::SeqCst) != operation
-                || !is_ocr
-                    && state.translation_revision.load(Ordering::SeqCst) != translation_revision
+                || !is_ocr && state.clipboard_side_translation.revision() != translation_revision
                 || regions.records_session != session
-                || (!regions.history_visible && !regions.translation_visible)
+                || !regions.clipboard_visible
                 || state.records_dirty.load(Ordering::SeqCst)
             {
                 return Err("cancelled".into());
             }
-        }
-        if !is_ocr && state.windows.lock().unwrap().records_browsing {
-            return Ok(true);
         }
         if action == "ocr" {
             if state.operation.load(Ordering::SeqCst) == clipboard_operation {
@@ -289,55 +304,27 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
                 state.clipboard_version.store(version, Ordering::SeqCst);
             }
         } else {
-            *state.clipboard_translation.lock().unwrap() = Some(SelectionContext {
-                text: copied,
-                presentation_id: None,
-                source_app: source.clone(),
-                error: None,
-            });
-            *state.selection_source.lock().unwrap() = source;
-            {
-                let mut regions = state.windows.lock().unwrap();
-                regions.set_record_view(nami::model::RecordView::Translation);
-                regions.translation_visible = true;
-            }
-            let delivery = windows::apply_translation(&app).and_then(|_| {
-                let view = app.get_webview("translation").ok_or("window_unavailable")?;
-                view.emit("clipboard_translation_ready", ())
-                    .map_err(|_| "event_emit")?;
-                view.set_focus().map_err(|_| "window_focus".to_string())
-            });
+            *state.clipboard_translation.lock().unwrap() =
+                Some(crate::ClipboardTranslationContext {
+                    record_id: translated_record_id.clone(),
+                    text: copied,
+                    source_app: source,
+                    error: None,
+                });
+            let delivery = windows::open_clipboard_translation(&app, translated_record_id)
+                .and_then(|_| {
+                    let view = app.get_webview("translation").ok_or("window_unavailable")?;
+                    view.emit("clipboard_translation_ready", ())
+                        .map_err(|_| "event_emit".to_string())
+                });
             if delivery.is_err() {
                 state.clipboard_translation.lock().unwrap().take();
             }
             delivery?;
         }
-        Ok::<_, String>(false)
+        Ok::<_, String>(())
     })
     .await??;
-    if background {
-        drop(_write);
-        if state.image_text_operation.load(Ordering::SeqCst) != operation {
-            return Err("cancelled".into());
-        }
-        let preferences = state.translation_preferences.lock().unwrap().clone();
-        let mut targets = vec![preferences.primary_language];
-        if preferences.secondary_language != "none" {
-            targets.push(preferences.secondary_language);
-        }
-        crate::commands::run_translation(
-            app.clone(),
-            text,
-            preferences.source_language,
-            targets,
-            background_source,
-            crate::commands::TranslationRunMode::Background {
-                revision: translation_revision,
-            },
-        )
-        .await?;
-        return Ok(());
-    }
     if is_ocr {
         let captured = ClipboardRecord {
             id: uuid::Uuid::new_v4().to_string(),

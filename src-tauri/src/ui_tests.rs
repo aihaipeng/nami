@@ -344,8 +344,8 @@ fn geometry(app: &AppHandle) -> Result<Geometry, String> {
         history_width: h.size.width,
         translation_x: t.origin.x,
         translation_width: t.size.width,
-        history_state_width: state.history_width,
-        translation_state_width: state.translation_width,
+        history_state_width: state.clipboard_width,
+        translation_state_width: state.right_target_width(),
         history_layer: view_layer(app, "history")?,
         translation_layer: view_layer(app, "translation")?,
     })
@@ -369,7 +369,7 @@ fn set_native_width(app: &AppHandle, width: f64, fixed_right: bool) -> Result<()
     Ok(())
 }
 
-fn reset(app: &AppHandle, history: f64, translation: f64) -> Result<(), String> {
+fn reset(app: &AppHandle, clipboard: f64, right: f64) -> Result<(), String> {
     let window = app.get_window("translation").ok_or("missing_test_window")?;
     let scale = window.scale_factor().map_err(|_| "window_geometry")?;
     let left = window
@@ -383,18 +383,20 @@ fn reset(app: &AppHandle, history: f64, translation: f64) -> Result<(), String> 
         .to_logical::<f64>(scale)
         .y;
     let state = WindowState {
-        record_view: crate::model::RecordView::Translation,
-        history_visible: true,
-        translation_visible: true,
-        history_pinned: true,
+        standalone_translation_visible: false,
+        clipboard_visible: true,
+        clipboard_detail_visible: true,
+        clipboard_translation_visible: false,
+        clipboard_pinned: true,
         translation_pinned: true,
-        history_width: history,
-        history_extent: history,
-        translation_width: translation,
-        translation_extent: translation,
-        history_width_initialized: true,
+        clipboard_width: clipboard,
+        clipboard_extent: clipboard,
+        clipboard_detail_width: right,
+        translation_width: right,
+        right_extent: right,
+        clipboard_width_initialized: true,
         motion_revision: 1,
-        motion_anchor: Some(left + history),
+        motion_anchor: Some(left + clipboard),
         ..WindowState::default()
     };
     *app.state::<AppState>().windows.lock().unwrap() = state;
@@ -411,8 +413,62 @@ fn reset(app: &AppHandle, history: f64, translation: f64) -> Result<(), String> 
         (
             PanelFrame {
                 left,
-                history,
-                translation,
+                clipboard,
+                right,
+            },
+            PanelFrame::default(),
+        ),
+        top,
+        620.0,
+        true,
+    )?;
+    Ok(())
+}
+
+fn reset_standalone(app: &AppHandle, translation: f64) -> Result<(), String> {
+    let window = app.get_window("translation").ok_or("missing_test_window")?;
+    let scale = window.scale_factor().map_err(|_| "window_geometry")?;
+    let left = window
+        .current_monitor()
+        .map_err(|_| "window_geometry")?
+        .map(|monitor| monitor.work_area().position.x as f64 / scale + 20.0)
+        .unwrap_or(20.0);
+    let top = window
+        .outer_position()
+        .map_err(|_| "window_geometry")?
+        .to_logical::<f64>(scale)
+        .y;
+    let state = WindowState {
+        standalone_translation_visible: true,
+        clipboard_visible: false,
+        clipboard_detail_visible: false,
+        clipboard_translation_visible: false,
+        clipboard_pinned: true,
+        translation_pinned: true,
+        translation_width: translation,
+        right_extent: translation,
+        clipboard_extent: 0.0,
+        clipboard_width_initialized: true,
+        motion_revision: 1,
+        motion_anchor: Some(left),
+        ..WindowState::default()
+    };
+    *app.state::<AppState>().windows.lock().unwrap() = state;
+    window
+        .set_min_size(Some(LogicalSize::new(1.0, 440.0)))
+        .map_err(|_| "window_geometry")?;
+    window
+        .set_max_size::<LogicalSize<f64>>(None)
+        .map_err(|_| "window_geometry")?;
+    set_panel_frame(
+        app,
+        &window,
+        1,
+        (
+            PanelFrame {
+                left,
+                clipboard: 0.0,
+                right: translation,
             },
             PanelFrame::default(),
         ),
@@ -430,12 +486,12 @@ fn owner(app: &AppHandle, _history: bool) -> Result<(), String> {
         state.native_resizing = true;
         StageGeometry {
             mode: StageMode::NativeResize,
-            history_extent: state.history_extent,
-            history_width: state.history_width,
-            translation_width: state.translation_width,
-            history_visible: state.history_visible,
-            translation_visible: state.translation_visible,
-            translation_content: state.record_view == crate::model::RecordView::Translation,
+            clipboard_extent: state.clipboard_extent,
+            clipboard_width: state.clipboard_width,
+            right_width: state.right_target_width(),
+            clipboard_visible: state.clipboard_visible,
+            right_visible: state.right_visible(),
+            standalone_translation: state.standalone_translation_visible,
         }
     };
     let window = app.get_window("translation").ok_or("missing_test_window")?;
@@ -528,7 +584,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
             for index in 0..80 {
                 let h = [280.0, 441.0, 360.0, 500.0, 320.0][index % 5];
                 let current = on_main(app, move |app| {
-                    resize_history(app, h, false)?;
+                    resize_clipboard(app, h, false)?;
                     geometry(app)
                 })?;
                 samples.push(current);
@@ -578,7 +634,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
                         .unwrap()
                         .native_resizing = false;
                     let baseline = geometry(app)?;
-                    resize_history(app, 360.0, false)?;
+                    resize_clipboard(app, 360.0, false)?;
                     Ok((baseline, geometry(app)?))
                 })?;
                 samples.push(current);
@@ -638,7 +694,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
         "single and dual column native minimum widths",
         |samples| {
             on_main(app, |app| {
-                reset(app, 300.0, 700.0)?;
+                reset_standalone(app, 700.0)?;
                 app.state::<AppState>()
                     .windows
                     .lock()
@@ -647,7 +703,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
                 owner(app, false)
             })?;
             let single = on_main(app, |app| {
-                set_native_width(app, 300.0 + 480.0, false)?;
+                set_native_width(app, 480.0, false)?;
                 track_translation_resize(app, &app.get_window("translation").unwrap())?;
                 geometry(app)
             })?;
@@ -671,7 +727,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
     );
     record_case(
         &mut cases,
-        "history toggle 40 times keeps view boundaries and stored widths",
+        "clipboard detail toggle 40 times keeps view boundaries and stored widths",
         |samples| {
             on_main(app, |app| reset(app, 360.0, 700.0))?;
             for index in 0..40 {
@@ -680,20 +736,15 @@ fn run(app: &AppHandle) -> Vec<Case> {
                         .windows
                         .lock()
                         .unwrap()
-                        .toggle_history();
+                        .toggle_clipboard_details();
                     layout_translation(app, false)?;
                     geometry(app)
                 })?;
                 samples.push(current);
-                equal(current.history_width, 360.0, "stored history view width")?;
-                equal(
-                    current.translation_width,
-                    700.0,
-                    "stored translation view width",
-                )?;
+                equal(current.history_width, 360.0, "stored clipboard view width")?;
                 equal(
                     current.window_width,
-                    if index % 2 == 0 { 700.0 } else { 1060.0 },
+                    if index % 2 == 0 { 360.0 } else { 1060.0 },
                     "visible window width",
                 )?;
                 current.adjacent()?;
@@ -703,23 +754,23 @@ fn run(app: &AppHandle) -> Vec<Case> {
     );
     record_case(
         &mut cases,
-        "history animation intermediate native frames preserve translation anchor",
+        "detail animation intermediate native frames preserve clipboard anchor",
         |samples| {
             on_main(app, |app| reset(app, 360.0, 700.0))?;
             let baseline = on_main(app, geometry)?;
             for open in [false, true, false, true] {
                 for step in 0..=30 {
                     let extent = if open {
-                        step as f64 * 12.0
+                        step as f64 * (700.0 / 30.0)
                     } else {
-                        360.0 - step as f64 * 12.0
+                        700.0 - step as f64 * (700.0 / 30.0)
                     };
                     let current = on_main(app, move |app| {
                         let state = app.state::<AppState>();
                         let mut state = state.windows.lock().unwrap();
-                        state.history_visible = open;
+                        state.clipboard_detail_visible = open;
                         state.motion_revision += 1;
-                        state.motion_anchor = Some(baseline.translation_left());
+                        state.motion_anchor = Some(baseline.window_left);
                         let revision = state.motion_revision;
                         drop(state);
                         let window = app.get_window("translation").unwrap();
@@ -738,9 +789,9 @@ fn run(app: &AppHandle) -> Vec<Case> {
                             revision,
                             (
                                 PanelFrame {
-                                    left: baseline.translation_left() - extent,
-                                    history: extent,
-                                    translation: 700.0,
+                                    left: baseline.window_left,
+                                    clipboard: 360.0,
+                                    right: extent,
                                 },
                                 PanelFrame::default(),
                             ),
@@ -754,24 +805,19 @@ fn run(app: &AppHandle) -> Vec<Case> {
                     })?;
                     samples.push(current);
                     equal(
-                        current.translation_left(),
-                        baseline.translation_left(),
-                        "animation translation screen left",
-                    )?;
-                    equal(
-                        current.translation_right(),
-                        baseline.translation_right(),
-                        "animation translation screen right",
+                        current.window_left,
+                        baseline.window_left,
+                        "animation clipboard screen left",
                     )?;
                     equal(
                         current.history_width,
                         360.0,
-                        "animation history viewport width",
+                        "animation clipboard viewport width",
                     )?;
                     equal(
                         current.translation_width,
                         700.0,
-                        "animation translation viewport width",
+                        "animation detail viewport width",
                     )?;
                     current.adjacent()?;
                 }
@@ -786,7 +832,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
             on_main(app, |app| reset(app, 360.0, 700.0))?;
             for h in [280.0, 620.0, 360.0] {
                 let current = on_main(app, move |app| {
-                    resize_history(app, h, false)?;
+                    resize_clipboard(app, h, false)?;
                     let window = app.get_window("translation").unwrap();
                     unsafe {
                         let native = window
@@ -849,7 +895,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
     );
     record_case(
         &mut cases,
-        "history-only resize and restore translation",
+        "clipboard-only resize and restore detail",
         |samples| {
             on_main(app, |app| {
                 reset(app, 360.0, 700.0)?;
@@ -857,7 +903,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
                     .windows
                     .lock()
                     .unwrap()
-                    .translation_visible = false;
+                    .clipboard_detail_visible = false;
                 layout_translation(app, false)?;
                 owner(app, true)
             })?;
@@ -867,52 +913,48 @@ fn run(app: &AppHandle) -> Vec<Case> {
                 geometry(app)
             })?;
             samples.push(h_only);
-            equal(h_only.window_width, 500.0, "history-only window width")?;
-            equal(h_only.history_width, 500.0, "history-only view width")?;
+            equal(h_only.window_width, 500.0, "clipboard-only window width")?;
+            equal(h_only.history_width, 500.0, "clipboard-only view width")?;
             let restored = on_main(app, |app| {
                 let state = app.state::<AppState>();
                 let mut state = state.windows.lock().unwrap();
-                state.translation_visible = true;
+                state.clipboard_detail_visible = true;
                 state.native_resizing = false;
                 drop(state);
                 layout_translation(app, false)?;
                 geometry(app)
             })?;
             samples.push(restored);
-            equal(restored.history_width, 500.0, "restored history width")?;
-            equal(
-                restored.translation_width,
-                700.0,
-                "restored translation width",
-            )?;
+            equal(restored.history_width, 500.0, "restored clipboard width")?;
+            equal(restored.translation_width, 700.0, "restored detail width")?;
             equal(restored.window_width, 1200.0, "restored window width")?;
             restored.adjacent()
         },
     );
-    for translation_visible in [true, false] {
+    for detail_visible in [true, false] {
         record_case(
             &mut cases,
-            if translation_visible {
-                "FinderX outer edge sweep with translation preserves history width"
+            if detail_visible {
+                "FinderX outer edge sweep with detail preserves clipboard width"
             } else {
-                "FinderX history-only outer edge sweep clamps history width"
+                "FinderX clipboard-only outer edge sweep clamps clipboard width"
             },
             |samples| {
                 let baseline = on_main(app, move |app| {
                     reset(app, 360.0, 700.0)?;
-                    if !translation_visible {
+                    if !detail_visible {
                         app.state::<AppState>()
                             .windows
                             .lock()
                             .unwrap()
-                            .translation_visible = false;
+                            .clipboard_detail_visible = false;
                         layout_translation(app, false)?;
                     }
                     owner(app, true)?;
                     geometry(app)
                 })?;
                 for index in 0..80 {
-                    let width = if translation_visible {
+                    let width = if detail_visible {
                         [1060.0, 1160.0, 1280.0, 1410.0][index % 4]
                     } else {
                         [280.0, 360.0, 500.0, 720.0][index % 4]
@@ -930,14 +972,14 @@ fn run(app: &AppHandle) -> Vec<Case> {
                     )?;
                     equal(
                         current.history_width,
-                        if translation_visible { 360.0 } else { width },
-                        "outer sweep history width",
+                        if detail_visible { 360.0 } else { width },
+                        "outer sweep clipboard width",
                     )?;
-                    if translation_visible {
+                    if detail_visible {
                         equal(
                             current.translation_width,
                             width - 360.0,
-                            "outer sweep translation width",
+                            "outer sweep detail width",
                         )?;
                     }
                     current.adjacent()?;
@@ -951,23 +993,23 @@ fn run(app: &AppHandle) -> Vec<Case> {
 
 fn run_visible_paced(app: &AppHandle) -> Vec<Case> {
     let mut cases = Vec::new();
-    for translation_visible in [true, false] {
+    for detail_visible in [true, false] {
         record_case(
             &mut cases,
-            if translation_visible {
-                "visible paced FinderX native outer resize with translation"
+            if detail_visible {
+                "visible paced FinderX native outer resize with detail"
             } else {
-                "visible paced FinderX history-only native outer resize"
+                "visible paced FinderX clipboard-only native outer resize"
             },
             |samples| {
                 let baseline = on_main(app, move |app| {
                     reset(app, 360.0, 700.0)?;
-                    if !translation_visible {
+                    if !detail_visible {
                         app.state::<AppState>()
                             .windows
                             .lock()
                             .unwrap()
-                            .translation_visible = false;
+                            .clipboard_detail_visible = false;
                         layout_translation(app, false)?;
                     }
                     owner(app, true)?;
@@ -976,7 +1018,7 @@ fn run_visible_paced(app: &AppHandle) -> Vec<Case> {
                 let mut first_error = None;
                 for index in 0..60 {
                     let phase = index as f64 * std::f64::consts::TAU / 59.0;
-                    let width = if translation_visible {
+                    let width = if detail_visible {
                         (1240.0 + 160.0 * phase.sin()).round()
                     } else {
                         (440.0 + 160.0 * phase.sin()).round()
@@ -1001,35 +1043,35 @@ fn run_visible_paced(app: &AppHandle) -> Vec<Case> {
                             "paced fixed window right",
                         )?;
                         presented.adjacent()?;
-                        let expected_history = if translation_visible { 360.0 } else { width };
+                        let expected_history = if detail_visible { 360.0 } else { width };
                         equal(
                             presented.history_width,
                             expected_history,
-                            "paced history model width",
+                            "paced clipboard model width",
                         )?;
                         let history = presented
                             .history_layer
                             .and_then(|layer| layer.presentation)
-                            .ok_or("history presentation unavailable")?;
+                            .ok_or("clipboard presentation unavailable")?;
                         equal(
                             history.width,
                             expected_history,
-                            "paced history presentation width",
+                            "paced clipboard presentation width",
                         )?;
-                        if translation_visible {
+                        if detail_visible {
                             let translation = presented
                                 .translation_layer
                                 .and_then(|layer| layer.presentation)
-                                .ok_or("translation presentation unavailable")?;
+                                .ok_or("detail presentation unavailable")?;
                             equal(
                                 translation.width,
                                 width - 360.0,
-                                "paced translation presentation width",
+                                "paced detail presentation width",
                             )?;
                             equal(
                                 presented.window_left + translation.x + translation.width,
                                 baseline.window_right,
-                                "paced translation presentation right",
+                                "paced detail presentation right",
                             )?;
                         }
                         Ok::<(), String>(())
@@ -1277,14 +1319,14 @@ fn assert_chrome_anchors(value: &serde_json::Value) -> Result<(), String> {
 fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
+        on_main(app, |app| reset_standalone(app, 920.0))?;
         let baseline = on_main(app, native_chrome_sample)?;
         let right = baseline["windowRight"]
             .as_f64()
             .ok_or("missing baseline right")?;
         on_main(app, |app| owner(app, false))?;
         for index in 0..60 {
-            let width = (360.0 + 920.0 + 180.0 * (index as f64 * 0.2).sin()).round();
+            let width = (920.0 + 180.0 * (index as f64 * 0.2).sin()).round();
             on_main(app, move |app| set_native_width(app, width, true))?;
             let sample = on_main(app, native_chrome_sample)?;
             equal(
@@ -1307,10 +1349,12 @@ fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
                 {
                     let app_state = app.state::<AppState>();
                     let mut state = app_state.windows.lock().unwrap();
-                    state.translation_visible = false;
-                    state.history_visible = true;
-                    state.history_width = width;
-                    state.history_extent = width;
+                    state.standalone_translation_visible = false;
+                    state.clipboard_visible = true;
+                    state.clipboard_detail_visible = false;
+                    state.clipboard_translation_visible = false;
+                    state.clipboard_width = width;
+                    state.clipboard_extent = width;
                 }
                 owner(app, true)?;
                 set_native_width(app, width, true)?;
@@ -1324,16 +1368,16 @@ fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
                 .any(|button| button["hidden"] != true)
             {
                 return Err(
-                    "native translation controls remained visible in history-only mode".into(),
+                    "native translation controls remained visible in clipboard-only mode".into(),
                 );
             }
             samples.push(sample);
         }
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
+        on_main(app, |app| reset_standalone(app, 920.0))?;
         Ok::<(), String>(())
     })();
     DomCase {
-        name: "native controls: left-resize right anchors, presentation and history-only hiding",
+        name: "native controls: left-resize right anchors, presentation and clipboard-only hiding",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -1348,36 +1392,18 @@ fn run_translation_partial(app: &AppHandle) -> DomCase {
             app,
             "return {ready:!!document.querySelector('.source-input')};",
         )?;
-        let persisted = |id: &str| {
-            let state = app.state::<AppState>();
-            let database = state.database.lock().unwrap();
-            database
-                .as_ref()
-                .ok_or("isolated test database")?
-                .record(id)
-        };
-        let history_total = || {
-            let state = app.state::<AppState>();
-            let database = state.database.lock().unwrap();
-            database
-                .as_ref()
-                .ok_or("isolated test database")?
-                .page(&nami::database::HistoryQuery::default(), None, 1)
-                .map(|page| page.total_records)
-        };
-        let initial_total = history_total()?;
         evaluate_dom(
             app,
             r#"
-window.__partialArgs = {text:'Synthetic split primary',source:'auto',targets:['en','ja'],fromSelection:false};
+window.__partialArgs = {text:'Synthetic split primary',source:'auto',targets:['en','ja'],scope:'standalone'};
 window.__partialRun = null;
 (async()=>{
   const invoke = window.__TAURI_INTERNALS__.invoke;
   const reject = async action => {try{await action();return 'unexpected success';}catch(e){return String(e);}};
   try {
     const {partial} = await invoke('translation_run',window.__partialArgs);
-    await invoke('translation_sample_copy',{sampleId:partial.id,part:'primary'});
-    const badCopy=await reject(()=>invoke('translation_sample_copy',{sampleId:partial.id,part:'secondary'}));
+    await invoke('translation_copy',{scope:'standalone',part:'primary'});
+    const badCopy=await reject(()=>invoke('translation_copy',{scope:'standalone',part:'secondary'}));
     const badRetry=await reject(()=>invoke('translation_run',{...window.__partialArgs,text:'Changed original',retryId:partial.id}));
     window.__partialRun={partial,badCopy,badRetry};
   } catch(e) { window.__partialRun={error:String(e)}; }
@@ -1388,15 +1414,13 @@ window.__partialRun = null;
             app,
             "return {ready:!!window.__partialRun,...window.__partialRun};",
         )?;
-        let partial_id = initial["partial"]["id"]
-            .as_str()
-            .ok_or_else(|| format!("missing split response: {initial}"))?;
-        if initial["partial"]["translations"] != serde_json::json!(["Synthetic translation en", ""])
+        if initial["partial"]["id"].as_str().is_none()
+            || initial["partial"]["translations"]
+                != serde_json::json!(["Synthetic translation en", ""])
             || initial["partial"]["errors"]
                 != serde_json::json!([null, "Synthetic service unavailable"])
             || initial["badCopy"] != "invalid_argument"
             || initial["badRetry"] != "invalid_argument"
-            || persisted(partial_id)?.is_some()
             || on_main(app, |_| {
                 Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
             })? != Some(crate::platform::ClipboardPayload::Text(
@@ -1407,7 +1431,7 @@ window.__partialRun = null;
                 "partial copy, isolation or retry validation failed: {initial}"
             ));
         }
-        samples.push(serde_json::json!({"primarySurvives":true,"secondaryCopyRejected":true,"requestMutationRejected":true,"partialNotPersisted":true}));
+        samples.push(serde_json::json!({"primarySurvives":true,"secondaryCopyRejected":true,"requestMutationRejected":true}));
         evaluate_dom(
             app,
             r#"
@@ -1416,9 +1440,8 @@ window.__retryRun=null;
   const invoke=window.__TAURI_INTERNALS__.invoke, retryId=window.__partialRun.partial.id;
   try {
     const record=await invoke('translation_run',{...window.__partialArgs,retryId});
-    let staleCopy;
-    try{await invoke('translation_sample_copy',{sampleId:retryId,part:'primary'});}catch(e){staleCopy=String(e);}
-    window.__retryRun={record,staleCopy};
+    await invoke('translation_copy',{scope:'standalone',part:'secondary'});
+    window.__retryRun={record};
   } catch(e) { window.__retryRun={error:String(e)}; }
 })();return true;
 "#,
@@ -1427,16 +1450,19 @@ window.__retryRun=null;
             app,
             "return {ready:!!window.__retryRun,...window.__retryRun};",
         )?;
-        let saved_id = retried["record"]["id"]
-            .as_str()
-            .ok_or_else(|| format!("retry did not complete: {retried}"))?;
-        let saved = persisted(saved_id)?.ok_or("complete retry not stored")?;
-        if saved.translations != ["Synthetic translation en", "Synthetic translation ja"]
-            || retried["staleCopy"] != "invalid_argument"
+        if retried["record"]["translations"]
+            != serde_json::json!(["Synthetic translation en", "Synthetic translation ja"])
+            || on_main(app, |_| {
+                Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
+            })? != Some(crate::platform::ClipboardPayload::Text(
+                "Synthetic translation ja".into(),
+            ))
         {
-            return Err(format!("retry storage or token check failed: {retried}"));
+            return Err(format!("retry completion or copy check failed: {retried}"));
         }
-        samples.push(serde_json::json!({"onlyFailedColumnRetried":true,"completePersisted":true,"expiredCopyRejected":true}));
+        samples.push(
+            serde_json::json!({"onlyFailedColumnRetried":true,"completedCopySucceeded":true}),
+        );
 
         evaluate_dom(
             app,
@@ -1446,7 +1472,7 @@ window.__nextRun=null;
   const invoke=window.__TAURI_INTERNALS__.invoke;
   try {
     const {partial}=await invoke('translation_run',{...window.__partialArgs,text:'Synthetic split secondary'});
-    await invoke('translation_sample_copy',{sampleId:partial.id,part:'secondary'});
+    await invoke('translation_copy',{scope:'standalone',part:'secondary'});
     let totalError;
     try{await invoke('translation_run',{...window.__partialArgs,text:'Synthetic split total failure'});}catch(e){totalError=String(e);}
     const heldArgs={...window.__partialArgs,text:'Synthetic held retry'};
@@ -1462,17 +1488,10 @@ window.__nextRun=null;
             app,
             "return {ready:!!window.__nextRun,...window.__nextRun};",
         )?;
-        let second_id = next["partial"]["id"]
-            .as_str()
-            .ok_or_else(|| format!("missing secondary: {next}"))?;
-        let held_id = next["held"]["id"]
-            .as_str()
-            .ok_or("missing cancellation fixture")?;
         if next["partial"]["translations"] != serde_json::json!(["", "Synthetic translation ja"])
             || next["partial"]["errors"]
                 != serde_json::json!(["Synthetic service unavailable", null])
             || next["totalError"] != "Synthetic service unavailable"
-            || persisted(second_id)?.is_some()
             || on_main(app, |_| {
                 Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
             })? != Some(crate::platform::ClipboardPayload::Text(
@@ -1487,7 +1506,8 @@ window.__nextRun=null;
         let state = app.state::<AppState>();
         let retrying = || {
             state
-                .pending_translation
+                .standalone_translation
+                .pending
                 .lock()
                 .unwrap()
                 .as_ref()
@@ -1510,10 +1530,10 @@ window.__heldCopy=null;
   const invoke=window.__TAURI_INTERNALS__.invoke;
   const retryId=window.__nextRun.held.id;
   try {
-    await invoke('translation_sample_copy',{sampleId:retryId,part:'primary'});
+    await invoke('translation_copy',{scope:'standalone',part:'primary'});
     let doubleRetry;
     try { await invoke('translation_run',{...window.__partialArgs,text:'Synthetic held retry',retryId}); } catch(e) { doubleRetry=String(e); }
-    await invoke('translation_cancel');
+    await invoke('translation_cancel',{scope:'standalone'});
     window.__heldCopy={doubleRetry};
   } catch(e) {window.__heldCopy={error:String(e)};}
 })();return true;
@@ -1539,16 +1559,12 @@ window.__heldCopy=null;
             app,
             "return {ready:!!window.__heldResult,...window.__heldResult};",
         )?;
-        let total = history_total()?;
-        if cancelled["error"] != "cancelled"
-            || persisted(held_id)?.is_some()
-            || total != initial_total + 1
-        {
-            return Err(format!("cancelled retry changed history: {cancelled}, before={initial_total}, after={total}"));
+        if cancelled["error"] != "cancelled" {
+            return Err(format!(
+                "cancelled retry did not report cancellation: {cancelled}"
+            ));
         }
-        samples.push(
-            serde_json::json!({"inFlightRetryCancelled":true,"onlyOneCompleteHistoryRecord":true}),
-        );
+        samples.push(serde_json::json!({"inFlightRetryCancelled":true}));
         evaluate_dom(
             app,
             r#"
@@ -1569,25 +1585,19 @@ window.__alternateRun=null;
             app,
             "return {ready:!!window.__alternateRun,...window.__alternateRun};",
         )?;
-        let mixed_id = swapped["mixed"]["id"]
-            .as_str()
-            .ok_or_else(|| format!("alternate retry failed: {swapped}"))?;
-        let mixed = persisted(mixed_id)?.ok_or("mixed result was not saved")?;
-        if mixed.translations
-            != [
+        if swapped["mixed"]["translations"]
+            != serde_json::json!([
                 "Synthetic translation en",
-                "Synthetic Google translation ja",
-            ]
-            || mixed
-                .translation
-                .is_none_or(|metadata| metadata.target_engines != ["edge", "google"])
+                "Synthetic Google translation ja"
+            ])
+            || swapped["mixed"]["translation"]["targetEngines"]
+                != serde_json::json!(["edge", "google"])
             || swapped["full"]["translations"]
                 != serde_json::json!([
                     "Synthetic Google translation en",
                     "Synthetic Google translation ja"
                 ])
             || swapped["engine"] != "edge"
-            || history_total()? != initial_total + 3
         {
             return Err(format!(
                 "alternate engine reran a successful column or changed the default: {swapped}"
@@ -1608,8 +1618,8 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
         on_main(app, |app| create(app, "translation").map(|_| ()))?;
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
-        wait_dom(app, "return { ready: document.fonts.status === 'loaded' && document.querySelector('[data-native-chrome=true]') !== null, fonts:document.fonts.status, chrome:document.querySelector('.translation-panel')?.dataset.nativeChrome, error:document.querySelector('.global-error')?.textContent };")?;
+        on_main(app, |app| reset_standalone(app, 920.0))?;
+        wait_dom(app, "return { ready: document.fonts.status === 'loaded' && document.querySelector('[data-native-chrome=true]') !== null && !document.querySelector('.history-trigger'), fonts:document.fonts.status, chrome:document.querySelector('.translation-panel')?.dataset.nativeChrome, error:document.querySelector('.global-error')?.textContent };")?;
         evaluate_dom(app,"const input=document.querySelector('.source-input');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
         wait_dom(
             app,
@@ -1623,7 +1633,7 @@ fn run_right_control_dom(app: &AppHandle) -> DomCase {
         evaluate_dom(app, "const option = [...document.querySelectorAll('.language-options [role=option]')].find(e => e.textContent === 'Chinese (Traditional)'); if (!option) throw Error('missing long source language'); option.click(); return true;")?;
         wait_dom(app, "return { ready: document.querySelector('.source-bar > .language-picker').textContent === 'Chinese (Traditional)' && !document.querySelector('.language-popover') && document.activeElement===document.querySelector('.source-input') };")?;
         for width in [700.0, 920.0, 1200.0] {
-            on_main(app, move |app| reset(app, 360.0, width))?;
+            on_main(app, move |app| reset_standalone(app, width))?;
             settle_chrome_dom(app)?;
             samples.push(check_right_control_dom(app, width)?);
         }
@@ -1643,7 +1653,7 @@ return {languagePickerOutline:outline};
         evaluate_dom(app, "const option = [...document.querySelectorAll('.language-options [role=option]')].find(e => e.textContent === 'None'); if (!option) throw Error('missing None language'); option.click(); return true;")?;
         wait_dom(app, "return { ready: !!document.querySelector('.translation-footer.single-column') && !document.querySelector('.language-popover') };")?;
         on_main(app, |app| {
-            set_native_width(app, 360.0 + 480.0, true)?;
+            set_native_width(app, 480.0, true)?;
             track_translation_resize(app, &app.get_window("translation").unwrap())
         })?;
         settle_chrome_dom(app)?;
@@ -1659,82 +1669,6 @@ return {languagePickerOutline:outline};
             app,
             "return { ready: !document.querySelector('.language-popover') };",
         )?;
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .history_visible = false;
-            apply_translation(app)
-        })?;
-        wait_motion(app)?;
-        on_main(app, |app| {
-            crate::sync_global_shortcuts(app);
-            Ok(())
-        })?;
-        set_opening_focus(app, RecordsOpenFocus::Search)?;
-        let press_history = || {
-            on_main(app, |app| {
-                send_registered_hotkey(
-                    app,
-                    crate::shortcuts::KeyBinding::new("Slash", &["meta"]),
-                    6,
-                )
-            })
-        };
-        press_history()?;
-        samples.push(wait_records(app,"const row=document.querySelector('#translation-history .history-row-select'),input=document.querySelector('#translation-history input[type=search]');return {ready:!!row&&document.activeElement===input&&!row.closest('[hidden],[inert]'),historyShortcut:'opened'};")?);
-        press_history()?;
-        samples.push(wait_dom(app, "return {ready:document.querySelector('.history-trigger').getAttribute('aria-expanded')==='false'&&!document.querySelector('.action-menu'),historyShortcut:'closed'};")?);
-        wait_motion(app)?;
-        let expect_state = |history: bool, translation: bool, visible: bool| {
-            for _ in 0..100 {
-                let ready = on_main(app, move |app| {
-                    use crate::model::RecordView;
-                    let state = app.state::<AppState>();
-                    let regions = state.windows.lock().unwrap();
-                    let host = app.get_window("translation").ok_or("window_unavailable")?;
-                    Ok(regions.history_visible == history
-                        && regions.translation_visible == translation
-                        && (!history || regions.record_view == RecordView::Translation)
-                        && host.is_visible().map_err(|_| "window_geometry")? == visible)
-                })?;
-                if ready {
-                    return wait_motion(app);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(format!("history hotkey did not settle: history={history}, translation={translation}, visible={visible}"))
-        };
-        for details in [false, true] {
-            // Seed the clipboard region without reading the system clipboard.
-            on_main(app, move |app| {
-                let host = create(app, "translation")?;
-                {
-                    let state = app.state::<AppState>();
-                    let mut regions = state.windows.lock().unwrap();
-                    regions.dismiss();
-                    regions.set_record_view(crate::model::RecordView::Clipboard);
-                    if details {
-                        regions.toggle_record_details();
-                    }
-                }
-                apply_translation(app)?;
-                host.show().map_err(|_| "window_show".to_owned())
-            })?;
-            wait_motion(app)?;
-            press_history()?;
-            expect_state(true, details, true)?;
-            press_history()?;
-            expect_state(false, details, details)?;
-            samples.push(serde_json::json!({"historyShortcut":"clipboard", "details":details}));
-        }
-        on_main(app, |app| hide(app, "translation"))?;
-        press_history()?;
-        expect_state(true, false, true)?;
-        press_history()?;
-        expect_state(false, false, false)?;
-        samples.push(serde_json::json!({"historyShortcut":"hidden host"}));
         on_main(app, |app| show(app, "translation"))?;
         evaluate_dom(app, "const input=document.querySelector('.source-input');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;")?;
         wait_dom(
@@ -1759,8 +1693,6 @@ return {languagePickerOutline:outline};
             return Err("translation shortcut did not invoke validated submit behavior".into());
         }
         samples.push(on_main(app, native_chrome_sample)?);
-        samples.extend(check_retranslation_shortcut(app)?);
-        samples.extend(check_translation_copy_shortcuts(app)?);
         Ok::<(), String>(())
     })();
     DomCase {
@@ -1770,162 +1702,6 @@ return {languagePickerOutline:outline};
         error: result.err(),
         samples,
     }
-}
-
-fn check_translation_copy_shortcuts(app: &AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let id = "sample-07";
-    let record = app
-        .state::<AppState>()
-        .history
-        .lock()
-        .unwrap()
-        .record(id)
-        .ok_or("missing single-target fixture")?;
-    if record.translations.len() != 1 {
-        return Err("copy fixture must have one translation".into());
-    }
-    evaluate_view_dom(
-        app,
-        "clipboard",
-        "window.__TAURI_INTERNALS__.invoke('records_details_toggle');return true;",
-    )?;
-    wait_records(app, "const row=document.querySelector('[data-record-id=sample-07] .history-row-select');if(!row||document.querySelector('.translation-history .records-details[aria-expanded=true]'))return {ready:false};row.focus();return {ready:document.hasFocus()&&document.activeElement===row&&document.querySelector('#translation-history .records-details')?.getAttribute('aria-expanded')==='false'};")?;
-    let mut samples = Vec::new();
-    for (index, (code, flags, key, text)) in [
-        (18, 1 << 20, "1", record.translations[0].as_str()),
-        (19, 1 << 20, "2", record.translations[0].as_str()),
-        (8, (1 << 20) | (1 << 17), "C", record.text.as_str()),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        post_records_key(app, code, flags, key, key, false)?;
-        let mut copied = false;
-        for _ in 0..80 {
-            let state = app.state::<AppState>();
-            let page = state
-                .database
-                .lock()
-                .unwrap()
-                .as_ref()
-                .ok_or("missing_test_database")?
-                .clipboard_page("", false, None, 100)?;
-            if page.total_records == index + 1 {
-                let id = &page.records.first().ok_or("missing clipboard copy")?.id;
-                let saved = state
-                    .database
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .ok_or("missing_test_database")?
-                    .clipboard_record(id)?;
-                let clipboard = on_main(app, |_| {
-                    crate::platform::read_clipboard(|_| false).map_err(str::to_owned)
-                })?;
-                copied = saved.text == text && clipboard.is_some_and(|capture| matches!(capture.payload, crate::platform::ClipboardPayload::Text(value) if value == text));
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !copied
-            || app
-                .state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible
-        {
-            return Err(format!(
-                "translation copy key {key} did not save full text without opening details"
-            ));
-        }
-        samples.push(
-            serde_json::json!({"copyKey":key,"clipboardRecords":index+1,"detailsOpen":false}),
-        );
-    }
-    Ok(samples)
-}
-
-fn check_retranslation_shortcut(app: &AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let mut samples = Vec::new();
-    records_mode(app, "translation")?;
-    for detail in [false, true] {
-        if detail {
-            on_main(app, |app| {
-                app.get_webview("translation")
-                    .ok_or("translation view")?
-                    .set_focus()
-                    .map_err(|_| "detail focus")?;
-                Ok(())
-            })?;
-            wait_dom(app, "const result=document.querySelector('.result-column');result.focus();return {ready:document.hasFocus()&&document.activeElement===result};")?;
-        } else {
-            wait_records(app, "const row=document.querySelector('#translation-history .history-items .history-row-select');row?.focus();return {ready:!!row&&document.hasFocus()&&document.activeElement===row};")?;
-        }
-        post_records_key(app, 36, 1 << 20, "\r", "\r", false)?;
-        samples.push(wait_dom(app, &format!("const error=document.querySelector('.translation-status [role=alert]')?.textContent;return {{ready:error==='translation_network_disabled_in_tests',detail:{detail},error}};"))?);
-        if !detail {
-            // Restore the displayed translation so the detail shortcut starts on a saved record.
-            let id = app
-                .state::<AppState>()
-                .history
-                .lock()
-                .unwrap()
-                .selected_id()
-                .ok_or("shortcut did not select a history record")?
-                .to_owned();
-            on_main(app, move |app| {
-                crate::commands::select_history_sample(app, Some(id), false, false)
-            })?;
-            wait_dom(app, "return {ready:!!document.querySelector('.result-column span')&&!document.querySelector('.translation-status [role=alert]')};")?;
-        }
-    }
-    let mut result = {
-        let state = app.state::<AppState>();
-        let history = state.history.lock().unwrap();
-        history
-            .record(history.selected_id().ok_or("missing source selection")?)
-            .ok_or("source record missing")?
-    };
-    let origin = result.id.clone();
-    result.id = format!("retranslated-{}", uuid::Uuid::new_v4());
-    result.is_pinned = false;
-    result.is_favorite = false;
-    let id = result.id.clone();
-    let handle = app.clone();
-    let (send, receive) = mpsc::channel();
-    tauri::async_runtime::spawn(async move {
-        let revision = handle
-            .state::<AppState>()
-            .translation_revision
-            .load(Ordering::SeqCst);
-        let _ = send.send(
-            crate::history_runtime::commit_translation(
-                &handle,
-                result,
-                "edge".into(),
-                revision,
-                Some(crate::history_runtime::TranslationFocus::History(origin)),
-            )
-            .await,
-        );
-    });
-    receive
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "retranslation commit timeout")??;
-    samples.push(wait_records(app, &format!("const row=document.querySelector('[data-record-id={id}] .history-row-select');return {{ready:!!row&&row.getAttribute('aria-pressed')==='true'&&document.hasFocus()&&document.activeElement===row,retranslatedFocus:{id:?},focused:document.activeElement?.closest('[data-record-id]')?.dataset.recordId}};"))?);
-    post_records_key(app, 3, 1 << 20, "f", "f", false)?;
-    samples.push(wait_records(app, "const input=document.querySelector('#translation-history .history-search input');return {ready:document.hasFocus()&&document.activeElement===input&&input.selectionStart===0&&input.selectionEnd===input.value.length,focusSearchFromHistory:true};")?);
-    let handle = app.clone();
-    let (send, receive) = mpsc::channel();
-    tauri::async_runtime::spawn(async move {
-        let _ = send
-            .send(crate::history_runtime::update_record(&handle, id, "delete".into(), None).await);
-    });
-    receive
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "retranslation cleanup timeout")??;
-    Ok(samples)
 }
 
 fn check_right_control_dom(app: &AppHandle, width: f64) -> Result<serde_json::Value, String> {
@@ -1983,11 +1759,7 @@ fn clipboard_host(app: &AppHandle) -> Result<Window, String> {
     create(app, "translation")?;
     {
         let state = app.state::<AppState>();
-        state
-            .windows
-            .lock()
-            .unwrap()
-            .set_record_view(crate::model::RecordView::Clipboard);
+        state.windows.lock().unwrap().show_clipboard();
     }
     apply_translation(app)?;
     Ok(app
@@ -2072,12 +1844,18 @@ fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
         samples.push(sample);
         for mode in 0..3 {
             samples.push(on_main(app, move |app| {
-                reset(app, 360.0, 920.0)?;
-                if mode != 0 {
-                    let state = app.state::<AppState>();
-                    if mode == 1 { state.windows.lock().unwrap().translation_visible = false; }
-                    else { state.windows.lock().unwrap().history_visible = false; }
-                    layout_translation(app, false)?;
+                if mode == 2 {
+                    reset_standalone(app, 920.0)?;
+                } else {
+                    reset(app, 360.0, 920.0)?;
+                    if mode == 1 {
+                        app.state::<AppState>()
+                            .windows
+                            .lock()
+                            .unwrap()
+                            .clipboard_detail_visible = false;
+                        layout_translation(app, false)?;
+                    }
                 }
                 let before = geometry(app)?;
                 let window = app.get_window("translation").ok_or("window_unavailable")?;
@@ -2085,8 +1863,8 @@ fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
                 let after = geometry(app)?;
                 equal(after.window_right,before.window_right,"grab band preserves opposite edge")?;
                 equal(after.window_width,before.window_width-48.0,"grab band drag changes width")?;
-                if mode == 0 { equal(after.history_width,before.history_width,"grab band preserves history width")?; after.adjacent()?; }
-                if mode == 1 { equal(after.history_width,after.window_width,"history-only grab band uses full width")?; }
+                if mode == 0 { equal(after.history_width,before.history_width,"grab band preserves clipboard width")?; after.adjacent()?; }
+                if mode == 1 { equal(after.history_width,after.window_width,"clipboard-only grab band uses full width")?; }
                 let stage=translation_stage(&window)?;
                 unsafe {
                     let bounds: objc2_foundation::NSRect=objc2::msg_send![&*stage,bounds];
@@ -2117,7 +1895,7 @@ fn run_resize_hit_targets(app: &AppHandle) -> DomCase {
 fn run_source_editing(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
-        on_main(app, |app| reset(app, 360.0, 920.0))?;
+        on_main(app, |app| reset_standalone(app, 920.0))?;
         evaluate_dom(app, "const input=document.querySelector('.source-input'); input.focus(); input.select(); document.execCommand('insertText', false, ''); return true;")?;
         for (text, expected) in [("a", "a"), ("b", "ab"), ("c", "abc")] {
             evaluate_dom(app, &format!("document.execCommand('insertText', false, {text:?}); window.__sourceEditReady=false; requestAnimationFrame(()=>requestAnimationFrame(()=>window.__sourceEditReady=true)); return true;"))?;
@@ -2752,7 +2530,7 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='11,6,6')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='10,6,5')throw Error('shortcut groups must contain the general and panel actions');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
@@ -2818,7 +2596,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts.preview.binding;
     if(saved.code!==code||saved.modifiers.length)throw Error('recorder did not keep a bare '+code);
   }
-  for (const [action,code] of [['preview','F6'],['switchView','KeyJ'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pastePlain','KeyI'],['saveImage','KeyU']]) {
+  for (const [action,code] of [['preview','F6'],['copyRecord','KeyC'],['note','KeyN'],['ocr','KeyO'],['translate','KeyT'],['favorite','KeyH'],['delete','KeyM'],['pastePlain','KeyI'],['saveImage','KeyU']]) {
     await local(action,null,false);
     await local(action,{code,modifiers:['alt']});
     const saved=(await invoke('app_snapshot')).clipboardControls.shortcuts[action];
@@ -2864,26 +2642,19 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   const excluded=await invoke('clipboard_excluded_app_remove',{bundleId:'com.apple.Passwords'});
   if(excluded.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('exclusion was not removed');
   window.clipboardSettingsProbe.stage='storage';
-  const view='clipboard', storage=await invoke('records_storage_info',{view});
+  const storage=await invoke('records_storage_info');
   const policy={limit:1};
   window.clipboardSettingsProbe.stage='preview';
-  const preview=await invoke('records_cleanup_preview',{view,policy});
+  const preview=await invoke('records_cleanup_preview',{policy});
   if(preview.count!==0||storage.limit!==500||storage.bytes<1)throw Error('clipboard count-only default or old row is missing');
   let stale;
-  try {await invoke('records_cleanup_apply',{view,policy,token:'0'.repeat(64)});} catch(error) {stale=String(error);}
+  try {await invoke('records_cleanup_apply',{policy,token:'0'.repeat(64)});} catch(error) {stale=String(error);}
   if(stale!=='clipboard_cleanup_changed')throw Error('cleanup accepted a mismatched preview');
   window.clipboardSettingsProbe.stage='apply';
-  const result=await invoke('records_cleanup_apply',{view,policy,token:preview.token});
+  const result=await invoke('records_cleanup_apply',{policy,token:preview.token});
   if(result.removed!==preview.count||result.mediaCleanupFailed)throw Error('cleanup did not match the preview');
   const saved=await invoke('clipboard_options_get');
   if(saved.historyPolicy.limit!==1)throw Error('confirmed count was not saved');
-  const translation={view:'translation',policy:{limit:3}};
-  const before=await invoke('records_storage_info',{view:translation.view});
-  const translationPreview=await invoke('records_cleanup_preview',translation);
-  if(before.limit!==500||before.bytes===0||translationPreview.count<1)throw Error('translation history is missing');
-  const translationResult=await invoke('records_cleanup_apply',{...translation,token:translationPreview.token});
-  const after=await invoke('records_storage_info',{view:translation.view});
-  if(translationResult.removed!==translationPreview.count||after.limit!==3||after.bytes>=before.bytes||(await invoke('records_storage_info',{view})).limit!==1)throw Error('translation cleanup or scope is incorrect');
   window.clipboardSettingsProbe={done:true,conflict,afterConflict:snapshot.clipboardBinding,removed:result.removed};
 })().catch(error=>window.clipboardSettingsProbe={...window.clipboardSettingsProbe,done:true,error:String(error)});
 return {paused:true};
@@ -3247,7 +3018,7 @@ window.__groupRestore=null;
   document.querySelector('#general-shortcut-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.focusSearch.code==='KeyF');
   let t=p.translationPreferences,c=p.clipboardControls.shortcuts;
-  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.switchView.binding.code!=='Tab'||!c.switchView.enabled||c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='KeyY'||c.preview.binding.modifiers[0]!=='meta'||!c.preview.enabled)throw Error('general defaults were not restored');
+  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='KeyY'||c.preview.binding.modifiers[0]!=='meta'||!c.preview.enabled)throw Error('general defaults were not restored');
   if(t.shortcuts.translate.code!=='KeyZ'||!t.disabledShortcuts.includes('translate')||t.selectionEnabled)throw Error('general restore changed another section');
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
   document.querySelector('#translation-shortcuts-heading').parentElement.querySelector('button').click();
@@ -3407,7 +3178,7 @@ return {ready:true,keyboardTarget:row.dataset.recordId};
             .windows
             .lock()
             .unwrap()
-            .history_pinned = false;
+            .clipboard_pinned = false;
         apply_translation(app)
     })?;
     samples.push(wait_records(
@@ -3878,20 +3649,16 @@ enum OpeningFocus {
     FirstRecord,
 }
 
-fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+fn records_mode(app: &AppHandle, _mode: &'static str) -> Result<(), String> {
     set_opening_focus(app, RecordsOpenFocus::Search)?;
     on_main(app, move |app| {
         let window = create(app, "translation")?;
         {
             let state = app.state::<AppState>();
             let mut state = state.windows.lock().unwrap();
-            state.set_record_view(if mode == "clipboard" {
-                crate::model::RecordView::Clipboard
-            } else {
-                crate::model::RecordView::Translation
-            });
+            state.show_clipboard();
             state.records_focus += 1;
-            state.history_pinned = true;
+            state.clipboard_pinned = true;
             state.translation_pinned = true;
         }
         apply_translation(app)?;
@@ -3900,11 +3667,7 @@ fn records_mode(app: &AppHandle, mode: &'static str) -> Result<(), String> {
         Ok(())
     })?;
     wait_motion(app)?;
-    let selector = if mode == "clipboard" {
-        ".clipboard-panel"
-    } else {
-        "#translation-history"
-    };
+    let selector = ".clipboard-panel";
     wait_records(app, &format!("const p=document.querySelector('{selector}');return {{ready:!!p&&p.getClientRects().length>0&&!p.closest('[hidden]')&&!!p.querySelector('.history-row:not([hidden])')&&!!p.querySelector('.history-search input')}};"))?;
     // Focus the mounted child after WK startup, which can otherwise replace its native responder.
     on_main(app, |app| {
@@ -3977,374 +3740,13 @@ fn verify_direct_delete(
     Ok(())
 }
 
-fn run_record_action_timing(app: &AppHandle, mode: &'static str, name: &'static str) -> DomCase {
-    let mut samples = Vec::new();
-    let result = (|| {
-        records_mode(app, mode)?;
-        let sample = wait_records(
-            app,
-            r#"
-const panel=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));
-if(!panel)return {ready:false};
-const row=panel.querySelector('.history-items .history-row:not([hidden])')||panel.querySelector('.history-row');if(!row)return {ready:false};
-const button=row.querySelector('.history-row-select'),actions=row.querySelector('.history-row-actions'),time=row.querySelector('time');
-button.focus();
-return {ready:row.matches(':focus-within'),duration:getComputedStyle(actions).transitionDuration,delay:getComputedStyle(actions).transitionDelay,timeDuration:getComputedStyle(time).transitionDuration,symbols:[...actions.querySelectorAll('.history-symbol')].map(i=>i.dataset.symbol),icons:[...actions.querySelectorAll('.history-symbol')].map(i=>({width:getComputedStyle(i).width,height:getComputedStyle(i).height})),color:getComputedStyle(actions.querySelector('button')).color,deleteColor:getComputedStyle(actions.querySelector('.history-delete')||actions.lastElementChild).color};
-"#,
-        )?;
-        if sample["duration"] != "0.15s"
-            || sample["delay"] != "0s, 0s, 0s"
-            || sample["timeDuration"] != "0.15s"
-        {
-            return Err(format!("record action timing: {sample}"));
-        }
-        if sample["symbols"]
-            .as_array()
-            .ok_or("symbols")?
-            .iter()
-            .any(|s| s == "languages")
-        {
-            return Err("record hover actions retained Retranslate".into());
-        }
-        for icon in sample["icons"].as_array().ok_or("icons")? {
-            if icon["width"] != "14px" || icon["height"] != "14px" {
-                return Err(format!("icon dimensions: {icon}"));
-            }
-        }
-        samples.push(sample);
-        Ok(())
-    })();
-    DomCase {
-        name,
-        passed: result.is_ok(),
-        error: result.err(),
-        samples,
-    }
-}
-
-fn run_translation_action_timing(app: &AppHandle) -> DomCase {
-    let mut case = run_record_action_timing(app, "translation", "translation action timing");
-    if !case.passed {
-        return case;
-    }
-    let result = (|| {
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible = false;
-            apply_translation(app)
-        })?;
-        wait_motion(app)?;
-        wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false'};")?;
-        let controls = {
-            let state = app.state::<AppState>();
-            let mut options = state.clipboard_options.lock().unwrap().clone();
-            options.record_shortcuts.set(
-                nami::shortcuts::ClipboardRecordAction::Preview,
-                Some(nami::shortcuts::KeyBinding::new("Space", &[])),
-                None,
-                &[],
-            )?;
-            options.controls()
-        };
-        app.get_webview("clipboard")
-            .ok_or("records child")?
-            .emit("clipboard_controls_changed", controls)
-            .map_err(|_| "event_emit")?;
-        let setup = r#"
-const panel=document.querySelector('#translation-history'),row=panel.querySelector('.history-items .history-row-select');
-row.focus();row.blur();
-window.__detailKeys=[];
-window.addEventListener('keydown',e=>{if(e.code==='Space')window.__detailKeys.push({trusted:e.isTrusted,handled:e.defaultPrevented,body:e.target===document.body});});
-return document.activeElement===document.body;
-"#;
-        if evaluate_view_dom(app, "clipboard", setup)? != true {
-            return Err("could not leave focus on the records body".into());
-        }
-        for (trigger, open, close) in [
-            ("space", "", ""),
-            ("toolbar", "document.querySelector('#translation-history .records-details').click();return true;", "document.querySelector('#translation-history .records-details').click();return true;"),
-            ("row", "window.__clickedRow=document.querySelector('#translation-history .history-items .history-row-select');window.__clickedRow.click();return true;", "window.__clickedRow.click();window.__clickedRow.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,detail:2}));return true;"),
-        ] {
-            if trigger == "space" {
-                post_records_key(app, 49, 0, " ", " ", false)?;
-            } else {
-                evaluate_view_dom(app, "clipboard", open)?;
-            }
-            wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='true'};")?;
-            wait_motion(app)?;
-            let close_history_events =
-                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let observed = close_history_events.clone();
-            let close_listener = app.listen_any("history_changed", move |_| {
-                observed.fetch_add(1, Ordering::SeqCst);
-            });
-            let clicked_at = std::time::Instant::now();
-            if trigger == "space" {
-                post_records_key(app, 49, 0, " ", " ", false)?;
-            } else {
-                evaluate_view_dom(app, "clipboard", close)?;
-            }
-            let mut first_move_ms = None;
-            let mut extents = Vec::new();
-            for _ in 0..160 {
-                let (extent, width, settled) = on_main(app, |app| {
-                    let state = app.state::<AppState>();
-                    let state = state.windows.lock().unwrap();
-                    Ok((
-                        state.translation_extent,
-                        state.translation_width,
-                        state.motion_anchor.is_none() && state.translation_extent <= 0.5,
-                    ))
-                })?;
-                if first_move_ms.is_none() && extent < width - 0.5 {
-                    first_move_ms = Some(clicked_at.elapsed().as_secs_f64() * 1000.0);
-                }
-                if extents
-                    .last()
-                    .is_none_or(|previous: &f64| (*previous - extent).abs() >= 0.5)
-                {
-                    extents.push(extent);
-                }
-                if settled {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            wait_motion(app)?;
-            app.unlisten(close_listener);
-            let close_history_events = close_history_events.load(Ordering::SeqCst);
-            let monotonic = extents.windows(2).all(|pair| pair[1] <= pair[0] + 0.5);
-            case.samples.push(serde_json::json!({"trigger":trigger,"closeFirstMoveMs":first_move_ms,"historySnapshotsDuringClose":close_history_events,"closeIntermediateFrames":extents.len(),"monotonic":monotonic}));
-            if close_history_events != 0
-                || first_move_ms.is_none_or(|elapsed| elapsed > 75.0)
-                || !monotonic
-                || (!crate::platform::reduce_motion() && extents.len() < 4)
-            {
-                return Err(format!("{trigger} close stuttered or broadcast full history: historySnapshots={close_history_events}, firstMoveMs={first_move_ms:?}, frames={}, monotonic={monotonic}", extents.len()));
-            }
-            let closed = wait_records(app, "return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false',beam:!!document.querySelector('[role=progressbar]')};")?;
-            if closed["beam"] != false {
-                return Err(format!("{trigger} close showed activity"));
-            }
-        }
-        case.samples.push(wait_records(app, "const keys=window.__detailKeys;return {ready:keys.length===2&&keys.every(k=>k.trusted&&k.handled&&k.body),keys};")?);
-        app.get_webview("clipboard")
-            .ok_or("records child")?
-            .emit(
-                "clipboard_controls_changed",
-                app.state::<AppState>()
-                    .clipboard_options
-                    .lock()
-                    .unwrap()
-                    .controls(),
-            )
-            .map_err(|_| "event_emit")?;
-        verify_direct_delete(app, "translation", &mut case.samples)?;
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible = true;
-            apply_translation(app)
-        })?;
-        wait_motion(app)?;
-        let original_preferences = app
-            .state::<AppState>()
-            .translation_preferences
-            .lock()
-            .unwrap()
-            .clone();
-        let mixed = crate::model::HistoryRecord {
-            title: String::new(),
-            id: "translation-auto-metadata".into(),
-            text: "Synthetic mixed language input".into(),
-            source_language: "mul".into(),
-            translation: Some(crate::model::TranslationMetadata {
-                requested_source: "auto".into(),
-                engine: "edge".into(),
-                target_engines: Vec::new(),
-                strategy_version: crate::translation::STRATEGY_VERSION,
-                detections: vec![
-                    crate::model::LanguageDetection {
-                        raw_language: "zh-Hans".into(),
-                        language: "zh-CN".into(),
-                        score: Some(1.0),
-                    },
-                    crate::model::LanguageDetection {
-                        raw_language: "en".into(),
-                        language: "en".into(),
-                        score: Some(1.0),
-                    },
-                ],
-            }),
-            target_languages: vec!["en".into()],
-            translations: vec!["Synthetic mixed language output".into()],
-            date: "2099-01-01T00:00:00Z".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-        };
-        app.state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_mut()
-            .ok_or("isolated database")?
-            .insert(&mixed, "edge", || true)?;
-        crate::history_runtime::history_add(app, mixed.clone())?;
-        let metadata_result = (|| {
-            for engine in ["edge", "google"] {
-                evaluate_dom(
-                    app,
-                    &format!(
-                        r#"window.__metadataSetup={{done:false}};(async()=>{{await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:null,retranslate:false,clearDetail:true}});await window.__TAURI_INTERNALS__.invoke('translation_preferences_set',{{engine:{engine:?},sourceLanguage:'auto',primaryLanguage:'en',secondaryLanguage:'none'}});await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:'translation-auto-metadata',retranslate:false}});}})().then(()=>window.__metadataSetup={{done:true}},error=>window.__metadataSetup={{done:true,error:String(error)}});return true;"#
-                    ),
-                )?;
-                let restored = wait_dom(
-                    app,
-                    r#"const source=document.querySelector('.source-bar > .language-picker'),bar=document.querySelector('.source-bar');return {ready:window.__metadataSetup?.done&&!window.__metadataSetup.error&&document.querySelector('.source-input')?.value==='Synthetic mixed language input'&&source?.textContent==='Multiple languages'&&bar?.dataset.detectedLanguage==='mul',source:source?.textContent,detected:bar?.dataset.detectedLanguage,description:source?.getAttribute('aria-description'),result:document.querySelector('.result-column')?.textContent,error:window.__metadataSetup?.error,status:document.querySelector('.translation-status')?.textContent};"#,
-                )?;
-                if restored["description"] != "Detected: Multiple languages"
-                    || restored["result"] != "Synthetic mixed language output"
-                    || restored["status"].is_string()
-                {
-                    return Err(format!(
-                        "{engine} auto metadata history restore: {restored}"
-                    ));
-                }
-                let mut native = serde_json::Value::Null;
-                for _ in 0..40 {
-                    native = on_main(app, native_chrome_sample)?;
-                    if native["buttons"][0]["title"] == "Multiple languages" {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                if native["buttons"][0]["title"] != "Multiple languages" {
-                    return Err(format!("{engine} native chrome lost auto mode: {native}"));
-                }
-                case.samples.push(serde_json::json!({"engine":engine,"restored":restored,"nativeSource":native["buttons"][0]}));
-                app.get_webview("translation")
-                    .ok_or("translation view")?
-                    .emit("translation_chrome_action", "source")
-                    .map_err(|_| "source menu event")?;
-                let source_catalog = wait_dom(
-                    app,
-                    r#"const popover=document.querySelector('.language-popover'),options=[...popover?.querySelectorAll('[role=option]')??[]];return {ready:options.length>100,count:options.length,esperanto:options.some(option=>option.textContent==='Esperanto'),swahili:options.some(option=>option.textContent==='Swahili'),selected:options.filter(option=>option.getAttribute('aria-selected')==='true').map(option=>option.textContent)};"#,
-                )?;
-                let expected_source = crate::translation::languages(engine)
-                    .iter()
-                    .filter(|language| language.source)
-                    .count()
-                    + 1;
-                if source_catalog["count"].as_u64() != Some(expected_source as u64)
-                    || source_catalog["esperanto"] != (engine == "google")
-                    || source_catalog["swahili"] != true
-                    || source_catalog["selected"] != serde_json::json!(["Auto-Detect"])
-                {
-                    return Err(format!(
-                        "{engine} source language catalog differs: {source_catalog}"
-                    ));
-                }
-                case.samples
-                    .push(serde_json::json!({"engine":engine,"sourceCatalog":source_catalog}));
-                evaluate_dom(app, "document.querySelector('.language-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
-                wait_dom(
-                    app,
-                    "return {ready:!document.querySelector('.language-popover')};",
-                )?;
-                evaluate_dom(app, "document.querySelector('.translation-footer .language-slot .language-picker').click();return true;")?;
-                let target_catalog = wait_dom(
-                    app,
-                    r#"const options=[...document.querySelectorAll('.language-popover [role=option]')];return {ready:options.length>100,count:options.length,esperanto:options.some(option=>option.textContent==='Esperanto'),selected:options.filter(option=>option.getAttribute('aria-selected')==='true').map(option=>option.textContent)};"#,
-                )?;
-                let expected_target = crate::translation::languages(engine)
-                    .iter()
-                    .filter(|language| language.target)
-                    .count();
-                if target_catalog["count"].as_u64() != Some(expected_target as u64)
-                    || target_catalog["esperanto"] != (engine == "google")
-                    || target_catalog["selected"] != serde_json::json!(["English"])
-                {
-                    return Err(format!(
-                        "{engine} target language catalog differs: {target_catalog}"
-                    ));
-                }
-                case.samples
-                    .push(serde_json::json!({"engine":engine,"targetCatalog":target_catalog}));
-                evaluate_dom(app, "document.querySelector('.language-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
-                wait_dom(
-                    app,
-                    "return {ready:!document.querySelector('.language-popover')};",
-                )?;
-            }
-            Ok::<_, String>(())
-        })();
-        let mut long_name = mixed;
-        long_name.id = "translation-long-detected-name".into();
-        long_name.source_language = "nhe".into();
-        long_name.translation.as_mut().unwrap().engine = "google".into();
-        app.state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_mut()
-            .ok_or("isolated database")?
-            .insert(&long_name, "google", || true)?;
-        crate::history_runtime::history_add(app, long_name)?;
-        evaluate_dom(app, "window.__TAURI_INTERNALS__.invoke('history_sample_select',{sampleId:'translation-long-detected-name',retranslate:false});return true;")?;
-        let full_name = wait_dom(app, "const b=document.querySelector('.source-bar > .language-picker'),s=b?.querySelector('span');return {ready:b?.textContent==='Nahuatl (Eastern Huasteca)',label:b?.textContent,width:b?.getBoundingClientRect().width,full:!!s&&s.scrollWidth<=s.clientWidth};")?;
-        let mut native_name = serde_json::Value::Null;
-        for _ in 0..40 {
-            native_name = on_main(app, native_chrome_sample)?;
-            if native_name["buttons"][0]["title"] == "Nahuatl (Eastern Huasteca)" {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if full_name["full"] != true
-            || native_name["buttons"][0]["title"] != "Nahuatl (Eastern Huasteca)"
-            || native_name["buttons"][0]["width"].as_f64().unwrap_or(0.0) + 1.0
-                < full_name["width"].as_f64().unwrap_or(1000.0)
-        {
-            return Err(format!(
-                "detected language name truncated: {full_name} / {native_name}"
-            ));
-        }
-        case.samples.push(serde_json::json!({"fullDetectedName":full_name,"nativeSource":native_name["buttons"][0]}));
-        let restored_preferences = serde_json::json!({"engine":original_preferences.engine,"sourceLanguage":original_preferences.source_language,"primaryLanguage":original_preferences.primary_language,"secondaryLanguage":original_preferences.secondary_language});
-        evaluate_dom(
-            app,
-            &format!(
-                r#"window.__metadataCleanup={{done:false}};(async()=>{{await window.__TAURI_INTERNALS__.invoke('history_sample_select',{{sampleId:null,retranslate:false,clearDetail:true}});await window.__TAURI_INTERNALS__.invoke('translation_preferences_set',{restored_preferences});await window.__TAURI_INTERNALS__.invoke('history_record_update',{{recordId:'translation-auto-metadata',action:'delete'}});await window.__TAURI_INTERNALS__.invoke('history_record_update',{{recordId:'translation-long-detected-name',action:'delete'}});await window.__TAURI_INTERNALS__.invoke('window_hide',{{region:'translation',keepHistory:true}});}})().then(()=>window.__metadataCleanup={{done:true}},error=>window.__metadataCleanup={{done:true,error:String(error)}});return true;"#
-            ),
-        )?;
-        let cleanup = wait_dom(
-            app,
-            "return {ready:window.__metadataCleanup?.done,...window.__metadataCleanup};",
-        )?;
-        if cleanup["error"].is_string() {
-            return Err(format!("metadata scenario cleanup failed: {cleanup}"));
-        }
-        metadata_result?;
-        Ok::<_, String>(())
-    })();
-    case.passed = result.is_ok();
-    case.error = result.err();
-    case
-}
-
 fn run_records_geometry(app: &AppHandle) -> DomCase {
     if let Err(error) = on_main(app, |app| {
         let window = create(app, "translation")?;
         if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
             let app_state = app.state::<AppState>();
             let mut state = app_state.windows.lock().unwrap();
-            state.history_pinned = true;
+            state.clipboard_pinned = true;
             state.translation_pinned = true;
             drop(state);
             window.show().map_err(|_| "window_show")?;
@@ -4371,7 +3773,7 @@ fn run_records_geometry(app: &AppHandle) -> DomCase {
             on_main(app, |app| {
                 reset(app, 360.0, 700.0)?;
                 let state = app.state::<AppState>();
-                state.windows.lock().unwrap().translation_visible = false;
+                state.windows.lock().unwrap().clipboard_detail_visible = false;
                 layout_translation(app, false)?;
                 let window = app.get_window("translation").ok_or("window")?;
                 window.show().map_err(|_| "window_show")?;
@@ -4383,7 +3785,7 @@ fn run_records_geometry(app: &AppHandle) -> DomCase {
                         .windows
                         .lock()
                         .unwrap()
-                        .translation_visible = visible;
+                        .clipboard_detail_visible = visible;
                     apply_translation(app)
                 })?;
                 std::thread::sleep(Duration::from_millis(320));
@@ -4394,7 +3796,7 @@ fn run_records_geometry(app: &AppHandle) -> DomCase {
                         return Err("detail motion exceeded 280ms plus two frame allowance".into());
                     }
                     equal(
-                        state.translation_extent,
+                        state.right_extent,
                         if visible { 700.0 } else { 0.0 },
                         "detail final extent",
                     )?;
@@ -4460,7 +3862,7 @@ fn run_records_pinned(app: &AppHandle) -> DomCase {
                     fingerprint: nami::clipboard::fingerprint(kind, text.as_bytes()),
                 })?;
         }
-        for mode in ["clipboard", "translation"] {
+        for mode in ["clipboard"] {
             records_mode(app, mode)?;
             if mode == "clipboard" {
                 wait_records(app, "return {ready:!!document.querySelector('[data-record-id=\"pinned-boundary-2\"] img')?.naturalWidth};")?;
@@ -4682,62 +4084,11 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             .as_mut()
             .ok_or("isolated database")?
             .clipboard_insert(&record)?;
-        let translation_record = crate::model::HistoryRecord {
-            title: String::new(),
-            id: "unified-translation".into(),
-            text: "Synthetic shared record input".into(),
-            source_language: "en".into(),
-            translation: None,
-            target_languages: vec!["fr".into()],
-            translations: vec!["Synthetic shared output".into()],
-            date: "2099-01-01T00:00:00Z".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-        };
-        app.state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_mut()
-            .ok_or("isolated database")?
-            .insert(&translation_record, "edge", || true)?;
-        for index in 0..200 {
-            let mut record = translation_record.clone();
-            record.id = format!("selection-load-{index}");
-            record.date = "2098-01-01T00:00:00Z".into();
-            record.text = "Synthetic long history text ".repeat(1000);
-            record.translations = vec!["Synthetic long result ".repeat(1000)];
-            record.source_app = Some(
-                serde_json::json!({"name":"Synthetic source","iconDataUrl":format!("data:image/png;base64,{}", "A".repeat(65536))}),
-            );
-            app.state::<AppState>()
-                .database
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or("isolated database")?
-                .insert(&record, "edge", || true)?;
-        }
-        on_main(app, move |app| history_add(app, translation_record))?;
+        crate::clipboard_runtime::changed(app)?;
         records_mode(app, "clipboard")?;
         let clipboard = wait_records(app, RECORDS_SNAPSHOT)?;
         if clipboard["error"].is_string() {
             return Err(format!("clipboard IPC failed: {clipboard}"));
-        }
-        records_mode(app, "translation")?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"window.__fixtureQueried=false;(async()=>{await window.__TAURI_INTERNALS__.invoke('history_query',{query:'',favoritesOnly:false});await window.__TAURI_INTERNALS__.invoke('history_load_more');await window.__TAURI_INTERNALS__.invoke('history_load_more');window.__fixtureQueried=true;})();return true;"#,
-        )?;
-        wait_records(
-            app,
-            r#"return {ready:window.__fixtureQueried&&!!document.querySelector('#translation-history [data-record-id="unified-translation"]')};"#,
-        )?;
-        let translation = wait_records(app, RECORDS_SNAPSHOT)?;
-        if translation["error"].is_string() {
-            return Err(format!("translation IPC failed: {translation}"));
         }
         evaluate_view_dom(
             app,
@@ -4752,424 +4103,103 @@ fn run_unified_records(app: &AppHandle) -> DomCase {
             return Err("record child gained settings command permission".into());
         }
         samples.push(permission);
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"window.__invalidClearDetail={done:false};window.__TAURI_INTERNALS__.invoke('history_sample_select',{sampleId:'unified-translation',retranslate:false,clearDetail:true}).then(()=>window.__invalidClearDetail={done:true,rejected:false},error=>window.__invalidClearDetail={done:true,rejected:error==='invalid_argument',error:String(error)});return true;"#,
-        )?;
-        let invalid_clear = wait_records(
-            app,
-            "return {ready:window.__invalidClearDetail?.done,...window.__invalidClearDetail};",
-        )?;
-        if invalid_clear["rejected"] != true {
-            return Err(format!(
-                "clearDetail accepted a nonempty sampleId: {invalid_clear}"
-            ));
-        }
-        samples.push(invalid_clear);
-        for key in [
-            "search",
-            "actionDuration",
-            "timeDuration",
-            "previewFont",
-            "labelColor",
-            "labelFill",
-            "targetBackground",
-            "detailBackground",
-            "mask",
-        ] {
-            if clipboard[key] != translation[key] {
-                return Err(format!(
-                    "record {key} differs: clipboard={}, translation={}",
-                    clipboard[key], translation[key]
-                ));
-            }
-        }
         if clipboard["targetBackground"] == clipboard["ordinaryBackground"]
             || clipboard["detailBackground"] != clipboard["ordinaryBackground"]
         {
             return Err("only the interaction target should have a row background".into());
         }
-        let clipboard_actions = clipboard["actions"]
-            .as_array()
-            .ok_or("clipboard actions")?
-            .iter()
-            .filter(|action| {
-                !["languages", "ocr"].contains(&action["symbol"].as_str().unwrap_or_default())
-            })
-            .collect::<Vec<_>>();
-        let translation_actions = translation["actions"]
-            .as_array()
-            .ok_or("translation actions")?;
-        if clipboard_actions.len() != translation_actions.len()
-            || !["doc.on.doc", "note"].into_iter().all(|symbol| {
-                translation_actions
-                    .iter()
-                    .any(|action| action["symbol"] == symbol)
-            })
-        {
-            return Err(format!(
-                "shared record actions differ: {clipboard} / {translation}"
-            ));
-        }
-        for (a, b) in clipboard_actions.into_iter().zip(translation_actions) {
-            for key in ["symbol", "mask", "color", "opacity", "width", "height"] {
-                if a[key] != b[key] {
-                    return Err(format!("record icon {key} differs: {a} / {b}"));
-                }
-            }
-        }
-        for (a, b) in clipboard["toolbar"]
-            .as_array()
-            .ok_or("clipboard toolbar")?
-            .iter()
-            .zip(
-                translation["toolbar"]
-                    .as_array()
-                    .ok_or("translation toolbar")?,
-            )
-        {
-            for key in ["x", "y", "width", "height", "symbol", "mask"] {
-                if a[key] != b[key] {
-                    return Err(format!("toolbar {key} differs: {a} / {b}"));
-                }
-            }
-        }
-        for key in ["x", "y", "width", "height"] {
-            if clipboard["footer"][key] != translation["footer"][key] {
-                return Err(format!("footer {key} differs"));
-            }
-        }
-        if clipboard["footer"]["keyboard"] != translation["footer"]["keyboard"] {
-            return Err("footer keyboard differs".into());
-        }
-        for key in ["y", "width", "height", "symbol", "mask", "color", "opacity"] {
-            if clipboard["footer"]["star"][key] != translation["footer"]["star"][key] {
-                return Err(format!(
-                    "footer favorite {key} differs: {clipboard} / {translation}"
-                ));
-            }
-        }
-        samples.extend([clipboard.clone(), translation.clone()]);
-        let baseline = on_main(app, geometry)?;
-        for mode in ["clipboard", "translation", "clipboard", "translation"] {
-            records_mode(app, mode)?;
-            let state = wait_records(app, RECORDS_SNAPSHOT)?;
-            let expected = if mode == "clipboard" {
-                &clipboard
-            } else {
-                &translation
-            };
-            if state["panel"] != expected["panel"] || state["rows"] != expected["rows"] {
-                return Err("mode switch replaced record nodes or selection".into());
-            }
-            if state["scrollbar"].is_object() && state["scrollbar"]["visible"] != false {
-                return Err("mode switch revealed scrollbar".into());
-            }
-            let current = on_main(app, geometry)?;
-            equal(
-                current.window_width,
-                baseline.window_width,
-                "mode switch window width",
-            )?;
-            equal(
-                current.history_width,
-                baseline.history_width,
-                "mode switch list width",
-            )?;
-        }
-        let mut menus = Vec::new();
-        for mode in ["clipboard", "translation"] {
-            records_mode(app, mode)?;
-            evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));const row=p.querySelector('.history-items .history-row:not([hidden])');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;"#,
-            )?;
-            let menu = wait_records(
-                app,
-                r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};
+        samples.push(clipboard.clone());
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));const row=p.querySelector('.history-items .history-row:not([hidden])');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;"#,
+        )?;
+        let menu = wait_records(
+            app,
+            r#"const menu=document.querySelector('.record-context-menu');if(!menu)return {ready:false};
 const style=getComputedStyle(menu),label=b=>b.querySelector('.record-menu-label').textContent;
 const nodes=[...menu.querySelectorAll('[role=menuitem],[role=separator]')],separator=menu.querySelector('[role=separator]');
 return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hidden]) .history-row.context-target'),labels:nodes.map(b=>b.getAttribute('role')==='separator'?'/':label(b)),keys:nodes.filter(b=>b.getAttribute('role')==='menuitem').map(b=>b.querySelector('kbd')?.textContent),width:menu.getBoundingClientRect().width,divider:separator&&[getComputedStyle(separator).height,getComputedStyle(separator).backgroundImage],background:style.backgroundColor,blur:style.webkitBackdropFilter,radius:style.borderRadius,shadow:style.boxShadow,items:[...menu.querySelectorAll('button')].filter(b=>['Favorite','Pin','Delete'].includes(label(b))).map(b=>{const s=getComputedStyle(b),i=b.querySelector('.history-symbol');return {label:label(b),color:s.color,height:s.height,opacity:s.opacity,symbol:i.dataset.symbol,mask:getComputedStyle(i).webkitMaskImage,width:getComputedStyle(i).width};})};"#,
-            )?;
-            if menu["contextTarget"] != true {
-                return Err(format!(
-                    "{mode}: right-click target is not highlighted: {menu}"
-                ));
-            }
-            if mode == "clipboard"
-                && menu["labels"]
-                    != serde_json::json!([
-                        "Paste",
-                        "Paste as Plain Text",
-                        "Copy",
-                        "/",
-                        "Favorite",
-                        "Pin",
-                        "Note",
-                        "/",
-                        "Delete"
-                    ])
-            {
-                return Err(format!("clipboard text menu order: {menu}"));
-            }
-            if mode == "translation"
-                && (menu["labels"]
-                    != serde_json::json!([
-                        "Copy source text",
-                        "Copy Primary Text",
-                        "/",
-                        "Translate",
-                        "/",
-                        "Favorite",
-                        "Pin",
-                        "Note",
-                        "/",
-                        "Delete"
-                    ])
-                    || menu["keys"]
-                        != serde_json::json!(["⇧⌘C", "⌘1", "⌘↵", "⌥F", "⌥P", "⇧⌘N", "⌘⌫"]))
-            {
-                return Err(format!("single-result translation menu: {menu}"));
-            }
-            samples.push(
-                serde_json::json!({"mode":mode,"menuLabels":menu["labels"],"contextTarget":true}),
-            );
-            let mut common = menu;
-            common.as_object_mut().unwrap().remove("labels");
-            common.as_object_mut().unwrap().remove("keys");
-            menus.push(common);
-            evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
-            wait_records(app, "return {ready:!document.querySelector('.record-context-menu')&&!document.querySelector('.record-view:not([hidden]) .history-row.context-target')};")?;
-        }
-        if menus[0] != menus[1] {
-            return Err(format!("record menus differ: {menus:?}"));
-        }
-        samples.push(serde_json::json!({"sharedMenus":menus}));
-        let before_copy = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const row=document.querySelector('#translation-history [data-record-id=unified-translation]');
-row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:120}));return true;
-"#,
         )?;
-        wait_records(app, "return {ready:!!document.querySelector('#translation-history .context-target[data-record-id=unified-translation]')&&!!document.querySelector('[role=menu]')};")?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-[...document.querySelectorAll('[role=menu] .record-menu-label')].find(item=>item.textContent==='Copy Primary Text').closest('button').click();return true;
-"#,
-        )?;
-        let mut copied_primary = false;
-        for _ in 0..80 {
-            copied_primary = on_main(app, move |_| {
-                Ok(crate::platform::clipboard_version() != before_copy
-                    && crate::platform::read_clipboard(|_| false)?.is_some_and(|capture| matches!(capture.payload, crate::platform::ClipboardPayload::Text(text) if text == "Synthetic shared output")))
+        if menu["contextTarget"] != true {
+            return Err(format!(
+                "clipboard: right-click target is not highlighted: {menu}"
+            ));
+        }
+        if menu["labels"]
+            != serde_json::json!([
+                "Paste",
+                "Paste as Plain Text",
+                "Copy",
+                "Copy as Plain Text",
+                "/",
+                "Favorite",
+                "Pin",
+                "Note",
+                "/",
+                "Delete"
+            ])
+        {
+            return Err(format!("clipboard text menu order: {menu}"));
+        }
+        samples.push(serde_json::json!({"mode":"clipboard","menuLabels":menu["labels"],"contextTarget":true}));
+        evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
+        wait_records(app, "return {ready:!document.querySelector('.record-context-menu')&&!document.querySelector('.record-view:not([hidden]) .history-row.context-target')};")?;
+        for width in [280.0, 320.0, 454.0, 380.0] {
+            on_main(app, move |app| {
+                let app_state = app.state::<AppState>();
+                let mut state = app_state.windows.lock().unwrap();
+                state.clipboard_width = width;
+                state.clipboard_extent = width;
+                drop(state);
+                layout_translation(app, false)?;
+                let child = view_frame(app, "history")?;
+                equal(child.size.width, width, "native record child width")?;
+                Ok(())
             })?;
-            if copied_primary {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !copied_primary {
-            return Err("translation menu did not copy the saved primary text".into());
-        }
-        samples.push(serde_json::json!({"contextPrimaryCopied":true}));
-        for mode in ["clipboard", "translation"] {
-            records_mode(app, mode)?;
-            for width in [280.0, 320.0, 454.0, 380.0] {
-                on_main(app, move |app| {
-                    let app_state = app.state::<AppState>();
-                    let mut state = app_state.windows.lock().unwrap();
-                    state.history_width = width;
-                    state.history_extent = width;
-                    drop(state);
-                    layout_translation(app, false)?;
-                    let child = view_frame(app, "history")?;
-                    equal(child.size.width, width, "native record child width")?;
-                    Ok(())
-                })?;
-                let state=wait_records(app,&format!("const p=document.querySelector('{}');return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width}};",if mode=="clipboard" {".clipboard-panel"} else {"#translation-history"}))?;
-                samples.push(state);
-                let footer = wait_records(
-                    app,
-                    r#"
+            let state = wait_records(app, &format!("const p=document.querySelector('.clipboard-panel');return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width}};"))?;
+            samples.push(state);
+            let footer = wait_records(
+                app,
+                r#"
 const p=document.querySelector('.record-view:not([hidden]) .history-panel'),bounds=p.getBoundingClientRect(),footer=p.querySelector('.history-footer');
 const filterButtons=[...footer.querySelectorAll('.history-filters button')].map(b=>b.getBoundingClientRect()),filters={left:Math.min(...filterButtons.map(b=>b.left)),right:Math.max(...filterButtons.map(b=>b.right))},count=footer.querySelector('.history-record-count').getBoundingClientRect(),keyboard=footer.querySelector('.history-shortcuts').getBoundingClientRect();
 const controls=[...footer.querySelectorAll('button')].map(button=>({label:button.getAttribute('aria-label'),rect:button.getBoundingClientRect()}));
 const overlap=(a,b)=>Math.min(a.right,b.right)-Math.max(a.left,b.left)>.5&&Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>.5;
 return {ready:true,width:bounds.width,centerOffset:(filters.left+filters.right)/2-(bounds.left+bounds.width/2),overlaps:controls.flatMap((a,i)=>controls.slice(i+1).filter(b=>overlap(a.rect,b.rect)).map(b=>[a.label,b.label])),countOverlap:controls.some(a=>overlap(a.rect,count)),within:controls.every(a=>a.rect.left>=bounds.left&&a.rect.right<=bounds.right),keyboardAtEdge:keyboard.right<=bounds.right};
 "#,
-                )?;
-                if footer["centerOffset"].as_f64().unwrap_or(99.).abs() > 0.5
-                    || footer["overlaps"]
-                        .as_array()
-                        .is_none_or(|values| !values.is_empty())
-                    || footer["countOverlap"] != false
-                    || footer["within"] != true
-                {
-                    return Err(format!(
-                        "{mode}: footer loses centering or overlaps at {width}px: {footer}"
-                    ));
-                }
-                samples.push(footer);
+            )?;
+            if footer["centerOffset"].as_f64().unwrap_or(99.).abs() > 0.5
+                || footer["overlaps"]
+                    .as_array()
+                    .is_none_or(|values| !values.is_empty())
+                || footer["countOverlap"] != false
+                || footer["within"] != true
+            {
+                return Err(format!(
+                    "clipboard: footer loses centering or overlaps at {width}px: {footer}"
+                ));
             }
+            samples.push(footer);
         }
-        for (name, args) in [
-            ("records_view_set", serde_json::json!({"view":"clipboard"})),
-            (
-                "window_hide",
-                serde_json::json!({"region":"translation","keepHistory":true}),
-            ),
-        ] {
-            if name == "window_hide" {
-                on_main(app, |app| {
-                    app.state::<AppState>()
-                        .windows
-                        .lock()
-                        .unwrap()
-                        .translation_visible = true;
-                    apply_translation(app)
-                })?;
-                wait_motion(app)?;
-            }
+        {
             let token_before = app.state::<AppState>().operation.load(Ordering::SeqCst);
-            evaluate_view_dom(app, "clipboard", &format!("window.__explicitNavigation={{done:false}};window.__TAURI_INTERNALS__.invoke({name:?},{args}).then(()=>window.__explicitNavigation={{done:true}},error=>window.__explicitNavigation={{done:true,error:String(error)}});return true;"))?;
+            evaluate_view_dom(
+                app,
+                "clipboard",
+                r#"window.__explicitNavigation={done:false};window.__TAURI_INTERNALS__.invoke("window_hide",{"region":"clipboard"}).then(()=>window.__explicitNavigation={done:true},error=>window.__explicitNavigation={done:true,error:String(error)});return true;"#,
+            )?;
             let navigation = wait_records(
                 app,
                 "return {ready:window.__explicitNavigation?.done,...window.__explicitNavigation};",
             )?;
             let token_after = app.state::<AppState>().operation.load(Ordering::SeqCst);
             if navigation["error"].is_string() || token_after <= token_before {
-                return Err(format!("explicit {name} retained stale paste token {token_before}->{token_after}: {navigation}"));
+                return Err(format!("explicit window_hide retained stale paste token {token_before}->{token_after}: {navigation}"));
             }
-            samples.push(serde_json::json!({"navigation":name,"tokenBefore":token_before,"tokenAfter":token_after}));
+            samples.push(serde_json::json!({"navigation":"window_hide","tokenBefore":token_before,"tokenAfter":token_after}));
         }
         records_mode(app, "clipboard")?;
-        records_mode(app, "translation")?;
-        evaluate_dom(
-            app,
-            r#"window.__selectionTiming={};const timing=window.__selectionTiming;const poll=()=>{const clip=document.querySelector('.translation-clip');if(document.querySelector('.source-input')?.value==='Synthetic shared record input'&&document.querySelector('.result-column')?.textContent==='Synthetic shared output'&&clip?.getAttribute('aria-hidden')==='false'){timing.readyAt=Date.now();}else requestAnimationFrame(poll);};requestAnimationFrame(poll);return true;"#,
-        )?;
-        let selection_broadcasts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let broadcasts = selection_broadcasts.clone();
-        let selection_listener = app.listen_any("history_changed", move |_| {
-            broadcasts.fetch_add(1, Ordering::SeqCst);
-        });
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"window.__selectionStarted=Date.now();document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
-        )?;
-        let selection_timing = wait_dom(
-            app,
-            "return {ready:!!window.__selectionTiming.readyAt,...window.__selectionTiming};",
-        )?;
-        let selection_started =
-            evaluate_view_dom(app, "clipboard", "return window.__selectionStarted;")?;
-        let elapsed = selection_timing["readyAt"]
-            .as_i64()
-            .ok_or("selection ready timestamp")?
-            - selection_started
-                .as_i64()
-                .ok_or("selection start timestamp")?;
-        app.unlisten(selection_listener);
-        let broadcasts = selection_broadcasts.load(Ordering::SeqCst);
-        samples.push(serde_json::json!({"selectionReadyMs":elapsed,"selectionFullPageBroadcasts":broadcasts}));
-        if broadcasts != 0 {
-            return Err(format!(
-                "selection rebroadcast {broadcasts} complete history pages before opening"
-            ));
-        }
-        if elapsed > 150 {
-            return Err(format!(
-                "selected translation was not ready during opening: {elapsed}ms"
-            ));
-        }
-        wait_motion(app)?;
-        wait_records(
-            app,
-            r#"return {ready:document.querySelector('[data-record-id="unified-translation"]').classList.contains('selected')};"#,
-        )?;
-        wait_dom(app,"return {ready:document.querySelector('.source-input')?.value==='Synthetic shared record input'&&document.querySelector('.result-column')?.textContent==='Synthetic shared output'};")?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const input=document.querySelector('#translation-history .history-search input');
-Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'synthetic-no-matching-record-71f39');
-input.dispatchEvent(new Event('input',{bubbles:true}));return true;
-"#,
-        )?;
-        let no_matches = wait_records(app, "const p=document.querySelector('#translation-history');return {ready:p.querySelectorAll('.history-row:not([hidden])').length===0&&!!p.querySelector('[role=status]'),empty:p.querySelector('[role=status]')?.textContent};")?;
-        let cleared = wait_dom(app, "const source=document.querySelector('.source-input')?.value,results=[...document.querySelectorAll('.result-column')].map(e=>e.textContent);return {ready:source===''&&results.every(value=>value===''),source,results};")?;
-        samples.extend([no_matches, cleared]);
-        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history .history-search button').click();return true;")?;
-        wait_records(
-            app,
-            r#"return {ready:!!document.querySelector('#translation-history [data-record-id=unified-translation]')&&document.querySelector('#translation-history .history-search input').value===''};"#,
-        )?;
-        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history [data-record-id=unified-translation] .history-row-select').click();return true;")?;
-        samples.push(wait_dom(app, "const source=document.querySelector('.source-input')?.value,result=document.querySelector('.result-column')?.textContent;return {ready:source==='Synthetic shared record input'&&result==='Synthetic shared output',source,result,restoredAfterEmptySearch:true};")?);
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"document.querySelector('[data-record-id="unified-translation"] .history-row-select').click();return true;"#,
-        )?;
-        wait_records(app,"return {ready:document.querySelector('#translation-history .records-details').getAttribute('aria-expanded')==='false'};")?;
-        wait_motion(app)?;
-        wait_records(
-            app,
-            r#"return {ready:!document.querySelector('#translation-history .history-row.selected')};"#,
-        )?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const row=document.querySelector('#translation-history [data-record-id=unified-translation]');row.querySelector('[data-action=note] button').click();return true;
-"#,
-        )?;
-        wait_records(
-            app,
-            r#"
-const card=document.querySelector('.clipboard-editor');if(!card||card.querySelector('input').disabled)return {ready:false};
-const content=card.querySelector('textarea');if(!content.readOnly||content.value!=='Synthetic shared record input')throw Error('translation note content must be read-only');
-return {ready:true};
-"#,
-        )?;
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"
-const title=document.querySelector('.clipboard-editor input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(title,'Native title only');title.dispatchEvent(new Event('input',{bubbles:true}));
-title.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));return true;
-"#,
-        )?;
-        samples.push(wait_records(app, r#"
-const row=document.querySelector('#translation-history [data-record-id=unified-translation]');return {ready:row?.querySelector('.history-preview')?.textContent==='Native title only'&&!document.querySelector('.clipboard-editor'),translationNoteSaved:true};
-"#)?);
-        evaluate_view_dom(
-            app,
-            "clipboard",
-            r#"document.querySelector('#translation-history input[type=search]').dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',code:'Tab',bubbles:true,cancelable:true}));return true;"#,
-        )?;
-        wait_records(app,"const p=document.querySelector('.clipboard-panel');return {ready:!!p.getClientRects().length&&!p.closest('[hidden]')};")?;
-        on_main(app, |app| {
-            if app
-                .state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible
-            {
-                return Err("clipboard mode left details visible".into());
-            }
-            Ok(())
-        })?;
         {
             let state = app.state::<AppState>();
             crate::clipboard_runtime::persist_capture(
@@ -5198,8 +4228,8 @@ const row=document.querySelector('#translation-history [data-record-id=unified-t
         wait_motion(app)?;
         let recovery = on_main(app, move |app| {
             let state = app.state::<AppState>().windows.lock().unwrap().clone();
-            if !state.history_visible
-                || state.record_view != crate::model::RecordView::Clipboard
+            if !state.clipboard_visible
+                || state.standalone_translation_visible
                 || app.state::<AppState>().operation.load(Ordering::SeqCst) != token
             {
                 return Err(
@@ -5310,8 +4340,12 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
                 return Err("global navigation bypassed note confirmation".into());
             }
             let guarded = on_main(app, |app| {
-                Ok(app.state::<AppState>().windows.lock().unwrap().record_view
-                    == crate::model::RecordView::Clipboard)
+                Ok(app
+                    .state::<AppState>()
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .clipboard_visible)
             })?;
             if app.state::<AppState>().target.lock().unwrap().is_none() {
                 return Err("pending navigation replaced the previous paste target".into());
@@ -5349,12 +4383,6 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
                         .is_some()
                     || app
                         .state::<AppState>()
-                        .selection_source
-                        .lock()
-                        .unwrap()
-                        .is_some()
-                    || app
-                        .state::<AppState>()
                         .records_navigation
                         .lock()
                         .unwrap()
@@ -5367,9 +4395,7 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
                 for _ in 0..100 {
                     navigated = on_main(app, |app| {
                         let state = app.state::<AppState>().windows.lock().unwrap().clone();
-                        Ok(state.record_view == crate::model::RecordView::Translation
-                            && state.translation_visible
-                            && !state.history_visible)
+                        Ok(state.standalone_translation_visible && !state.clipboard_visible)
                     })?;
                     if navigated {
                         break;
@@ -5408,50 +4434,48 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
             }
             samples.push(serde_json::json!({"noteNavigationAction":action,"guarded":true}));
         }
-        for mode in ["clipboard", "translation"] {
-            records_mode(app, mode)?;
-            evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true}));return true;"#,
-            )?;
-            on_main(app, |app| {
-                if !app
-                    .state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .history_visible
-                {
-                    return Err("composition Escape hid workspace".into());
-                }
-                Ok(())
-            })?;
-            evaluate_view_dom(
-                app,
-                "clipboard",
-                r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
-            )?;
-            for _ in 0..100 {
-                if on_main(app, |app| {
-                    let app_state = app.state::<AppState>();
-                    let s = app_state.windows.lock().unwrap();
-                    Ok(!s.history_visible && !s.translation_visible)
-                })? {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+        records_mode(app, "clipboard")?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true}));return true;"#,
+        )?;
+        on_main(app, |app| {
+            if !app
+                .state::<AppState>()
+                .windows
+                .lock()
+                .unwrap()
+                .clipboard_visible
+            {
+                return Err("composition Escape hid workspace".into());
             }
-            on_main(app, |app| {
+            Ok(())
+        })?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"const p=[...document.querySelectorAll('.history-panel')].find(p=>p.getClientRects().length&&!p.closest('[hidden]'));p.querySelector('.history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+        )?;
+        for _ in 0..100 {
+            if on_main(app, |app| {
                 let app_state = app.state::<AppState>();
                 let s = app_state.windows.lock().unwrap();
-                if s.history_visible || s.translation_visible {
-                    return Err("Escape failed to hide fixed workspace".into());
-                }
-                Ok(())
-            })?;
+                Ok(!s.clipboard_visible && !s.standalone_translation_visible)
+            })? {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        samples.push(serde_json::json!({"sameRenderer":true,"rapidSwitchStable":true,"menus":true,"nativeResizeChild":true,"detailsRestore":true,"escapePinnedAndComposition":true}));
+        on_main(app, |app| {
+            let app_state = app.state::<AppState>();
+            let s = app_state.windows.lock().unwrap();
+            if s.clipboard_visible || s.standalone_translation_visible {
+                return Err("Escape failed to hide fixed workspace".into());
+            }
+            Ok(())
+        })?;
+        samples.push(serde_json::json!({"sameRenderer":true,"menus":true,"nativeResizeChild":true,"escapePinnedAndComposition":true}));
         Ok(())
     })();
     DomCase {
@@ -5465,7 +4489,7 @@ input.dispatchEvent(new Event('input',{bubbles:true}));return true;
 fn records_open_runtime_state(app: &AppHandle) -> serde_json::Value {
     let state = app.state::<AppState>();
     let regions = state.windows.lock().unwrap();
-    serde_json::json!({"historyVisible":regions.history_visible,"translationVisible":regions.translation_visible,"recordView":regions.record_view,"recordsSession":regions.records_session,
+    serde_json::json!({"clipboardVisible":regions.clipboard_visible,"standaloneTranslationVisible":regions.standalone_translation_visible,"clipboardDetailVisible":regions.clipboard_detail_visible,"clipboardTranslationVisible":regions.clipboard_translation_visible,"recordsSession":regions.records_session,
         "captureEnabled":state.clipboard_enabled.load(Ordering::SeqCst),"clipboardVersion":state.clipboard_version.load(Ordering::SeqCst),"operation":state.operation.load(Ordering::SeqCst),
         "hasTarget":state.target.lock().unwrap().is_some(),"hasSelection":state.selection.lock().unwrap().is_some(),"selectionBusy":state.selection_busy.load(Ordering::SeqCst),"hasSelectionOrigin":state.selection_origin.lock().unwrap().is_some()})
 }
@@ -5543,8 +4567,8 @@ fn records_hide_handoff(app: &AppHandle) -> Result<serde_json::Value, String> {
         let state = records_open_runtime_state(app);
         if visible
             || focused
-            || state["historyVisible"] != false
-            || state["translationVisible"] != false
+            || state["clipboardVisible"] != false
+            || state["standaloneTranslationVisible"] != false
         {
             return Err(format!("records hide did not settle before next summon: visible={visible},focused={focused},state={state}"));
         }
@@ -6085,15 +5109,12 @@ fn run_clipboard_translate_shortcut(app: &AppHandle) -> DomCase {
         };
         command_t()?;
         samples.push(wait_dom(app, r#"
-const input=document.querySelector('.source-input');return {ready:input?.value==='Synthetic clipboard Command-T',action:'Command-T translated the clipboard record'};
+const pane=document.querySelector('.clipboard-translate-pane');return {ready:!!pane&&pane.textContent.includes('Synthetic translation en'),action:'Command-T translated the clipboard record in attached pane'};
 "#)?);
         samples.push(wait_records(app, r#"
-const row=document.querySelector('#translation-history .history-items .history-row');
-const button=row?.querySelector('.history-row-select');
-return {ready:document.hasFocus()&&document.activeElement===button&&button?.getAttribute('aria-pressed')==='true'&&row?.hasAttribute('data-keyboard-current')&&button.textContent.includes('Synthetic clipboard Command-T'),action:'New translation record selected and focused',record:row?.dataset.recordId,focused:document.hasFocus(),activeId:document.activeElement?.closest('[data-record-id]')?.dataset.recordId,activeTag:document.activeElement?.tagName,selected:button?.getAttribute('aria-pressed'),current:row?.hasAttribute('data-keyboard-current')};
-"#)?);
-        samples.push(wait_dom(app, r#"
-return {ready:document.querySelector('.source-input')?.value==='Synthetic clipboard Command-T'&&document.body.textContent.includes('Synthetic translation en'),action:'Focused row matches the completed translation'};
+const row=document.querySelector('.clipboard-panel [data-record-id="translate-hotkey"]');
+const translate=row?.querySelector('[aria-label="Translate"]');
+return {ready:row?.dataset.translating==='true'&&translate?.getAttribute('aria-pressed')==='true',action:'Clipboard row marks active attached translation',record:row?.dataset.recordId,pressed:translate?.getAttribute('aria-pressed')};
 "#)?);
         // Verify the global fallback without capturing selection from another app.
         on_main(app, |app| {
@@ -6242,10 +5263,6 @@ return {ready:window.__focusShortcutSaved===true};
         samples.push(check("Next category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='true'&&keys.at(-1)?.trusted")?);
         press(123, 0, "\u{f702}", "\u{f702}")?;
         check("Previous category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&keys.at(-1)?.trusted")?;
-        press(48, 0, "\t", "\t")?;
-        samples.push(check("Tab to translation records", "document.querySelector('.records-workspace')?.dataset.recordView==='translation'&&document.activeElement===document.querySelector('#translation-history .history-unpinned .history-row:not([hidden]) .history-row-select')&&keys.at(-1)?.trusted")?);
-        press(48, 0, "\t", "\t")?;
-        samples.push(check("Tab to clipboard records", "!focused&&document.querySelector('.records-workspace')?.dataset.recordView==='clipboard'&&document.activeElement===row?.querySelector('.history-row-select')&&row?.dataset.recordId==='smoke-second'&&keys.at(-1)?.trusted")?);
         press(45, CMD | SHIFT, "N", "N")?;
         samples.push(check("Note", "keys.at(-1)?.trusted&&document.querySelector('.clipboard-editor textarea')?.value==='Synthetic shortcut smoke second'")?);
         press(53, 0, "\u{1b}", "\u{1b}")?;
@@ -6308,17 +5325,12 @@ return {ready:window.__focusShortcutSaved===true};
         )?;
         let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
         press(8, CMD, "c", "c")?;
-        check(
+        samples.push(check(
             "System text copy preserved",
             "keys.at(-1)?.key==='Copy'&&keys.at(-1)?.trusted",
-        )?;
-        press(36, OPT, "\r", "\r")?;
-        samples.push(check(
-            "Dedicated Paste remains disabled",
-            "keys.at(-1)?.code==='Enter'&&keys.at(-1)?.trusted",
         )?);
         if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version {
-            return Err("retired shortcut used a record".into());
+            return Err("system copy shortcut unexpectedly used a record".into());
         }
         evaluate_view_dom(
             app,
@@ -6531,7 +5543,11 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         )?;
         press(17, CMD, "t", "t")?;
         samples.push(wait_dom(app, r#"
-const input=document.querySelector('.source-input');return {ready:input?.value==='Synthetic shortcut smoke keep',action:'Translate'};
+const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];
+const orig=tabs.find(b=>b.textContent==='Original');
+if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();
+const input=pane?.querySelector('textarea');
+return {ready:!!pane&&input?.value==='Synthetic shortcut smoke keep',action:'Translate'};
 "#)?);
         if on_main(app, |_| {
             Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
@@ -6539,6 +5555,8 @@ const input=document.querySelector('.source-input');return {ready:input?.value==
         {
             return Err("Translate unexpectedly changed the isolated pasteboard".into());
         }
+        on_main(app, |app| hide(app, "clipboard"))?;
+        wait_motion(app)?;
         evaluate_view_dom(
             app,
             "settings",
@@ -6918,7 +5936,7 @@ fn run_record_display_shortcuts(app: &AppHandle) -> DomCase {
         on_main(app, |app| {
             let state = app.state::<AppState>();
             let mut regions = state.windows.lock().unwrap();
-            regions.history_pinned = true;
+            regions.clipboard_pinned = true;
             regions.translation_pinned = true;
             drop(regions);
             create(app, "settings")?;
@@ -6942,20 +5960,6 @@ fn run_record_display_shortcuts(app: &AppHandle) -> DomCase {
                 fingerprint: "smoke-preview-text".into(),
             })?;
         }
-        let translation = nami::model::HistoryRecord {
-            id: "smoke-preview-source".into(),
-            title: String::new(),
-            text: source.into(),
-            source_language: "en".into(),
-            translation: None,
-            target_languages: vec!["fr".into()],
-            translations: vec!["Synthetic translation".into()],
-            date: "2099-01-01T00:00:00Z".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-        };
-        on_main(app, move |app| history_add(app, translation))?;
         crate::clipboard_runtime::changed(app)?;
         let measure = |id: &str, lines| {
             format!(
@@ -6985,17 +5989,16 @@ window.__previewPreferences='pending';
 (async()=>{
   const invoke=window.__TAURI_INTERNALS__.invoke;
   const before=(await invoke('app_snapshot')).clipboardControls.previewLines;
-  if(before.clipboard!==3||before.translation!==3)throw Error('incorrect default preview lines');
+  if(before.clipboard!==3)throw Error('incorrect default preview lines');
   for(const lines of [0,4]){
-    const error=await invoke('records_preview_lines_set',{view:'clipboard',lines}).then(()=>null,String);
+    const error=await invoke('records_preview_lines_set',{lines}).then(()=>null,String);
     if(error!=='invalid_argument')throw Error('out-of-range preview lines were accepted');
   }
-  await invoke('records_preview_lines_set',{view:'clipboard',lines:1});
-  await invoke('records_preview_lines_set',{view:'translation',lines:2});
+  await invoke('records_preview_lines_set',{lines:1});
 })().then(()=>window.__previewPreferences='saved',error=>window.__previewPreferences=String(error));return true;
 "#,
         )?;
-        samples.push(wait_view_dom(app,"settings",r#"return {ready:window.__previewPreferences==='saved',action:'Save distinct preview preferences and reject 0/4',status:window.__previewPreferences};"#)?);
+        samples.push(wait_view_dom(app,"settings",r#"return {ready:window.__previewPreferences==='saved',action:'Save preview preference and reject 0/4',status:window.__previewPreferences};"#)?);
         {
             let state = app.state::<AppState>();
             let database = state.database.lock().unwrap();
@@ -7004,7 +6007,7 @@ window.__previewPreferences='pending';
             )?;
             if serde_json::to_value(reloaded.controls()).map_err(|error| error.to_string())?
                 ["previewLines"]
-                != serde_json::json!({"clipboard":1,"translation":2})
+                != serde_json::json!({"clipboard":1})
             {
                 return Err("Preview preferences did not survive reload".into());
             }
@@ -7019,8 +6022,6 @@ window.__previewPreferences='pending';
             return Err("Reducing the clipboard line limit did not shrink the preview".into());
         }
         samples.push(compact);
-        on_main(app, |app| set_record_view(app, "translation"))?;
-        samples.push(wait_records(app, &measure("smoke-preview-source", 2))?);
 
         for target in ["clipboard", "translation"] {
             on_main(app, move |app| resume_navigation(app, target))?;
@@ -7088,41 +6089,13 @@ fn run_records_pointer(app: &AppHandle) -> DomCase {
             regions.dismiss();
             regions.sync_records_session();
         }
-        for index in 0..3 {
-            on_main(app, move |app| {
-                history_add(
-                    app,
-                    crate::model::HistoryRecord {
-                        title: String::new(),
-                        id: format!("pointer-translation-{index}"),
-                        text: format!("Synthetic pointer translation {index}"),
-                        source_language: "en".into(),
-                        translation: None,
-                        target_languages: vec!["fr".into()],
-                        translations: vec![format!("Traduction synthetique {index}")],
-                        date: format!("2099-01-0{}T00:00:00Z", index + 1),
-                        is_favorite: false,
-                        is_pinned: false,
-                        source_app: None,
-                    },
-                )
-            })?;
-        }
         // The pointer belongs to the person at the machine. It goes back only while it still rests where the
         // case put it: one moved since is in use.
         let placed = Placed::default();
         let pointer = crate::platform::test_pointer_location()?;
         let outcome = (|| {
             records_mode(app, "clipboard")?;
-            records_pointer_view(app, "clipboard", ".clipboard-panel", &mut samples, &placed)?;
-            records_mode(app, "translation")?;
-            records_pointer_view(
-                app,
-                "translation",
-                "#translation-history",
-                &mut samples,
-                &placed,
-            )
+            records_pointer_view(app, "clipboard", ".clipboard-panel", &mut samples, &placed)
         })();
         let placed = *placed.lock().unwrap();
         match (outcome, return_pointer(pointer, placed)) {
@@ -7903,7 +6876,6 @@ return true;
                     {
                         let state = app.state::<AppState>();
                         let mut regions = state.windows.lock().unwrap();
-                        regions.history_pinned = true;
                         regions.clipboard_pinned = true;
                     }
                     crate::windows::resume_navigation(app, "clipboard")?;
@@ -7947,7 +6919,6 @@ return true;
                 on_main(app, |app| {
                     let state = app.state::<AppState>();
                     let mut regions = state.windows.lock().unwrap();
-                    regions.history_pinned = false;
                     regions.clipboard_pinned = false;
                     Ok(())
                 })?;
@@ -8049,7 +7020,8 @@ fn run_selection_open(app: &AppHandle) -> DomCase {
             )?;
             let revision = app
                 .state::<AppState>()
-                .translation_revision
+                .standalone_translation
+                .revision
                 .load(Ordering::SeqCst);
             let started = std::time::Instant::now();
             on_main(app, move |app| {
@@ -8074,12 +7046,12 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
             })?;
             let state = app.state::<AppState>();
             let windows = state.windows.lock().unwrap();
-            if !windows.translation_visible
-                || windows.history_visible
+            if !windows.standalone_translation_visible
+                || windows.clipboard_visible
                 || state.selection_busy.load(Ordering::SeqCst)
                 || state.selection.lock().unwrap().is_some()
                 || state.selection_presentation.lock().unwrap().is_some()
-                || state.translation_revision.load(Ordering::SeqCst) <= revision
+                || state.standalone_translation.revision.load(Ordering::SeqCst) <= revision
                 || state.clipboard_version.load(Ordering::SeqCst) != clipboard_version
                 || sample["samePanel"] != true
                 || sample["sameInput"] != true
@@ -8115,7 +7087,7 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
             samples.push(sample);
         }
         let state = app.state::<AppState>();
-        let before = state.translation_revision.load(Ordering::SeqCst);
+        let before = state.standalone_translation.revision.load(Ordering::SeqCst);
         on_main(app, |app| crate::selection::test_empty_summon(app, false))?;
         for _ in 0..100 {
             if !state.selection_busy.load(Ordering::SeqCst) {
@@ -8124,7 +7096,7 @@ return {ready:ready&&probe.presented,empty:input?.value==='',focused:document.ac
             std::thread::sleep(Duration::from_millis(10));
         }
         if state.selection_busy.load(Ordering::SeqCst)
-            || state.translation_revision.load(Ordering::SeqCst) != before
+            || state.standalone_translation.revision.load(Ordering::SeqCst) != before
             || state.selection.lock().unwrap().is_some()
         {
             return Err("selection-only shortcut without text interrupted a translation".into());
@@ -8519,7 +7491,7 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         // Explicit extraction takes the persisted original (case and newlines), not the folded index.
         on_main(app, |app| {
             let state = app.state::<AppState>();
-            state.windows.lock().unwrap().history_visible = true;
+            state.windows.lock().unwrap().clipboard_visible = true;
             Ok(())
         })?;
         tauri::async_runtime::block_on(crate::clipboard_text::process(
@@ -9014,14 +7986,15 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
             let window = app.get_window("translation").ok_or("missing_test_window")?;
             let native = window.ns_window().map_err(|_| "window_geometry")?.cast::<objc2::runtime::AnyObject>();
             let minimum: objc2_foundation::NSSize = unsafe { objc2::msg_send![native, contentMinSize] };
-            equal(minimum.width, history.size.width + 480.0, "detail shrink limit")?;
+            equal(minimum.width, history.size.width + 360.0, "detail shrink limit")?;
             let native_frame = native_translation_frame(&window)?;
-            native_resize::test_drag(&window, objc2_foundation::NSPoint::new(native_frame.size.width - 1.0, native_frame.size.height / 2.0), objc2_foundation::NSPoint::new(-120.0, 0.0))?;
+            native_resize::test_drag(&window, objc2_foundation::NSPoint::new(native_frame.size.width - 1.0, native_frame.size.height / 2.0), objc2_foundation::NSPoint::new(-200.0, 0.0))?;
             let resized = geometry(app)?;
-            equal(resized.translation_width, 480.0, "detail cannot shrink below default")?;
+            equal(resized.translation_width, 360.0, "detail cannot shrink below minimum")?;
             equal(resized.history_width, history.size.width, "minimum drag preserves records width")?;
-            Ok(serde_json::json!({"detailWidth":resized.translation_width,"historyHeight":history.size.height,"detailHeight":detail.size.height,"sameTop":detail.origin.y==history.origin.y,"minimumWidth":480}))
+            Ok(serde_json::json!({"detailWidth":resized.translation_width,"historyHeight":history.size.height,"detailHeight":detail.size.height,"sameTop":detail.origin.y==history.origin.y,"minimumWidth":360}))
         })?);
+        let baseline_after_shrink = on_main(app, geometry)?;
         for _ in 0..3 {
             evaluate_view_dom(
                 app,
@@ -9041,32 +8014,21 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
             frame.adjacent()?;
             equal(
                 frame.window_left,
-                initial.window_left,
+                baseline_after_shrink.window_left,
                 "detail reopen left anchor",
             )?;
             equal(
                 frame.window_width,
-                initial.window_width,
+                baseline_after_shrink.window_width,
                 "detail reopen window width",
             )?;
             equal(
                 frame.history_width,
-                initial.history_width,
+                baseline_after_shrink.history_width,
                 "detail reopen records width",
             )?;
-            samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail-text')?.textContent==='Second synthetic detail'&&document.querySelector('.source-input')===window.__detailInput&&document.querySelector('.clipboard-detail')===window.__detailPane,sameTranslation:document.querySelector('.source-input')===window.__detailInput,sameDetails:document.querySelector('.clipboard-detail')===window.__detailPane};"#)?);
+            samples.push(wait_dom(app, r#"return {ready:document.querySelector('.clipboard-detail-text')?.textContent==='Second synthetic detail'&&document.querySelector('.clipboard-detail')===window.__detailPane,sameDetails:document.querySelector('.clipboard-detail')===window.__detailPane};"#)?);
         }
-        on_main(app, |app| {
-            {
-                let state = app.state::<AppState>();
-                let mut windows = state.windows.lock().unwrap();
-                windows.history_visible = false;
-                windows.translation_pinned = true;
-            }
-            apply_translation(app)
-        })?;
-        wait_motion(app)?;
-        wait_records(app, "return {ready:document.querySelector('.clipboard-panel')?.closest('.record-view')?.inert===true};")?;
         evaluate_dom(
             app,
             r#"document.querySelector('.clipboard-detail [aria-label="Note"]').click();return true;"#,
@@ -9082,13 +8044,11 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
         {
             let state = app.state::<AppState>();
             let windows = state.windows.lock().unwrap();
-            if !windows.history_visible
+            if !windows.clipboard_visible
                 || !windows.records_editor_open
-                || !windows.translation_visible
+                || !windows.clipboard_detail_visible
             {
-                return Err(
-                    "detail-only Note failed to reveal and protect the shared editor".into(),
-                );
+                return Err("detail Note failed to reveal and protect the shared editor".into());
             }
         }
         evaluate_view_dom(
@@ -9239,8 +8199,8 @@ fn run_clipboard_kind_text(app: &AppHandle) -> DomCase {
             on_main(app, move |app| {
                 let state = app.state::<AppState>();
                 let mut windows = state.windows.lock().unwrap();
-                windows.history_width = width;
-                windows.history_extent = width;
+                windows.clipboard_width = width;
+                windows.clipboard_extent = width;
                 drop(windows);
                 layout_translation(app, false)
             })?;
@@ -9444,131 +8404,67 @@ const text=actions('kind-text-favorite'),ordinary=actions('kind-text-ordinary'),
 return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.includes('Translate')&&image.includes('Favorite')&&image.includes('Translate')&&image.includes('Extract text'),text,ordinary,image};
 "#)?);
         on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .translation_visible = false;
+            let state = app.state::<AppState>();
+            let mut windows = state.windows.lock().unwrap();
+            windows.clipboard_detail_visible = false;
+            windows.clipboard_translation_visible = false;
+            windows.clipboard_translation_record_id = None;
+            drop(windows);
             apply_translation(app)
         })?;
         wait_motion(app)?;
-        wait_dom(app, "return {ready:document.querySelector('.translation-clip')?.getAttribute('aria-hidden')==='true'};")?;
         evaluate_view_dom(
             app,
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-text"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value,error=document.querySelector('.translation-status [role=alert]')?.textContent;return {ready:text?.includes('HELLO NAMI')&&error==='translation_network_disabled_in_tests',text,error};"#)?);
+        samples.push(wait_dom(app, r#"const pane=document.querySelector('.clipboard-translate-pane'),error=pane?.querySelector('[role=alert]')?.textContent;return {ready:!!pane&&error==='translation_network_disabled_in_tests',error};"#)?);
         let before_hover = app
             .state::<AppState>()
-            .translation_revision
+            .clipboard_side_translation
+            .revision
             .load(Ordering::SeqCst);
-        evaluate_view_dom(app, "clipboard", "document.querySelector('#translation-history .history-row').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;")?;
+        evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-panel [data-record-id=\"kind-text-ordinary\"]').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;")?;
         wait_records(app, "return {ready:true};")?;
         let after_hover = wait_dom(
             app,
-            r#"const text=document.querySelector('.source-input')?.value;return {ready:!!text,text};"#,
+            r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const text=pane?.querySelector('textarea')?.value;return {ready:!!text,text};"#,
         )?;
         if !after_hover["text"]
             .as_str()
             .is_some_and(|text| text.contains("HELLO NAMI"))
             || app
                 .state::<AppState>()
-                .translation_revision
+                .clipboard_side_translation
+                .revision
                 .load(Ordering::SeqCst)
                 != before_hover
         {
             return Err(format!(
-                "stationary pointer replaced the image translation: {after_hover}"
+                "browsing another clipboard record replaced the attached image translation: {after_hover}"
             ));
         }
         samples.push(after_hover);
-        let selected = on_main(app, |app| {
-            let record = app
-                .state::<AppState>()
-                .history
-                .lock()
-                .unwrap()
-                .snapshot()
-                .records[0]
-                .clone();
-            crate::commands::select_history_sample(app, Some(record.id.clone()), false, false)?;
-            Ok::<_, String>(record)
-        })?;
-        let mut completed = selected.clone();
-        completed.id = format!("background-{}", uuid::Uuid::new_v4());
-        completed.is_favorite = false;
-        completed.is_pinned = false;
-        completed.text = "Synthetic background translation completed while browsing".into();
-        let completed_id = completed.id.clone();
-        let handle = app.clone();
-        let (send, receive) = mpsc::channel();
-        tauri::async_runtime::spawn(async move {
-            let revision = handle
-                .state::<AppState>()
-                .translation_revision
-                .load(Ordering::SeqCst);
-            let result = crate::history_runtime::commit_translation(
-                &handle,
-                completed,
-                "google".into(),
-                revision,
-                None,
-            )
-            .await;
-            let _ = send.send(result.map(|_| ()));
-        });
-        receive
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "background commit timeout")??;
-        if app
-            .state::<AppState>()
-            .history
-            .lock()
-            .unwrap()
-            .selected_id()
-            != Some(selected.id.as_str())
-        {
-            return Err("background translation replaced the browsed record".into());
-        }
-        if app
-            .state::<AppState>()
-            .database
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or("test database")?
-            .record(&completed_id)?
-            .is_none()
-        {
-            return Err("background translation was not saved".into());
-        }
-        let handle = app.clone();
-        let (send, receive) = mpsc::channel();
-        tauri::async_runtime::spawn(async move {
-            let result =
-                crate::history_runtime::update_record(&handle, completed_id, "delete".into(), None)
-                    .await;
-            let _ = send.send(result.map(|_| ()));
-        });
-        receive
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "background cleanup timeout")??;
-        records_mode(app, "clipboard")?;
-        wait_records(app, "return {ready:!!document.querySelector('.clipboard-panel [data-record-id=\"kind-text-favorite\"] [aria-label=\"Translate\"]')};")?;
         evaluate_view_dom(
             app,
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-text-favorite"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        let translated = wait_dom(app,&format!("return {{ready:document.querySelector('.source-input')?.value==={},length:document.querySelector('.source-input')?.value.length}};",serde_json::to_string(&full_text).unwrap()))?;
+        let translated = wait_dom(
+            app,
+            &format!(
+                r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const value=pane?.querySelector('textarea')?.value;return {{ready:value==={},length:value?.length}};"#,
+                serde_json::to_string(&full_text).unwrap()
+            ),
+        )?;
         {
             let state = app.state::<AppState>();
             let windows = state.windows.lock().unwrap();
-            if windows.record_view != crate::model::RecordView::Translation
-                || !windows.translation_visible
+            if !windows.clipboard_visible
+                || !windows.clipboard_translation_visible
+                || windows.standalone_translation_visible
             {
-                return Err("clipboard Translate failed to open translation details".into());
+                return Err("clipboard Translate failed to open attached translate pane".into());
             }
         }
         samples.push(translated);
@@ -9613,7 +8509,7 @@ return {ready:image.includes('Translate')&&image.includes('Extract text')&&image
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-file"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        samples.push(wait_dom(app, r#"const text=document.querySelector('.source-input')?.value;return {ready:text?.includes('HELLO NAMI'),text};"#)?);
+        samples.push(wait_dom(app, r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const text=pane?.querySelector('textarea')?.value;return {ready:!!text&&text.includes('HELLO NAMI'),text};"#)?);
         records_mode(app, "clipboard")?;
         evaluate_view_dom(
             app,
@@ -9644,19 +8540,9 @@ return true;
         }
         samples.push(extracted);
         std::fs::write(&file_image, &blank_png).map_err(|_| "fixture image update")?;
-        // Leave and re-enter the clipboard view to refresh file eligibility without recognizing text.
-        on_main(app, |app| {
-            app.state::<AppState>()
-                .windows
-                .lock()
-                .unwrap()
-                .set_record_view(crate::model::RecordView::Translation);
-            apply_translation(app)
-        })?;
-        wait_records(
-            app,
-            "return {ready:!!document.querySelector('.clipboard-panel')?.closest('[hidden]')};",
-        )?;
+        // Hide and reopen the clipboard view to refresh file eligibility without recognizing text.
+        on_main(app, |app| hide(app, "clipboard"))?;
+        wait_motion(app)?;
         records_mode(app, "clipboard")?;
         evaluate_view_dom(
             app,
@@ -9912,12 +8798,23 @@ const action=document.querySelector('.clipboard-panel [data-record-id="kind-imag
 action?.click(); return {ready:!!action};
 "#,
         )?;
+        wait_dom(
+            app,
+            r#"
+const pane=document.querySelector('.clipboard-translate-pane');
+const dispatched=pane?.querySelector('[role=alert]')?.textContent==='translation_network_disabled_in_tests';
+return {ready:dispatched,translationAttempted:dispatched};
+"#,
+        )?;
         samples.push(wait_dom(
             app,
             r#"
-const source=document.querySelector('.source-input')?.value;
-const dispatched=document.querySelector('.translation-status [role=alert]')?.textContent==='translation_network_disabled_in_tests';
-return {ready:source==='HELLO NAMI'&&dispatched,cachedTranslationSource:source,translationAttempted:dispatched};
+const pane=document.querySelector('.clipboard-translate-pane');
+const tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];
+const orig=tabs.find(b=>b.textContent==='Original');
+if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();
+const source=pane?.querySelector('textarea')?.value;
+return {ready:source==='HELLO NAMI',cachedTranslationSource:source,translationAttempted:true};
 "#,
         )?);
         if crate::clipboard_text::VISION_CALLS.load(Ordering::SeqCst) != calls {
@@ -9941,159 +8838,205 @@ return {ready:source==='HELLO NAMI'&&dispatched,cachedTranslationSource:source,t
     }
 }
 
-fn run_history_pagination(app: &AppHandle) -> DomCase {
+fn run_clipboard_translate(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
-    let original_database = app.state::<AppState>().database.lock().unwrap().take();
-    let original_paging = app.state::<AppState>().history_page.lock().unwrap().clone();
-    let original_loaded = app
-        .state::<AppState>()
-        .history
-        .lock()
-        .unwrap()
-        .loaded_page(original_paging.cursor.clone());
+    let mut original_database = None;
     let result = (|| {
-        let mut db = crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
-        for index in 0..250 {
-            db.insert(
-                &crate::model::HistoryRecord {
-                    title: String::new(),
-                    id: format!("pagination-{index}"),
-                    text: format!("Synthetic page token-{index:04}"),
-                    source_language: "en".into(),
-                    translation: None,
-                    target_languages: vec!["fr".into()],
-                    translations: vec!["Synthetic output".into()],
-                    date: "2099-01-01T00:00:00Z".into(),
-                    is_favorite: false,
-                    is_pinned: false,
-                    source_app: None,
-                },
-                "edge",
-                || true,
-            )?;
+        if app.config().identifier != "dev.local.nami.ui-tests" {
+            return Err(
+                "clipboard-translate requires the isolated test application identity".into(),
+            );
         }
-        let page = db.page(&crate::database::HistoryQuery::default(), None, 100)?;
-        *app.state::<AppState>().database.lock().unwrap() = Some(db);
-        {
-            let app_state = app.state::<AppState>();
-            let mut paging = app_state.history_page.lock().unwrap();
-            *paging = Default::default();
-            paging.cursor = page.cursor.clone();
-            paging.cache.insert(Default::default(), page.clone());
+        let mut database =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
+        for (id, text, date) in [
+            (
+                "translate-first",
+                "Synthetic clipboard translate first",
+                "2099-01-02T00:00:00Z",
+            ),
+            (
+                "translate-second",
+                "Synthetic clipboard translate second",
+                "2099-01-01T00:00:00Z",
+            ),
+        ] {
+            database.clipboard_insert(&nami::clipboard::ClipboardRecord {
+                id: id.into(),
+                kind: "text".into(),
+                text: text.into(),
+                date: date.into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: None,
+                fingerprint: nami::clipboard::fingerprint("text", text.as_bytes()),
+            })?;
         }
-        on_main(app, move |app| {
+        original_database = Some(
             app.state::<AppState>()
-                .history
+                .database
                 .lock()
                 .unwrap()
-                .apply_page(page, true);
-            crate::history_runtime::publish_history(app)
-        })?;
-        records_mode(app, "translation")?;
+                .replace(database),
+        );
+        crate::clipboard_runtime::changed(app)?;
+        records_mode(app, "clipboard")?;
+        wait_records(
+            app,
+            r#"return {ready:!!document.querySelector('[data-record-id="translate-first"]')&&!!document.querySelector('[data-record-id="translate-second"]')&&!document.querySelector('.history-toolbar [aria-label="Translations"]')&&!document.querySelector('.history-toolbar [aria-label="Clipboard"]')};"#,
+        )?;
+        // 1. Open attached translate pane directly from list-only: [List | Translate]
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Synthetic page token');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+            r#"document.querySelector('[data-record-id="translate-first"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        let mut queried = false;
-        for _ in 0..100 {
-            queried = app
-                .state::<AppState>()
-                .history_page
-                .lock()
-                .unwrap()
-                .query
-                .text
-                == "Synthetic page token";
-            if queried {
-                break;
+        wait_motion(app)?;
+        samples.push(wait_dom(
+            app,
+            r#"const pane=document.querySelector('.clipboard-translate-pane'),detailHidden=!!document.querySelector('.clipboard-detail')?.closest('[hidden]');return {ready:!!pane&&detailHidden&&pane.getBoundingClientRect().width>=360,width:pane?.getBoundingClientRect().width,mode:'list-translate'};"#,
+        )?);
+        samples.push(wait_records(
+            app,
+            r#"const row=document.querySelector('[data-record-id="translate-first"]'),btn=row?.querySelector('[aria-label="Translate"]');return {ready:row?.dataset.translating==='true'&&btn?.getAttribute('aria-pressed')==='true',pressed:btn?.getAttribute('aria-pressed')};"#,
+        )?);
+        {
+            let state = app.state::<AppState>();
+            let windows = state.windows.lock().unwrap();
+            if !windows.clipboard_visible
+                || windows.clipboard_detail_visible
+                || !windows.clipboard_translation_visible
+                || windows.clipboard_translation_record_id.as_deref() != Some("translate-first")
+                || windows.standalone_translation_visible
+            {
+                return Err(format!(
+                    "expected [List | Translate] state, got: {windows:?}"
+                ));
             }
-            std::thread::sleep(Duration::from_millis(20));
         }
-        if !queried {
-            return Err("pagination UI did not establish its own query projection".into());
-        }
-        samples.push(wait_records(app,r#"const p=document.querySelector('#translation-history');const rows=[...p.querySelectorAll('.history-row')];return {ready:rows.length===100&&!p.querySelector('[role=progressbar]'),count:rows.length,total:p.querySelector('.history-record-count').textContent};"#)?);
+        // 2. Expand Details -> 3-pane [List | Detail | Translate]
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"const p=document.querySelector('#translation-history'),list=p.querySelector('.history-list');window.__pagingNodes=[...list.querySelectorAll('.history-row')];list.scrollTop=list.scrollHeight-list.clientHeight-100;window.__pagingTop=list.scrollTop;list.dispatchEvent(new WheelEvent('wheel',{deltaY:1,bubbles:true}));return true;"#,
+            r#"document.querySelector('.clipboard-panel .records-details').click();return true;"#,
         )?;
-        let appended = wait_records(
+        wait_motion(app)?;
+        samples.push(wait_dom(
             app,
-            r#"const p=document.querySelector('#translation-history'),list=p.querySelector('.history-list'),rows=[...list.querySelectorAll('.history-row')];return {ready:rows.length===200&&!p.querySelector('[role=progressbar]'),count:rows.length,retained:window.__pagingNodes.every((node,index)=>rows[index]===node),scrollDelta:Math.abs(list.scrollTop-window.__pagingTop),query:p.querySelector('.history-search input').value,favorites:p.querySelector('.history-favorites').getAttribute('aria-pressed'),active:!p.closest('[hidden]'),error:p.querySelector('[role=alert]')?.textContent};"#,
+            r#"const detail=document.querySelector('.clipboard-detail'),divider=document.querySelector('.clipboard-pane-divider'),pane=document.querySelector('.clipboard-translate-pane'),detailBtn=detail?.querySelector('[aria-label="Translate"]');return {ready:!!detail&&!!divider&&!!pane&&detailBtn?.getAttribute('aria-pressed')==='true',detailWidth:detail?.getBoundingClientRect().width,translateWidth:pane?.getBoundingClientRect().width,mode:'three-pane'};"#,
+        )?);
+        let three_pane_geo = on_main(app, |app| {
+            let window = app.get_window("translation").ok_or("missing window")?;
+            let frame = native_translation_frame(&window)?;
+            let scale = window.scale_factor().map_err(|_| "scale")?;
+            let work_width = window
+                .current_monitor()
+                .map_err(|_| "monitor")?
+                .map(|m| m.work_area().size.width as f64 / scale)
+                .unwrap_or(frame.size.width);
+            if frame.size.width > work_width + 1.0 {
+                return Err(format!(
+                    "3-pane window width {} exceeded monitor work area {}",
+                    frame.size.width, work_width
+                ));
+            }
+            Ok(serde_json::json!({"windowWidth":frame.size.width,"workWidth":work_width}))
+        })?;
+        samples.push(three_pane_geo);
+        // 3. Hover-browsing another record updates Detail without changing Translate
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('[data-record-id="translate-second"]').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;"#,
         )?;
-        if appended["retained"] != true || appended["scrollDelta"].as_f64().unwrap_or(99.0) > 1.0 {
-            return Err(format!(
-                "pagination replaced nodes or moved viewport: {appended}"
-            ));
-        }
-        samples.push(appended);
-        let direct = app
+        samples.push(wait_dom(
+            app,
+            r#"const detailText=document.querySelector('.clipboard-detail-text')?.textContent,detailBtn=document.querySelector('.clipboard-detail [aria-label="Translate"]');return {ready:detailText==='Synthetic clipboard translate second'&&detailBtn?.getAttribute('aria-pressed')==='false',detailText,detailPressed:detailBtn?.getAttribute('aria-pressed')};"#,
+        )?);
+        if app
             .state::<AppState>()
-            .database
+            .windows
             .lock()
             .unwrap()
-            .as_ref()
-            .ok_or("test database")?
-            .page(
-                &crate::database::HistoryQuery {
-                    text: "token-0000".into(),
-                    favorites_only: false,
-                },
-                None,
-                100,
-            )?;
-        if direct.records.len() != 1 || direct.records[0].id != "pagination-0" {
-            return Err(format!(
-                "deep query fixture mismatch: {:?}",
-                direct
-                    .records
-                    .iter()
-                    .map(|r| r.text.as_str())
-                    .collect::<Vec<_>>()
-            ));
+            .clipboard_translation_record_id
+            .as_deref()
+            != Some("translate-first")
+        {
+            return Err(
+                "hover-browsing another record replaced attached translation target".into(),
+            );
+        }
+        // 4. Collapse Details -> returns to [List | Translate]
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-panel .records-details').click();return true;"#,
+        )?;
+        wait_motion(app)?;
+        samples.push(wait_dom(
+            app,
+            r#"return {ready:!!document.querySelector('.clipboard-detail')?.closest('[hidden]')&&!!document.querySelector('.clipboard-translate-pane'),mode:'collapsed-detail-translate-kept'};"#,
+        )?);
+        // 5. Clicking active record's Translate button again closes attached translate pane
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('[data-record-id="translate-first"] [aria-label="Translate"]').click();return true;"#,
+        )?;
+        wait_motion(app)?;
+        samples.push(wait_records(
+            app,
+            r#"const row=document.querySelector('[data-record-id="translate-first"]'),btn=row?.querySelector('[aria-label="Translate"]');return {ready:row?.dataset.translating!=='true'&&btn?.getAttribute('aria-pressed')==='false',closedByToggle:true};"#,
+        )?);
+        // 6. Reopen Translate, then 2-step Escape: first closes translate pane only, second hides clipboard
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('[data-record-id="translate-first"] [aria-label="Translate"]').click();return true;"#,
+        )?;
+        wait_motion(app)?;
+        wait_dom(
+            app,
+            r#"return {ready:!!document.querySelector('.clipboard-translate-pane')};"#,
+        )?;
+        evaluate_view_dom(
+            app,
+            "clipboard",
+            r#"document.querySelector('.clipboard-panel .history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+        )?;
+        wait_motion(app)?;
+        {
+            let state = app.state::<AppState>();
+            let windows = state.windows.lock().unwrap();
+            if !windows.clipboard_visible || windows.clipboard_translation_visible {
+                return Err(format!(
+                    "first Escape should close only attached translate pane, got: {windows:?}"
+                ));
+            }
         }
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'token-0000');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
+            r#"document.querySelector('.clipboard-panel .history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
         )?;
-        let found = wait_records(
-            app,
-            r#"const p=document.querySelector('#translation-history'),rows=[...p.querySelectorAll('.history-row')];return {ready:rows.length===1&&rows[0].dataset.recordId==='pagination-0'&&!p.querySelector('[role=progressbar]'),total:p.querySelector('.history-record-count').textContent,query:p.querySelector('.history-search input').value,rows:rows.map(r=>r.dataset.recordId),error:p.querySelector('[role=alert]')?.textContent};"#,
-        )?;
-        if found["total"] != "1 record" {
-            return Err(format!("deep search count: {found}"));
+        wait_motion(app)?;
+        {
+            let state = app.state::<AppState>();
+            let windows = state.windows.lock().unwrap();
+            if windows.clipboard_visible {
+                return Err("second Escape did not hide clipboard window".into());
+            }
         }
-        samples.push(found);
+        samples.push(serde_json::json!({"twoStepEscape":true}));
         Ok(())
     })();
-    let result = result.map_err(|error| {
-        let state = app.state::<AppState>();
-        let query = state.history_page.lock().unwrap().query.clone();
-        format!(
-            "{error}; backend query={:?}, favorites={}",
-            query.text, query.favorites_only
-        )
-    });
-    *app.state::<AppState>().database.lock().unwrap() = original_database;
-    *app.state::<AppState>().history_page.lock().unwrap() = original_paging;
-    let _ = on_main(app, move |app| {
-        app.state::<AppState>()
-            .history
-            .lock()
-            .unwrap()
-            .apply_page(original_loaded, true);
-        crate::history_runtime::publish_history(app)
-    });
-    let _ = evaluate_view_dom(
-        app,
-        "clipboard",
-        r#"const input=document.querySelector('#translation-history .history-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));return true;"#,
-    );
+    if let Some(database) = original_database {
+        *app.state::<AppState>().database.lock().unwrap() = database;
+        let _ = crate::clipboard_runtime::changed(app);
+    }
     DomCase {
-        name: "shared record child pagination IPC",
+        name: "clipboard attached translate pane and 3-pane geometry",
         passed: result.is_ok(),
         error: result.err(),
         samples,
@@ -10114,7 +9057,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         .windows
         .lock()
         .unwrap()
-        .history_width_initialized = true;
+        .clipboard_width_initialized = true;
     if let Ok(case) = std::env::var("NAMI_UI_TEST_CASE") {
         if ![
             "clipboard-actions",
@@ -10127,17 +9070,16 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-editor",
             "clipboard-media",
             "clipboard-kind-text",
+            "clipboard-translate",
             "clipboard-image-index",
             "clipboard-capture-burst",
             "clipboard-details",
-            "translation-actions",
             "translation-controls",
             "translation-partial",
             "translation-settings",
             "unified-records",
             "records-geometry",
             "records-pinned",
-            "records-pagination",
             "records-open",
             "records-pointer",
             "selection-open",
@@ -10165,10 +9107,10 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_clipboard_image_index(&app)
             } else if case == "clipboard-kind-text" {
                 run_clipboard_kind_text(&app)
+            } else if case == "clipboard-translate" {
+                run_clipboard_translate(&app)
             } else if case == "clipboard-details" {
                 run_clipboard_details(&app)
-            } else if case == "records-pagination" {
-                run_history_pagination(&app)
             } else if case == "records-geometry" {
                 run_records_geometry(&app)
             } else if case == "records-pinned" {
@@ -10181,8 +9123,6 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_translation_partial(&app)
             } else if case == "translation-settings" {
                 run_translation_settings(&app)
-            } else if case == "translation-actions" {
-                run_translation_action_timing(&app)
             } else if case == "clipboard-settings" {
                 run_clipboard_capture_setting(&app)
             } else if case == "record-display-shortcuts" {
@@ -10212,7 +9152,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     if visible {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        state.history_pinned = true;
+        state.clipboard_pinned = true;
         state.translation_pinned = true;
         drop(state);
         window.show().map_err(|_| "window_show")?;
@@ -10230,15 +9170,14 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             run_native_chrome_geometry(&app),
             run_right_control_dom(&app),
         ];
-        dom_cases.push(run_history_pagination(&app));
         dom_cases.push(run_source_editing(&app));
         dom_cases.push(run_resize_hit_targets(&app));
         dom_cases.push(run_unified_records(&app));
-        dom_cases.push(run_translation_action_timing(&app));
         dom_cases.push(run_clipboard_action_timing(&app));
         dom_cases.push(run_clipboard_media_layout(&app));
         dom_cases.push(run_clipboard_editor_layout(&app));
         dom_cases.push(run_clipboard_kind_text(&app));
+        dom_cases.push(run_clipboard_translate(&app));
         dom_cases.push(run_clipboard_details(&app));
         dom_cases.push(run_clipboard_capture_setting(&app));
         dom_cases.push(run_translation_settings(&app));

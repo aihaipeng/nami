@@ -10,7 +10,7 @@ import type { MessageKey } from '../shared/i18n';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordToolbar } from '../shared/RecordToolbar';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
-import { historyPreview, historyScrollTarget } from '../translation/history';
+import { historyPreview, historyScrollTarget } from '../shared/recordPreview';
 import { cn } from '../lib/utils';
 import { RecordHeading } from '../shared/RecordHeading';
 import { RecordActions } from '../shared/RecordActions';
@@ -80,7 +80,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
   const canTranslateRecord = (record: ClipboardRecord) => record.kind === 'text' ? !!record.text.trim() : snapshot.capabilities.imageOcr && (record.kind === 'image' || imageFiles.has(record.id));
   const canOcrRecord = (record: ClipboardRecord) => record.kind !== 'text' && canTranslateRecord(record) && snapshot.capabilities.clipboardWrite;
-  const selection = snapshot.window.translationVisible ? snapshot.window.clipboardDetailId : selected;
+  const selection = snapshot.window.clipboardDetailVisible ? snapshot.window.clipboardDetailId : selected;
   const visibleIds = new Set(records.map(({ id }) => id));
   const ordinary = useMemo(() => records.filter((record) => !record.isPinned), [records]);
   const allUnpinned = useMemo(() => clipboard.retainedRecords.filter((record) => !record.isPinned), [clipboard.retainedRecords]);
@@ -143,7 +143,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setSession((value) => value + 1);
   }, [snapshot.window.recordsSession]);
   useEffect(() => { if (!active) { ++operation.current; ++processingRevision.current; setEditing(null); setMenu(null); setRevealed(null); setFeedback(null); setProcessing(null); setProcessingError(null); setSession((value) => value + 1); } }, [active]);
-  useRecordsOpenFocus(search, active, snapshot.window.historyVisible, snapshot.window.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
+  useRecordsOpenFocus(search, active, snapshot.window.clipboardVisible, snapshot.window.recordsFocus, snapshot.clipboardControls.recordsOpenFocus === 'list',
     clipboard.displayReady, !clipboard.loading, setSelected);
 
   useEffect(() => {
@@ -158,7 +158,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   revealContext.current = { browsing: snapshot.window.recordsBrowsing !== false };
   function previewRecord(id: string, explicit = false) {
     if (!explicit && snapshot.window.recordsBrowsing === false) return;
-    if (!snapshot.window.translationVisible || !explicit && snapshot.window.clipboardDetailId === id || editing) return;
+    if (!snapshot.window.clipboardDetailVisible || !explicit && snapshot.window.clipboardDetailId === id || editing) return;
     void command('clipboard_details_select', { recordId: id, ...(explicit ? { browsing: true } : {}) });
   }
   useEffect(() => {
@@ -195,12 +195,12 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     listHandle.current?.scrollToId(id, 'instant');
   }
   useEffect(() => {
-    if (!active || !snapshot.window.translationVisible || clipboard.loading || !clipboard.displayReady || reveal.current) return;
+    if (!active || !snapshot.window.clipboardDetailVisible || clipboard.loading || !clipboard.displayReady || reveal.current) return;
     if (snapshot.window.clipboardDetailId && records.some(({ id }) => id === snapshot.window.clipboardDetailId)) return;
     if ((first?.id ?? null) !== (snapshot.window.clipboardDetailId ?? null)) void command('clipboard_details_select', { recordId: first?.id ?? null });
-  }, [active, snapshot.window.translationVisible, snapshot.window.clipboardDetailId, records, clipboard.loading, clipboard.displayReady, first, command]);
+  }, [active, snapshot.window.clipboardDetailVisible, snapshot.window.clipboardDetailId, records, clipboard.loading, clipboard.displayReady, first, command]);
   async function toggleDetails() {
-    if (!snapshot.window.translationVisible) {
+    if (!snapshot.window.clipboardDetailVisible) {
       await command('clipboard_details_select', { recordId: keyboardId ?? null, browsing: true });
     }
     await command('records_details_toggle');
@@ -281,12 +281,13 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!active || event.defaultPrevented || event.isComposing || event.keyCode === 229 || (editing && event.key === 'Escape')) return;
       if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [snapshot.capabilities.primaryModifier] }, event)) {
         event.preventDefault(); ++operation.current;
-        void command('window_hide', { region: 'clipboard' });
+        if (snapshot.window.clipboardTranslationVisible) void command('clipboard_translation_close');
+        else void command('window_hide', { region: 'clipboard' });
       }
     };
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
-  }, [snapshot.capabilities.primaryModifier, command, editing, active]);
+  }, [snapshot.capabilities.primaryModifier, snapshot.window.clipboardTranslationVisible, command, editing, active]);
   function focusRow(id: string) {
     setSelected(id);
     const button = rowRefs.current.get(id);
@@ -330,7 +331,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     try {
       const result = await clipboardOpenTarget(recordId, true);
       if (result !== 'files' || !mounted.current || operation.current !== revision) return;
-      if (snapshot.window.translationVisible) {
+      if (snapshot.window.clipboardDetailVisible) {
         await command('clipboard_details_select', { recordId, browsing: true });
       } else {
         await command('records_details_toggle', { recordId });
@@ -360,19 +361,19 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     void clipboard.update(record.id, action);
   }
 
-  const canPreview = snapshot.window.translationVisible || (clipboard.displayReady && ordered.length > 0);
+  const canPreview = snapshot.window.clipboardDetailVisible || (clipboard.displayReady && ordered.length > 0);
   useRecordsPreviewShortcut({
     active,
     blocked: Boolean(editing || menu),
     canTrigger: canPreview,
-    excludedContainers: '.translation-panel, .clipboard-detail, .preview-bar',
+    excludedContainers: '.translation-panel, .clipboard-detail, .clipboard-translate-pane, .preview-bar',
     snapshot,
     native,
     onPreview: (rowId) => {
       const targetId = rowId ?? keyboardId;
       const record = clipboard.displayReady ? (ordered.find(({ id }) => id === targetId) ?? first) : undefined;
       if (record) void command('records_details_toggle', { recordId: record.id });
-      else if (snapshot.window.translationVisible) void command('records_details_toggle');
+      else if (snapshot.window.clipboardDetailVisible) void command('records_details_toggle');
     },
   });
 
@@ -433,7 +434,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, alternateActivate ? 'activateAlternate' : 'activate'); }
       return;
     }
-    if (!action || action === 'switchView' || action === 'preview') return;
+    if (!action || action === 'preview') return;
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;
@@ -496,7 +497,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       record.isFavorite ? 'Favorite' : null,
       record.imageTextMatch ? t('clipboardImageTextMatch') : null,
     ].filter(Boolean).join(', ') || undefined;
-    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseMove={(event) => {
+    const translating = snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === record.id;
+    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-translating={translating || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseMove={(event) => {
       if (!active || editing || menu || !clipboard.displayReady || !visibleIds.has(record.id)) return;
       targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); });
     }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
@@ -506,14 +508,14 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         {record.imageTextMatch && <span className="clipboard-search-match">{t('clipboardImageTextMatch')}</span>}
       </button>
       <RecordActions allowMarkedDelete recordId={record.id} t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} deleteLabel={t('deleteClipboard')}
-        canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => useRecord(record.id, 'copy')} onNote={() => setEditing({ id: record.id })} busy={processing !== null} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
+        canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => useRecord(record.id, 'copy')} onNote={() => setEditing({ id: record.id })} busy={processing !== null} translateActive={translating} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
         onUpdate={(action) => { updateRecord(record, action); }} />
     </article>;
   }
   return <section data-focus-ready={clipboard.displayReady || undefined} inert={editing !== null} onKeyDown={recordKeyDown} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
     <ActivityBeam label={t('working')} active={active && clipboard.showActivity} />
     <div className="drag-strip" data-tauri-drag-region />
-    <RecordToolbar t={t} snapshot={snapshot} command={command} view="clipboard" query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />
+    <RecordToolbar t={t} snapshot={snapshot} command={command} query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />
     {clipboard.error && <p role="alert" className="history-error">{t(clipboard.searchError === 'invalidRegex' ? 'clipboardSearchInvalidRegex' : clipboard.searchError === 'tooBroad' ? 'clipboardSearchTooBroad' : 'nativeError')}
       {!clipboard.searchError && <> <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></>}
     </p>}

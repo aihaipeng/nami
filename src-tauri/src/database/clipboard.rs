@@ -5,7 +5,6 @@ use crate::clipboard::{
     ClipboardSearchMode, ClipboardSearchOptions, ClipboardTextFormatting, HistoryPolicy,
     MAX_FILE_COUNT, MAX_RICH_TEXT_BYTES, MAX_TEXT_BYTES,
 };
-use crate::model::RecordView;
 use rusqlite::{
     functions::FunctionFlags, params, Connection, OptionalExtension, Row, TransactionBehavior,
 };
@@ -1440,7 +1439,6 @@ impl HistoryDatabase {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        let view = RecordView::Clipboard;
         // Freeze the clock across verification and deletion so a record cannot age into the confirmed set mid-transaction.
         let ctx = CleanupContext {
             policy,
@@ -1450,7 +1448,7 @@ impl HistoryDatabase {
             image_root,
             storage_budget_override,
         };
-        check_cleanup(&transaction, view, ctx, expected)?;
+        check_cleanup(&transaction, ctx, expected)?;
         let sequences = clipboard_cleanup_sequences(&transaction, ctx)?;
         let mut images = std::collections::HashSet::new();
         {
@@ -1491,7 +1489,7 @@ impl HistoryDatabase {
                 removed += delete_stmt.execute([seq]).map_err(storage_error)?;
             }
         }
-        persist_limit(&transaction, view, policy, expected)?;
+        persist_limit(&transaction, policy, expected)?;
         let mut unreferenced = Vec::new();
         for image in images {
             if !image_referenced(&transaction, &image)? {
@@ -1895,7 +1893,6 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("nami-retention-{}.sqlite3", uuid::Uuid::new_v4()));
         let mut db = HistoryDatabase::open(&path).unwrap();
-        let view = RecordView::Clipboard;
         let policy = Some(HistoryPolicy {
             limit: 500,
             max_age_days: Some(7),
@@ -1911,7 +1908,7 @@ mod tests {
         let mut later = record("later", "synthetic will age");
         later.date = chrono::Utc::now().to_rfc3339();
         db.clipboard_insert(&later).unwrap();
-        let preview = db.records_cleanup_preview(view, policy).unwrap();
+        let preview = db.records_cleanup_preview(policy).unwrap();
         assert_eq!(preview.count, 1);
         assert_eq!(
             db.clipboard_cleanup(policy, 0, Some(&preview.token))
@@ -1925,12 +1922,6 @@ mod tests {
                 .total_records,
             0
         );
-        assert_eq!(
-            db.records_cleanup_preview(RecordView::Translation, policy)
-                .err()
-                .as_deref(),
-            Some("invalid_argument")
-        );
         db.connection
             .execute(
                 "UPDATE clipboard_records SET date='2001-01-01T00:00:00.000Z' WHERE id='later'",
@@ -1940,7 +1931,7 @@ mod tests {
         drop(db);
 
         let mut db = HistoryDatabase::open(&path).unwrap();
-        let saved = db.records_history_policy(view).unwrap();
+        let saved = db.clipboard_history_policy().unwrap();
         assert_eq!(Some(saved), policy);
         assert_eq!(db.clipboard_cleanup(Some(saved), 0, None).unwrap().0, 1);
         assert_eq!(
@@ -1954,7 +1945,6 @@ mod tests {
     #[test]
     fn clipboard_recent_cleanup_protects_flags_and_rechecks_confirmation() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        let view = RecordView::Clipboard;
         let now = chrono::Utc::now();
         let since = now.timestamp_millis() - 15 * 60_000;
         for (id, time, pinned, favorite) in [
@@ -1972,7 +1962,7 @@ mod tests {
             db.clipboard_insert(&item).unwrap();
         }
         let preview = db
-            .records_cleanup_preview_scoped(view, None, Some(since))
+            .records_cleanup_preview_scoped(None, Some(since))
             .unwrap();
         assert_eq!(preview.count, 1);
         assert_eq!(preview.recent_since, Some(since));
@@ -1984,7 +1974,7 @@ mod tests {
             Err("clipboard_cleanup_changed".into())
         );
         let current = db
-            .records_cleanup_preview_scoped(view, None, Some(since))
+            .records_cleanup_preview_scoped(None, Some(since))
             .unwrap();
         assert_eq!(current.count, 2);
         assert!(db
@@ -2015,21 +2005,13 @@ mod tests {
         old.date = "2001-01-01T00:00:00.000Z".into();
         db.clipboard_insert(&old).unwrap();
         db.clipboard_insert(&record("newer", "newer")).unwrap();
-        assert_eq!(
-            db.records_cleanup_preview(RecordView::Clipboard, Some(policy))
-                .unwrap()
-                .count,
-            0
-        );
+        assert_eq!(db.records_cleanup_preview(Some(policy)).unwrap().count, 0);
         db.clipboard_insert(&record("newest", "newest")).unwrap();
         for flag in ["favorite", "pin"] {
             db.clipboard_insert(&record(flag, flag)).unwrap();
             db.clipboard_update(flag, flag).unwrap();
         }
-        let token = db
-            .records_cleanup_preview(RecordView::Clipboard, Some(policy))
-            .unwrap()
-            .token;
+        let token = db.records_cleanup_preview(Some(policy)).unwrap().token;
         assert_eq!(
             db.clipboard_cleanup(Some(policy), 0, Some(&token)).unwrap(),
             (1, vec![])
@@ -2044,10 +2026,7 @@ mod tests {
         assert_eq!(db.clipboard_unprotected_count().unwrap(), 2);
         assert!(db.clipboard_record("favorite").unwrap().is_favorite);
         assert!(db.clipboard_record("pin").unwrap().is_pinned);
-        assert_eq!(
-            db.records_history_policy(RecordView::Clipboard).unwrap(),
-            policy
-        );
+        assert_eq!(db.clipboard_history_policy().unwrap(), policy);
     }
 
     #[test]
@@ -2058,14 +2037,9 @@ mod tests {
             ..Default::default()
         };
         db.clipboard_insert(&record("first", "first")).unwrap();
-        let original = db
-            .records_cleanup_preview(RecordView::Clipboard, Some(policy))
-            .unwrap()
-            .token;
+        let original = db.records_cleanup_preview(Some(policy)).unwrap().token;
         db.clipboard_insert(&record("second", "second")).unwrap();
-        let preview = db
-            .records_cleanup_preview(RecordView::Clipboard, Some(policy))
-            .unwrap();
+        let preview = db.records_cleanup_preview(Some(policy)).unwrap();
         assert_eq!(preview.count, 1);
         assert_eq!(
             db.clipboard_cleanup(Some(policy), 0, Some(&original))
@@ -2097,9 +2071,7 @@ mod tests {
                 item.is_pinned = category & 2 != 0;
                 db.clipboard_insert(&item).unwrap();
             }
-            let preview = db
-                .records_cleanup_preview(RecordView::Clipboard, None)
-                .unwrap();
+            let preview = db.records_cleanup_preview(None).unwrap();
             assert_eq!(preview.categories, Some([1, 2, 2]));
             assert_eq!(preview.count, 4);
             let selected = [1, 2, 4, 6].map(|flags| mask & flags != 0);
@@ -2122,9 +2094,7 @@ mod tests {
         db.clipboard_insert(&record("first", "first")).unwrap();
         db.clipboard_insert(&record("second", "second")).unwrap();
         db.clipboard_update("first", "favorite").unwrap();
-        let preview = db
-            .records_cleanup_preview(RecordView::Clipboard, None)
-            .unwrap();
+        let preview = db.records_cleanup_preview(None).unwrap();
         let token = Some(preview.token.as_str());
         assert_eq!(
             db.clipboard_cleanup(None, 0, token).unwrap_err(),
@@ -2146,9 +2116,7 @@ mod tests {
         db.clipboard_update("first", "favorite").unwrap();
         db.clipboard_update("second", "favorite").unwrap();
         assert_eq!(
-            db.records_cleanup_preview(RecordView::Clipboard, None)
-                .unwrap()
-                .categories,
+            db.records_cleanup_preview(None).unwrap().categories,
             preview.categories
         );
         assert_eq!(
@@ -2160,9 +2128,8 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_clear_keeps_shared_media_and_translation_and_counts_only_clipboard_data() {
+    fn clipboard_clear_keeps_shared_media_and_counts_only_clipboard_data() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        db.connection.execute("INSERT INTO translation_records(id,created_at,record_json,engine,is_favorite,is_pinned,source_folded,primary_folded,secondary_folded) VALUES('translation',0,'{}','edge',0,0,'','','')", []).unwrap();
         assert_eq!(db.clipboard_storage_bytes().unwrap(), 0);
         let image = image_record("image");
         let attachment = representation(&image, "photo.png");
@@ -2174,10 +2141,7 @@ mod tests {
             .unwrap();
         let before = db.clipboard_storage_bytes().unwrap();
         assert!(before > 0);
-        let token = db
-            .records_cleanup_preview(RecordView::Clipboard, None)
-            .unwrap()
-            .token;
+        let token = db.records_cleanup_preview(None).unwrap().token;
         assert_eq!(
             db.clipboard_cleanup(None, 1, Some(&token)).unwrap(),
             (1, vec![])
@@ -2186,22 +2150,12 @@ mod tests {
         assert!(db
             .clipboard_image_referenced(&attachment.image_path)
             .unwrap());
-        let token = db
-            .records_cleanup_preview(RecordView::Clipboard, None)
-            .unwrap()
-            .token;
+        let token = db.records_cleanup_preview(None).unwrap().token;
         assert_eq!(
             db.clipboard_cleanup(None, 2, Some(&token)).unwrap(),
             (1, vec![attachment.image_path])
         );
         assert_eq!(db.clipboard_storage_bytes().unwrap(), 0);
-        assert_eq!(
-            db.connection
-                .query_row("SELECT count(*) FROM translation_records", [], |row| row
-                    .get::<_, u32>(0))
-                .unwrap(),
-            1
-        );
     }
 
     #[test]
@@ -2532,10 +2486,7 @@ mod tests {
             // An otherwise valid cache filename occupied by a directory makes unlink fail on all platforms.
             std::fs::create_dir_all(&path).unwrap();
             if bulk {
-                let token = db
-                    .records_cleanup_preview(RecordView::Clipboard, None)
-                    .unwrap()
-                    .token;
+                let token = db.records_cleanup_preview(None).unwrap().token;
                 assert_eq!(db.clipboard_cleanup(None, 1, Some(&token)).unwrap().0, 1);
             } else {
                 db.clipboard_update(&id, "delete").unwrap();
@@ -2964,10 +2915,7 @@ mod tests {
         }
         assert_eq!(db.clipboard_record("file").unwrap().text, paths);
         assert!(db.clipboard_storage_bytes().unwrap() > before);
-        let token = db
-            .records_cleanup_preview(RecordView::Clipboard, None)
-            .unwrap()
-            .token;
+        let token = db.records_cleanup_preview(None).unwrap().token;
         assert_eq!(db.clipboard_cleanup(None, 1, Some(&token)).unwrap().0, 3);
         assert_eq!(db.clipboard_storage_bytes().unwrap(), 0);
         assert_eq!(db.connection.query_row("SELECT count(*) FROM clipboard_ocr_search WHERE clipboard_ocr_search MATCH 'wording'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
@@ -4545,60 +4493,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_preserves_version_one_translation_records() {
-        let directory = std::env::temp_dir().join(format!("nami-upgrade-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("test.sqlite3");
-        let mut database = HistoryDatabase::open(&path).unwrap();
-        let translation = crate::model::HistoryRecord {
-            title: String::new(),
-            id: "preserved-translation".into(),
-            text: "synthetic original".into(),
-            source_language: "auto".into(),
-            translation: None,
-            target_languages: vec!["en".into()],
-            translations: vec!["synthetic translation".into()],
-            date: "2026-11-14T12:00:00.000Z".into(),
-            is_favorite: true,
-            is_pinned: false,
-            source_app: None,
-        };
-        database.insert(&translation, "edge", || true).unwrap();
-        database.connection.execute_batch("DROP TABLE clipboard_text_formatting; DROP TABLE clipboard_ocr_search; DROP TABLE clipboard_ocr; DROP TABLE clipboard_title_search; DROP TABLE clipboard_titles; DROP TABLE clipboard_file_representations; DROP TRIGGER clipboard_insert; DROP TRIGGER clipboard_delete; DROP TABLE clipboard_search; DROP TABLE clipboard_contents; DROP TABLE clipboard_records; DROP TABLE preferences; PRAGMA user_version=1;").unwrap();
-        database
-            .connection
-            .execute(
-                "INSERT INTO source_apps(payload) VALUES(?1)",
-                ["synthetic preserved source"],
-            )
-            .unwrap();
-        drop(database);
-        let database = HistoryDatabase::open(&path).unwrap();
-        assert_eq!(
-            database
-                .connection
-                .query_row("SELECT payload FROM source_apps", [], |row| row
-                    .get::<_, String>(0))
-                .unwrap(),
-            "synthetic preserved source"
-        );
-        assert!(!database.clipboard_capture_enabled().unwrap());
-        let restored = database.record("preserved-translation").unwrap().unwrap();
-        assert_eq!(restored.text, translation.text);
-        assert_eq!(restored.translations, translation.translations);
-        assert!(restored.is_favorite);
-        assert_eq!(
-            database
-                .connection
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            super::super::VERSION
-        );
-        drop(database);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn clipboard_detail_includes_sanitized_rich_text_preview_and_clears_after_body_edit() {
         let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         let html_item = record("rich-html", "Hello World");
@@ -4688,12 +4582,6 @@ mod tests {
             max_age_days: None,
             max_storage_mb: Some(500),
         };
-        assert_eq!(
-            db.records_cleanup_preview(RecordView::Translation, Some(policy))
-                .err()
-                .as_deref(),
-            Some("invalid_argument")
-        );
 
         // Budget fits shared image (4096) + remaining DB rows (~600B), but NOT solo image (6144).
         // Evicting old-shared alone does not free shared_bytes (pinned-shared still holds a ref),
@@ -4720,12 +4608,7 @@ mod tests {
         drop(db);
 
         let reopened = HistoryDatabase::open(&db_path).unwrap();
-        assert_eq!(
-            reopened
-                .records_history_policy(RecordView::Clipboard)
-                .unwrap(),
-            policy
-        );
+        assert_eq!(reopened.clipboard_history_policy().unwrap(), policy);
         drop(reopened);
         let _ = std::fs::remove_dir_all(root);
     }

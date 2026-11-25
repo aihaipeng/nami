@@ -35,57 +35,6 @@ pub(crate) fn defer_navigation_with_target(
     Ok(true)
 }
 
-pub(crate) fn toggle_translation_history(app: &AppHandle) -> Result<(), String> {
-    if defer_navigation(app, "toggle:history")? {
-        return Ok(());
-    }
-    let state = app.state::<AppState>();
-    let was_hidden = app
-        .get_window("translation")
-        .map(|window| window.is_visible())
-        .transpose()
-        .map_err(|_| "window_geometry")?
-        != Some(true);
-    let (history, translation) = {
-        let mut regions = state.windows.lock().unwrap();
-        if was_hidden {
-            regions.dismiss();
-        }
-        if regions.history_visible && regions.record_view == nami::model::RecordView::Clipboard {
-            state.operation.fetch_add(1, Ordering::SeqCst);
-        }
-        regions.toggle_history();
-        if regions.history_visible {
-            regions.records_focus += 1;
-        }
-        (regions.history_visible, regions.translation_visible)
-    };
-    if was_hidden {
-        let mode = *state.window_position_mode.lock().unwrap();
-        if mode != nami::model::WindowPositionMode::LastPosition {
-            *state.pending_window_anchor.lock().unwrap() =
-                crate::platform::capture_window_anchor(mode);
-        }
-        *state.target.lock().unwrap() = crate::platform::capture_target();
-        windows::prewarm_records(app)?;
-    }
-    windows::apply_translation(app)?;
-    if history && crate::platform::capabilities().native_history {
-        if was_hidden {
-            app.get_window("translation")
-                .ok_or("window_unavailable")?
-                .show()
-                .map_err(|_| "window_show")?;
-        }
-        windows::focus_records_editor(app)?;
-    } else if translation {
-        if let Some(view) = app.get_webview("translation") {
-            view.set_focus().map_err(|_| "window_focus")?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     if defer_navigation(app, "settings")? {
         return Ok(());
@@ -98,16 +47,21 @@ pub(crate) fn dismiss_records_window(app: &AppHandle, region: &str) -> Result<()
         return Ok(());
     }
     let state = app.state::<AppState>();
+    let close_side_translation = {
+        let regions = state.windows.lock().unwrap();
+        regions.clipboard_visible
+            && regions.clipboard_translation_visible
+            && !regions.records_editor_open
+    };
+    if close_side_translation {
+        state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+        state.clipboard_side_translation.clear();
+        state.clipboard_translation.lock().unwrap().take();
+        return windows::close_clipboard_translation(app);
+    }
     state.image_text_operation.fetch_add(1, Ordering::SeqCst);
     state.operation.fetch_add(1, Ordering::SeqCst);
-    windows::hide(
-        app,
-        if region == "history" {
-            "translation"
-        } else {
-            region
-        },
-    )
+    windows::hide(app, region)
 }
 
 pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), String> {
@@ -118,7 +72,6 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
         if action == Some("translation") {
             state.selection.lock().unwrap().take();
             state.selection_presentation.lock().unwrap().take();
-            state.selection_source.lock().unwrap().take();
             state.selection_target.lock().unwrap().take();
         }
         return Ok(());
@@ -130,10 +83,7 @@ pub(crate) fn resolve_navigation(app: &AppHandle, proceed: bool) -> Result<(), S
         state.operation.fetch_add(1, Ordering::SeqCst);
     }
     match action {
-        Some("view:clipboard") => windows::set_record_view(app, "clipboard"),
-        Some("view:translation") => windows::set_record_view(app, "translation"),
         Some("close:records") => dismiss_records_window(app, "translation"),
-        Some("toggle:history") => toggle_translation_history(app),
         Some(target) => {
             if target == "translation" && paste_target.is_none() {
                 if state.selection.lock().unwrap().is_some() {

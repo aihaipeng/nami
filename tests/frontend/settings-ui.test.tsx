@@ -96,18 +96,18 @@ describe('Settings', () => {
     const baseInvoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'backup_export') {
-        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 3, clipboardCount: 12, imageCount: 2, fileSize: 4096 };
+        return { exportedAt: '2026-11-24T10:00:00Z', clipboardCount: 12, imageCount: 2, fileSize: 4096 };
       }
       if (name === 'backup_import_pick') {
         return {
           token: 'tok-backup-1',
           fileName: 'Nami_Backup_2026-11-24.namibak',
-          summary: { exportedAt: '2026-11-24T10:00:00Z', translationCount: 3, clipboardCount: 12, imageCount: 2, fileSize: 4096 },
+          summary: { exportedAt: '2026-11-24T10:00:00Z', clipboardCount: 12, imageCount: 2, fileSize: 4096 },
         };
       }
       if (name === 'backup_import_apply') {
         const { mode } = args as { token: string; mode: 'merge' | 'replace' };
-        return { mode, importedTranslations: 3, skippedTranslations: 0, importedClipboard: 10, skippedClipboard: 2, restoredImages: 2 };
+        return { mode, importedClipboard: 10, skippedClipboard: 2, restoredImages: 2 };
       }
       return baseInvoke(name, args);
     });
@@ -150,7 +150,7 @@ describe('Settings', () => {
     const baseInvoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'backup_export') {
-        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 2, clipboardCount: 8, imageCount: 1, fileSize: 8192 };
+        return { exportedAt: '2026-11-24T10:00:00Z', clipboardCount: 8, imageCount: 1, fileSize: 8192 };
       }
       if (name === 'backup_import_pick') {
         return {
@@ -163,11 +163,11 @@ describe('Settings', () => {
       if (name === 'backup_import_unlock') {
         const { password } = args as { token: string; password: string };
         if (password !== 'secret-123') throw 'backup_wrong_password';
-        return { exportedAt: '2026-11-24T10:00:00Z', translationCount: 2, clipboardCount: 8, imageCount: 1, fileSize: 8192 };
+        return { exportedAt: '2026-11-24T10:00:00Z', clipboardCount: 8, imageCount: 1, fileSize: 8192 };
       }
       if (name === 'backup_import_apply') {
         const { mode } = args as { token: string; mode: 'merge' | 'replace'; password?: string };
-        return { mode, importedTranslations: 2, skippedTranslations: 0, importedClipboard: 8, skippedClipboard: 0, restoredImages: 1 };
+        return { mode, importedClipboard: 8, skippedClipboard: 0, restoredImages: 1 };
       }
       return baseInvoke(name, args);
     });

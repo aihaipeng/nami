@@ -20,9 +20,11 @@ beforeEach(() => {
   ];
   bridge.snapshot.capabilities.nativeHistory = false;
   bridge.snapshot.capabilities.nativeChrome = false;
-  bridge.snapshot.window.recordView = 'clipboard';
-  bridge.snapshot.window.translationVisible = false;
-  bridge.snapshot.window.translationExtent = 0;
+  bridge.snapshot.window.standaloneTranslationVisible = false;
+  bridge.snapshot.window.clipboardVisible = true;
+  bridge.snapshot.window.clipboardDetailVisible = false;
+  bridge.snapshot.window.clipboardExtent = bridge.snapshot.window.clipboardWidth;
+  bridge.snapshot.window.rightExtent = 0;
   const original = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     const id = (args as { recordId?: string })?.recordId;
@@ -50,7 +52,8 @@ async function open() {
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
 }
 function direct() {
-  bridge.snapshot.window.translationVisible = true;
+  bridge.snapshot.window.clipboardDetailVisible = true;
+  bridge.snapshot.window.rightExtent = bridge.snapshot.window.clipboardDetailWidth;
   bridge.snapshot.window.clipboardDetailId = 'first';
   return render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={async (name, args) => { await bridge.invoke(name, args); }} activity={vi.fn()} />);
 }
@@ -149,7 +152,7 @@ describe('clipboard details', () => {
     expect(bridge.snapshot.window.clipboardDetailId).toBe('pinned');
 
     fireEvent.keyDown(document.activeElement!, { key: ' ', code: 'Space' });
-    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailVisible).toBe(false));
   });
 
   it('follows pointer movement even when programmatic row focus does not emit a focus event', async () => {
@@ -194,7 +197,7 @@ describe('clipboard details', () => {
     await waitFor(() => expect(button.querySelector('.copy-success')).toBeTruthy());
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' });
     expect(calls('window_hide')).toHaveLength(0);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
+    expect(bridge.snapshot.window.clipboardDetailVisible).toBe(true);
   });
 
   it('expands the first unpinned record, keeps full text and source name, and adds Note after text actions', async () => {
@@ -223,7 +226,7 @@ describe('clipboard details', () => {
     fireEvent.focus(row('pinned').querySelector('button')!);
     await waitFor(() => expect(within(pane()).getByText('Pinned text')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Collapse details' }));
-    await waitFor(() => expect(bridge.snapshot.window.translationVisible).toBe(false));
+    await waitFor(() => expect(bridge.snapshot.window.clipboardDetailVisible).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('pinned'));
   });
@@ -275,7 +278,7 @@ describe('clipboard details', () => {
     await waitFor(() => expect(within(pane()).getByText('Second text')).toBeTruthy());
     await act(async () => resolve(first()));
     expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('Second text');
-    await windowState({ translationVisible: false });
+    await windowState({ clipboardDetailVisible: false, rightExtent: 0 });
     expect(document.querySelector('.clipboard-detail-content')).toBeNull();
   });
 
@@ -299,9 +302,9 @@ describe('clipboard details', () => {
   it('opens the existing editor when a note request arrives while the list is temporarily hidden', async () => {
     await mount('translation');
     await waitFor(() => expect(row('first')).toBeTruthy());
-    await windowState({ historyVisible: false, translationVisible: true, clipboardDetailId: 'first' });
+    await windowState({ clipboardVisible: false, clipboardDetailVisible: true, clipboardDetailId: 'first' });
     await emit('clipboard_note_requested', 'first');
-    await windowState({ historyVisible: true });
+    await windowState({ clipboardVisible: true });
     expect(await screen.findByRole('dialog', { name: 'Note' })).toBeTruthy();
     expect(screen.getByRole('textbox', { name: 'Content' })).toHaveProperty('value', first().text);
   });
@@ -309,7 +312,7 @@ describe('clipboard details', () => {
   it.each([['image-unknown', 'unindexed', true], ['image-text', 'indexed', true], ['image-blank', 'empty', false]] as const)('uses stored status without probing %s', async (id, imageIndexStatus, text) => {
     records[1] = { ...first(), id, kind: 'image', text: 'Image', imageIndexStatus, width: 2400, height: 1600, characterCount: null, size: 1536 * 1024 };
     bridge.snapshot.window.clipboardDetailId = id;
-    bridge.snapshot.window.translationVisible = true;
+    bridge.snapshot.window.clipboardDetailVisible = true;
     render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
     await waitFor(() => expect(within(pane()).getByText('2400 × 1600')).toBeTruthy());
     await act(async () => {});
@@ -429,7 +432,7 @@ describe('clipboard details', () => {
     expect(pane().querySelector('.clipboard-detail-content')).toBeNull();
     expect(within(pane()).queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.keyDown(document.body, { key: 'Escape' });
-    expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'translation' });
+    expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'clipboard' });
   });
 });
 
@@ -612,7 +615,7 @@ it('renders L2 color, JSON, timestamp, and QR code views in details without modi
 it('displays locally detected QR codes on images and opens links only on explicit click', async () => {
   records[1] = { ...first(), id: 'qr-img', kind: 'image', text: 'Image', imageIndexStatus: 'indexed', width: 400, height: 400, characterCount: null, size: 12_000 };
   bridge.snapshot.window.clipboardDetailId = 'qr-img';
-  bridge.snapshot.window.translationVisible = true;
+  bridge.snapshot.window.clipboardDetailVisible = true;
   const baseInvoke = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_image_qr_codes') return ['https://example.test/from-qr', 'plain-qr-payload'];

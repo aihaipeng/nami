@@ -47,10 +47,7 @@ enum PasteAttempt {
 }
 
 fn pinned_clipboard_session(window: &WindowState) -> Option<u64> {
-    (window.history_visible
-        && window.history_pinned
-        && window.record_view == nami::model::RecordView::Clipboard
-        && !window.records_editor_open)
+    (window.clipboard_visible && window.clipboard_pinned && !window.records_editor_open)
         .then_some(window.records_session)
 }
 
@@ -99,10 +96,7 @@ pub struct Snapshot {
 
 #[tauri::command]
 pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String> {
-    authorize(
-        &window,
-        &["translation", "history", "clipboard", "settings"],
-    )?;
+    authorize(&window, &["translation", "clipboard", "settings"])?;
     let state = app.state::<AppState>();
     let clipboard_shortcut = state.clipboard_shortcut.lock().unwrap().clone();
     let snapshot = Snapshot {
@@ -142,10 +136,7 @@ pub async fn launch_at_login_set(
 
 #[tauri::command]
 pub fn window_show(window: Webview, app: AppHandle, target: String) -> Result<(), String> {
-    authorize(
-        &window,
-        &["translation", "history", "clipboard", "settings"],
-    )?;
+    authorize(&window, &["translation", "clipboard", "settings"])?;
     if target == "settings" {
         return crate::records_runtime::open_settings_window(&app);
     }
@@ -153,16 +144,11 @@ pub fn window_show(window: Webview, app: AppHandle, target: String) -> Result<()
 }
 
 #[tauri::command]
-pub fn window_hide(
-    window: Webview,
-    app: AppHandle,
-    region: String,
-    keep_history: Option<bool>,
-) -> Result<(), String> {
+pub fn window_hide(window: Webview, app: AppHandle, region: String) -> Result<(), String> {
     if region == "settings" {
         authorize(&window, &["settings"])?;
-    } else if ["history", "translation", "clipboard"].contains(&region.as_str()) {
-        authorize(&window, &["translation", "history", "clipboard"])?;
+    } else if ["translation", "clipboard"].contains(&region.as_str()) {
+        authorize(&window, &["translation", "clipboard"])?;
     } else {
         return Err("invalid_argument".into());
     }
@@ -171,50 +157,53 @@ pub fn window_hide(
         state.image_text_operation.fetch_add(1, Ordering::SeqCst);
         state.operation.fetch_add(1, Ordering::SeqCst);
     }
-    if region == "translation" && keep_history == Some(true) {
-        {
-            let state = app.state::<AppState>();
-            let mut state = state.windows.lock().unwrap();
-            state.translation_visible = false;
-            state.history_visible = true;
-        }
-        return windows::apply_translation(&app);
-    }
     windows::hide(&app, &region)
 }
 
 #[tauri::command]
-pub async fn translation_sample_copy(
+pub async fn translation_copy(
     window: Webview,
     app: AppHandle,
-    sample_id: String,
+    scope: nami::model::TranslationScope,
     part: String,
+    source_text: Option<String>,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
+    authorize(&window, &["translation", "clipboard"])?;
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    let allow_pending = window.label() == "translation";
     let text = on_main(&app, move |app| {
         let state = app.state::<AppState>();
-        let pending = state.pending_translation.lock().unwrap();
-        let text = if let Some(pending) = pending
-            .as_ref()
-            .filter(|draft| draft.record.id == sample_id)
-        {
-            if !allow_pending
-                || pending.revision != state.translation_revision.load(Ordering::SeqCst)
-            {
-                return Err("invalid_argument".into());
+        let slot = state.translation_slot(scope);
+        let text = if part == "source" {
+            if let Some(text) = source_text.filter(|value| !value.is_empty()) {
+                nami::translation::validate_text(&text)?;
+                text
+            } else {
+                let pending = slot.pending.lock().unwrap();
+                let completed = slot.completed.lock().unwrap();
+                pending
+                    .as_ref()
+                    .map(|draft| draft.output.text.clone())
+                    .or_else(|| completed.as_ref().map(|item| item.text.clone()))
+                    .ok_or("invalid_argument")?
             }
-            pending
-                .copy_part(&part)
-                .ok_or("invalid_argument")?
-                .to_owned()
         } else {
-            let record = windows::history_record(&app, &sample_id).ok_or("invalid_argument")?;
-            translation_copy_part(&record, &part)
-                .ok_or("invalid_argument")?
-                .to_owned()
+            let pending = slot.pending.lock().unwrap();
+            if let Some(pending) = pending.as_ref() {
+                if pending.revision != slot.revision() {
+                    return Err("invalid_argument".into());
+                }
+                pending
+                    .copy_part(&part)
+                    .ok_or("invalid_argument")?
+                    .to_owned()
+            } else {
+                let completed = slot.completed.lock().unwrap();
+                let output = completed.as_ref().ok_or("invalid_argument")?;
+                translation_copy_part(output, &part)
+                    .ok_or("invalid_argument")?
+                    .to_owned()
+            }
         };
         let version = platform::write_text(&text).map_err(|(code, _)| code.to_owned())?;
         state.clipboard_version.store(version, Ordering::SeqCst);
@@ -236,7 +225,7 @@ pub async fn translation_sample_copy(
 }
 
 fn translation_copy_part<'a>(
-    record: &'a nami::model::HistoryRecord,
+    record: &'a nami::model::TranslationOutput,
     part: &str,
 ) -> Option<&'a str> {
     match part {
@@ -261,38 +250,18 @@ pub fn window_pin(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     match region.as_str() {
-        "translation" | "history" => {
-            authorize(&window, &["translation", "history", "clipboard"])?;
-            {
-                let mut windows = state.windows.lock().unwrap();
-                if region == "translation" {
-                    windows.translation_pinned = pinned
-                } else {
-                    windows.history_pinned = pinned;
-                    windows.clipboard_pinned = pinned
-                }
-            }
+        "translation" => {
+            authorize(&window, &["translation"])?;
+            state.windows.lock().unwrap().translation_pinned = pinned;
             windows::update_translation_level(&app)
         }
         "clipboard" => {
             authorize(&window, &["clipboard", "translation"])?;
-            {
-                let mut windows = state.windows.lock().unwrap();
-                windows.history_pinned = pinned;
-                windows.clipboard_pinned = pinned;
-            }
+            state.windows.lock().unwrap().clipboard_pinned = pinned;
             windows::update_translation_level(&app)
         }
         _ => Err("invalid_argument".into()),
     }
-}
-
-#[tauri::command]
-pub fn records_view_set(window: Webview, app: AppHandle, view: String) -> Result<(), String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    let state = app.state::<AppState>();
-    state.operation.fetch_add(1, Ordering::SeqCst);
-    windows::set_record_view(&app, &view)
 }
 
 #[tauri::command]
@@ -301,7 +270,7 @@ pub fn records_details_toggle(
     app: AppHandle,
     record_id: Option<String>,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
+    authorize(&window, &["translation", "clipboard"])?;
     if record_id
         .as_ref()
         .is_some_and(|id| id.is_empty() || id.len() > 160)
@@ -328,8 +297,7 @@ pub fn clipboard_details_select(
     let state = app.state::<AppState>();
     {
         let mut regions = state.windows.lock().unwrap();
-        if regions.record_view != nami::model::RecordView::Clipboard
-            || !regions.history_visible
+        if !regions.clipboard_visible
             || regions.records_editor_open
             || state.records_dirty.load(Ordering::SeqCst)
         {
@@ -356,21 +324,14 @@ pub fn clipboard_note_open(
         return Err("invalid_argument".into());
     }
     let state = app.state::<AppState>();
-    let reveal = {
-        let mut regions = state.windows.lock().unwrap();
-        if regions.record_view != nami::model::RecordView::Clipboard
-            || (!regions.history_visible && !regions.translation_visible)
+    {
+        let regions = state.windows.lock().unwrap();
+        if !regions.clipboard_visible
             || regions.records_editor_open
             || state.records_dirty.load(Ordering::SeqCst)
         {
             return Err("cancelled".into());
         }
-        let reveal = !regions.history_visible;
-        regions.history_visible = true;
-        reveal
-    };
-    if reveal {
-        windows::apply_translation(&app)?;
     }
     let view = app
         .get_webview("clipboard")
@@ -413,37 +374,60 @@ pub fn records_navigation_resolve(
 }
 
 #[tauri::command]
-pub fn history_toggle(window: Webview, app: AppHandle) -> Result<(), String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    crate::records_runtime::toggle_translation_history(&app)
-}
-
-#[tauri::command]
-pub fn history_visibility_set(
-    window: Webview,
-    app: AppHandle,
-    visible: bool,
-) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
-    {
-        let state = app.state::<AppState>();
-        let mut state = state.windows.lock().unwrap();
-        state.record_view = crate::model::RecordView::Translation;
-        state.history_visible = visible;
-        state.show_translation();
-    }
-    windows::apply_translation(&app)
-}
-
-#[tauri::command]
-pub fn history_width_set(
+pub fn clipboard_width_set(
     window: Webview,
     app: AppHandle,
     width: f64,
     initialize: bool,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
-    windows::resize_history(&app, width, initialize)
+    authorize(&window, &["translation", "clipboard"])?;
+    windows::resize_clipboard(&app, width, initialize)
+}
+
+#[tauri::command]
+pub fn clipboard_detail_width_set(
+    window: Webview,
+    app: AppHandle,
+    width: f64,
+) -> Result<(), String> {
+    authorize(&window, &["translation", "clipboard"])?;
+    if !width.is_finite() {
+        return Err("invalid_argument".into());
+    }
+    {
+        let state = app.state::<AppState>();
+        let mut regions = state.windows.lock().unwrap();
+        if !regions.clipboard_visible {
+            return Ok(());
+        }
+        regions.set_clipboard_detail_width(width);
+    }
+    windows::emit_state(&app)
+}
+
+#[tauri::command]
+pub fn clipboard_translation_close(window: Webview, app: AppHandle) -> Result<(), String> {
+    authorize(&window, &["translation", "clipboard"])?;
+    let state = app.state::<AppState>();
+    state.image_text_operation.fetch_add(1, Ordering::SeqCst);
+    state.clipboard_side_translation.clear();
+    state.clipboard_translation.lock().unwrap().take();
+    windows::close_clipboard_translation(&app)
+}
+
+#[tauri::command]
+pub fn clipboard_translation_clear_record(window: Webview, app: AppHandle) -> Result<(), String> {
+    authorize(&window, &["translation", "clipboard"])?;
+    let changed = app
+        .state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .clear_clipboard_translation_record();
+    if changed {
+        windows::emit_state(&app)?;
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -475,165 +459,20 @@ pub fn translation_chrome_update(
     Ok(true)
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HistorySelection {
-    revision: u64,
-    sample_id: Option<String>,
-    retranslate: bool,
-    clear_detail: bool,
-    record: Option<crate::model::HistoryRecord>,
-}
-
-#[tauri::command]
-pub fn history_snapshot(
-    window: Webview,
-    app: AppHandle,
-) -> Result<crate::history::HistoryWireSnapshot, String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    let state = app.state::<AppState>();
-    if let Some(error) = state.storage_error.lock().unwrap().clone() {
-        return Err(error);
-    }
-    let snapshot = state.history.lock().unwrap().wire_snapshot();
-    Ok(snapshot)
-}
-
-#[tauri::command]
-pub async fn history_query(
-    window: Webview,
-    app: AppHandle,
-    query: String,
-    favorites_only: bool,
-) -> Result<crate::history::HistoryWireSnapshot, String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    crate::history_runtime::query_history(&app, query, favorites_only).await
-}
-
-#[tauri::command]
-pub async fn history_load_more(
-    window: Webview,
-    app: AppHandle,
-) -> Result<crate::history::HistoryWireSnapshot, String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    crate::history_runtime::load_more(&app).await
-}
-
-#[tauri::command]
-pub async fn history_record_update(
-    window: Webview,
-    app: AppHandle,
-    record_id: String,
-    action: String,
-    title: Option<String>,
-) -> Result<crate::history::HistoryWireSnapshot, String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    crate::history_runtime::update_record(&app, record_id, action, title).await
-}
-
-#[tauri::command]
-pub fn history_record_note(
-    window: Webview,
-    app: AppHandle,
-    record_id: String,
-) -> Result<serde_json::Value, String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    let record = windows::history_record(&app, &record_id).ok_or("not_found")?;
-    Ok(serde_json::json!({"title": record.title, "text": record.text, "kind": "text"}))
-}
-
-#[tauri::command]
-pub fn history_sample_select(
-    window: Webview,
-    app: AppHandle,
-    sample_id: Option<String>,
-    retranslate: bool,
-    clear_detail: Option<bool>,
-    preview: Option<bool>,
-) -> Result<(), String> {
-    authorize(&window, &["translation", "history", "clipboard"])?;
-    if preview == Some(true)
-        && !app
-            .state::<AppState>()
-            .windows
-            .lock()
-            .unwrap()
-            .records_browsing
-    {
-        return Ok(());
-    }
-    select_history_sample(&app, sample_id, retranslate, clear_detail.unwrap_or(false))
-}
-
-pub(crate) fn select_history_sample(
-    app: &AppHandle,
-    sample_id: Option<String>,
-    retranslate: bool,
-    clear_detail: bool,
-) -> Result<(), String> {
-    if clear_detail && sample_id.is_some() {
-        return Err("invalid_argument".into());
-    }
-    let record = sample_id
-        .as_ref()
-        .and_then(|id| windows::history_record(app, id));
-    if sample_id.is_some() && record.is_none() {
-        return Err("invalid_argument".into());
-    }
-    let repeated = app
-        .state::<AppState>()
-        .history
-        .lock()
-        .unwrap()
-        .selected_id()
-        .map(str::to_owned)
-        == sample_id;
-    let revision = windows::select_native_history(app, sample_id.as_deref())?;
-    if sample_id.is_some() {
-        let visible = {
-            let state = app.state::<AppState>();
-            let mut windows = state.windows.lock().unwrap();
-            windows.records_browsing = true;
-            windows.select_history_record(repeated, retranslate);
-            windows.translation_visible
-        };
-        if visible {
-            windows::apply_translation(app)?;
-            if let Some(view) = app.get_webview("translation") {
-                view.window().show().map_err(|_| "window_show")?;
-            }
-        } else {
-            windows::apply_translation(app)?;
-        }
-    }
-    let selection = HistorySelection {
-        revision,
-        sample_id,
-        retranslate,
-        clear_detail,
-        record,
-    };
-    for label in ["translation", "history", "clipboard"] {
-        if let Some(view) = app.get_webview(label) {
-            view.emit("history_sample_selected", &selection)
-                .map_err(|_| "event_emit")?;
-        }
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub fn translation_columns_set(
     window: Webview,
     app: AppHandle,
     secondary_enabled: bool,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "history"])?;
+    authorize(&window, &["translation"])?;
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
         state.secondary_enabled = secondary_enabled;
-        state.translation_width = state.translation_width.max(state.translation_min_width());
+        state.translation_width = state
+            .translation_width
+            .max(state.standalone_translation_min_width());
     }
     windows::apply_translation(&app)
 }
@@ -652,7 +491,7 @@ pub async fn locale_set(window: Webview, app: AppHandle, locale: String) -> Resu
     })
     .await?;
     *state.locale.lock().unwrap() = locale.clone();
-    for label in ["translation", "history", "clipboard", "settings"] {
+    for label in ["translation", "clipboard", "settings"] {
         if let Some(window) = app.get_webview(label) {
             window
                 .emit("locale_changed", &locale)
@@ -677,7 +516,7 @@ pub async fn window_position_mode_set(
     })
     .await?;
     *state.window_position_mode.lock().unwrap() = mode;
-    for label in ["translation", "history", "clipboard", "settings"] {
+    for label in ["translation", "clipboard", "settings"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("window_position_mode_changed", mode)
                 .map_err(|_| "event_emit")?;
@@ -811,7 +650,7 @@ pub async fn clipboard_record_use(
         } else {
             None
         };
-        if !state.windows.lock().unwrap().history_pinned {
+        if !state.windows.lock().unwrap().clipboard_pinned {
             let _ = windows::hide_after_clipboard_use(&app);
         }
         if !platform::activate(target) {
@@ -1030,12 +869,16 @@ pub fn selection_present(
 }
 
 #[tauri::command]
-pub fn translation_cancel(window: Webview, app: AppHandle) -> Result<(), String> {
-    authorize(&window, &["translation"])?;
+pub fn translation_cancel(
+    window: Webview,
+    app: AppHandle,
+    scope: Option<nami::model::TranslationScope>,
+) -> Result<(), String> {
+    authorize(&window, &["translation", "clipboard"])?;
     let state = app.state::<AppState>();
-    state.translation_revision.fetch_add(1, Ordering::SeqCst);
-    state.pending_translation.lock().unwrap().take();
-    crate::records_runtime::protect_result(&app)
+    let scope = scope.unwrap_or(nami::model::TranslationScope::Standalone);
+    state.translation_slot(scope).bump_revision();
+    Ok(())
 }
 
 async fn store_preferences(
@@ -1056,7 +899,7 @@ fn publish_preferences(
     app: &AppHandle,
     preferences: &crate::translation::Preferences,
 ) -> Result<(), String> {
-    for label in ["translation", "settings", "clipboard", "history"] {
+    for label in ["translation", "settings", "clipboard"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("translation_preferences_changed", preferences)
                 .map_err(|_| "event_emit")?;
@@ -1106,8 +949,8 @@ async fn commit_preferences(
         *state.translation_engine.lock().unwrap() = preferences.engine.clone();
         *state.translation_preferences.lock().unwrap() = preferences.clone();
         if engine_changed {
-            state.translation_revision.fetch_add(1, Ordering::SeqCst);
-            state.pending_translation.lock().unwrap().take();
+            state.standalone_translation.bump_revision();
+            state.clipboard_side_translation.bump_revision();
         }
         publish_preferences(&app, &preferences)?;
         crate::sync_global_shortcuts(&app);
@@ -1267,8 +1110,8 @@ pub async fn translation_shortcuts_restore(
         .map(|value| json(serde_json::to_string(value)))
         .transpose()?;
     let selection_enabled = preferences.selection_enabled;
-    use crate::shortcuts::ShortcutAction::{Selection, ToggleHistory};
-    let next = [Selection, ToggleHistory]
+    use crate::shortcuts::ShortcutAction::Selection;
+    let next = [Selection]
         .into_iter()
         .filter(|_| !general && platform::capabilities().selection)
         .filter_map(|action| preferences.global_binding(action))
@@ -1340,8 +1183,8 @@ pub fn translation_engine_set(
     state.translation_preferences.lock().unwrap().engine = engine.clone();
     *state.translation_engine.lock().unwrap() = engine.clone();
     let preferences = state.translation_preferences.lock().unwrap().clone();
-    state.translation_revision.fetch_add(1, Ordering::SeqCst);
-    state.pending_translation.lock().unwrap().take();
+    state.standalone_translation.bump_revision();
+    state.clipboard_side_translation.bump_revision();
     let app_for_store = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = store_preferences(&app_for_store, preferences).await;
@@ -1358,7 +1201,7 @@ pub fn translation_engine_set(
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum TranslationRunOutput {
-    Complete(Box<crate::model::HistoryRecord>),
+    Complete(Box<crate::model::TranslationOutput>),
     Partial { partial: PartialTranslationView },
 }
 
@@ -1373,9 +1216,8 @@ pub struct PartialTranslationView {
 
 #[derive(Clone)]
 pub(crate) struct PendingTranslation {
-    record: crate::model::HistoryRecord,
+    pub(crate) output: crate::model::TranslationOutput,
     errors: Vec<Option<String>>,
-    focus_origin: Option<crate::history_runtime::TranslationFocus>,
     revision: u64,
     pub(crate) retrying: bool,
 }
@@ -1390,24 +1232,12 @@ impl PendingTranslation {
         if self.errors.get(index)?.is_some() {
             return None;
         }
-        self.record
+        self.output
             .translations
             .get(index)
             .map(String::as_str)
             .filter(|text| !text.is_empty())
     }
-}
-
-pub(crate) enum TranslationRunMode {
-    Foreground {
-        reuse: Option<crate::translation::TranslationReuse>,
-        retry_id: Option<String>,
-        retry_engine: Option<String>,
-        clipboard_session: Option<u64>,
-    },
-    Background {
-        revision: u64,
-    },
 }
 
 #[tauri::command]
@@ -1418,39 +1248,25 @@ pub async fn translation_run(
     text: String,
     source: String,
     targets: Vec<String>,
-    from_selection: bool,
-    reuse: Option<crate::translation::TranslationReuse>,
+    scope: Option<nami::model::TranslationScope>,
+    reuse_target_index: Option<usize>,
     retry_id: Option<String>,
     retry_engine: Option<String>,
-    clipboard_session: Option<u64>,
 ) -> Result<TranslationRunOutput, String> {
     authorize(&window, &["translation"])?;
-    if (retry_id.is_some() || clipboard_session.is_some()) && reuse.is_some()
-        || clipboard_session.is_some() && !from_selection
-    {
+    if retry_id.is_some() && reuse_target_index.is_some() {
         return Err("invalid_argument".into());
     }
-    let captured = if from_selection {
-        app.state::<AppState>()
-            .selection_source
-            .lock()
-            .unwrap()
-            .clone()
-    } else {
-        None
-    };
+    let scope = scope.unwrap_or(nami::model::TranslationScope::Standalone);
     run_translation(
         app,
+        scope,
         text,
         source,
         targets,
-        captured,
-        TranslationRunMode::Foreground {
-            reuse,
-            retry_id,
-            retry_engine,
-            clipboard_session,
-        },
+        reuse_target_index,
+        retry_id,
+        retry_engine,
     )
     .await
 }
@@ -1468,39 +1284,24 @@ fn reserve_translation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_translation(
     app: AppHandle,
+    scope: nami::model::TranslationScope,
     text: String,
     source: String,
     targets: Vec<String>,
-    captured: Option<serde_json::Value>,
-    mode: TranslationRunMode,
+    reuse_target_index: Option<usize>,
+    retry_id: Option<String>,
+    retry_engine: Option<String>,
 ) -> Result<TranslationRunOutput, String> {
-    let (reuse, retry_id, retry_engine, clipboard_session, expected_revision) = match mode {
-        TranslationRunMode::Foreground {
-            reuse,
-            retry_id,
-            retry_engine,
-            clipboard_session,
-        } => (reuse, retry_id, retry_engine, clipboard_session, None),
-        TranslationRunMode::Background { revision } => (None, None, None, None, Some(revision)),
-    };
-    if let Some(error) = app
-        .state::<AppState>()
-        .storage_error
-        .lock()
-        .unwrap()
-        .clone()
-    {
-        return Err(error);
-    }
     crate::translation::validate_text(&text)?;
     #[cfg(feature = "ui-tests")]
     let local_fixture = if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
         if app.config().identifier != "dev.local.nami.ui-tests"
             || !matches!(
                 std::env::var("NAMI_UI_TEST_CASE").as_deref(),
-                Ok("translation-partial" | "clipboard-translate-shortcut")
+                Ok("translation-partial" | "clipboard-translate-shortcut" | "clipboard-translate")
             )
         {
             return Err("translation_network_disabled_in_tests".into());
@@ -1510,66 +1311,52 @@ pub(crate) async fn run_translation(
         false
     };
     let state = app.state::<AppState>();
-    let (preferences, engine, revision, retried) = {
+    let slot = state.translation_slot(scope);
+    let (preferences, engine, revision, retried, previous_completed) = {
         let preferences = state.translation_preferences.lock().unwrap();
-        let mut pending = state.pending_translation.lock().unwrap();
+        let mut pending = slot.pending.lock().unwrap();
+        let completed = slot.completed.lock().unwrap().clone();
         let (engine, revision, draft) = if let Some(id) = retry_id.as_deref() {
             let draft = pending
                 .as_mut()
                 .filter(|draft| {
-                    let record = &draft.record;
+                    let record = &draft.output;
                     !draft.retrying
                         && record.id == id
                         && record.text == text
                         && record.target_languages == targets
-                        && record
-                            .translation
-                            .as_ref()
-                            .is_some_and(|metadata| metadata.requested_source == source)
+                        && record.translation.requested_source == source
                 })
                 .ok_or("invalid_argument")?;
-            let engine = retry_engine
-                .unwrap_or_else(|| draft.record.translation.as_ref().unwrap().engine.clone());
+            let engine = retry_engine.unwrap_or_else(|| draft.output.translation.engine.clone());
             let missing = targets
                 .iter()
                 .zip(&draft.errors)
                 .filter_map(|(target, error)| error.as_ref().map(|_| target.clone()))
                 .collect::<Vec<_>>();
             crate::translation::validate_options(&engine, &source, &missing)?;
-            let revision = reserve_translation(&state.translation_revision, Some(draft.revision))?;
+            let revision = reserve_translation(&slot.revision, Some(draft.revision))?;
             draft.revision = revision;
             draft.retrying = true;
             (engine, revision, Some(draft.clone()))
         } else {
             let engine = retry_engine.unwrap_or_else(|| preferences.engine.clone());
             crate::translation::validate_options(&engine, &source, &targets)?;
-            let revision = reserve_translation(&state.translation_revision, expected_revision)?;
+            let revision = reserve_translation(&slot.revision, None)?;
             pending.take();
             (engine, revision, None)
         };
-        (preferences.clone(), engine, revision, draft)
+        (preferences.clone(), engine, revision, draft, completed)
     };
     let proxy_url = preferences.proxy_url;
     let proxy_enabled = preferences.proxy_enabled;
-    let focus_origin = if let Some(draft) = &retried {
-        draft.focus_origin.clone()
-    } else {
-        reuse
-            .as_ref()
-            .filter(|reuse| reuse.focus_history)
-            .map(|reuse| crate::history_runtime::TranslationFocus::History(reuse.record_id.clone()))
-            .or_else(|| clipboard_session.map(crate::history_runtime::TranslationFocus::Clipboard))
-    };
-    let previous_history = reuse
-        .as_ref()
-        .and_then(|reuse| state.history.lock().unwrap().record(&reuse.record_id));
     let previous = retried
         .as_ref()
-        .map(|draft| &draft.record)
-        .or(previous_history.as_ref());
+        .map(|draft| &draft.output)
+        .or(previous_completed.as_ref());
     let retained = if let Some(draft) = &retried {
         draft
-            .record
+            .output
             .translations
             .iter()
             .zip(&draft.errors)
@@ -1577,12 +1364,12 @@ pub(crate) async fn run_translation(
             .collect()
     } else {
         crate::translation::reusable_results(
-            &preferences.engine,
+            &engine,
             &text,
             &source,
             &targets,
             previous,
-            reuse.as_ref().and_then(|reuse| reuse.target_index),
+            reuse_target_index,
         )
     };
     let missing: Vec<String> = targets
@@ -1591,75 +1378,77 @@ pub(crate) async fn run_translation(
         .filter(|(_, result)| result.is_none())
         .map(|(target, _)| target.clone())
         .collect();
-    let source_app = crate::translation::source_app_for_translation(&text, previous, captured);
-    let translated_result = if missing.is_empty() {
-        crate::translation::TranslationResult {
+    let batch = if missing.is_empty() {
+        ResolvedTranslationBatch {
             translations: Vec::new(),
             errors: Vec::new(),
+            engines: Vec::new(),
             source_language: source.clone(),
             detections: Vec::new(),
         }
     } else {
-        let request = async {
-            #[cfg(feature = "ui-tests")]
-            if local_fixture {
-                return partial_translation_fixture(&engine, &text, &missing).await;
-            }
-            crate::translation::translate(
-                &engine,
-                &text,
-                &source,
-                &missing,
-                &proxy_url,
-                proxy_enabled,
-            )
-            .await
-        };
-        tokio::pin!(request);
-        loop {
-            tokio::select! {
-                result = &mut request => break match result {
-                    Ok(output) => output,
-                    Err(error) if retained.iter().any(Option::is_some) => crate::translation::TranslationResult {
-                        translations: vec![String::new(); missing.len()],
-                        errors: vec![Some(error); missing.len()],
-                        source_language: source.clone(),
-                        detections: Vec::new(),
-                    },
-                    Err(error) => return Err(error),
-                },
-                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                    if state.translation_revision.load(Ordering::SeqCst) != revision { return Err("cancelled".into()); }
+        let text_ref = &text;
+        let source_ref = &source;
+        let proxy_url_ref = &proxy_url;
+        translate_with_google_fallback(&engine, source_ref, &missing, |run_engine, run_targets| {
+            let run_engine = run_engine.to_string();
+            let run_targets = run_targets.to_vec();
+            let text_owned = text_ref.clone();
+            let source_owned = source_ref.clone();
+            let proxy_url_owned = proxy_url_ref.clone();
+            async move {
+                let request = async {
+                    #[cfg(feature = "ui-tests")]
+                    if local_fixture {
+                        return partial_translation_fixture(&run_engine, &text_owned, &run_targets)
+                            .await;
+                    }
+                    crate::translation::translate(
+                        &run_engine,
+                        &text_owned,
+                        &source_owned,
+                        &run_targets,
+                        &proxy_url_owned,
+                        proxy_enabled,
+                    )
+                    .await
+                };
+                tokio::pin!(request);
+                loop {
+                    tokio::select! {
+                        result = &mut request => break result,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                            if slot.revision() != revision { return Err("cancelled".into()); }
+                        }
+                    }
                 }
             }
-        }
+        })
+        .await?
     };
     let previous_detection = retained.first().is_some_and(Option::is_some)
-        || (retained.iter().any(Option::is_some)
-            && translated_result.errors.iter().all(Option::is_some));
+        || (retained.iter().any(Option::is_some) && batch.errors.iter().all(Option::is_some));
     let detections = if previous_detection {
         previous
-            .as_ref()
-            .and_then(|record| record.translation.as_ref())
-            .map(|metadata| metadata.detections.clone())
+            .map(|record| record.translation.detections.clone())
             .unwrap_or_default()
     } else {
-        translated_result.detections
+        batch.detections
     };
     let resolved_source = if previous_detection {
         previous
-            .as_ref()
             .map(|record| record.source_language.clone())
             .unwrap_or_else(|| source.clone())
     } else {
-        translated_result.source_language
+        batch.source_language
     };
+    let mut fresh_engines = batch.engines.into_iter();
     let mut target_engines = retained
         .iter()
         .enumerate()
         .map(|(index, result)| {
             if let Some(metadata) = previous
-                .and_then(|record| record.translation.as_ref())
+                .map(|record| &record.translation)
                 .filter(|_| result.is_some())
             {
                 metadata
@@ -1668,20 +1457,25 @@ pub(crate) async fn run_translation(
                     .unwrap_or(&metadata.engine)
                     .clone()
             } else {
-                engine.clone()
+                fresh_engines.next().unwrap_or_else(|| engine.clone())
             }
         })
         .collect::<Vec<_>>();
-    if target_engines
-        .iter()
-        .all(|target_engine| target_engine == &engine)
-    {
-        target_engines.clear();
-    }
-    let mut fresh = translated_result
-        .translations
-        .into_iter()
-        .zip(translated_result.errors);
+    let effective_engine = if let Some(first) = target_engines.first() {
+        if target_engines
+            .iter()
+            .all(|target_engine| target_engine == first)
+        {
+            let uniform = first.clone();
+            target_engines.clear();
+            uniform
+        } else {
+            engine.clone()
+        }
+    } else {
+        engine.clone()
+    };
+    let mut fresh = batch.translations.into_iter().zip(batch.errors);
     let (translated, errors): (Vec<String>, Vec<Option<String>>) = retained
         .into_iter()
         .map(|cached| {
@@ -1694,62 +1488,135 @@ pub(crate) async fn run_translation(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .unzip();
-    let record = crate::model::HistoryRecord {
-        title: String::new(),
+    let output = crate::model::TranslationOutput {
         id: uuid::Uuid::new_v4().to_string(),
         text,
         source_language: resolved_source,
-        translation: Some(crate::model::TranslationMetadata {
+        translation: crate::model::TranslationMetadata {
             requested_source: source,
-            engine: engine.clone(),
+            engine: effective_engine,
             target_engines,
             strategy_version: crate::translation::STRATEGY_VERSION,
             detections,
-        }),
+        },
         target_languages: targets,
         translations: translated,
-        date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        is_favorite: false,
-        is_pinned: false,
-        source_app,
     };
     if let Some(error) = errors.iter().flatten().next() {
-        if expected_revision.is_some() || errors.iter().all(Option::is_some) {
+        if errors.iter().all(Option::is_some) {
             return Err(error.clone());
         }
-        let mut pending = state.pending_translation.lock().unwrap();
-        if state.translation_revision.load(Ordering::SeqCst) != revision {
+        let mut pending = slot.pending.lock().unwrap();
+        if slot.revision() != revision {
             return Err("cancelled".into());
         }
         let partial = PartialTranslationView {
-            id: record.id.clone(),
-            translations: record.translations.clone(),
-            source_language: record.source_language.clone(),
+            id: output.id.clone(),
+            translations: output.translations.clone(),
+            source_language: output.source_language.clone(),
             errors: errors.clone(),
         };
         *pending = Some(PendingTranslation {
-            record,
+            output,
             errors,
-            focus_origin,
             revision,
             retrying: false,
         });
         return Ok(TranslationRunOutput::Partial { partial });
     }
-    let committed =
-        crate::history_runtime::commit_translation(&app, record, engine, revision, focus_origin)
-            .await;
-    if retried.is_some() {
-        let mut pending = state.pending_translation.lock().unwrap();
-        if let Some(draft) = pending.as_mut().filter(|draft| draft.revision == revision) {
-            if committed.is_ok() || state.translation_revision.load(Ordering::SeqCst) != revision {
-                pending.take();
-            } else {
-                draft.retrying = false;
+    {
+        let mut pending = slot.pending.lock().unwrap();
+        if slot.revision() != revision {
+            return Err("cancelled".into());
+        }
+        pending.take();
+        *slot.completed.lock().unwrap() = Some(output.clone());
+    }
+    Ok(TranslationRunOutput::Complete(Box::new(output)))
+}
+
+struct ResolvedTranslationBatch {
+    translations: Vec<String>,
+    errors: Vec<Option<String>>,
+    engines: Vec<String>,
+    source_language: String,
+    detections: Vec<crate::model::LanguageDetection>,
+}
+
+async fn translate_with_google_fallback<F, Fut>(
+    primary_engine: &str,
+    source: &str,
+    missing: &[String],
+    mut execute: F,
+) -> Result<ResolvedTranslationBatch, String>
+where
+    F: FnMut(&str, &[String]) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::translation::TranslationResult, String>>,
+{
+    let primary = execute(primary_engine, missing).await;
+    let (mut translations, mut errors, mut source_language, mut detections) = match primary {
+        Ok(result) => (
+            result.translations,
+            result.errors,
+            result.source_language,
+            result.detections,
+        ),
+        Err(error) if error == "cancelled" => return Err(error),
+        Err(error) => (
+            vec![String::new(); missing.len()],
+            vec![Some(error); missing.len()],
+            source.to_string(),
+            Vec::new(),
+        ),
+    };
+    let mut engines = vec![primary_engine.to_string(); missing.len()];
+    if primary_engine == "google" {
+        let failed_indices: Vec<usize> = errors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, error)| error.as_ref().map(|_| index))
+            .collect();
+        if !failed_indices.is_empty() {
+            let failed_targets: Vec<String> = failed_indices
+                .iter()
+                .map(|&index| missing[index].clone())
+                .collect();
+            if crate::translation::validate_options("edge", source, &failed_targets).is_ok() {
+                match execute("edge", &failed_targets).await {
+                    Ok(fallback) => {
+                        for (slot_index, (text, error)) in failed_indices
+                            .into_iter()
+                            .zip(fallback.translations.into_iter().zip(fallback.errors))
+                        {
+                            if error.is_none() {
+                                translations[slot_index] = text;
+                                errors[slot_index] = None;
+                                engines[slot_index] = "edge".to_string();
+                            }
+                        }
+                        if detections.is_empty() && !fallback.detections.is_empty() {
+                            detections = fallback.detections;
+                        }
+                        if (source_language == source || source_language == "auto")
+                            && !fallback.source_language.is_empty()
+                            && fallback.source_language != "auto"
+                        {
+                            source_language = fallback.source_language;
+                        }
+                    }
+                    Err(error) if error == "cancelled" => return Err(error),
+                    Err(_) => {}
+                }
             }
         }
     }
-    committed.map(|record| TranslationRunOutput::Complete(Box::new(record)))
+    Ok(ResolvedTranslationBatch {
+        translations,
+        errors,
+        engines,
+        source_language,
+        detections,
+    })
 }
 
 #[cfg(feature = "ui-tests")]
@@ -2140,13 +2007,10 @@ pub async fn clipboard_record_process(
 pub fn clipboard_translation_take(
     window: Webview,
     app: AppHandle,
-) -> Result<Option<crate::selection::SelectionContext>, String> {
+) -> Result<Option<crate::ClipboardTranslationContext>, String> {
     authorize(&window, &["translation"])?;
     let state = app.state::<AppState>();
     let context = state.clipboard_translation.lock().unwrap().take();
-    if let Some(context) = &context {
-        *state.selection_source.lock().unwrap() = context.source_app.clone();
-    }
     Ok(context)
 }
 
@@ -2164,6 +2028,7 @@ pub async fn clipboard_record_update(
     let _write = state.clipboard_writes.lock().await;
     let root = crate::clipboard_runtime::image_root(&app)?;
     let deleting = action == "delete";
+    let deleted_id = deleting.then(|| record_id.clone());
     crate::clipboard_runtime::database(&app, move |database| {
         if action == "edit" {
             database.clipboard_edit(
@@ -2180,6 +2045,20 @@ pub async fn clipboard_record_update(
         Ok(())
     })
     .await?;
+    if let Some(deleted_id) = deleted_id {
+        let cleared = {
+            let mut regions = state.windows.lock().unwrap();
+            if regions.clipboard_translation_record_id.as_deref() == Some(deleted_id.as_str()) {
+                regions.clipboard_translation_record_id = None;
+                true
+            } else {
+                false
+            }
+        };
+        if cleared {
+            let _ = on_main(&app, |app| windows::emit_state(&app)).await;
+        }
+    }
     crate::clipboard_runtime::changed(&app)?;
     if deleting && crate::clipboard_preferences::retry_image_deletions_locked(&app, root).await? {
         return Err("clipboard_cleanup_failed".into());
@@ -2447,9 +2326,10 @@ mod tests {
 
     #[test]
     fn secondary_copy_falls_back_to_the_saved_primary_without_using_source() {
-        let mut record: nami::model::HistoryRecord = serde_json::from_value(serde_json::json!({
+        let mut record: nami::model::TranslationOutput = serde_json::from_value(serde_json::json!({
             "id":"copy-test", "text":"source", "sourceLanguage":"auto", "targetLanguages":["en"],
-            "translations":["primary"], "date":"2026-11-20T00:00:00Z", "isFavorite":false, "isPinned":false
+            "translations":["primary"],
+            "translation":{"requestedSource":"auto","engine":"edge","strategyVersion":1,"detections":[]}
         })).unwrap();
         assert_eq!(
             super::translation_copy_part(&record, "secondary"),
@@ -2479,24 +2359,6 @@ mod tests {
         );
         assert_eq!(revision.load(std::sync::atomic::Ordering::SeqCst), 9);
         assert_eq!(super::reserve_translation(&revision, Some(9)), Ok(10));
-    }
-
-    #[test]
-    fn history_selection_detail_clear_is_explicit_in_the_shared_event() {
-        for clear_detail in [false, true] {
-            let event = super::HistorySelection {
-                revision: 7,
-                sample_id: None,
-                retranslate: false,
-                clear_detail,
-                record: None,
-            };
-            let payload = serde_json::to_value(event).unwrap();
-            assert_eq!(payload["sampleId"], serde_json::Value::Null);
-            assert_eq!(payload["clearDetail"], clear_detail);
-            assert_eq!(payload["revision"], 7);
-            assert!(payload.get("clear_detail").is_none());
-        }
     }
 
     #[test]
@@ -2551,8 +2413,8 @@ mod tests {
     #[test]
     fn paste_focus_return_requires_the_original_pinned_clipboard_session() {
         let window = WindowState {
-            history_visible: true,
-            history_pinned: true,
+            clipboard_visible: true,
+            clipboard_pinned: true,
             records_session: 3,
             ..WindowState::default()
         };
@@ -2566,19 +2428,15 @@ mod tests {
         assert!(!handoff.still_owned(&window, 7, 10));
         for changed in [
             WindowState {
-                history_visible: false,
+                clipboard_visible: false,
                 ..window.clone()
             },
             WindowState {
-                history_pinned: false,
+                clipboard_pinned: false,
                 ..window.clone()
             },
             WindowState {
                 records_editor_open: true,
-                ..window.clone()
-            },
-            WindowState {
-                record_view: nami::model::RecordView::Translation,
                 ..window.clone()
             },
             WindowState {
@@ -2596,5 +2454,152 @@ mod tests {
         assert_eq!(paste_release_result(true, false), Err("clipboard_changed"));
         assert_eq!(paste_release_result(false, false), Err("clipboard_changed"));
         assert_eq!(paste_release_result(false, true), Err("target_unavailable"));
+    }
+
+    #[test]
+    fn google_total_failure_falls_back_to_edge_automatically() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "google",
+                "auto",
+                &["en".into(), "zh-CN".into()],
+                |engine, targets| {
+                    called.push((engine.to_string(), targets.to_vec()));
+                    let engine = engine.to_string();
+                    let targets = targets.to_vec();
+                    async move {
+                        if engine == "google" {
+                            Err("Google Translate is unreachable".into())
+                        } else {
+                            Ok(crate::translation::TranslationResult {
+                                translations: targets
+                                    .iter()
+                                    .map(|target| format!("edge:{target}"))
+                                    .collect(),
+                                errors: vec![None; targets.len()],
+                                source_language: "en".into(),
+                                detections: Vec::new(),
+                            })
+                        }
+                    }
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            called,
+            vec![
+                ("google".into(), vec!["en".into(), "zh-CN".into()]),
+                ("edge".into(), vec!["en".into(), "zh-CN".into()]),
+            ]
+        );
+        assert_eq!(batch.translations, vec!["edge:en", "edge:zh-CN"]);
+        assert_eq!(batch.errors, vec![None, None]);
+        assert_eq!(batch.engines, vec!["edge", "edge"]);
+        assert_eq!(batch.source_language, "en");
+    }
+
+    #[test]
+    fn google_partial_failure_falls_back_failed_target_only_to_edge() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "google",
+                "auto",
+                &["en".into(), "zh-CN".into()],
+                |engine, targets| {
+                    called.push((engine.to_string(), targets.to_vec()));
+                    let engine = engine.to_string();
+                    let targets = targets.to_vec();
+                    async move {
+                        if engine == "google" {
+                            Ok(crate::translation::TranslationResult {
+                                translations: vec!["google:en".into(), String::new()],
+                                errors: vec![None, Some("rate_limited".into())],
+                                source_language: "ja".into(),
+                                detections: Vec::new(),
+                            })
+                        } else {
+                            Ok(crate::translation::TranslationResult {
+                                translations: targets
+                                    .iter()
+                                    .map(|target| format!("edge:{target}"))
+                                    .collect(),
+                                errors: vec![None; targets.len()],
+                                source_language: "ja".into(),
+                                detections: Vec::new(),
+                            })
+                        }
+                    }
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            called,
+            vec![
+                ("google".into(), vec!["en".into(), "zh-CN".into()]),
+                ("edge".into(), vec!["zh-CN".into()]),
+            ]
+        );
+        assert_eq!(batch.translations, vec!["google:en", "edge:zh-CN"]);
+        assert_eq!(batch.errors, vec![None, None]);
+        assert_eq!(batch.engines, vec!["google", "edge"]);
+        assert_eq!(batch.source_language, "ja");
+    }
+
+    #[test]
+    fn google_fallback_skips_edge_when_target_is_unsupported_by_edge() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "google",
+                "auto",
+                &["ab".into()],
+                |engine, targets| {
+                    called.push((engine.to_string(), targets.to_vec()));
+                    async move { Err("google_down".into()) }
+                },
+            ))
+            .unwrap();
+        assert_eq!(called, vec![("google".into(), vec!["ab".into()])]);
+        assert_eq!(batch.errors, vec![Some("google_down".into())]);
+        assert_eq!(batch.engines, vec!["google"]);
+    }
+
+    #[test]
+    fn edge_failure_does_not_auto_fallback_to_google() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "edge",
+                "auto",
+                &["en".into(), "zh-CN".into()],
+                |engine, targets| {
+                    called.push((engine.to_string(), targets.to_vec()));
+                    async move { Err("edge_down".into()) }
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            called,
+            vec![("edge".into(), vec!["en".into(), "zh-CN".into()])]
+        );
+        assert_eq!(
+            batch.errors,
+            vec![Some("edge_down".into()), Some("edge_down".into())]
+        );
+        assert_eq!(batch.engines, vec!["edge", "edge"]);
     }
 }

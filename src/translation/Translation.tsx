@@ -4,27 +4,25 @@ import { flushSync } from 'react-dom';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
-import { languageName, languages, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
+import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { editsText, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
-import { translationShortcutEnabled, type TranslationPreferences } from '../shared/contracts';
+import { translationShortcutEnabled, type TranslationOutput, type TranslationPreferences } from '../shared/contracts';
 import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
-import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
+import { ClipboardTranslatePane } from '../clipboard/ClipboardTranslatePane';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
-import { HistoryIcon } from './HistoryIcon';
 import { RecordFeedback } from '../shared/RecordFeedback';
-import { TRANSLATION_STRATEGY_VERSION, requestedSource, historySamples, type HistoryRecord, type HistorySelection } from './history';
 import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
 type Popup = 'source' | 'primary' | 'secondary';
 type Engine = 'edge' | 'google';
-type TranslationReuse = { recordId: string; focusHistory?: boolean; targetIndex?: number };
-type TranslationRequest = { text: string; source: string; targets: string[]; fromSelection: boolean; clipboardSession?: number };
+type TranslationRequest = { text: string; source: string; targets: string[] };
 type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 
+const TRANSLATION_STRATEGY_VERSION = 1;
 let sourceMeasure: CanvasRenderingContext2D | null | undefined;
 
 function sourcePrefixWidth(field: HTMLTextAreaElement, prefix: string) {
@@ -33,6 +31,49 @@ function sourcePrefixWidth(field: HTMLTextAreaElement, prefix: string) {
   const style = getComputedStyle(field);
   sourceMeasure.font = style.font || `${style.fontSize} ${style.fontFamily}`;
   return sourceMeasure.measureText(prefix).width;
+}
+
+function ClipboardPaneDivider({ t, width, command }: Pick<ViewProps, 't' | 'command'> & { width: number }) {
+  const drag = useRef<{ x: number; width: number } | null>(null);
+  const frame = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  useEffect(() => { if (drag.current) drag.current.width = width; }, [width]);
+
+  function dragWidth(x: number) {
+    const current = drag.current!;
+    current.width = Math.min(920, Math.max(320, current.width + x - current.x));
+    current.x = x;
+    return current.width;
+  }
+
+  return <div className="clipboard-pane-divider" role="separator" aria-label={t('resizeClipboardDetails')} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={920} aria-valuenow={width} tabIndex={0}
+    onKeyDown={(event) => {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        void command('clipboard_detail_width_set', { width: event.key === 'Home' ? 320 : event.key === 'End' ? 920 : width + (event.key === 'ArrowRight' ? 24 : -24) });
+      }
+    }}
+    onPointerDown={(event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      drag.current = { x: event.screenX, width };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }}
+    onPointerMove={(event) => {
+      if (!drag.current) return;
+      const next = dragWidth(event.screenX);
+      cancelAnimationFrame(frame.current);
+      frame.current = requestAnimationFrame(() => { void command('clipboard_detail_width_set', { width: next }); });
+    }}
+    onPointerUp={(event) => {
+      if (!drag.current) return;
+      const next = dragWidth(event.screenX);
+      drag.current = null;
+      cancelAnimationFrame(frame.current);
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      void command('clipboard_detail_width_set', { width: next });
+    }}
+    onLostPointerCapture={() => { drag.current = null; cancelAnimationFrame(frame.current); }} />;
 }
 
 export function Translation({ t, snapshot, command, native, activity }: ViewProps) {
@@ -47,17 +88,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const copyOperation = useRef(0);
   const copying = useRef(new Map<number, number>());
   const requestRevision = useRef(0);
-  const completedRecord = useRef<HistoryRecord | null>(null);
+  const completedOutput = useRef<TranslationOutput | null>(null);
   const partialTicket = useRef<{ id: string; request: TranslationRequest; pending: boolean } | null>(null);
   const [partial, setPartial] = useState<PartialTranslation | null>(null);
   const [retrying, setRetrying] = useState(false);
-  const [failedRequest, setFailedRequest] = useState<{ request: TranslationRequest; engine: Engine; reuse?: TranslationReuse } | null>(null);
+  const [failedRequest, setFailedRequest] = useState<{ request: TranslationRequest; engine: Engine; reuseTargetIndex?: number } | null>(null);
   const [partialEngine, setPartialEngine] = useState<Engine | null>(null);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
-  const fromSelection = useRef(false);
-  const receiveSelection = useRef<(context: { text: string; error: string | null }, clipboardSession?: number) => void>(() => {});
+  const receiveSelection = useRef<(context: { text: string; error: string | null }) => void>(() => {});
   const [popup, setPopup] = useState<Popup | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cachedResults, setCachedResults] = useState<string[]>([]);
   const [sourceWidth, setSourceWidth] = useState(140);
   const sourceBar = useRef<HTMLElement>(null);
@@ -77,69 +116,31 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   secondaryRef.current = secondary;
   draftRef.current = draft;
   preferencesRef.current = snapshot.translationPreferences;
-  const select = useRef<(record: HistoryRecord, retranslate: boolean) => void>(() => {});
+
   const state = snapshot.window;
-  const clipboardDetails = state.recordView === 'clipboard';
-  const committedHistoryWidth = useRef(state.historyWidth);
-  const historyWidthChanged = committedHistoryWidth.current !== state.historyWidth;
-  useLayoutEffect(() => { committedHistoryWidth.current = state.historyWidth; }, [state.historyWidth]);
+  const standaloneVisible = state.standaloneTranslationVisible;
+  const clipboardRightVisible = state.clipboardVisible && (state.clipboardDetailVisible || state.clipboardTranslationVisible);
+  const rightVisible = standaloneVisible || clipboardRightVisible;
+  const committedClipboardWidth = useRef(state.clipboardWidth);
+  const clipboardWidthChanged = committedClipboardWidth.current !== state.clipboardWidth;
+  useLayoutEffect(() => { committedClipboardWidth.current = state.clipboardWidth; }, [state.clipboardWidth]);
+
   useEffect(() => {
     ++copyOperation.current; copying.current.clear(); setCopyFailed(false);
     return () => { ++copyOperation.current; };
-  }, [selectedId, draft, cachedResults, partial?.id, state.recordView, state.translationVisible, state.recordsSession]);
+  }, [draft, cachedResults, partial?.id, standaloneVisible]);
+
   const capabilities = snapshot.capabilities;
   const languagesAvailable = supportsTranslation(snapshot.translationEngine, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
-  const currentWindow = useRef(state);
-  currentWindow.current = state;
   const shortcutBinding = (action: ShortcutAction) => {
     const preferences = preferencesRef.current;
     return translationShortcutEnabled(preferences, action) ? preferences.shortcuts[action] : null;
   };
   const primaryPressed = (event: KeyboardEvent) => capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey;
   const sourceLabel = `${languageName(source === 'auto' && detectedSource ? detectedSource : source)}${supportsLanguage(snapshot.translationEngine, 'source', source) ? '' : ` (${t('languageUnavailable')})`}`;
-  const nativeChrome = useNativeChrome(native && capabilities.nativeChrome, { sourceLabel, sourceWidth }, () => {
+  const nativeChrome = useNativeChrome(native && capabilities.nativeChrome && standaloneVisible, { sourceLabel, sourceWidth }, () => {
     setPopup((current) => current === 'source' ? null : 'source');
   });
-
-  useEffect(() => {
-    let disposed = false;
-    void document.fonts.ready.then(() => {
-      if (disposed) return;
-      const context = document.createElement('canvas').getContext('2d');
-      if (!context) return;
-      context.font = '10px Inter';
-      const longest = languages.map(([, name]) => name).reduce((a, b) => context.measureText(a).width > context.measureText(b).width ? a : b);
-      const title = context.measureText(`${longest} - ${longest}, ${longest}`).width;
-      context.font = '11px Inter';
-      void command('history_width_set', { width: Math.ceil(title + context.measureText('88-88 88:88').width + 65), initialize: true });
-    });
-    return () => { disposed = true; };
-  }, []);
-
-  useEffect(() => {
-    if (!native) return;
-    let disposed = false;
-    function clearDetail() {
-      setSelectedId(null); completedRecord.current = null;
-      discardRequestView();
-      fromSelection.current = false; normalizedCaret.current = null;
-      setDraft(''); setCachedResults([]); setNotice(null); setServiceError(null); setDetectedSource(null);
-    }
-    const removeSelection = listen<HistorySelection>('history_sample_selected', ({ payload }) => {
-      if (disposed || payload.visualOnly) return;
-      if (payload.sampleId === null) {
-        if (payload.clearDetail) clearDetail();
-        else setSelectedId(null);
-        return;
-      }
-      const record = payload.record ?? historySamples.find(({ id }) => id === payload.sampleId);
-      if (record) select.current(record, payload.retranslate);
-    });
-    const removeDetail = listen<string>('history_detail_removed', ({ payload }) => {
-      if (!disposed && completedRecord.current?.id === payload) clearDetail();
-    });
-    return () => { disposed = true; for (const remove of [removeSelection, removeDetail]) void remove.then((unlisten) => unlisten()); };
-  }, [native]);
 
   useEffect(() => {
     if (!native || !capabilities.selection) return;
@@ -161,21 +162,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [native, capabilities.selection]);
 
   useEffect(() => {
-    if (!native) return;
-    let disposed = false;
-    const take = async () => {
-      const revision = requestRevision.current;
-      const session = currentWindow.current.recordsSession;
-      const context = await invoke<{ text: string; error: string | null } | null>('clipboard_translation_take');
-      if (!disposed && context && requestRevision.current === revision && currentWindow.current.recordsSession === session && currentWindow.current.translationVisible) receiveSelection.current(context, session ?? 0);
-    };
-    const remove = listen('clipboard_translation_ready', () => { void take().catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); }); });
-    void remove.then(take).catch(() => { if (!disposed) setServiceError('Unable to read clipboard text.'); });
-    return () => { disposed = true; void remove.then((unlisten) => unlisten()).catch(() => {}); };
-  }, [native]);
-
-  useEffect(() => {
-    completedRecord.current = null;
+    completedOutput.current = null;
     cancelRequest(); setCachedResults([]); setServiceError(null); setDetectedSource(null);
   }, [snapshot.translationEngine]);
 
@@ -190,8 +177,8 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }, [native]);
 
   useEffect(() => {
-    if (state.translationVisible && !state.historyVisible && !clipboardDetails) input.current?.focus({ preventScroll: true });
-  }, [state.translationVisible]);
+    if (standaloneVisible) input.current?.focus({ preventScroll: true });
+  }, [standaloneVisible]);
 
   useLayoutEffect(() => {
     if (normalizedCaret.current === null) return;
@@ -199,7 +186,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     normalizedCaret.current = null;
   }, [draft]);
 
-  useEffect(() => { setPopup(null); }, [snapshot.locale, state.historyWidth, state.translationVisible]);
+  useEffect(() => { setPopup(null); }, [snapshot.locale, state.clipboardWidth, standaloneVisible]);
   useEffect(() => () => { sourceDrag.current.active = false; cancelAnimationFrame(sourceDrag.current.frame); }, []);
   useEffect(() => {
     const close = () => setPopup(null);
@@ -212,7 +199,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   useLayoutEffect(() => {
     const bar = sourceBar.current;
     const picker = bar?.querySelector<HTMLElement>('.language-picker');
-    if (!capabilities.nativeHistory || !state.translationVisible || !bar || !picker) return;
+    if (!capabilities.nativeHistory || !standaloneVisible || !bar || !picker) return;
     const measure = () => {
       bar.style.paddingRight = `${picker.offsetWidth + 24}px`;
       if (picker.offsetWidth > 0) setSourceWidth(Math.min(360, Math.max(32, picker.offsetWidth)));
@@ -222,7 +209,7 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     void document.fonts.ready.then(measure);
     measure();
     return () => observer.disconnect();
-  }, [source, detectedSource, snapshot.locale, state.translationVisible, capabilities.nativeHistory]);
+  }, [source, detectedSource, snapshot.locale, standaloneVisible, capabilities.nativeHistory]);
 
   function stepSourceDrag() {
     const field = input.current;
@@ -267,11 +254,6 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     if (pointerId !== undefined) field?.releasePointerCapture?.(pointerId);
   }
 
-  function clearSelection() {
-    if (native && selectedId !== null) void command('history_sample_select', { sampleId: null, retranslate: false });
-    setSelectedId(null);
-  }
-
   function discardRequestView() {
     ++requestRevision.current;
     partialTicket.current = null; setPartial(null); setRetrying(false); setFailedRequest(null); setPartialEngine(null);
@@ -279,13 +261,16 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function cancelRequest() {
     discardRequestView();
-    if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel')).catch(() => {});
+    if (native) cancellation.current = cancellation.current.then(() => invoke('translation_cancel', { scope: 'standalone' })).catch(() => {});
   }
 
-  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], captured: boolean, reuse?: HistoryRecord, refreshTarget?: number, focusHistory = false, clipboardSession?: number) {
-    const origin = reuse ?? completedRecord.current;
+  async function translateText(text: string, sourceLanguage: string, targetLanguages: string[], reuse?: TranslationOutput, refreshTarget?: number) {
     cancelRequest();
-    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text && requestedSource(reuse) === sourceLanguage && reuse.translation && (reuse.translation.targetEngines?.[index] ?? reuse.translation.engine) === snapshot.translationEngine && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
+    const retained = targetLanguages.map((target, index) => index !== refreshTarget && reuse?.text === text
+      && reuse.translation.requestedSource === sourceLanguage
+      && (reuse.translation.targetEngines?.[index] ?? reuse.translation.engine) === snapshot.translationEngine
+      && reuse.translation.strategyVersion === TRANSLATION_STRATEGY_VERSION
+      && reuse.targetLanguages[index] === target ? reuse.translations[index] ?? '' : '');
     setPopup(null); setCachedResults(retained); setServiceError(null); setNotice(null); setDetectedSource(null);
     if (snapshot.storageError || !supportsTranslation(snapshot.translationEngine, sourceLanguage, targetLanguages)) return;
     if (!inputWithinLimits(text)) { setNotice('inputLimit'); return; }
@@ -293,31 +278,34 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     const revision = requestRevision.current;
     await cancellation.current;
     if (requestRevision.current !== revision) return;
-    await runTranslation({ text, source: sourceLanguage, targets: targetLanguages, fromSelection: captured, ...(clipboardSession !== undefined ? { clipboardSession } : {}) }, revision,
-      origin?.text === text ? { reuse: { recordId: origin.id, ...(focusHistory ? { focusHistory } : {}), ...(refreshTarget !== undefined ? { targetIndex: refreshTarget } : {}) } } : {});
+    await runTranslation(
+      { text, source: sourceLanguage, targets: targetLanguages },
+      revision,
+      { ...(refreshTarget !== undefined && reuse?.text === text ? { reuseTargetIndex: refreshTarget } : {}) },
+    );
   }
 
-  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; retryEngine?: Engine; reuse?: TranslationReuse }) {
+  async function runTranslation(request: TranslationRequest, revision: number, options: { retryId?: string; retryEngine?: Engine; reuseTargetIndex?: number }) {
     const engine = options.retryEngine ?? (options.retryId ? partialEngine : null) ?? snapshot.translationEngine;
     activity(1);
     try {
-      const result = await invoke<HistoryRecord | { partial: PartialTranslation }>('translation_run', { ...request, ...options });
+      const result = await invoke<TranslationOutput | { partial: PartialTranslation }>('translation_run', { ...request, scope: 'standalone', ...options });
       if (requestRevision.current !== revision) return;
       const output = 'partial' in result ? result.partial : result;
       if ('partial' in result) {
-        completedRecord.current = null;
+        completedOutput.current = null;
         partialTicket.current = { id: result.partial.id, request, pending: false };
-        setPartial(result.partial); setPartialEngine(engine); setSelectedId(null);
+        setPartial(result.partial); setPartialEngine(engine);
       } else {
-        completedRecord.current = result;
+        completedOutput.current = result;
         partialTicket.current = null;
-        setPartial(null); setSelectedId(result.id);
+        setPartial(null);
       }
       setCachedResults(output.translations); setDetectedSource(output.sourceLanguage === 'auto' ? null : output.sourceLanguage);
     } catch (error) {
       if (requestRevision.current === revision && String(error) !== 'cancelled') {
         setServiceError(String(error));
-        if (!options.retryId) setFailedRequest({ request, engine, reuse: options.reuse });
+        if (!options.retryId) setFailedRequest({ request, engine, reuseTargetIndex: options.reuseTargetIndex });
       }
     } finally {
       if ((options.retryId || options.retryEngine) && requestRevision.current === revision) {
@@ -343,48 +331,33 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       void runTranslation(ticket.request, ++requestRevision.current, { retryId: ticket.id, ...(engine ? { retryEngine: engine } : {}) });
     } else if (failedRequest && engine) {
       setRetrying(true); setServiceError(null); setFailedRequest(null);
-      void runTranslation(failedRequest.request, ++requestRevision.current, { retryEngine: engine, ...(failedRequest.reuse ? { reuse: failedRequest.reuse } : {}) });
+      void runTranslation(failedRequest.request, ++requestRevision.current, {
+        retryEngine: engine,
+        ...(failedRequest.reuseTargetIndex !== undefined ? { reuseTargetIndex: failedRequest.reuseTargetIndex } : {}),
+      });
     }
   }
   const retryElsewhere = canRetryElsewhere && <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(otherEngine)}>
     {t(otherEngine === 'google' ? 'retryWithGoogle' : 'retryWithEdge')}
   </button>;
 
-  function submit(focusHistory = false) {
+  function submit() {
     if (!draft.trim() || composing.current || snapshot.storageError || !languagesAvailable) return;
-    if (!focusHistory) clearSelection();
-    void translateText(draft, source, [primary, ...(secondary === 'none' ? [] : [secondary])], fromSelection.current, undefined, undefined, focusHistory);
-    if (!focusHistory) input.current?.focus({ preventScroll: true });
+    void translateText(draft, source, [primary, ...(secondary === 'none' ? [] : [secondary])]);
+    input.current?.focus({ preventScroll: true });
   }
 
-  receiveSelection.current = (context, clipboardSession) => {
-    completedRecord.current = null;
+  receiveSelection.current = (context) => {
+    completedOutput.current = null;
     cancelRequest(); normalizedCaret.current = null;
     const preferred = preferencesRef.current;
-    setDraft(context.text); setSource(preferred.sourceLanguage); setDetectedSource(null); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null); clearSelection();
+    setDraft(context.text); setSource(preferred.sourceLanguage); setDetectedSource(null); setPrimary(preferred.primaryLanguage); setSecondary(preferred.secondaryLanguage); setCachedResults([]); setNotice(null);
     sourceRef.current = preferred.sourceLanguage; primaryRef.current = preferred.primaryLanguage; secondaryRef.current = preferred.secondaryLanguage;
-    fromSelection.current = true;
     setServiceError(context.error === 'permission_required' ? 'Allow Accessibility in Settings → Privacy & Data to translate selected text.' : context.error === 'selection_copy_no_change' ? t('selectionCopyDisabled') : context.error ? 'Selected text is unavailable in this application.' : null);
     const targets = [preferred.primaryLanguage, ...(preferred.secondaryLanguage === 'none' ? [] : [preferred.secondaryLanguage])];
-    if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets, true, undefined, undefined, false, clipboardSession);
+    if (context.text.trim()) void translateText(context.text, preferred.sourceLanguage, targets);
     input.current?.focus({ preventScroll: true });
   };
-
-  function selectHistory(record: HistoryRecord, retranslate = false) {
-    setPopup(null);
-    discardRequestView(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
-    normalizedCaret.current = null;
-    setSelectedId(record.id); setDraft(record.text);
-    setSource(requestedSource(record)); setDetectedSource(record.sourceLanguage === 'auto' ? null : record.sourceLanguage); setPrimary(record.targetLanguages[0]);
-    setSecondary(record.targetLanguages[1] ?? 'none');
-    completedRecord.current = record;
-    setCachedResults(retranslate ? [] : record.translations);
-    setNotice(null);
-    if (retranslate && !snapshot.storageError) void translateText(record.text, requestedSource(record), record.targetLanguages, false, undefined, undefined, true);
-    if (!native) void command('window_show', { target: 'translation' });
-  }
-
-  select.current = selectHistory;
 
   function changeLanguage(side: 'source' | 'primary' | 'secondary', value: string) {
     const current = { source, primary, secondary };
@@ -393,10 +366,10 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     sourceRef.current = next.source; primaryRef.current = next.primary; secondaryRef.current = next.secondary;
     ({ source: setSource, primary: setPrimary, secondary: setSecondary })[side](value);
     void command('translation_preferences_set', side === 'source' ? { sourceLanguage: value } : side === 'primary' ? { primaryLanguage: value } : { secondaryLanguage: value });
-    clearSelection(); setDetectedSource(null);
+    setDetectedSource(null);
     const targets = [next.primary, ...(next.secondary === 'none' ? [] : [next.secondary])];
     if (draft.trim()) {
-      void translateText(draft, next.source, targets, fromSelection.current, side === 'source' ? undefined : completedRecord.current ?? undefined, side === 'primary' ? 0 : side === 'secondary' ? 1 : undefined);
+      void translateText(draft, next.source, targets, side === 'source' ? undefined : completedOutput.current ?? undefined, side === 'primary' ? 0 : side === 'secondary' ? 1 : undefined);
     } else {
       cancelRequest(); setCachedResults([]); setNotice(null); setServiceError(null);
     }
@@ -404,24 +377,14 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
 
   function copyTranslation(requestedIndex: number) {
     const index = partial ? requestedIndex : requestedIndex === 1 && cachedResults[1] ? 1 : 0;
-    const recordId = partial?.id ?? completedRecord.current?.id ?? selectedId;
-    if (!native || !capabilities.clipboardWrite || !recordId || !cachedResults[index] || copying.current.has(index)) return;
+    if (!native || !capabilities.clipboardWrite || !cachedResults[index] || copying.current.has(index)) return;
     setPopup(null); setCopyFailed(false);
     const operation = ++copyOperation.current;
     copying.current.set(index, operation);
-    void invoke('translation_sample_copy', { sampleId: recordId, part: index ? 'secondary' : 'primary' })
+    void invoke('translation_copy', { scope: 'standalone', part: index ? 'secondary' : 'primary' })
       .catch(() => { if (operation === copyOperation.current) setCopyFailed(true); })
       .finally(() => { if (copying.current.get(index) === operation) copying.current.delete(index); });
   }
-
-  useRecordsPreviewShortcut({
-    active: state.historyVisible && state.translationVisible && !clipboardDetails,
-    blocked: popup !== null || snapshot.window.recordsEditorOpen === true,
-    excludedContainers: '.records-workspace, .clipboard-detail, .preview-bar',
-    snapshot,
-    native,
-    onPreview: () => { void command('records_details_toggle'); },
-  });
 
   function focusInput() {
     setPopup(null);
@@ -437,13 +400,11 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       event.preventDefault(); if (!event.repeat) focusInput();
     } else if (matchesBinding(shortcutBinding('translate'), event)) {
       event.preventDefault();
-      if (!event.repeat) submit(state.historyVisible && selectedId !== null && completedRecord.current !== null);
+      if (!event.repeat) submit();
     } else if (matchesBinding(shortcutBinding('copyPrimary'), event)) {
       event.preventDefault(); copyTranslation(0);
     } else if (matchesBinding(shortcutBinding('copySecondary'), event)) {
       event.preventDefault(); copyTranslation(1);
-    } else if (!capabilities.selection && matchesBinding(shortcutBinding('toggleHistory'), event)) {
-      event.preventDefault(); if (!event.nativeEvent.repeat) toggleHistory();
     } else if (matchesBinding(shortcutBinding('pin'), event)) {
       event.preventDefault(); if (!event.nativeEvent.repeat) togglePin();
     } else if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
@@ -471,20 +432,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
     const sourceChanged = next.source !== current.source;
     const primaryChanged = next.primary !== current.primary;
     const secondaryChanged = next.secondary !== current.secondary;
-    if (sourceChanged || (primaryChanged && secondaryChanged)) void translateText(text, next.source, targets, fromSelection.current);
-    else if (primaryChanged) void translateText(text, next.source, targets, fromSelection.current, completedRecord.current ?? undefined, 0);
-    else void translateText(text, next.source, targets, fromSelection.current, completedRecord.current ?? undefined, 1);
+    if (sourceChanged || (primaryChanged && secondaryChanged)) void translateText(text, next.source, targets);
+    else if (primaryChanged) void translateText(text, next.source, targets, completedOutput.current ?? undefined, 0);
+    else void translateText(text, next.source, targets, completedOutput.current ?? undefined, 1);
   };
 
   function togglePin() {
     setPopup(null);
     void command('window_pin', { region: 'translation', pinned: !state.translationPinned });
     input.current?.focus({ preventScroll: true });
-  }
-
-  function toggleHistory() {
-    setPopup(null);
-    void command('history_toggle');
   }
 
   function picker(id: Popup, value: string, onChange: (value: string) => void, extra?: 'auto' | 'none') {
@@ -500,63 +456,70 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const taskStatus = serviceError ?? (notice ? t(notice) : !languagesAvailable ? t('languageNotSupported') : null);
   const hasResults = !notice && cachedResults.some(Boolean);
   const shellStyle = {
-    '--history-width': `${state.historyWidth}px`,
+    '--history-width': `${state.clipboardWidth}px`,
     '--translation-width': `${state.translationWidth}px`,
-    '--history-extent': `${state.historyExtent}px`,
-    '--translation-extent': `${state.translationExtent}px`,
+    '--history-extent': `${state.clipboardExtent}px`,
+    '--translation-extent': `${state.rightExtent}px`,
+    '--clipboard-detail-width': `${state.clipboardDetailWidth}px`,
+    '--clipboard-translation-width': `${state.clipboardTranslationWidth}px`,
   } as CSSProperties;
 
-  return <div className={cn('translation-shell', state.historyVisible && 'with-history', !state.translationVisible && 'history-only')} style={shellStyle}>
-    {!capabilities.nativeHistory && <div className="history-clip" style={historyWidthChanged ? { transition: 'none' } : undefined} hidden={!state.historyVisible && state.historyExtent === 0} aria-hidden={!state.historyVisible} inert={!state.historyVisible}>
-    <RecordsWorkspace t={t} snapshot={snapshot} command={command} native={native} activity={activity} selectedId={selectedId} onSelect={native ? undefined : selectHistory} />
+  return <div className={cn('translation-shell', state.clipboardVisible && 'with-history', !rightVisible && 'history-only')} style={shellStyle}>
+    {!capabilities.nativeHistory && <div className="history-clip" style={clipboardWidthChanged ? { transition: 'none' } : undefined} hidden={!state.clipboardVisible && state.clipboardExtent === 0} aria-hidden={!state.clipboardVisible} inert={!state.clipboardVisible}>
+      <RecordsWorkspace t={t} snapshot={snapshot} command={command} native={native} activity={activity} />
     </div>}
-    <div className="translation-clip" hidden={!capabilities.nativeHistory && !state.translationVisible && state.translationExtent === 0} aria-hidden={!state.translationVisible} inert={!state.translationVisible}>
-    {clipboardDetails && <ClipboardDetail t={t} snapshot={snapshot} command={command} native={native} activity={activity} />}
-    <section hidden={clipboardDetails} className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')} tabIndex={-1}
-      onKeyDown={keydown}
-      onKeyDownCapture={(event) => {
-        if (primaryPressed(event)) { keydown(event); if (event.defaultPrevented) event.stopPropagation(); }
-      }}>
-      <div className="drag-strip" data-tauri-drag-region />
-      <header ref={sourceBar} className="source-bar" data-detected-language={detectedSource ?? undefined}>
-        <button className="icon-button history-trigger" title={t('history')} aria-label={t('history')} aria-expanded={state.historyVisible}
-          aria-controls={capabilities.nativeHistory ? undefined : 'translation-history'} aria-pressed={state.historyVisible} onMouseDown={(event) => event.preventDefault()}
-          onClick={toggleHistory}><HistoryIcon name="clock" /></button>
-        <textarea ref={input} className="source-input" aria-label={t('sourceLabel')} rows={1} wrap="off" spellCheck={false} value={displaySource(draft)}
-          onChange={(event) => {
-            completedRecord.current = null;
-            cancelRequest(); fromSelection.current = false; setServiceError(null); setDetectedSource(null);
-            const next = event.target.value;
-            // Like FinderX, leave ordinary typing and IME selection to the editor.
-            normalizedCaret.current = displaySource(next) === next ? null : displaySource(next.slice(0, event.target.selectionStart)).length;
-            setDraft(editSource(draft, next)); setNotice(null); clearSelection(); setCachedResults([]);
-          }}
-          onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
-          onPointerDown={beginSourceDrag} onPointerMove={moveSourceDrag} onPointerUp={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onPointerCancel={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onBlur={() => stopSourceDrag()} />
-        {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
-      </header>
-      <div className={cn('result-columns', secondary === 'none' && 'single-column', taskStatus && !hasResults && 'task-status-only')}>
-        {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" tabIndex={-1} key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
-          {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
-          {partial?.errors[index] && <div className="result-error" data-tauri-drag-region="false">
-            <span role="alert">{partial.errors[index]}</span>
-            <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
-            {retryElsewhere}
-          </div>}
-        </section>)}
-        {taskStatus && !hasResults && <div className="translation-status" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && retryElsewhere}</div>}
-        <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
-      </div>
-      {taskStatus && hasResults && <div className="translation-status with-results" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && !partial && retryElsewhere}</div>}
-      <footer className={cn('translation-footer', secondary === 'none' && 'single-column')}>
-        <div className="language-slot">{picker('primary', primary, (value) => changeLanguage('primary', value))}</div>
-        <div className={cn('language-slot', secondary === 'none' && 'secondary-off')}>
-          {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
+    <div className="translation-clip" hidden={!capabilities.nativeHistory && !rightVisible && state.rightExtent === 0} aria-hidden={!rightVisible} inert={!rightVisible}>
+      <div hidden={!clipboardRightVisible} className={cn('clipboard-right-panes', state.clipboardDetailVisible && state.clipboardTranslationVisible && 'split')}>
+        <div hidden={!state.clipboardDetailVisible} className="clipboard-detail-slot">
+          <ClipboardDetail t={t} snapshot={snapshot} command={command} native={native} activity={activity} />
         </div>
-      </footer>
-    </section>
+        {state.clipboardDetailVisible && state.clipboardTranslationVisible && <ClipboardPaneDivider t={t} width={state.clipboardDetailWidth} command={command} />}
+        {state.clipboardTranslationVisible && <div className="clipboard-translate-slot">
+          <ClipboardTranslatePane t={t} snapshot={snapshot} command={command} native={native} activity={activity} />
+        </div>}
+      </div>
+      <section hidden={!standaloneVisible} className={cn('translation-panel', nativeChrome && 'native-chrome')} data-native-chrome={nativeChrome} data-tauri-drag-region="deep" aria-label={t('translation')} tabIndex={-1}
+        onKeyDown={keydown}
+        onKeyDownCapture={(event) => {
+          if (primaryPressed(event)) { keydown(event); if (event.defaultPrevented) event.stopPropagation(); }
+        }}>
+        <div className="drag-strip" data-tauri-drag-region />
+        <header ref={sourceBar} className="source-bar" data-detected-language={detectedSource ?? undefined}>
+          <textarea ref={input} className="source-input" aria-label={t('sourceLabel')} rows={1} wrap="off" spellCheck={false} value={displaySource(draft)}
+            onChange={(event) => {
+              completedOutput.current = null;
+              cancelRequest(); setServiceError(null); setDetectedSource(null);
+              const next = event.target.value;
+              // Like FinderX, leave ordinary typing and IME selection to the editor.
+              normalizedCaret.current = displaySource(next) === next ? null : displaySource(next.slice(0, event.target.selectionStart)).length;
+              setDraft(editSource(draft, next)); setNotice(null); setCachedResults([]);
+            }}
+            onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
+            onPointerDown={beginSourceDrag} onPointerMove={moveSourceDrag} onPointerUp={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onPointerCancel={(event) => stopSourceDrag(event.currentTarget, event.pointerId)} onBlur={() => stopSourceDrag()} />
+          {picker('source', source, (value) => changeLanguage('source', value), 'auto')}
+        </header>
+        <div className={cn('result-columns', secondary === 'none' && 'single-column', taskStatus && !hasResults && 'task-status-only')}>
+          {[primary, ...(secondary === 'none' ? [] : [secondary])].map((_, index) => <section className="result-column" tabIndex={-1} key={index} data-tauri-drag-region="deep" aria-label={index ? t('secondaryLanguage') : t('primaryLanguage')}>
+            {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
+            {partial?.errors[index] && <div className="result-error" data-tauri-drag-region="false">
+              <span role="alert">{partial.errors[index]}</span>
+              <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
+              {retryElsewhere}
+            </div>}
+          </section>)}
+          {taskStatus && !hasResults && <div className="translation-status" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && retryElsewhere}</div>}
+          <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
+        </div>
+        {taskStatus && hasResults && <div className="translation-status with-results" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && !partial && retryElsewhere}</div>}
+        <footer className={cn('translation-footer', secondary === 'none' && 'single-column')}>
+          <div className="language-slot">{picker('primary', primary, (value) => changeLanguage('primary', value))}</div>
+          <div className={cn('language-slot', secondary === 'none' && 'secondary-off')}>
+            {picker('secondary', secondary, (value) => changeLanguage('secondary', value), 'none')}
+          </div>
+        </footer>
+      </section>
     </div>
-    {!capabilities.nativeHistory && state.historyVisible && state.translationVisible && <HistoryDivider t={t} width={state.historyWidth} command={command}
-      onStart={() => setPopup(null)} onEscape={() => input.current?.focus()} />}
+    {!capabilities.nativeHistory && state.clipboardVisible && clipboardRightVisible && <HistoryDivider t={t} width={state.clipboardWidth} command={command}
+      onStart={() => setPopup(null)} />}
   </div>;
 }

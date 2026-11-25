@@ -7,7 +7,6 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { initialSnapshot, translationShortcutEnabled, type AppSnapshot, type Locale, type TranslationPreferences, type WindowPositionMode, type WindowState, type WindowTarget } from './shared/contracts';
 import { resolveLanguage, translator } from './shared/i18n';
 import { Translation } from './translation/Translation';
-import { HistoryView } from './translation/HistoryView';
 import { RecordsWorkspace } from './shared/RecordsWorkspace';
 import { Settings } from './settings/Settings';
 import { Waves } from 'lucide-react';
@@ -19,11 +18,11 @@ type ClipboardBindingChange = { binding: AppSnapshot['clipboardBinding']; enable
 export const native = isTauri();
 document.documentElement.dataset.native = String(native);
 
-type ViewTarget = WindowTarget | 'history';
+type ViewTarget = WindowTarget;
 
 function currentTarget(): ViewTarget {
   const value = native ? getCurrentWebview().label : new URLSearchParams(location.search).get('window');
-  return value === 'clipboard' || value === 'settings' || value === 'history' ? value : 'translation';
+  return value === 'clipboard' || value === 'settings' ? value : 'translation';
 }
 
 export default function App() {
@@ -124,25 +123,35 @@ export default function App() {
   async function command(name: string, args?: Record<string, unknown>) {
     setError(false);
     if (!native) {
-      if (name === 'records_view_set') setSnapshot((value) => {
-        const view = args?.view as 'clipboard' | 'translation';
-        const keep = value.window.historyVisible && value.window.translationVisible;
-        return { ...value, window: { ...value.window, recordView: view, historyVisible: true, historyExtent: value.window.historyWidth, translationVisible: keep && value.window.translationVisible, translationExtent: keep ? value.window.translationExtent : 0, clipboardDetailId: keep ? value.window.clipboardDetailId : null, ...(view === 'clipboard' ? { recordsBrowsing: true } : {}) } };
-      });
-      if (name === 'clipboard_details_select') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardDetailId: String(args?.recordId) } }));
+      const rightExtentFor = (window: WindowState) => {
+        if (window.standaloneTranslationVisible) return window.translationWidth;
+        if (!window.clipboardVisible) return 0;
+        return (window.clipboardDetailVisible ? window.clipboardDetailWidth : 0)
+          + (window.clipboardTranslationVisible ? window.clipboardTranslationWidth : 0);
+      };
+      if (name === 'clipboard_details_select') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardDetailId: (args?.recordId as string | null | undefined) ?? null } }));
       if (name === 'records_details_toggle') setSnapshot((value) => {
         const recordId = args?.recordId as string | undefined;
-        const visible = !value.window.translationVisible || Boolean(recordId && value.window.clipboardDetailId !== recordId);
-        return { ...value, window: { ...value.window, translationVisible: visible, translationExtent: visible ? value.window.translationWidth : 0, recordsBrowsing: true, ...(recordId ? { clipboardDetailId: recordId } : {}) } };
+        const visible = !value.window.clipboardDetailVisible || Boolean(recordId && value.window.clipboardDetailId !== recordId);
+        const next: WindowState = { ...value.window, clipboardVisible: true, standaloneTranslationVisible: false, clipboardDetailVisible: visible, clipboardExtent: value.window.clipboardWidth, recordsBrowsing: true, ...(recordId ? { clipboardDetailId: recordId } : {}) };
+        return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
       });
-      if (name === 'history_visibility_set' || name === 'history_toggle') setSnapshot((value) => {
-        const visible = name === 'history_toggle' ? value.window.recordView !== 'translation' || !value.window.historyVisible : Boolean(args?.visible);
-        const translationVisible = name === 'history_toggle' ? value.window.translationVisible : true;
-        return { ...value, window: { ...value.window, recordView: 'translation', translationVisible, translationExtent: translationVisible ? value.window.translationWidth : 0, historyVisible: visible, historyExtent: visible ? value.window.historyWidth : 0 } };
+      if (name === 'clipboard_translation_close') setSnapshot((value) => {
+        const next: WindowState = { ...value.window, clipboardTranslationVisible: false, clipboardTranslationRecordId: null };
+        return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
       });
-      if (name === 'history_width_set') setSnapshot((value) => ({ ...value, window: { ...value.window, historyWidth: Math.min(720, Math.max(280, Number(args?.width))), historyExtent: value.window.historyVisible ? Math.min(720, Math.max(280, Number(args?.width))) : 0 } }));
+      if (name === 'clipboard_translation_clear_record') setSnapshot((value) => ({ ...value, window: { ...value.window, clipboardTranslationRecordId: null } }));
+      if (name === 'clipboard_width_set') setSnapshot((value) => {
+        const width = Math.min(720, Math.max(280, Number(args?.width)));
+        return { ...value, window: { ...value.window, clipboardWidth: width, clipboardExtent: value.window.clipboardVisible ? width : 0 } };
+      });
+      if (name === 'clipboard_detail_width_set') setSnapshot((value) => {
+        const width = Math.min(920, Math.max(320, Number(args?.width)));
+        const next: WindowState = { ...value.window, clipboardDetailWidth: width };
+        return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
+      });
       if (name === 'translation_columns_set') setSnapshot((value) => ({ ...value, window: { ...value.window, secondaryEnabled: Boolean(args?.secondaryEnabled) } }));
-      if (name === 'window_pin') setSnapshot((value) => ({ ...value, window: { ...value.window, [`${String(args?.region)}Pinned`]: Boolean(args?.pinned) } }));
+      if (name === 'window_pin') setSnapshot((value) => ({ ...value, window: { ...value.window, [args?.region === 'clipboard' ? 'clipboardPinned' : 'translationPinned']: Boolean(args?.pinned) } }));
       if (name === 'records_open_focus_set') setSnapshot((value) => ({ ...value, clipboardControls: { ...value.clipboardControls, recordsOpenFocus: args?.focus as 'search' | 'list' } }));
       if (name === 'locale_set') setSnapshot((value) => ({ ...value, locale: args?.locale as Locale }));
       if (name === 'window_position_mode_set') setSnapshot((value) => ({ ...value, windowPositionMode: args?.mode as WindowPositionMode }));
@@ -151,13 +160,26 @@ export default function App() {
         return { ...value, translationEngine: next.engine, translationPreferences: next };
       });
       if (name === 'window_show') {
-        setTarget(args?.target as WindowTarget);
-        if (args?.target === 'translation') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: true, translationExtent: value.window.translationWidth } }));
+        const nextTarget = args?.target as WindowTarget;
+        setTarget(nextTarget);
+        if (nextTarget === 'translation') setSnapshot((value) => {
+          const next: WindowState = { ...value.window, standaloneTranslationVisible: true, clipboardVisible: false, clipboardDetailVisible: false, clipboardTranslationVisible: false, clipboardTranslationRecordId: null, clipboardExtent: 0 };
+          return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
+        });
+        if (nextTarget === 'clipboard') setSnapshot((value) => {
+          const next: WindowState = { ...value.window, standaloneTranslationVisible: false, clipboardVisible: true, clipboardExtent: value.window.clipboardWidth };
+          return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
+        });
       }
-      if (name === 'window_hide') setSnapshot((value) => ({ ...value, window: { ...value.window, translationVisible: false, translationExtent: 0, historyVisible: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)), historyExtent: value.window.historyVisible && (value.window.historyPinned || Boolean(args?.keepHistory)) ? value.window.historyWidth : 0 } }));
+      if (name === 'window_hide') setSnapshot((value) => {
+        const next: WindowState = args?.region === 'clipboard'
+          ? { ...value.window, clipboardVisible: false, clipboardDetailVisible: false, clipboardTranslationVisible: false, clipboardTranslationRecordId: null, clipboardExtent: 0 }
+          : { ...value.window, standaloneTranslationVisible: false };
+        return { ...value, window: { ...next, rightExtent: rightExtentFor(next) } };
+      });
       return;
     }
-    const showsActivity = !['records_view_set', 'records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'history_toggle', 'history_visibility_set', 'history_width_set', 'history_sample_select', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'locale_set', 'window_position_mode_set', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
+    const showsActivity = !['records_details_toggle', 'clipboard_details_select', 'clipboard_note_open', 'clipboard_width_set', 'clipboard_detail_width_set', 'clipboard_translation_close', 'clipboard_translation_clear_record', 'translation_columns_set', 'window_pin', 'window_hide', 'window_show', 'locale_set', 'window_position_mode_set', 'records_open_focus_set', 'launch_at_login_set', 'clipboard_capture_set'].includes(name);
     if (showsActivity) setPending((count) => count + 1);
     try {
       await invoke(name, args);
@@ -198,7 +220,6 @@ export default function App() {
     <main className={cn('app-surface', target)}>
       <ActivityBeam label={t('working')} active={!connected || pending > 0} />
       {connected && target === 'translation' && <Translation {...common} />}
-      {connected && target === 'history' && <HistoryView {...common} />}
       {connected && target === 'clipboard' && <RecordsWorkspace {...common} />}
       {connected && target === 'settings' && <Settings {...common} />}
     </main>

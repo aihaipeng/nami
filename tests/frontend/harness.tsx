@@ -1,14 +1,13 @@
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
-import type { HistorySnapshot } from '../../src/translation/history';
-import { initialSnapshot, type AppSnapshot, type TranslationPreferences, type WindowState } from '../../src/shared/contracts';
+import { initialSnapshot, type AppSnapshot, type TranslationOutput, type TranslationPreferences, type TranslationScope, type WindowState } from '../../src/shared/contracts';
 import { clipboardOnlyActions, defaultClipboardShortcuts, isClipboardTranslateLaunchKey, sameClipboardBinding, sharedRecordActions, type ClipboardRecordAction } from '../../src/shared/clipboardShortcuts';
 import { defaultClipboardBinding, defaultTranslationShortcuts, generalShortcutActions, globalTranslationActions, normalizeBinding, recordWindowActions, shortcutError, translationWindowActions, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from '../../src/shared/shortcuts';
 
 const bridge = vi.hoisted(() => ({
   label: 'translation',
   snapshot: undefined as unknown as AppSnapshot,
-  history: undefined as unknown as HistorySnapshot,
+  translationOutputs: { standalone: null as TranslationOutput | null, clipboard: null as TranslationOutput | null },
   listeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
   invoke: vi.fn(),
   listen: vi.fn(),
@@ -17,28 +16,23 @@ const bridge = vi.hoisted(() => ({
 
 export { bridge };
 
-vi.mock('../../src/translation/history', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../src/translation/history')>(),
-  historySamples: (await import('../fixtures/translation-history.json')).default,
-}));
-
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true, invoke: bridge.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: bridge.listen }));
 vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: () => ({ label: bridge.label }) }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'translation', onMoved: bridge.moved }) }));
 
 import App from '../../src/App';
-import { filterHistory, historySamples } from '../../src/translation/history';
 
 const frames = new Map<number, FrameRequestCallback>();
 let nextFrame = 0;
-let historyQuery = '';
-let historyFavorites = false;
-let historyLoaded = 100;
-function historySnapshot(): HistorySnapshot {
-  const matching = filterHistory(bridge.history.records, historyQuery, historyFavorites);
-  return structuredClone({ ...bridge.history, records: matching.slice(0, historyLoaded), totalRecords: matching.length, hasMore: matching.length > historyLoaded });
+
+function rightExtentFor(window: WindowState) {
+  if (window.standaloneTranslationVisible) return window.translationWidth;
+  if (!window.clipboardVisible) return 0;
+  return (window.clipboardDetailVisible ? window.clipboardDetailWidth : 0)
+    + (window.clipboardTranslationVisible ? window.clipboardTranslationWidth : 0);
 }
+
 export const scrollTo = vi.fn(function (this: HTMLElement, first?: number | ScrollToOptions, second?: number) {
   this.scrollTop = typeof first === 'number' ? second ?? 0 : first?.top ?? this.scrollTop;
 });
@@ -81,31 +75,35 @@ beforeEach(() => {
   bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, clipboardDrag: true, localBackup: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.snapshot.translationEngine = 'edge';
   bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, selectionEnabled: true, disabledShortcuts: [], shortcuts: defaultTranslationShortcuts('meta') };
-  bridge.history = { revision: 0, records: structuredClone(historySamples), selectedId: null, totalRecords: historySamples.length, hasMore: false, generation: 0 };
-  historyQuery = ''; historyFavorites = false; historyLoaded = 100;
-  bridge.snapshot.window.recordView = 'translation';
-  bridge.snapshot.window.historyVisible = true;
-  bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
+  bridge.translationOutputs = { standalone: null, clipboard: null };
+  bridge.snapshot.window.standaloneTranslationVisible = true;
+  bridge.snapshot.window.clipboardVisible = false;
+  bridge.snapshot.window.clipboardDetailVisible = false;
+  bridge.snapshot.window.clipboardTranslationVisible = false;
+  bridge.snapshot.window.clipboardTranslationRecordId = null;
+  bridge.snapshot.window.clipboardExtent = 0;
+  bridge.snapshot.window.rightExtent = bridge.snapshot.window.translationWidth;
   bridge.listeners.clear(); frames.clear(); reducedMotion = false;
   bridge.invoke.mockReset().mockImplementation(async (name: string, args?: unknown) => {
-    if (name === 'selection_take') return null;
-    if (name === 'translation_cancel') {
-      bridge.snapshot.window.recordsBrowsing = false;
-      deliver('window_state', structuredClone(bridge.snapshot.window));
-    }
+    if (name === 'selection_take' || name === 'clipboard_translation_take') return null;
+    if (name === 'translation_cancel') return undefined;
     if (name === 'translation_run') {
-      const request = args as { text: string; source: string; targets: string[]; clipboardSession?: number; reuse?: { recordId: string; targetIndex?: number; focusHistory?: boolean } };
-      const previous = bridge.history.records.find(({ id }) => id === request.reuse?.recordId);
-      const count = bridge.invoke.mock.calls.filter(([name]) => name === 'translation_run').length;
-      const record = { ...historySamples[0], id: count === 1 ? 'translation-test' : `translation-test-${count}`, text: request.text, sourceLanguage: request.source, translation: { requestedSource: request.source, engine: bridge.snapshot.translationEngine, strategyVersion: 1, detections: [] }, targetLanguages: request.targets, translations: request.targets.map((target, index) => request.reuse?.targetIndex !== undefined && index !== request.reuse.targetIndex && previous?.text === request.text && previous.sourceLanguage === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`), isFavorite: false, isPinned: false, sourceApp: previous?.text === request.text ? previous.sourceApp : undefined };
-      bridge.history.records = [...bridge.history.records.filter(({ id }) => id !== record.id), record];
-      if (!bridge.snapshot.window.recordsBrowsing || request.reuse?.focusHistory) bridge.history.selectedId = record.id;
-      ++bridge.history.revision;
-      deliver('history_changed', historySnapshot());
-      const window = bridge.snapshot.window;
-      if (request.reuse?.focusHistory || request.clipboardSession !== undefined && request.clipboardSession === (window.recordsSession ?? 0) && window.historyVisible && window.recordView === 'translation' && window.translationVisible && !window.recordsBrowsing) deliver('history_refocus', record.id);
-      return record;
+      const request = args as { text: string; source: string; targets: string[]; scope?: TranslationScope; reuseTargetIndex?: number };
+      const scope: TranslationScope = request.scope ?? 'standalone';
+      const previous = bridge.translationOutputs[scope];
+      const count = bridge.invoke.mock.calls.filter(([cmd]) => cmd === 'translation_run').length;
+      const output: TranslationOutput = {
+        id: count === 1 ? 'translation-test' : `translation-test-${count}`,
+        text: request.text,
+        sourceLanguage: request.source,
+        translation: { requestedSource: request.source, engine: bridge.snapshot.translationEngine, strategyVersion: 1, detections: [] },
+        targetLanguages: request.targets,
+        translations: request.targets.map((target, index) => request.reuseTargetIndex !== undefined && index !== request.reuseTargetIndex && previous?.text === request.text && previous.translation.requestedSource === request.source && previous.targetLanguages[index] === target ? previous.translations[index] : `Synthetic translation ${index + 1}`),
+      };
+      bridge.translationOutputs[scope] = output;
+      return output;
     }
+    if (name === 'translation_copy') return undefined;
     if (name === 'clipboard_capture_set') {
       bridge.snapshot.clipboardCaptureEnabled = Boolean((args as { enabled: boolean }).enabled);
       deliver('clipboard_capture_changed', bridge.snapshot.clipboardCaptureEnabled);
@@ -122,49 +120,6 @@ beforeEach(() => {
       deliver('window_position_mode_changed', mode);
       return;
     }
-    if (name === 'history_snapshot') return historySnapshot();
-    if (name === 'history_query') {
-      const { query, favoritesOnly } = args as { query: string; favoritesOnly: boolean };
-      historyQuery = query; historyFavorites = favoritesOnly; historyLoaded = 100;
-      ++bridge.history.generation; ++bridge.history.revision;
-      const snapshot = historySnapshot(); deliver('history_changed', snapshot); return snapshot;
-    }
-    if (name === 'history_load_more') {
-      historyLoaded += 100; ++bridge.history.revision;
-      const snapshot = historySnapshot(); deliver('history_changed', snapshot); return snapshot;
-    }
-    if (name === 'history_record_note') {
-      const record = bridge.history.records.find(({ id }) => id === (args as { recordId: string }).recordId);
-      if (!record) throw new Error('not_found');
-      return { title: record.title ?? '', text: record.text, kind: 'text' };
-    }
-    if (name === 'history_record_update') {
-      const { recordId, action, title } = args as { recordId: string; action: string; title?: string };
-      const record = bridge.history.records.find(({ id }) => id === recordId);
-      if (!record) throw new Error('not_found');
-      if (action === 'delete') {
-        if (record.isFavorite || record.isPinned) throw new Error('history_protected');
-        bridge.history.records = bridge.history.records.filter(({ id }) => id !== recordId);
-        if (bridge.history.selectedId === recordId) bridge.history.selectedId = null;
-      } else if (action === 'favorite') record.isFavorite = !record.isFavorite;
-      else if (action === 'pin') record.isPinned = !record.isPinned;
-      else if (action === 'note' && title !== undefined) record.title = title.trim();
-      else throw new Error('invalid_argument');
-      ++bridge.history.revision; deliver('history_changed', historySnapshot());
-      return historySnapshot();
-    }
-    if (name === 'records_view_set') {
-      const { view } = args as { view: 'clipboard' | 'translation' };
-      const keep = bridge.snapshot.window.historyVisible && bridge.snapshot.window.translationVisible;
-      bridge.snapshot.window.recordView = view;
-      if (view === 'clipboard') bridge.snapshot.window.recordsBrowsing = true;
-      bridge.snapshot.window.historyVisible = true;
-      bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
-      if (!keep) {
-        bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; bridge.snapshot.window.clipboardDetailId = null;
-      }
-      deliver('window_state', structuredClone(bridge.snapshot.window));
-    }
     if (name === 'clipboard_details_select') {
       const browsing = (args as { browsing?: boolean }).browsing;
       if (browsing !== undefined) bridge.snapshot.window.recordsBrowsing = browsing;
@@ -172,16 +127,40 @@ beforeEach(() => {
       bridge.snapshot.window.clipboardDetailId = (args as { recordId: string | null }).recordId;
       deliver('window_state', structuredClone(bridge.snapshot.window));
     }
-    if (name === 'records_editor_set' && (args as { open?: boolean }).open !== undefined) { bridge.snapshot.window.recordsEditorOpen = (args as { open: boolean }).open; deliver('window_state', structuredClone(bridge.snapshot.window)); }
+    if (name === 'records_editor_set' && (args as { open?: boolean }).open !== undefined) {
+      bridge.snapshot.window.recordsEditorOpen = (args as { open: boolean }).open;
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
     if (name === 'clipboard_note_open') deliver('clipboard_note_requested', (args as { recordId: string }).recordId);
     if (name === 'records_details_toggle') {
       const recordId = (args as { recordId?: string } | undefined)?.recordId;
       const state = bridge.snapshot.window;
       state.recordsBrowsing = true;
-      state.translationVisible = !state.translationVisible || Boolean(recordId && state.clipboardDetailId !== recordId);
+      state.clipboardVisible = true;
+      state.standaloneTranslationVisible = false;
+      state.clipboardDetailVisible = !state.clipboardDetailVisible || Boolean(recordId && state.clipboardDetailId !== recordId);
       if (recordId) state.clipboardDetailId = recordId;
-      state.translationExtent = state.translationVisible ? state.translationWidth : 0;
+      state.clipboardExtent = state.clipboardWidth;
+      state.rightExtent = rightExtentFor(state);
       deliver('window_state', structuredClone(state));
+    }
+    if (name === 'clipboard_translation_close') {
+      const state = bridge.snapshot.window;
+      state.clipboardTranslationVisible = false;
+      state.clipboardTranslationRecordId = null;
+      state.rightExtent = rightExtentFor(state);
+      deliver('window_state', structuredClone(state));
+    }
+    if (name === 'clipboard_translation_clear_record') {
+      bridge.snapshot.window.clipboardTranslationRecordId = null;
+      deliver('window_state', structuredClone(bridge.snapshot.window));
+    }
+    if (name === 'clipboard_width_set') return undefined;
+    if (name === 'clipboard_detail_width_set') {
+      const width = Math.min(920, Math.max(320, Number((args as { width: number }).width)));
+      bridge.snapshot.window.clipboardDetailWidth = width;
+      bridge.snapshot.window.rightExtent = rightExtentFor(bridge.snapshot.window);
+      deliver('window_state', structuredClone(bridge.snapshot.window));
     }
     if (name === 'translation_preferences_set') {
       const patch = args as Partial<TranslationPreferences>;
@@ -248,8 +227,8 @@ beforeEach(() => {
       return;
     }
     if (name === 'records_preview_lines_set') {
-      const { view, lines } = args as { view: 'clipboard' | 'translation'; lines: number };
-      bridge.snapshot.clipboardControls.previewLines = { ...bridge.snapshot.clipboardControls.previewLines!, [view]: lines };
+      const { lines } = args as { lines: number };
+      bridge.snapshot.clipboardControls.previewLines = { clipboard: lines };
       deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
       return;
     }
@@ -290,22 +269,6 @@ beforeEach(() => {
     }
     if (name === 'translation_shortcut_capture') return;
     if (name === 'app_snapshot') return structuredClone(bridge.snapshot);
-    if (name === 'history_sample_select') {
-      const selected = args as { sampleId: string | null; retranslate: boolean; preview?: boolean };
-      if (selected.preview && bridge.snapshot.window.recordsBrowsing === false) return;
-      const record = bridge.history.records.find(({ id }) => id === selected.sampleId);
-      if (selected.sampleId !== null && !record) throw new Error('invalid_argument');
-      if (selected.sampleId !== null) {
-        bridge.snapshot.window.recordsBrowsing = true;
-        bridge.snapshot.window.translationVisible = true;
-        bridge.snapshot.window.translationExtent = bridge.snapshot.window.translationWidth;
-        bridge.snapshot.window.historyVisible = true;
-        bridge.snapshot.window.historyExtent = bridge.snapshot.window.historyWidth;
-        deliver('window_state', structuredClone(bridge.snapshot.window));
-      }
-      bridge.history.selectedId = selected.sampleId; ++bridge.history.revision;
-      deliver('history_sample_selected', { ...selected, record, revision: bridge.history.revision });
-    }
     return undefined;
   });
   bridge.listen.mockReset().mockImplementation(async (name: string, callback: (event: { payload: unknown }) => void) => {
@@ -325,10 +288,6 @@ function deliver(name: string, payload: unknown) {
 
 export async function emit(name: string, payload: unknown) {
   await act(async () => {
-    if (name === 'history_sample_selected') {
-      bridge.history.selectedId = (payload as { sampleId: string | null }).sampleId; ++bridge.history.revision;
-      payload = { revision: bridge.history.revision, ...payload as object };
-    }
     deliver(name, payload);
   });
 }
@@ -338,10 +297,14 @@ export async function windowState(patch: Partial<WindowState>) {
   await emit('window_state', structuredClone(bridge.snapshot.window));
 }
 
-export async function mount(label: 'translation' | 'history' | 'clipboard' | 'settings' = 'translation') {
+export async function mount(label: 'translation' | 'clipboard' | 'settings' = 'translation') {
   bridge.label = label;
-  if (label === 'clipboard') { bridge.snapshot.window.recordView = 'clipboard'; bridge.snapshot.window.translationVisible = false; bridge.snapshot.window.translationExtent = 0; }
-  if (label === 'history') bridge.snapshot.window.recordView = 'translation';
+  if (label === 'clipboard') {
+    bridge.snapshot.window.standaloneTranslationVisible = false;
+    bridge.snapshot.window.clipboardVisible = true;
+    bridge.snapshot.window.clipboardExtent = bridge.snapshot.window.clipboardWidth;
+    bridge.snapshot.window.rightExtent = rightExtentFor(bridge.snapshot.window);
+  }
   const previous = bridge.invoke.mock.calls.filter(([name]) => name === 'app_snapshot').length;
   const result = render(<App />);
   await waitFor(() => {

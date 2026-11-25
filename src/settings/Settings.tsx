@@ -21,7 +21,7 @@ const pages = [
 
 export function Settings({ t, snapshot, command, native }: ViewProps) {
   const [page, setPage] = useState<typeof pages[number]['value']>('general');
-  const [openDropdown, setOpenDropdown] = useState<'language' | 'windowPosition' | 'recordsFocus' | 'clipboardPreviewLines' | 'translationPreviewLines' | null>(null);
+  const [openDropdown, setOpenDropdown] = useState<'language' | 'windowPosition' | 'recordsFocus' | 'clipboardPreviewLines' | null>(null);
   const [savingLaunch, setSavingLaunch] = useState(false);
   const [launchError, setLaunchError] = useState(false);
   const [previewSaveFailed, setPreviewSaveFailed] = useState(false);
@@ -38,12 +38,12 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
     finally { setSavingLaunch(false); }
   }
 
-  async function savePreviewLines(view: 'clipboard' | 'translation', code: string) {
-    const current = snapshot.clipboardControls.previewLines?.[view] ?? 3;
+  async function savePreviewLines(code: string) {
+    const current = snapshot.clipboardControls.previewLines?.clipboard ?? 3;
     if (!canManageRecords || savingPreview.current || Number(code) === current) return;
     savingPreview.current = true;
     setPreviewSaveFailed(false);
-    try { await invoke('records_preview_lines_set', { view, lines: Number(code) }); }
+    try { await invoke('records_preview_lines_set', { lines: Number(code) }); }
     catch { setPreviewSaveFailed(true); }
     finally { savingPreview.current = false; }
   }
@@ -103,13 +103,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
               <label className="settings-field-content" htmlFor="clipboard-preview-lines">{t('clipboardPreviewLines')}</label>
               {canManageRecords ? <SearchableDropdown id="clipboard-preview-lines" label={t('clipboardPreviewLines')} value={String(snapshot.clipboardControls.previewLines?.clipboard ?? 3)}
                 items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={openDropdown === 'clipboardPreviewLines'} onOpenChange={(open) => setOpenDropdown(open ? 'clipboardPreviewLines' : null)}
-                onChange={(code) => void savePreviewLines('clipboard', code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
-            </div>
-            <div className="settings-field">
-              <label className="settings-field-content" htmlFor="translation-preview-lines">{t('translationPreviewLines')}</label>
-              {canManageRecords ? <SearchableDropdown id="translation-preview-lines" label={t('translationPreviewLines')} value={String(snapshot.clipboardControls.previewLines?.translation ?? 3)}
-                items={['1', '2', '3'].map((code) => ({ code, name: code }))} open={openDropdown === 'translationPreviewLines'} onOpenChange={(open) => setOpenDropdown(open ? 'translationPreviewLines' : null)}
-                onChange={(code) => void savePreviewLines('translation', code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
+                onChange={(code) => void savePreviewLines(code)} t={t} searchable={false} side="bottom" settings menuWidth={90} /> : <span className="settings-badge">—</span>}
             </div>
             {previewSaveFailed && <p className="settings-field-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
             <div className="settings-field"><span className="settings-field-content">{t('appearance')}</span><span className="settings-badge">{t('followSystem')}</span></div>

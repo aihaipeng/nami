@@ -1,5 +1,5 @@
 use crate::{
-    model::{RecordView, WindowState},
+    model::{WindowState, CLIPBOARD_MAX_WIDTH, CLIPBOARD_MIN_WIDTH},
     platform, AppState,
 };
 use std::sync::atomic::Ordering;
@@ -7,8 +7,6 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
     Window, WindowEvent,
 };
-
-pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
 pub fn update_translation_chrome(_: &AppHandle, _: String, _: f64) -> Result<(), String> {
     Err("platform_unavailable".into())
@@ -27,7 +25,6 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
     }
     let (width, height) = match label {
         "translation" => (920.0, 620.0),
-        "clipboard" => (420.0, 620.0),
         "settings" => (840.0, 640.0),
         _ => return Err("invalid_argument".into()),
     };
@@ -74,19 +71,6 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
                 handle.state::<AppState>().windows.lock().unwrap().blur();
                 apply_translation(&handle)
             }
-            WindowEvent::Focused(false) if label == "clipboard" => {
-                if !handle
-                    .state::<AppState>()
-                    .windows
-                    .lock()
-                    .unwrap()
-                    .clipboard_pinned
-                {
-                    hide(&handle, &label)
-                } else {
-                    Ok(())
-                }
-            }
             _ => Ok(()),
         };
         if let Err(code) = result {
@@ -101,38 +85,17 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         let ended = regions.sync_records_session();
-        if ended {
-            regions.record_view = RecordView::Clipboard;
-        }
         (regions.clone(), ended)
     };
     if ended {
+        let app_state = app.state::<AppState>();
+        app_state.clipboard_side_translation.clear();
+        app_state.clipboard_translation.lock().unwrap().take();
         crate::clipboard_runtime::visibility(app, false)?;
-        app.state::<AppState>()
-            .records_dirty
-            .store(false, Ordering::SeqCst);
-        app.state::<AppState>()
-            .records_navigation
-            .lock()
-            .unwrap()
-            .take();
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = crate::history_runtime::query_history(&app, String::new(), false).await;
-        });
+        app_state.records_dirty.store(false, Ordering::SeqCst);
+        app_state.records_navigation.lock().unwrap().take();
     }
-    if !state.translation_visible {
-        let revision = app
-            .state::<AppState>()
-            .history
-            .lock()
-            .unwrap()
-            .clear_visual_selection_revision();
-        if let Some(revision) = revision {
-            crate::history_runtime::publish_visual_selection(app, revision, None)?;
-        }
-    }
-    for label in ["translation", "history", "clipboard", "settings"] {
+    for label in ["translation", "clipboard", "settings"] {
         if let Some(view) = app.get_webview(label) {
             view.emit("window_state", &state)
                 .map_err(|_| "event_emit")?;
@@ -142,63 +105,64 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
 }
 
 fn visible_width(state: &WindowState) -> f64 {
-    (if state.history_visible {
-        state.history_width
+    (if state.clipboard_visible {
+        state.clipboard_width
     } else {
         0.0
-    }) + if state.translation_visible {
-        state.translation_width
-    } else {
-        0.0
-    }
+    }) + state.right_target_width()
 }
 
 fn layout(app: &AppHandle, anchor_right: bool) -> Result<(), String> {
+    let window = app.get_window("translation").ok_or("window_unavailable")?;
+    let scale = window.scale_factor().map_err(|_| "window_geometry")?;
+    let work_width = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.work_area().size.to_logical::<f64>(scale).width);
     let (state, anchor_right) = {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
+        if let Some(max_w) = work_width {
+            state.clamp_right_panes_to_available(max_w);
+        }
         let anchor_right = keep_right_anchor(&state, anchor_right);
-        state.history_extent = if state.history_visible {
-            state.history_width
+        state.clipboard_extent = if state.clipboard_visible {
+            state.clipboard_width
         } else {
             0.0
         };
-        state.translation_extent = if state.translation_visible {
-            state.translation_width
-        } else {
-            0.0
-        };
+        state.right_extent = state.right_target_width();
         (state.clone(), anchor_right)
     };
-    let window = app.get_window("translation").ok_or("window_unavailable")?;
-    if !state.translation_visible && !state.history_visible {
+    if !state.any_visible() {
         window.hide().map_err(|_| "window_hide")?;
         return emit_state(app);
     }
-    let scale = window.scale_factor().map_err(|_| "window_geometry")?;
     let size = window
         .inner_size()
         .map_err(|_| "window_geometry")?
         .to_logical::<f64>(scale);
     let width = visible_width(&state);
-    let minimum = if state.translation_visible {
-        state.translation_min_width()
-            + if state.history_visible {
-                state.history_width
+    let right_visible = state.right_visible();
+    let minimum = if right_visible {
+        state.right_min_width()
+            + if state.clipboard_visible {
+                state.clipboard_width
             } else {
                 0.0
             }
     } else {
-        280.0
+        CLIPBOARD_MIN_WIDTH
     };
     window
         .set_min_size(Some(LogicalSize::new(minimum, 440.0)))
         .map_err(|_| "window_geometry")?;
     window
-        .set_max_size(if state.translation_visible {
+        .set_max_size(if right_visible {
             None
         } else {
-            Some(LogicalSize::new(720.0, 100_000.0))
+            Some(LogicalSize::new(CLIPBOARD_MAX_WIDTH, 100_000.0))
         })
         .map_err(|_| "window_geometry")?;
     if (size.width - width).abs() > 0.5 {
@@ -218,114 +182,82 @@ fn layout(app: &AppHandle, anchor_right: bool) -> Result<(), String> {
                 .map_err(|_| "window_geometry")?;
         }
     }
-    window
-        .set_always_on_top(
-            (state.translation_visible && state.translation_pinned)
-                || (state.history_visible && state.history_pinned),
-        )
-        .map_err(|_| "window_pin")?;
+    let pinned = (state.standalone_translation_visible && state.translation_pinned)
+        || (state.clipboard_visible && state.clipboard_pinned);
+    window.set_always_on_top(pinned).map_err(|_| "window_pin")?;
     window.show().map_err(|_| "window_show")?;
     emit_state(app)
 }
 
 fn keep_right_anchor(state: &WindowState, requested: bool) -> bool {
-    // Changing the right card keeps the history's left edge; changing history
-    // keeps the translation's right edge. Seam resizing explicitly keeps left.
-    requested && ((state.translation_extent > 0.0) == state.translation_visible)
+    requested && ((state.right_extent > 0.0) == state.right_visible())
 }
 
 pub fn apply_translation(app: &AppHandle) -> Result<(), String> {
     layout(app, true)
 }
 
-pub fn resize_history(app: &AppHandle, width: f64, initialize: bool) -> Result<(), String> {
+pub fn resize_clipboard(app: &AppHandle, width: f64, initialize: bool) -> Result<(), String> {
     if !width.is_finite() {
         return Err("invalid_argument".into());
     }
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        if initialize && state.history_width_initialized {
+        if initialize && state.clipboard_width_initialized {
             return Ok(());
         }
-        state.history_width = width.clamp(280.0, 720.0);
-        state.history_width_initialized = true;
+        state.clipboard_width = width.clamp(CLIPBOARD_MIN_WIDTH, CLIPBOARD_MAX_WIDTH);
+        state.clipboard_width_initialized = true;
     }
-    platform::save_history_width(width.clamp(280.0, 720.0));
+    platform::save_history_width(width.clamp(CLIPBOARD_MIN_WIDTH, CLIPBOARD_MAX_WIDTH));
     layout(app, false)
 }
 
 pub fn update_translation_level(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_window("translation") {
         let state = app.state::<AppState>().windows.lock().unwrap().clone();
-        window
-            .set_always_on_top(
-                (state.translation_visible && state.translation_pinned)
-                    || (state.history_visible && state.history_pinned),
-            )
-            .map_err(|_| "window_pin")?;
+        let pinned = (state.standalone_translation_visible && state.translation_pinned)
+            || (state.clipboard_visible && state.clipboard_pinned);
+        window.set_always_on_top(pinned).map_err(|_| "window_pin")?;
     }
     emit_state(app)
 }
 
-pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
-    let view = match view {
-        "clipboard" => RecordView::Clipboard,
-        "translation" => RecordView::Translation,
-        _ => return Err("invalid_argument".into()),
-    };
-    if app.state::<AppState>().windows.lock().unwrap().record_view == view {
-        return Ok(());
-    }
-    if crate::records_runtime::defer_navigation(
-        app,
-        if view == RecordView::Clipboard {
-            "view:clipboard"
-        } else {
-            "view:translation"
-        },
-    )? {
-        return Ok(());
-    }
-    app.state::<AppState>()
-        .windows
-        .lock()
-        .unwrap()
-        .set_record_view(view);
-    apply_translation(app)
-}
-
 pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
-    let restored = {
+    {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         if let Some(record_id) = record_id {
-            if regions.record_view != RecordView::Clipboard
-                || !regions.history_visible
+            if !regions.clipboard_visible
                 || regions.records_editor_open
-                || state
-                    .records_dirty
-                    .load(std::sync::atomic::Ordering::SeqCst)
+                || state.records_dirty.load(Ordering::SeqCst)
             {
                 return Err("cancelled".into());
             }
             regions.preview_clipboard_record(record_id);
         } else {
-            regions.toggle_record_details();
+            regions.toggle_clipboard_details();
         }
-        if regions.translation_visible && regions.record_view == RecordView::Translation {
-            state
-                .history
-                .lock()
-                .unwrap()
-                .restore_visual_selection_revision()
-        } else {
-            None
-        }
-    };
-    if let Some((revision, selected_id)) = restored {
-        crate::history_runtime::publish_visual_selection(app, revision, selected_id)?;
     }
+    apply_translation(app)
+}
+
+pub fn open_clipboard_translation(app: &AppHandle, record_id: String) -> Result<(), String> {
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .open_clipboard_translation(record_id);
+    apply_translation(app)
+}
+
+pub fn close_clipboard_translation(app: &AppHandle) -> Result<(), String> {
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .close_clipboard_translation();
     apply_translation(app)
 }
 
@@ -359,9 +291,9 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
             let state = app.state::<AppState>();
             let mut regions = state.windows.lock().unwrap();
             if target == "translation" {
-                regions.summon_translation();
+                regions.summon_standalone_translation();
             } else {
-                regions.set_record_view(RecordView::Clipboard);
+                regions.show_clipboard();
                 regions.records_focus += 1;
             }
         }
@@ -407,7 +339,7 @@ pub fn reveal_clipboard_failure(app: &AppHandle) -> Result<(), String> {
         .windows
         .lock()
         .unwrap()
-        .set_record_view(RecordView::Clipboard);
+        .show_clipboard();
     apply_translation(app)?;
     if let Some(window) = app.get_window("translation") {
         reveal_without_focus(&window)?;
@@ -426,21 +358,13 @@ pub fn reveal_without_focus(window: &Window) -> Result<(), String> {
 
 pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
     match region {
-        "translation" | "history" | "clipboard" => {
+        "translation" | "clipboard" => {
             if region == "clipboard" {
                 app.state::<AppState>()
                     .operation
                     .fetch_add(1, Ordering::SeqCst);
             }
-            {
-                let state = app.state::<AppState>();
-                let mut regions = state.windows.lock().unwrap();
-                if region == "history" {
-                    regions.history_visible = false;
-                } else {
-                    regions.dismiss();
-                }
-            }
+            app.state::<AppState>().windows.lock().unwrap().dismiss();
             apply_translation(app)
         }
         "settings" => {
@@ -459,31 +383,18 @@ mod tests {
     #[test]
     fn shared_host_width_only_includes_visible_regions() {
         let mut state = WindowState::default();
-        assert_eq!(visible_width(&state), 920.0);
-        state.history_visible = true;
-        assert_eq!(visible_width(&state), 1280.0);
-        state.translation_visible = false;
-        assert_eq!(visible_width(&state), 360.0);
-        state.history_visible = false;
         assert_eq!(visible_width(&state), 0.0);
-    }
-
-    #[test]
-    fn translation_open_close_keeps_history_left_while_history_toggle_keeps_right() {
-        let mut state = WindowState {
-            history_visible: true,
-            history_extent: 360.0,
-            ..WindowState::default()
-        };
-        assert!(keep_right_anchor(&state, true));
-        state.translation_visible = false;
-        assert!(!keep_right_anchor(&state, true));
-        state.translation_extent = 0.0;
-        state.translation_visible = true;
-        assert!(!keep_right_anchor(&state, true));
-        state.translation_extent = state.translation_width;
-        state.history_visible = false;
-        assert!(keep_right_anchor(&state, true));
-        assert!(!keep_right_anchor(&state, false));
+        state.summon_standalone_translation();
+        assert_eq!(visible_width(&state), 920.0);
+        state.show_clipboard();
+        assert_eq!(visible_width(&state), 360.0);
+        state.toggle_clipboard_details();
+        assert_eq!(visible_width(&state), 840.0);
+        state.open_clipboard_translation("rec-1".into());
+        assert_eq!(visible_width(&state), 1280.0);
+        state.toggle_clipboard_details();
+        assert_eq!(visible_width(&state), 800.0);
+        state.dismiss();
+        assert_eq!(visible_width(&state), 0.0);
     }
 }

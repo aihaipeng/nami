@@ -1,13 +1,13 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { FloatingPanel, restorePanelFocus } from './FloatingPanel';
 import { matchesLanguage } from './languages';
 import type { Translate } from './i18n';
 
-export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false, description, valueLabel }: {
-  value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string }[];
+export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false, description, valueLabel, iconTrigger, triggerTitle }: {
+  value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string; icon?: string }[];
   t: Translate; side?: 'top' | 'bottom'; open: boolean; onOpenChange: (open: boolean) => void; searchable?: boolean; id?: string; capsule?: boolean; settings?: boolean; menuWidth?: number;
-  hiddenTrigger?: boolean; description?: string; valueLabel?: string;
+  hiddenTrigger?: boolean; description?: string; valueLabel?: string; iconTrigger?: ReactNode; triggerTitle?: string;
 }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(value);
@@ -33,10 +33,10 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   }
 
   return <>
-    <button ref={trigger} id={triggerId} type="button" className={settings ? 'language-picker settings-dropdown' : capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
+    <button ref={trigger} id={triggerId} type="button" className={iconTrigger ? (open ? 'icon-button record-active' : 'icon-button') : settings ? 'language-picker settings-dropdown' : capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
       aria-hidden={hiddenTrigger || undefined} inert={hiddenTrigger} tabIndex={hiddenTrigger ? -1 : undefined}
-      title={description} aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
-      <span>{selected}</span><ChevronDown aria-hidden="true" />
+      title={triggerTitle ?? description} aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
+      {iconTrigger ?? <><span>{selected}</span><ChevronDown aria-hidden="true" /></>}
     </button>
     {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className={settings ? 'language-popover settings-popover' : 'language-popover'} dismissOnSettingsScroll={settings}>
       {searchable && <label className="language-search"><Search aria-hidden="true" /><input role="combobox" aria-label={t('searchLanguage')}
@@ -72,7 +72,10 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
         {visible.map((option, index) => <button key={option.code} id={`${id}-${index}`} type="button" role="option"
           aria-selected={value === option.code} data-active={active === option.code} tabIndex={-1}
           onMouseDown={(event) => event.preventDefault()} onClick={() => choose(option.code)}>
-          <span>{option.name}</span>{value === option.code && <Check aria-hidden="true" />}
+          {option.icon
+            ? <span className="language-option-label"><img className="language-option-icon" src={option.icon} alt="" aria-hidden="true" /><span>{option.name}</span></span>
+            : <span>{option.name}</span>}
+          {value === option.code && <Check aria-hidden="true" />}
         </button>)}
         {!visible.length && <div className="language-no-results">{t('noMatches')}</div>}
       </div>

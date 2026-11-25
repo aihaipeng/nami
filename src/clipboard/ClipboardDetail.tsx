@@ -61,7 +61,7 @@ function formatSize(bytes: number) {
 
 export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const id = snapshot.window.clipboardDetailId;
-  const active = snapshot.window.recordView === 'clipboard' && snapshot.window.translationVisible;
+  const active = snapshot.window.clipboardVisible && snapshot.window.clipboardDetailVisible;
   const [detail, setDetail] = useState<ClipboardDetailData | null>(null);
   const [failed, setFailed] = useState<'unavailable' | 'retry' | null>(null);
   const [loading, setLoading] = useState(false);
@@ -214,7 +214,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   }
   useRecordsPreviewShortcut({
     active: active && !snapshot.window.recordsEditorOpen,
-    excludedContainers: '.records-workspace, .translation-panel, .preview-bar',
+    excludedContainers: '.records-workspace, .translation-panel, .clipboard-translate-pane, .preview-bar',
     snapshot,
     native,
     onPreview: () => { void command('records_details_toggle'); },
@@ -224,12 +224,14 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     const dismiss = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
-        event.preventDefault(); void command('window_hide', { region: 'translation' });
+        event.preventDefault();
+        if (snapshot.window.clipboardTranslationVisible) void command('clipboard_translation_close');
+        else void command('window_hide', { region: 'clipboard' });
       }
     };
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
-  }, [active, snapshot.window.recordsEditorOpen, snapshot.capabilities.primaryModifier, command]);
+  }, [active, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, snapshot.capabilities.primaryModifier, command]);
   const hasRichPreview = Boolean(current?.kind === 'text' && current.richTextHtml);
   const showingRich = hasRichPreview && textViewMode === 'rich';
   const copyPlain = hasRichPreview && !showingRich && !showQr;
@@ -259,6 +261,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       </div>}
       {shown && <RecordActions allowMarkedDelete recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} copyLabel={copyPlain ? t('clipboardCopyPlain') : undefined} deleteLabel={t('deleteClipboard')} canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => action(copyPlain ? 'copyPlain' : 'copy')}
         onOpenTarget={openTargetAction} onQrCode={qrAction}
+        translateActive={snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === shown.id}
         onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
         onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
     </header>

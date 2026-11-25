@@ -1,5 +1,8 @@
 use crate::{
-    model::{PanelFrame, RecordView, WindowState},
+    model::{
+        PanelFrame, WindowState, CLIPBOARD_MAX_WIDTH, CLIPBOARD_MIN_WIDTH,
+        STANDALONE_TRANSLATION_DEFAULT_WIDTH,
+    },
     platform, AppState,
 };
 use objc2::{rc::Retained, runtime::AnyObject, DefinedClass, MainThreadOnly};
@@ -14,9 +17,7 @@ use tauri::{
     WindowEvent,
 };
 
-const TRANSLATION_WIDTH: f64 = 920.0;
-const HISTORY_MIN_WIDTH: f64 = 280.0;
-const HISTORY_MAX_WIDTH: f64 = 720.0;
+const TRANSLATION_WIDTH: f64 = STANDALONE_TRANSLATION_DEFAULT_WIDTH;
 const STAGE_TRANSLATION_TAG: isize = 2;
 const STAGE_CLIPBOARD_TAG: isize = 3;
 
@@ -25,10 +26,6 @@ mod native_controls;
 pub use native_controls::update as update_translation_chrome;
 #[path = "windows/native_resize.rs"]
 mod native_resize;
-
-#[cfg(feature = "ui-tests")]
-pub(crate) use crate::history_runtime::history_add;
-pub(crate) use crate::history_runtime::{history_record, select_native_history};
 
 unsafe extern "C" {
     static NSRunLoopCommonModes: *const objc2_foundation::NSString;
@@ -119,72 +116,69 @@ impl StageMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct StageGeometry {
     mode: StageMode,
-    history_extent: f64,
-    history_width: f64,
-    translation_width: f64,
-    history_visible: bool,
-    translation_visible: bool,
-    translation_content: bool,
+    clipboard_extent: f64,
+    clipboard_width: f64,
+    right_width: f64,
+    clipboard_visible: bool,
+    right_visible: bool,
+    standalone_translation: bool,
 }
 
 impl StageGeometry {
-    fn explicit(state: &WindowState, history_extent: f64) -> Self {
+    fn explicit(state: &WindowState, clipboard_extent: f64, right_width: f64) -> Self {
         Self {
             mode: StageMode::Explicit,
-            history_extent,
-            history_width: state.history_width,
-            translation_width: state.translation_width,
-            history_visible: state.history_visible,
-            translation_visible: state.translation_visible,
-            translation_content: state.record_view == RecordView::Translation,
+            clipboard_extent,
+            clipboard_width: state.clipboard_width,
+            right_width,
+            clipboard_visible: state.clipboard_visible,
+            right_visible: state.right_visible(),
+            standalone_translation: state.standalone_translation_visible,
         }
     }
 
     fn frames(self, width: f64) -> StageFrames {
         let width = width.max(0.0);
-        let history_width = self.history_width.max(0.0);
-        let translation_width = self.translation_width.max(0.0);
+        let clipboard_width = self.clipboard_width.max(0.0);
+        let right_width = self.right_width.max(0.0);
         match self.mode {
             StageMode::Explicit => StageFrames {
-                // history_extent is the animated seam between the panes.
                 history: StageFrame {
-                    x: self.history_extent - history_width,
-                    width: history_width,
+                    x: self.clipboard_extent - clipboard_width,
+                    width: clipboard_width,
                 },
                 translation: StageFrame {
-                    x: self.history_extent,
-                    width: translation_width,
+                    x: self.clipboard_extent,
+                    width: right_width,
                 },
             },
             StageMode::NativeResize => {
-                if !self.history_visible {
+                if !self.clipboard_visible {
                     StageFrames {
                         history: StageFrame {
-                            x: -history_width,
-                            width: history_width,
+                            x: -clipboard_width,
+                            width: clipboard_width,
                         },
                         translation: StageFrame { x: 0.0, width },
                     }
-                } else if !self.translation_visible {
+                } else if !self.right_visible {
                     StageFrames {
                         history: StageFrame { x: 0.0, width },
                         translation: StageFrame {
                             x: width,
-                            width: translation_width,
+                            width: right_width,
                         },
                     }
                 } else {
-                    // The history keeps its width against the fixed left edge;
-                    // translation absorbs the delta.
-                    let translation = (width - history_width).max(0.0);
+                    let right = (width - clipboard_width).max(0.0);
                     StageFrames {
                         history: StageFrame {
                             x: 0.0,
-                            width: history_width,
+                            width: clipboard_width,
                         },
                         translation: StageFrame {
-                            x: history_width,
-                            width: translation,
+                            x: clipboard_width,
+                            width: right,
                         },
                     }
                 }
@@ -248,28 +242,28 @@ objc2::define_class!(
             unsafe {
                 let mouse: NSPoint = objc2::msg_send![objc2::class!(NSEvent), mouseLocation];
                 let delta = mouse.x - self.ivars().last_x.replace(mouse.x);
-                let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width;
-                let _ = resize_history(&self.ivars().app, width + delta, false);
+                let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().clipboard_width;
+                let _ = resize_clipboard(&self.ivars().app, width + delta, false);
             }
         }
         #[unsafe(method(resetCursorRects))]
         fn cursor(&self) { unsafe { let bounds: NSRect = objc2::msg_send![self, bounds]; let cursor: *mut AnyObject = objc2::msg_send![objc2::class!(NSCursor), resizeLeftRightCursor]; let _: () = objc2::msg_send![self, addCursorRect: bounds, cursor: cursor]; } }
         #[unsafe(method(accessibilityPerformIncrement))]
-        fn increment(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width; resize_history(&self.ivars().app, width + 24.0, false).is_ok() }
+        fn increment(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().clipboard_width; resize_clipboard(&self.ivars().app, width + 24.0, false).is_ok() }
         #[unsafe(method(accessibilityPerformDecrement))]
-        fn decrement(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().history_width; resize_history(&self.ivars().app, width - 24.0, false).is_ok() }
+        fn decrement(&self) -> bool { let width = self.ivars().app.state::<AppState>().windows.lock().unwrap().clipboard_width; resize_clipboard(&self.ivars().app, width - 24.0, false).is_ok() }
     }
 );
 
 #[derive(Default)]
 struct StageState {
     mode: Cell<u32>,
-    history_extent: Cell<f64>,
-    history_width: Cell<f64>,
-    translation_width: Cell<f64>,
-    history_visible: Cell<bool>,
-    translation_visible: Cell<bool>,
-    translation_content: Cell<bool>,
+    clipboard_extent: Cell<f64>,
+    clipboard_width: Cell<f64>,
+    right_width: Cell<f64>,
+    clipboard_visible: Cell<bool>,
+    right_visible: Cell<bool>,
+    standalone_translation: Cell<bool>,
     animating: Cell<bool>,
     geometry_version: Cell<u64>,
     applied_version: Cell<u64>,
@@ -351,8 +345,8 @@ objc2::define_class!(
                 }
                 let state = self.ivars();
                 let bounds: objc2_foundation::NSRect = objc2::msg_send![self, bounds];
-                let seam = if StageMode::from_raw(state.mode.get()) == StageMode::NativeResize { state.history_width.get() } else { state.history_extent.get() };
-                if state.history_visible.get() && state.translation_visible.get()
+                let seam = if StageMode::from_raw(state.mode.get()) == StageMode::NativeResize { state.clipboard_width.get() } else { state.clipboard_extent.get() };
+                if state.clipboard_visible.get() && state.right_visible.get()
                     && point.x >= seam - 6.0 && point.x < seam + 6.0 && point.y >= native_resize::EDGE && point.y < bounds.size.height-native_resize::EDGE {
                     return objc2::msg_send![self, viewWithTag: 206isize];
                 }
@@ -364,9 +358,9 @@ objc2::define_class!(
         fn cursors(&self) {
             unsafe {
                 let state = self.ivars();
-                if !state.history_visible.get() || !state.translation_visible.get() { return; }
+                if !state.clipboard_visible.get() || !state.right_visible.get() { return; }
                 let bounds: objc2_foundation::NSRect = objc2::msg_send![self, bounds];
-                let seam = if StageMode::from_raw(state.mode.get()) == StageMode::NativeResize { state.history_width.get() } else { state.history_extent.get() };
+                let seam = if StageMode::from_raw(state.mode.get()) == StageMode::NativeResize { state.clipboard_width.get() } else { state.clipboard_extent.get() };
                 let area = objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(seam-6.0,native_resize::EDGE),objc2_foundation::NSSize::new(12.0,(bounds.size.height-2.0*native_resize::EDGE).max(0.0)));
                 let cursor: *mut AnyObject = objc2::msg_send![objc2::class!(NSCursor), resizeLeftRightCursor];
                 let _: () = objc2::msg_send![self, addCursorRect: area, cursor: cursor];
@@ -429,12 +423,12 @@ impl TranslationStage {
         state.applied_version.set(state.geometry_version.get());
         let geometry = StageGeometry {
             mode: StageMode::from_raw(state.mode.get()),
-            history_extent: state.history_extent.get(),
-            history_width: state.history_width.get(),
-            translation_width: state.translation_width.get(),
-            history_visible: state.history_visible.get(),
-            translation_visible: state.translation_visible.get(),
-            translation_content: state.translation_content.get(),
+            clipboard_extent: state.clipboard_extent.get(),
+            clipboard_width: state.clipboard_width.get(),
+            right_width: state.right_width.get(),
+            clipboard_visible: state.clipboard_visible.get(),
+            right_visible: state.right_visible.get(),
+            standalone_translation: state.standalone_translation.get(),
         };
         unsafe {
             let bounds: objc2_foundation::NSRect = objc2::msg_send![self, bounds];
@@ -456,9 +450,9 @@ impl TranslationStage {
                     let _: () = objc2::msg_send![view, setFrame: rect];
                 }
             }
-            let detail_shown = state.translation_visible.get()
+            let detail_shown = state.right_visible.get()
                 || (geometry.mode == StageMode::Explicit
-                    && bounds.size.width > geometry.history_extent + 0.5);
+                    && bounds.size.width > geometry.clipboard_extent + 0.5);
             let divider: *mut AnyObject = objc2::msg_send![self, viewWithTag: 206isize];
             if !divider.is_null() {
                 let divider_rect = NSRect::new(
@@ -469,7 +463,7 @@ impl TranslationStage {
                 if current != divider_rect {
                     let _: () = objc2::msg_send![divider, setFrame: divider_rect];
                 }
-                let hidden = !state.history_visible.get() || !detail_shown;
+                let hidden = !state.clipboard_visible.get() || !detail_shown;
                 let is_hidden: bool = objc2::msg_send![divider, isHidden];
                 if is_hidden != hidden {
                     let _: () = objc2::msg_send![divider, setHidden: hidden];
@@ -479,7 +473,7 @@ impl TranslationStage {
                 self,
                 frames,
                 bounds.size.height,
-                state.translation_content.get() && detail_shown,
+                state.standalone_translation.get() && detail_shown,
             );
             if !state.animating.get() {
                 let window: *mut AnyObject = objc2::msg_send![self, window];
@@ -497,12 +491,14 @@ impl TranslationStage {
     fn configure_with_motion(&self, geometry: StageGeometry, animating: bool) {
         let state = self.ivars();
         state.mode.set(geometry.mode.raw());
-        state.history_extent.set(geometry.history_extent);
-        state.history_width.set(geometry.history_width);
-        state.translation_width.set(geometry.translation_width);
-        state.history_visible.set(geometry.history_visible);
-        state.translation_visible.set(geometry.translation_visible);
-        state.translation_content.set(geometry.translation_content);
+        state.clipboard_extent.set(geometry.clipboard_extent);
+        state.clipboard_width.set(geometry.clipboard_width);
+        state.right_width.set(geometry.right_width);
+        state.clipboard_visible.set(geometry.clipboard_visible);
+        state.right_visible.set(geometry.right_visible);
+        state
+            .standalone_translation
+            .set(geometry.standalone_translation);
         state.animating.set(animating);
         state
             .geometry_version
@@ -665,7 +661,7 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
             objc2::msg_send![super(divider), initWithFrame: NSRect::ZERO];
         let _: () = objc2::msg_send![&*divider, setAccessibilityElement: true];
         let _: () = objc2::msg_send![&*divider, setAccessibilityRole: objc2_foundation::ns_string!("AXSplitter")];
-        let _: () = objc2::msg_send![&*divider, setAccessibilityLabel: objc2_foundation::ns_string!("Resize translation history")];
+        let _: () = objc2::msg_send![&*divider, setAccessibilityLabel: objc2_foundation::ns_string!("Resize clipboard panel")];
         let _: () = objc2::msg_send![&*stage, addSubview: &*divider];
     }
     native_controls::install(window.app_handle(), &stage)?;
@@ -677,7 +673,11 @@ fn install_translation_surface(window: &Window) -> Result<(), String> {
         .lock()
         .unwrap()
         .clone();
-    stage.configure(StageGeometry::explicit(&state, state.history_extent));
+    stage.configure(StageGeometry::explicit(
+        &state,
+        state.clipboard_extent,
+        state.right_target_width().max(state.right_extent),
+    ));
     stage.finish_layout();
     Ok(())
 }
@@ -884,41 +884,24 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         let ended = regions.sync_records_session();
-        if ended {
-            regions.record_view = RecordView::Clipboard;
-        }
         (regions.clone(), ended)
     };
     if ended {
-        app.state::<AppState>()
-            .records_dirty
-            .store(false, Ordering::SeqCst);
-        app.state::<AppState>()
-            .records_navigation
-            .lock()
-            .unwrap()
-            .take();
+        let app_state = app.state::<AppState>();
+        app_state.clipboard_side_translation.clear();
+        app_state.clipboard_translation.lock().unwrap().take();
+        app_state.records_dirty.store(false, Ordering::SeqCst);
+        app_state.records_navigation.lock().unwrap().take();
         crate::clipboard_runtime::visibility(app, false)?;
     }
-    if !state.translation_visible {
-        let revision = app
-            .state::<AppState>()
-            .history
-            .lock()
-            .unwrap()
-            .clear_visual_selection_revision();
-        if let Some(revision) = revision {
-            crate::history_runtime::publish_visual_selection(app, revision, None)?;
-        }
-    }
     if let Some(view) = app.get_webview("clipboard") {
-        let hidden = !state.history_visible && state.history_extent <= 0.0;
+        let hidden = !state.clipboard_visible && state.clipboard_extent <= 0.0;
         view.with_webview(move |webview| unsafe {
             let _: () = objc2::msg_send![webview.inner().cast::<AnyObject>(), setHidden: hidden];
         })
         .map_err(|_| "window_geometry")?;
     }
-    for label in ["translation", "history", "clipboard", "settings"] {
+    for label in ["translation", "clipboard", "settings"] {
         if let Some(window) = app.get_webview(label) {
             window
                 .emit("window_state", &state)
@@ -930,24 +913,25 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
 
 fn update_size_limits(app: &AppHandle, window: &Window) -> Result<(), String> {
     let state = app.state::<AppState>().windows.lock().unwrap().clone();
-    let minimum = if state.translation_visible {
-        state.translation_min_width()
-            + if state.history_visible {
-                state.history_width
+    let right_visible = state.right_visible();
+    let minimum = if right_visible {
+        state.right_min_width()
+            + if state.clipboard_visible {
+                state.clipboard_width
             } else {
                 0.0
             }
     } else {
-        HISTORY_MIN_WIDTH
+        CLIPBOARD_MIN_WIDTH
     };
     window
         .set_min_size(Some(LogicalSize::new(minimum, 440.0)))
         .map_err(|_| "window_geometry")?;
     window
-        .set_max_size(if state.translation_visible {
+        .set_max_size(if right_visible {
             None
         } else {
-            Some(LogicalSize::new(HISTORY_MAX_WIDTH, 100_000.0))
+            Some(LogicalSize::new(CLIPBOARD_MAX_WIDTH, 100_000.0))
         })
         .map_err(|_| "window_geometry".into())
 }
@@ -987,12 +971,12 @@ fn begin_translation_resize(app: &AppHandle) -> Result<(), String> {
         state.native_resizing = true;
         StageGeometry {
             mode: StageMode::NativeResize,
-            history_extent: state.history_extent,
-            history_width: state.history_width,
-            translation_width: state.translation_width,
-            history_visible: state.history_visible,
-            translation_visible: state.translation_visible,
-            translation_content: state.record_view == RecordView::Translation,
+            clipboard_extent: state.clipboard_extent,
+            clipboard_width: state.clipboard_width,
+            right_width: state.right_target_width(),
+            clipboard_visible: state.clipboard_visible,
+            right_visible: state.right_visible(),
+            standalone_translation: state.standalone_translation_visible,
         }
     };
     // AppKit owns the window frame and the stage keeps both WebViews glued to
@@ -1003,20 +987,20 @@ fn begin_translation_resize(app: &AppHandle) -> Result<(), String> {
 
 fn end_translation_resize(app: &AppHandle, window: &Window) -> Result<(), String> {
     let size = translation_window_size(window)?;
-    let history_width = {
+    let clipboard_width = {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        if state.motion_anchor.is_some() || (!state.translation_visible && !state.history_visible) {
+        if state.motion_anchor.is_some() || !state.any_visible() {
             state.native_resizing = false;
             return Ok(());
         }
         state.resize_visible_width(size.width);
-        let save = state.history_visible && !state.translation_visible;
-        let history_width = save.then_some(state.history_width);
+        let save = state.clipboard_visible && !state.right_visible();
+        let clipboard_width = save.then_some(state.clipboard_width);
         state.native_resizing = false;
-        history_width
+        clipboard_width
     };
-    if let Some(width) = history_width {
+    if let Some(width) = clipboard_width {
         platform::save_history_width(width);
     }
     sync_translation_views(app, window)?;
@@ -1038,12 +1022,12 @@ fn track_translation_resize(app: &AppHandle, window: &Window) -> Result<(), Stri
     {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        if state.motion_anchor.is_some() || (!state.translation_visible && !state.history_visible) {
+        if state.motion_anchor.is_some() || !state.any_visible() {
             return Ok(());
         }
         state.resize_visible_width(size.width);
-        if state.history_visible && !state.translation_visible {
-            platform::save_history_width(state.history_width);
+        if state.clipboard_visible && !state.right_visible() {
+            platform::save_history_width(state.clipboard_width);
         }
     }
     sync_translation_views(app, window)?;
@@ -1054,7 +1038,7 @@ pub fn apply_translation(app: &AppHandle) -> Result<(), String> {
     layout_translation(app, true)
 }
 
-pub fn resize_history(app: &AppHandle, width: f64, initialize: bool) -> Result<(), String> {
+pub fn resize_clipboard(app: &AppHandle, width: f64, initialize: bool) -> Result<(), String> {
     if !width.is_finite() {
         return Err("invalid_argument".into());
     }
@@ -1063,34 +1047,30 @@ pub fn resize_history(app: &AppHandle, width: f64, initialize: bool) -> Result<(
     };
     let scale = window.scale_factor().map_err(|_| "window_geometry")?;
     let left = native_translation_frame(&window)?.origin.x;
-    let mut width = width.clamp(280.0, 720.0);
+    let mut width = width.clamp(CLIPBOARD_MIN_WIDTH, CLIPBOARD_MAX_WIDTH);
     let (frame, revision) = {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
-        if (initialize && state.history_width_initialized)
+        if (initialize && state.clipboard_width_initialized)
             || (!initialize && state.motion_anchor.is_some())
         {
             return Ok(());
         }
-        if state.history_visible {
+        let right_width = state.right_target_width();
+        if state.clipboard_visible {
             if let Some(monitor) = window.current_monitor().map_err(|_| "window_geometry")? {
                 let work = monitor.work_area();
                 let right = (work.position.x as f64 + work.size.width as f64) / scale;
-                let translation = if state.translation_visible {
-                    state.translation_width
-                } else {
-                    0.0
-                };
-                let available = right - left - translation;
-                width = width.min(available.max(280.0));
+                let available = right - left - right_width;
+                width = width.min(available.max(CLIPBOARD_MIN_WIDTH));
             }
         }
-        state.history_width = width.round();
-        state.history_width_initialized = true;
+        state.clipboard_width = width.round();
+        state.clipboard_width_initialized = true;
         state.motion_revision += 1;
         state.motion_anchor = Some(
-            left + if state.history_visible {
-                state.history_width
+            left + if state.clipboard_visible {
+                state.clipboard_width
             } else {
                 0.0
             },
@@ -1098,16 +1078,12 @@ pub fn resize_history(app: &AppHandle, width: f64, initialize: bool) -> Result<(
         (
             PanelFrame {
                 left,
-                history: if state.history_visible {
-                    state.history_width
+                clipboard: if state.clipboard_visible {
+                    state.clipboard_width
                 } else {
                     0.0
                 },
-                translation: if state.translation_visible {
-                    state.translation_width
-                } else {
-                    0.0
-                },
+                right: right_width,
             },
             state.motion_revision,
         )
@@ -1164,9 +1140,17 @@ fn set_native_frame(
     finished: bool,
 ) -> Result<(), String> {
     let stage = translation_stage(window)?;
-    let history_extent = frame
-        .map(|(frame, _)| frame.history)
-        .unwrap_or(state.history_extent);
+    let clipboard_extent = frame
+        .map(|(frame, _)| frame.clipboard)
+        .unwrap_or(state.clipboard_extent);
+    let right_width = if state.right_visible() {
+        state.right_target_width()
+    } else {
+        frame
+            .map(|(frame, _)| frame.right)
+            .unwrap_or(state.right_extent)
+            .max(state.clipboard_detail_width)
+    };
     stage.configure_with_motion(
         StageGeometry {
             mode: if state.native_resizing {
@@ -1174,12 +1158,12 @@ fn set_native_frame(
             } else {
                 StageMode::Explicit
             },
-            history_extent,
-            history_width: state.history_width,
-            translation_width: state.translation_width,
-            history_visible: state.history_visible,
-            translation_visible: state.translation_visible,
-            translation_content: state.record_view == RecordView::Translation,
+            clipboard_extent,
+            clipboard_width: state.clipboard_width,
+            right_width,
+            clipboard_visible: state.clipboard_visible,
+            right_visible: state.right_visible(),
+            standalone_translation: state.standalone_translation_visible,
         },
         frame.is_some() && !finished,
     );
@@ -1191,7 +1175,7 @@ fn set_native_frame(
         unsafe {
             let rect = objc2_foundation::NSRect::new(
                 objc2_foundation::NSPoint::new(frame.left, ns_y),
-                objc2_foundation::NSSize::new(frame.history + frame.translation, height),
+                objc2_foundation::NSSize::new(frame.clipboard + frame.right, height),
             );
             let _: () = objc2::msg_send![native, setFrame: rect, display: false];
         }
@@ -1234,8 +1218,8 @@ fn set_panel_frame_ns_y(
         if state.motion_revision != revision {
             return Ok(false);
         }
-        state.history_extent = frame.history;
-        state.translation_extent = frame.translation;
+        state.clipboard_extent = frame.clipboard;
+        state.right_extent = frame.right;
         state.motion_velocity = velocity;
     }
     let state = app.state::<AppState>().windows.lock().unwrap().clone();
@@ -1271,16 +1255,17 @@ fn advance_motion(
 ) -> Result<bool, String> {
     let (mut frame, mut speed) = start.spring(target, velocity, elapsed);
     let state = app.state::<AppState>().windows.lock().unwrap().clone();
-    let anchor = frame.left + frame.history;
-    if frame.history < 0.0 || frame.history > state.history_width {
-        frame.history = frame.history.clamp(0.0, state.history_width);
-        speed.left += speed.history;
-        speed.history = 0.0;
+    let anchor = frame.left + frame.clipboard;
+    if frame.clipboard < 0.0 || frame.clipboard > state.clipboard_width {
+        frame.clipboard = frame.clipboard.clamp(0.0, state.clipboard_width);
+        speed.left += speed.clipboard;
+        speed.clipboard = 0.0;
     }
-    frame.left = anchor - frame.history;
-    if frame.translation < 0.0 || frame.translation > state.translation_width {
-        frame.translation = frame.translation.clamp(0.0, state.translation_width);
-        speed.translation = 0.0;
+    frame.left = anchor - frame.clipboard;
+    let right_limit = target.right.max(start.right);
+    if frame.right < 0.0 || frame.right > right_limit {
+        frame.right = frame.right.clamp(0.0, right_limit);
+        speed.right = 0.0;
     }
     let finished = frame.settled(target, speed);
     set_panel_frame_ns_y(
@@ -1311,41 +1296,46 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
         .map_err(|_| "window_geometry")?
         .to_logical::<f64>(scale);
     let size = translation_window_size(&window)?;
+    let monitor_work = window
+        .current_monitor()
+        .map_err(|_| "window_geometry")?
+        .map(|monitor| {
+            let work = monitor.work_area();
+            (
+                work.position.to_logical::<f64>(scale),
+                work.size.to_logical::<f64>(scale),
+            )
+        });
     let (start, velocity, mut target, revision, visible) = {
         let state = app.state::<AppState>();
         let mut state = state.windows.lock().unwrap();
         state.motion_revision += 1;
-        if !state.translation_visible && !state.history_visible {
+        if !state.any_visible() {
             state.motion_anchor = None;
             state.motion_velocity = PanelFrame::default();
             drop(state);
             window.hide().map_err(|_| "window_hide")?;
             return emit_state(app);
         }
-        let initial_anchor = native_translation_frame(&window)?.origin.x + state.history_extent;
+        if let Some((_, available)) = monitor_work {
+            state.clamp_right_panes_to_available(available.width);
+        }
+        let initial_anchor = native_translation_frame(&window)?.origin.x + state.clipboard_extent;
         let anchor = *state.motion_anchor.get_or_insert(initial_anchor);
         let start = PanelFrame {
             left: native_translation_frame(&window)?.origin.x,
-            history: state.history_extent,
-            translation: state.translation_extent,
+            clipboard: state.clipboard_extent,
+            right: state.right_extent,
+        };
+        let target_clipboard = if state.clipboard_visible {
+            state.clipboard_width
+        } else {
+            0.0
         };
         let target = PanelFrame {
-            left: anchor
-                - if state.history_visible {
-                    state.history_width
-                } else {
-                    0.0
-                },
-            history: if state.history_visible {
-                state.history_width
-            } else {
-                0.0
-            },
-            translation: if state.translation_visible {
-                state.translation_width
-            } else {
-                0.0
-            },
+            left: anchor - target_clipboard,
+            clipboard: target_clipboard,
+            right: state.right_target_width(),
         };
         (
             start,
@@ -1372,7 +1362,7 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
                 height = height.min(anchor.visible_frame.height);
                 if let Some(origin) = nami::model::compute_window_origin(
                     mode,
-                    target.history + target.translation,
+                    target.clipboard + target.right,
                     height,
                     anchor,
                 ) {
@@ -1385,13 +1375,10 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     let ns_y = if let Some(ns_y) = ns_y_override {
         ns_y
     } else {
-        if let Some(monitor) = window.current_monitor().map_err(|_| "window_geometry")? {
-            let work = monitor.work_area();
-            let origin = work.position.to_logical::<f64>(scale);
-            let available = work.size.to_logical::<f64>(scale);
+        if let Some((origin, available)) = monitor_work {
             target.left = target.left.clamp(
                 origin.x,
-                (origin.x + available.width - target.history - target.translation).max(origin.x),
+                (origin.x + available.width - target.clipboard - target.right).max(origin.x),
             );
             height = height.min(available.height);
             top = top.clamp(
@@ -1412,8 +1399,8 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     if !animated
         || !visible
         || platform::reduce_motion()
-        || ((start.history - target.history).abs() < 0.5
-            && (start.translation - target.translation).abs() < 0.5
+        || ((start.clipboard - target.clipboard).abs() < 0.5
+            && (start.right - target.right).abs() < 0.5
             && (start.left - target.left).abs() < 0.5)
     {
         set_panel_frame_ns_y(
@@ -1447,7 +1434,7 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
     let period = std::time::Duration::from_secs_f64(1.0 / refresh_rate);
     let now = std::time::Instant::now();
     let detail_only =
-        start.history == target.history && (start.translation - target.translation).abs() >= 0.5;
+        start.clipboard == target.clipboard && (start.right - target.right).abs() >= 0.5;
     let (began, next_tick) = if detail_only {
         // Present the first detail frame before publishing selection and window changes.
         if !advance_motion(
@@ -1559,8 +1546,8 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
 
 fn sync_translation_level(app: &AppHandle, window: &Window) -> Result<(), String> {
     let state = app.state::<AppState>().windows.lock().unwrap().clone();
-    let pinned = (state.translation_visible && state.translation_pinned)
-        || (state.history_visible && state.history_pinned);
+    let pinned = (state.standalone_translation_visible && state.translation_pinned)
+        || (state.clipboard_visible && state.clipboard_pinned);
     if window.is_always_on_top().map_err(|_| "window_pin")? != pinned {
         window.set_always_on_top(pinned).map_err(|_| "window_pin")?;
     }
@@ -1574,70 +1561,40 @@ pub fn update_translation_level(app: &AppHandle) -> Result<(), String> {
     emit_state(app)
 }
 
-pub fn set_record_view(app: &AppHandle, view: &str) -> Result<(), String> {
-    let view = match view {
-        "clipboard" => RecordView::Clipboard,
-        "translation" => RecordView::Translation,
-        _ => return Err("invalid_argument".into()),
-    };
-    let current = app.state::<AppState>().windows.lock().unwrap().record_view;
-    if current == view {
-        return Ok(());
-    }
-    if crate::records_runtime::defer_navigation(
-        app,
-        if view == RecordView::Clipboard {
-            "view:clipboard"
-        } else {
-            "view:translation"
-        },
-    )? {
-        return Ok(());
-    }
-    {
-        let state = app.state::<AppState>();
-        let mut windows = state.windows.lock().unwrap();
-        windows.set_record_view(view);
-        windows.records_focus += 1;
-    }
-    apply_translation(app)?;
-    if let Some(view) = app.get_webview("clipboard") {
-        view.set_focus().map_err(|_| "window_focus")?;
-    }
-    Ok(())
-}
-
 pub fn toggle_record_details(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
-    let restored = {
+    {
         let state = app.state::<AppState>();
         let mut regions = state.windows.lock().unwrap();
         if let Some(record_id) = record_id {
-            if regions.record_view != RecordView::Clipboard
-                || !regions.history_visible
+            if !regions.clipboard_visible
                 || regions.records_editor_open
-                || state
-                    .records_dirty
-                    .load(std::sync::atomic::Ordering::SeqCst)
+                || state.records_dirty.load(Ordering::SeqCst)
             {
                 return Err("cancelled".into());
             }
             regions.preview_clipboard_record(record_id);
         } else {
-            regions.toggle_record_details();
+            regions.toggle_clipboard_details();
         }
-        if regions.translation_visible && regions.record_view == RecordView::Translation {
-            state
-                .history
-                .lock()
-                .unwrap()
-                .restore_visual_selection_revision()
-        } else {
-            None
-        }
-    };
-    if let Some((revision, selected_id)) = restored {
-        crate::history_runtime::publish_visual_selection(app, revision, selected_id)?;
     }
+    apply_translation(app)
+}
+
+pub fn open_clipboard_translation(app: &AppHandle, record_id: String) -> Result<(), String> {
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .open_clipboard_translation(record_id);
+    apply_translation(app)
+}
+
+pub fn close_clipboard_translation(app: &AppHandle) -> Result<(), String> {
+    app.state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .close_clipboard_translation();
     apply_translation(app)
 }
 
@@ -1686,9 +1643,9 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
             let state = app.state::<AppState>();
             let mut regions = state.windows.lock().unwrap();
             if target == "translation" {
-                regions.summon_translation();
+                regions.summon_standalone_translation();
             } else {
-                regions.set_record_view(RecordView::Clipboard);
+                regions.show_clipboard();
                 regions.records_focus += 1;
             }
         }
@@ -1706,7 +1663,7 @@ fn show_entry(app: &AppHandle, target: &str, capture: bool) -> Result<(), String
 pub fn clipboard_has_focus(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     let regions = state.windows.lock().unwrap();
-    if !regions.history_visible || regions.record_view != RecordView::Clipboard {
+    if !regions.clipboard_visible {
         return false;
     }
     drop(regions);
@@ -1747,7 +1704,7 @@ pub fn reveal_clipboard_failure(app: &AppHandle) -> Result<(), String> {
         .windows
         .lock()
         .unwrap()
-        .set_record_view(RecordView::Clipboard);
+        .show_clipboard();
     apply_translation(app)?;
     if let Some(window) = app.get_window("translation") {
         reveal_without_focus(&window)?;
@@ -1780,21 +1737,13 @@ pub fn reveal_without_focus(window: &Window) -> Result<(), String> {
 
 pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
     match region {
-        "translation" | "history" | "clipboard" => {
+        "translation" | "clipboard" => {
             if region == "clipboard" {
                 app.state::<AppState>()
                     .operation
                     .fetch_add(1, Ordering::SeqCst);
             }
-            {
-                let state = app.state::<AppState>();
-                let mut regions = state.windows.lock().unwrap();
-                if region == "history" {
-                    regions.history_visible = false;
-                } else {
-                    regions.dismiss();
-                }
-            }
+            app.state::<AppState>().windows.lock().unwrap().dismiss();
             apply_translation(app)
         }
         "settings" => {
@@ -1813,36 +1762,39 @@ mod stage_layout_tests {
 
     fn geometry(
         mode: StageMode,
-        history_extent: f64,
-        history_width: f64,
-        translation_width: f64,
-        history_visible: bool,
-        translation_visible: bool,
+        clipboard_extent: f64,
+        clipboard_width: f64,
+        right_width: f64,
+        clipboard_visible: bool,
+        right_visible: bool,
     ) -> StageGeometry {
         StageGeometry {
             mode,
-            history_extent,
-            history_width,
-            translation_width,
-            history_visible,
-            translation_visible,
-            translation_content: true,
+            clipboard_extent,
+            clipboard_width,
+            right_width,
+            clipboard_visible,
+            right_visible,
+            standalone_translation: false,
         }
     }
 
     #[test]
-    fn clipboard_details_keep_the_same_stage_frames_without_translation_controls() {
-        let mut state = WindowState {
-            history_visible: true,
-            history_extent: 360.0,
-            ..Default::default()
-        };
-        let clipboard = StageGeometry::explicit(&state, state.history_extent);
-        assert!(!clipboard.translation_content);
-        state.record_view = RecordView::Translation;
-        let translation = StageGeometry::explicit(&state, state.history_extent);
-        assert!(translation.translation_content);
-        assert_eq!(clipboard.frames(1280.0), translation.frames(1280.0));
+    fn clipboard_modes_hide_standalone_translation_chrome() {
+        let mut state = WindowState::default();
+        state.show_clipboard();
+        state.toggle_clipboard_details();
+        state.open_clipboard_translation("rec-1".into());
+        let attached =
+            StageGeometry::explicit(&state, state.clipboard_width, state.right_target_width());
+        assert!(!attached.standalone_translation);
+        assert!(attached.clipboard_visible && attached.right_visible);
+        assert_eq!(attached.right_width, 920.0);
+
+        state.summon_standalone_translation();
+        let standalone = StageGeometry::explicit(&state, 0.0, state.right_target_width());
+        assert!(standalone.standalone_translation);
+        assert!(!standalone.clipboard_visible && standalone.right_visible);
     }
 
     #[test]

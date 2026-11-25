@@ -113,7 +113,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="general-shortcut-heading">
         {translationRow('focusSearch')}
-        {(['switchView', 'preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
+        {(['preview', 'copyRecord', 'favorite', 'pin', 'note', 'delete'] as const).map(localRow)}
         {translationRow('pin')}
         {translationRow('showShortcuts')}
         {translationRow('openSettings')}
@@ -143,7 +143,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
         <button type="button" className="settings-action" disabled={!canManageClipboard || restoring || savingClipboard} onClick={() => void restore(false)}>{t('restoreDefaultHotKeys')}</button>
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="translation-shortcuts-heading">
-        {(['selection', 'openTranslation', 'translate', 'toggleHistory', 'copyPrimary', 'copySecondary'] as const).map(translationRow)}
+        {(['selection', 'openTranslation', 'translate', 'copyPrimary', 'copySecondary'] as const).map(translationRow)}
       </div>
     </section>
     {translationError && <SettingsDialog title={t('shortcutUnavailable')} description={translationError} onClose={() => setTranslationError(null)}>

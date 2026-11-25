@@ -187,3 +187,29 @@
 .clipboard-detail[data-qr-view=true] .clipboard-detail-content { flex: 1 0 auto; display: flex; flex-direction: column; }
 .clipboard-qr-preview { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; padding: 14px 8px; }
 .clipboard-qr-svg { display: block; width: min(210px, 100%); height: auto; border-radius: 10px; box-shadow: 0 2px 12px rgb(0 0 0 / .14); }
+
+.clipboard-right-panes { display: flex; width: 100%; height: 100%; min-width: 0; position: relative; }
+.clipboard-right-panes[hidden], .clipboard-detail-slot[hidden] { display: none; }
+.clipboard-detail-slot { flex: 1 1 0; min-width: 0; height: 100%; display: flex; }
+.clipboard-translate-slot { flex: 1 1 0; min-width: 0; height: 100%; display: flex; }
+.clipboard-right-panes.split > .clipboard-detail-slot { flex: 0 0 clamp(320px, var(--clipboard-detail-width, 480px), max(320px, calc(100% - 360px))); }
+.clipboard-right-panes.split > .clipboard-translate-slot { flex: 1 1 0; min-width: 0; }
+.clipboard-pane-divider { position: relative; flex: 0 0 8px; margin: 0 -4px; z-index: 2; align-self: center; height: 94%; cursor: col-resize; touch-action: none; }
+.clipboard-pane-divider::before { content: ''; position: absolute; left: 3.5px; top: 0; width: 1px; height: 100%; background: linear-gradient(to bottom, transparent, hsl(var(--foreground) / .28) 25%, hsl(var(--foreground) / .28) 75%, transparent); }
+.clipboard-pane-divider:focus-visible { outline: 1px solid hsl(var(--foreground) / .25); outline-offset: 0; border-radius: 4px; }
+
+.clipboard-translate-pane.history-panel { position: relative; inset: auto; width: 100%; min-width: 0; }
+.clipboard-translate-tabs { min-width: 0; max-width: 100%; overflow: hidden; }
+.clipboard-translate-tabs button { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clipboard-translate-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 4px; overflow: hidden; }
+.clipboard-translate-pane .history-viewport { position: relative; inset: auto; flex: 1; }
+.clipboard-translate-pane .history-list { padding: 8px 14px; }
+.clipboard-translate-pane .history-items { margin: 0; padding: 0; clip-path: none; }
+.clipboard-translate-result { min-width: 0; }
+.clipboard-translate-result .translation-status { position: static; inset: auto; padding: 16px 8px; font-size: 13px; }
+.clipboard-translate-result .translation-status.with-results { padding: 10px 0 0; justify-content: flex-start; text-align: left; }
+.clipboard-translate-empty { padding: 16px 0; color: var(--history-secondary); font-size: 12px; }
+
+.clipboard-panel .history-row[data-translating=true] .history-row-actions { opacity: 1; visibility: visible; transform: translateX(0); }
+.clipboard-panel .history-row[data-translating=true] time { opacity: 0; }
+.clipboard-panel .history-row[data-translating=true] .history-languages { margin-right: calc(var(--history-actions-width) - 36px); -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); }

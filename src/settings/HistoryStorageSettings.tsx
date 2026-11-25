@@ -25,7 +25,7 @@ function storageSize(bytes: number, locale: string) {
   }
 }
 
-export function HistoryStorageSettings({ t, available, view, locale }: { t: Translate; available: boolean; view: 'clipboard' | 'translation'; locale: string }) {
+export function HistoryStorageSettings({ t, available, locale }: { t: Translate; available: boolean; locale: string }) {
   const id = useId();
   const [openPicker, setOpenPicker] = useState<'age' | 'storage' | null>(null);
   const [storage, setStorage] = useState<Storage>();
@@ -41,17 +41,17 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
   const limit = Number(draft);
   const canSave = draft !== null && /^\d+$/.test(draft) && limit >= 1 && limit <= 1_000_000 && limit !== storage?.limit;
   const number = new Intl.NumberFormat(locale);
-  const storageHelp = t(view === 'clipboard' ? 'clipboardStorageUsedHelp' : 'translationStorageUsedHelp');
+  const storageHelp = t('clipboardStorageUsedHelp');
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const reload = () => refreshStorage((value) => value + 1);
   useEffect(() => {
     if (!available) return;
     let current = true;
-    void invoke<Storage>('records_storage_info', { view }).then((value) => {
+    void invoke<Storage>('records_storage_info').then((value) => {
       if (current) { setStorage(value); setStorageError(false); }
     }, () => { if (current) setStorageError(true); });
     return () => { current = false; };
-  }, [available, view, refresh]);
+  }, [available, refresh]);
 
   async function perform(action: () => Promise<void>) {
     if (pending.current) return;
@@ -67,7 +67,7 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
   }
 
   async function apply({ policy, token, recentSince }: Preview & { policy: Policy | null }, selected?: number) {
-    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { view, policy, token, ...(selected === undefined ? {} : { categories: selected }), ...(recentSince === undefined ? {} : { recentSince }) });
+    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { policy, token, ...(selected === undefined ? {} : { categories: selected }), ...(recentSince === undefined ? {} : { recentSince }) });
     if (policy) {
       setStorage((previous) => previous && { bytes: previous.bytes, ...policy });
       setDraft(null);
@@ -79,7 +79,7 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
   function preview(policy: Policy | null, recent = false) {
     if (!available || cleanup) return;
     void perform(async () => {
-      const result = await invoke<Preview>('records_cleanup_preview', { view, policy, ...(recent ? { recent: true } : {}) });
+      const result = await invoke<Preview>('records_cleanup_preview', { policy, ...(recent ? { recent: true } : {}) });
       if (!mounted.current) return;
       const candidate = { ...result, policy };
       if (recent && result.recentSince === undefined) throw new Error();
@@ -102,9 +102,9 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
     });
   }
 
-  return <section aria-labelledby={`${view}-storage-heading`}>
+  return <section aria-labelledby="clipboard-storage-heading">
     <div className="settings-section-heading clipboard-section-heading">
-      <h2 id={`${view}-storage-heading`}>{t('clipboardHistoryStorage')}</h2>
+      <h2 id="clipboard-storage-heading">{t('clipboardHistoryStorage')}</h2>
       <button type="button" className="settings-action clipboard-clear-records" aria-haspopup="dialog" disabled={!available} aria-disabled={busy || undefined}
         onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null); }}>{t('clipboardClearRecords')}</button>
     </div>
@@ -127,44 +127,42 @@ export function HistoryStorageSettings({ t, available, view, locale }: { t: Tran
           {canSave && <button type="submit" className="settings-action" aria-disabled={busy || undefined}>{t('shortcutManualSave')}</button>}
         </div> : <span className="settings-badge">—</span>}
       </form>
-      {view === 'clipboard' && <>
-        <div className="settings-field">
-          <label className="settings-field-content" htmlFor={`${id}-retention`}>{t('clipboardHistoryAge')}</label>
-          {available && storage ? <SearchableDropdown id={`${id}-retention`} label={t('clipboardHistoryAge')} value={String(storage.maxAgeDays ?? 0)}
-            items={['0', '1', '7', '30'].map((code) => ({ code, name: code === '0' ? t('clipboardHistoryNoExpiry') : code === '1' ? t('clipboardHistoryOneDay') : t('clipboardHistoryDays').replace('{count}', number.format(Number(code))) }))}
-            open={openPicker === 'age'} onOpenChange={(next) => setOpenPicker(next ? 'age' : null)} onChange={(code) => {
-              const days = Number(code);
-              if (days !== (storage.maxAgeDays ?? 0)) {
-                preview({
-                  limit: storage.limit,
-                  ...(days ? { maxAgeDays: days } : {}),
-                  ...(storage.maxStorageMb ? { maxStorageMb: storage.maxStorageMb } : {}),
-                });
-              }
-            }}
-            t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
-        </div>
-        <div className="settings-field">
-          <label className="settings-field-content" htmlFor={`${id}-storage-limit`}>{t('clipboardStorageLimit')}</label>
-          {available && storage ? <SearchableDropdown id={`${id}-storage-limit`} label={t('clipboardStorageLimit')} value={String(storage.maxStorageMb ?? 0)}
-            items={storageLimitOptions.map(({ code, label }) => ({ code, name: label ?? t('clipboardStorageNoLimit') }))}
-            open={openPicker === 'storage'} onOpenChange={(next) => setOpenPicker(next ? 'storage' : null)} onChange={(code) => {
-              const mb = Number(code);
-              if (mb !== (storage.maxStorageMb ?? 0)) {
-                preview({
-                  limit: storage.limit,
-                  ...(storage.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}),
-                  ...(mb ? { maxStorageMb: mb } : {}),
-                });
-              }
-            }}
-            t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
-        </div>
-        <div className="settings-field">
-          <span className="settings-field-content">{t('clipboardCleanupRecentScope')}</span>
-          <button type="button" className="settings-action" aria-haspopup="dialog" disabled={!available} aria-disabled={busy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null, true); }}>{t('clipboardCleanupReview')}</button>
-        </div>
-      </>}
+      <div className="settings-field">
+        <label className="settings-field-content" htmlFor={`${id}-retention`}>{t('clipboardHistoryAge')}</label>
+        {available && storage ? <SearchableDropdown id={`${id}-retention`} label={t('clipboardHistoryAge')} value={String(storage.maxAgeDays ?? 0)}
+          items={['0', '1', '7', '30'].map((code) => ({ code, name: code === '0' ? t('clipboardHistoryNoExpiry') : code === '1' ? t('clipboardHistoryOneDay') : t('clipboardHistoryDays').replace('{count}', number.format(Number(code))) }))}
+          open={openPicker === 'age'} onOpenChange={(next) => setOpenPicker(next ? 'age' : null)} onChange={(code) => {
+            const days = Number(code);
+            if (days !== (storage.maxAgeDays ?? 0)) {
+              preview({
+                limit: storage.limit,
+                ...(days ? { maxAgeDays: days } : {}),
+                ...(storage.maxStorageMb ? { maxStorageMb: storage.maxStorageMb } : {}),
+              });
+            }
+          }}
+          t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
+      </div>
+      <div className="settings-field">
+        <label className="settings-field-content" htmlFor={`${id}-storage-limit`}>{t('clipboardStorageLimit')}</label>
+        {available && storage ? <SearchableDropdown id={`${id}-storage-limit`} label={t('clipboardStorageLimit')} value={String(storage.maxStorageMb ?? 0)}
+          items={storageLimitOptions.map(({ code, label }) => ({ code, name: label ?? t('clipboardStorageNoLimit') }))}
+          open={openPicker === 'storage'} onOpenChange={(next) => setOpenPicker(next ? 'storage' : null)} onChange={(code) => {
+            const mb = Number(code);
+            if (mb !== (storage.maxStorageMb ?? 0)) {
+              preview({
+                limit: storage.limit,
+                ...(storage.maxAgeDays ? { maxAgeDays: storage.maxAgeDays } : {}),
+                ...(mb ? { maxStorageMb: mb } : {}),
+              });
+            }
+          }}
+          t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
+      </div>
+      <div className="settings-field">
+        <span className="settings-field-content">{t('clipboardCleanupRecentScope')}</span>
+        <button type="button" className="settings-action" aria-haspopup="dialog" disabled={!available} aria-disabled={busy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null, true); }}>{t('clipboardCleanupReview')}</button>
+      </div>
       <div className="settings-field">
         <span className="settings-field-content">{t('clipboardStorageUsed')}</span>
         <div className="clipboard-storage-value">

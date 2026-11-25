@@ -4,14 +4,13 @@ mod clipboard_preferences;
 mod clipboard_runtime;
 mod clipboard_text;
 mod commands;
-mod history_runtime;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
 #[cfg(target_os = "macos")]
 mod shortcut_capture;
 use nami::{
     clipboard::RecordingTypes,
-    database, history, model,
+    database, model,
     shortcuts::{self, KeyBinding},
     translation,
 };
@@ -23,11 +22,12 @@ mod windows;
 #[path = "portable_windows.rs"]
 mod windows;
 
-use model::WindowState;
+use model::{TranslationOutput, TranslationScope, WindowState};
+use serde::Serialize;
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU64},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     Mutex,
 };
 use tauri::{
@@ -38,6 +38,39 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 mod records_runtime;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardTranslationContext {
+    pub record_id: String,
+    pub text: String,
+    pub source_app: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct TranslationSlot {
+    pub(crate) revision: AtomicU64,
+    pub(crate) pending: Mutex<Option<commands::PendingTranslation>>,
+    pub(crate) completed: Mutex<Option<TranslationOutput>>,
+}
+
+impl TranslationSlot {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn bump_revision(&self) -> u64 {
+        let next = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        self.pending.lock().unwrap().take();
+        next
+    }
+
+    pub(crate) fn clear(&self) {
+        self.bump_revision();
+        self.completed.lock().unwrap().take();
+    }
+}
 
 pub struct AppState {
     records_dirty: AtomicBool,
@@ -54,14 +87,9 @@ pub struct AppState {
     image_text: tokio::sync::Mutex<clipboard_text::ImageTextCache>,
     image_text_operation: AtomicU64,
     image_index_jobs: Mutex<clipboard_text::IndexJobs>,
-    clipboard_translation: Mutex<Option<selection::SelectionContext>>,
-    history: Mutex<history::HistoryStore>,
+    clipboard_translation: Mutex<Option<ClipboardTranslationContext>>,
     database: Mutex<Option<database::HistoryDatabase>>,
     storage_error: Mutex<Option<String>>,
-    history_writes: tokio::sync::Mutex<()>,
-    history_page: Mutex<history_runtime::PageState>,
-    history_query_revision: AtomicU64,
-    history_loading_more: AtomicBool,
     windows: Mutex<WindowState>,
     window_position_mode: Mutex<model::WindowPositionMode>,
     pending_window_anchor: Mutex<Option<model::PlacementAnchor>>,
@@ -69,8 +97,8 @@ pub struct AppState {
     shortcut_errors: Mutex<Vec<String>>,
     target: Mutex<Option<platform::Target>>,
     operation: AtomicU64,
-    translation_revision: AtomicU64,
-    pending_translation: Mutex<Option<commands::PendingTranslation>>,
+    standalone_translation: TranslationSlot,
+    clipboard_side_translation: TranslationSlot,
     translation_engine: Mutex<String>,
     translation_preferences: Mutex<translation::Preferences>,
     shortcuts_suspended: AtomicBool,
@@ -80,7 +108,6 @@ pub struct AppState {
     selection: Mutex<Option<selection::SelectionContext>>,
     selection_presentation: Mutex<Option<u64>>,
     selection_target: Mutex<Option<platform::Target>>,
-    selection_source: Mutex<Option<serde_json::Value>>,
     selection_revision: AtomicU64,
     selection_busy: AtomicBool,
     selection_copy_busy: AtomicBool,
@@ -88,12 +115,21 @@ pub struct AppState {
     pending_backup_import: Mutex<Option<backup_runtime::PendingBackupImport>>,
 }
 
+impl AppState {
+    pub(crate) fn translation_slot(&self, scope: TranslationScope) -> &TranslationSlot {
+        match scope {
+            TranslationScope::Standalone => &self.standalone_translation,
+            TranslationScope::Clipboard => &self.clipboard_side_translation,
+        }
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         let mut windows = WindowState::default();
         if let Some(width) = platform::history_width() {
-            windows.history_width = width;
-            windows.history_width_initialized = true;
+            windows.clipboard_width = width;
+            windows.clipboard_width_initialized = true;
         }
         Self {
             records_dirty: AtomicBool::new(false),
@@ -114,13 +150,8 @@ impl Default for AppState {
             image_text_operation: AtomicU64::new(0),
             image_index_jobs: Mutex::default(),
             clipboard_translation: Mutex::new(None),
-            history: Mutex::new(history::HistoryStore::new(model::initial_history_records())),
             database: Mutex::new(None),
             storage_error: Mutex::new(None),
-            history_writes: tokio::sync::Mutex::new(()),
-            history_page: Mutex::new(history_runtime::PageState::default()),
-            history_query_revision: AtomicU64::new(0),
-            history_loading_more: AtomicBool::new(false),
             windows: Mutex::new(windows),
             window_position_mode: Mutex::new(model::WindowPositionMode::default()),
             pending_window_anchor: Mutex::new(None),
@@ -128,8 +159,8 @@ impl Default for AppState {
             shortcut_errors: Mutex::new(Vec::new()),
             target: Mutex::new(None),
             operation: AtomicU64::new(0),
-            translation_revision: AtomicU64::new(0),
-            pending_translation: Mutex::new(None),
+            standalone_translation: TranslationSlot::default(),
+            clipboard_side_translation: TranslationSlot::default(),
             translation_engine: Mutex::new("edge".into()),
             translation_preferences: Mutex::new(translation::Preferences::defaults(
                 platform::capabilities().primary_modifier,
@@ -141,7 +172,6 @@ impl Default for AppState {
             selection: Mutex::new(None),
             selection_presentation: Mutex::new(None),
             selection_target: Mutex::new(None),
-            selection_source: Mutex::new(None),
             selection_revision: AtomicU64::new(0),
             selection_busy: AtomicBool::new(false),
             selection_copy_busy: AtomicBool::new(false),
@@ -246,13 +276,13 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
     let suspended = state
         .shortcuts_suspended
         .load(std::sync::atomic::Ordering::SeqCst);
-    use shortcuts::ShortcutAction::{OpenTranslation, Selection, ToggleHistory};
+    use shortcuts::ShortcutAction::{OpenTranslation, Selection};
     let previous = state.registered_shortcuts.lock().unwrap().clone();
     let mut desired = Vec::new();
     if !suspended {
         desired.extend(clipboard_shortcut(&state));
         let preferences = state.translation_preferences.lock().unwrap();
-        for shortcut in [Selection, OpenTranslation, ToggleHistory]
+        for shortcut in [Selection, OpenTranslation]
             .into_iter()
             .filter_map(|action| preferences.global_binding(action))
             .filter_map(|binding| binding_shortcut(binding).ok())
@@ -329,13 +359,11 @@ fn main() {
                         {
                             return;
                         }
-                        use shortcuts::ShortcutAction::{
-                            OpenTranslation, Selection, ToggleHistory,
-                        };
+                        use shortcuts::ShortcutAction::{OpenTranslation, Selection};
                         let matches = |candidate: &Shortcut| {
                             candidate.key == key && candidate.mods == modifiers
                         };
-                        let (selection, open, history) = {
+                        let (selection, open) = {
                             let prefs = state.translation_preferences.lock().unwrap();
                             let matched = |action| {
                                 prefs
@@ -344,11 +372,7 @@ fn main() {
                                     .as_ref()
                                     .is_some_and(matches)
                             };
-                            (
-                                matched(Selection),
-                                matched(OpenTranslation),
-                                matched(ToggleHistory),
-                            )
+                            (matched(Selection), matched(OpenTranslation))
                         };
                         if contextual
                             && pressed
@@ -383,8 +407,6 @@ fn main() {
                             }
                         } else if open && pressed {
                             selection::show_blank(&owned)
-                        } else if history && !pressed {
-                            records_runtime::toggle_translation_history(&owned)
                         } else {
                             Ok(())
                         };
@@ -403,6 +425,7 @@ fn main() {
             commands::app_snapshot,
             commands::translation_run,
             commands::translation_cancel,
+            commands::translation_copy,
             commands::translation_engine_set,
             commands::translation_preferences_set,
             commands::translation_shortcut_set,
@@ -413,24 +436,17 @@ fn main() {
             commands::window_show,
             commands::window_hide,
             commands::window_pin,
-            commands::records_view_set,
             commands::records_details_toggle,
             commands::clipboard_details_select,
             commands::clipboard_note_open,
             commands::records_editor_set,
             commands::records_navigation_resolve,
-            commands::history_visibility_set,
-            commands::history_toggle,
-            commands::history_width_set,
+            commands::clipboard_width_set,
+            commands::clipboard_detail_width_set,
+            commands::clipboard_translation_close,
+            commands::clipboard_translation_clear_record,
             commands::translation_chrome_update,
-            commands::history_sample_select,
-            commands::history_snapshot,
-            commands::history_query,
-            commands::history_load_more,
-            commands::history_record_update,
-            commands::history_record_note,
             commands::translation_columns_set,
-            commands::translation_sample_copy,
             commands::clipboard_record_use,
             commands::clipboard_query,
             commands::clipboard_record_detail,
@@ -494,12 +510,7 @@ fn main() {
             #[cfg(feature = "ui-tests")]
             if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
                 let database = std::thread::spawn(|| -> Result<_, String> {
-                    let mut database =
-                        database::HistoryDatabase::open(std::path::Path::new(":memory:"))?;
-                    for record in model::initial_history_records() {
-                        database.insert(&record, "edge", || true)?;
-                    }
-                    Ok(database)
+                    database::HistoryDatabase::open(std::path::Path::new(":memory:"))
                 })
                 .join()
                 .map_err(|_| std::io::Error::other("storage_worker"))?
@@ -531,11 +542,6 @@ fn main() {
                 }
                 let mut database =
                     database::HistoryDatabase::open(&directory.join("nami.sqlite3"))?;
-                let page = database.page(
-                    &database::HistoryQuery::default(),
-                    None,
-                    database::PAGE_SIZE,
-                )?;
                 let ui_locale = parse_ui_locale(database.preference("ui_locale")?.as_deref());
                 let window_position_mode = model::WindowPositionMode::parse(
                     database.preference("window_position_mode")?.as_deref(),
@@ -579,7 +585,6 @@ fn main() {
                     );
                 Ok((
                     database,
-                    page,
                     ui_locale,
                     window_position_mode,
                     capture,
@@ -595,7 +600,6 @@ fn main() {
             match loaded {
                 Ok((
                     database,
-                    page,
                     ui_locale,
                     window_position_mode,
                     capture,
@@ -625,19 +629,6 @@ fn main() {
                         std::sync::atomic::Ordering::SeqCst,
                     );
                     *app.state::<AppState>().database.lock().unwrap() = Some(database);
-                    {
-                        let state = app.state::<AppState>();
-                        let mut paging = state.history_page.lock().unwrap();
-                        paging.cursor = page.cursor.clone();
-                        paging
-                            .cache
-                            .insert(database::HistoryQuery::default(), page.clone());
-                    }
-                    app.state::<AppState>()
-                        .history
-                        .lock()
-                        .unwrap()
-                        .apply_page(page, true);
                     let app = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         let state = app.state::<AppState>();

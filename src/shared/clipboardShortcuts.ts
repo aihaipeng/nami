@@ -3,13 +3,13 @@ import type { ClipboardSearchOptions } from './clipboardSearch';
 import type { MessageKey } from './i18n';
 import { bindingFromEvent, editsText, globalTranslationActions, recordWindowActions, sameBinding, type KeyBinding } from './shortcuts';
 
-export const sharedRecordActions = ['switchView', 'preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
+export const sharedRecordActions = ['preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
 export const clipboardOnlyActions = ['openTarget', 'ocr', 'translate', 'pastePlain', 'saveImage'] as const;
 export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyActions] as const;
 export type ClipboardRecordAction = typeof clipboardRecordActions[number];
 type RecordShortcut = { binding: KeyBinding | null; enabled: boolean };
 export type RecordsOpenFocus = 'search' | 'list';
-export type ClipboardControls = { search?: ClipboardSearchOptions; recordsOpenFocus?: RecordsOpenFocus; previewLines?: Record<'clipboard' | 'translation', number>; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
+export type ClipboardControls = { search?: ClipboardSearchOptions; recordsOpenFocus?: RecordsOpenFocus; previewLines?: { clipboard: number }; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
 
 export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
   const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = ['alt']) => ({ enabled: true, binding: { code, modifiers } });
@@ -18,7 +18,7 @@ export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
     pastePlain: shortcut('Enter', [primary]), saveImage: shortcut('KeyS', [primary]),
     preview: shortcut('KeyY', [primary]),
     note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
-    switchView: shortcut('Tab', []), copyRecord: shortcut('KeyC', [primary, 'shift']),
+    copyRecord: shortcut('KeyC', [primary, 'shift']),
     favorite: shortcut('KeyF'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
   };
 }
@@ -30,7 +30,7 @@ export function sameClipboardBinding(left: KeyBinding, right: KeyBinding) {
 export const clipboardShortcutLabels = {
   pastePlain: 'clipboardShortcutPastePlain', saveImage: 'clipboardShortcutSaveImage',
   openTarget: 'clipboardShortcutOpenTarget', preview: 'clipboardShortcutPreview', note: 'toggleRecordNote', ocr: 'clipboardShortcutOcr', translate: 'translation',
-  switchView: 'switchRecordView', copyRecord: 'copy',
+  copyRecord: 'copy',
   favorite: 'clipboardShortcutFavorite', pin: 'clipboardShortcutPin', delete: 'clipboardShortcutDelete',
 } as const satisfies Record<ClipboardRecordAction, MessageKey>;
 
@@ -40,7 +40,7 @@ export function clipboardGlobalBindings(snapshot: AppSnapshot, includeTranslatio
   const { translationPreferences: preferences } = snapshot;
   return [
     snapshot.clipboardShortcutEnabled ? snapshot.clipboardBinding : null,
-    ...([...(includeTranslationLaunch ? globalTranslationActions : []), 'toggleHistory', 'openSettings'] as const)
+    ...([...(includeTranslationLaunch ? globalTranslationActions : []), 'openSettings'] as const)
       .filter((action) => translationShortcutEnabled(preferences, action)).map((action) => preferences.shortcuts[action]),
   ];
 }
@@ -60,7 +60,7 @@ export function clipboardPanelShortcuts(snapshot: AppSnapshot, actions: readonly
 }
 
 export function clipboardShortcutAvailable(snapshot: AppSnapshot, native: boolean, action: ClipboardRecordAction) {
-  return action === 'preview' || action === 'switchView' || (native && !snapshot.storageError
+  return action === 'preview' || (native && !snapshot.storageError
     && (action !== 'ocr' || snapshot.capabilities.imageOcr && snapshot.capabilities.clipboardWrite)
     && (action !== 'openTarget' || snapshot.capabilities.clipboardOpenTarget)
     && (action !== 'copyRecord' || snapshot.capabilities.clipboardWrite)

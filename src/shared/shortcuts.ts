@@ -2,13 +2,13 @@ import type { Translate } from './i18n';
 
 export const recordWindowActions = ['pin', 'showShortcuts', 'focusSearch', 'openSettings'] as const;
 export const globalTranslationActions = ['openTranslation', 'selection'] as const;
-export const generalShortcutActions = [...globalTranslationActions, ...recordWindowActions, 'toggleHistory'] as const;
-export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary', 'toggleHistory'] as const;
+export const generalShortcutActions = [...globalTranslationActions, ...recordWindowActions] as const;
+export const translationWindowActions = ['translate', 'copyPrimary', 'copySecondary'] as const;
 export const shortcutActions = [...globalTranslationActions, ...recordWindowActions, ...translationWindowActions] as const;
 
 export const shortcutTitles = {
   openTranslation: 'openTranslation', selection: 'autofillInput', pin: 'pinWindow', showShortcuts: 'showShortcuts', focusSearch: 'focusSearch', openSettings: 'openSettings',
-  translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary', toggleHistory: 'toggleTranslationHistory',
+  translate: 'translation', copyPrimary: 'copyPrimary', copySecondary: 'copySecondary',
 } as const;
 export type ShortcutAction = typeof shortcutActions[number];
 export type ShortcutModifier = 'control' | 'alt' | 'shift' | 'meta';
@@ -35,7 +35,6 @@ export function defaultTranslationShortcuts(primary: 'meta' | 'control'): Transl
     showShortcuts: key('KeyK'),
     focusSearch: key('KeyF'),
     openSettings: key('Comma'),
-    toggleHistory: key('Slash'),
   };
 }
 

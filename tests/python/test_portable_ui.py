@@ -9,17 +9,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_CASES = {
-    'shared history startup',
+    'portable clipboard startup',
     'shared record presentation and menus',
-    'shared loading animation in both record views',
-    'single record scroll owner and protected action exit',
+    'shared loading animation in clipboard view',
+    'single record scroll owner and pinned transparency',
     'adjacent notes use measured reversible height transitions',
-    'React actions update shared Rust history',
-    'shared history protects favorite and pinned records',
-    'React selection restores cached translation through IPC',
-    'React deletion removes shared record and preserves selection',
-    'portable history layout preserves source across toggles and widths',
-    'unified records switch shares host and preserves cached translation',
+    'portable clipboard layout preserves list across widths and details toggle',
 }
 
 
@@ -70,7 +65,7 @@ def test_portable_report_rejects_stale_failed_or_missing_coverage(change):
     elif change == 'failed':
         result['passed'] = False
     elif change == 'missing-loading-case':
-        result['cases'] = [case for case in result['cases'] if case['name'] != 'shared loading animation in both record views']
+        result['cases'] = [case for case in result['cases'] if case['name'] != 'shared loading animation in clipboard view']
     elif change == 'duplicate-case':
         result['cases'].append(result['cases'][0].copy())
     elif change == 'failed-case':

@@ -5,7 +5,6 @@ import { SettingsDialog } from './SettingsDialog';
 
 interface BackupSummary {
   exportedAt: string;
-  translationCount: number;
   clipboardCount: number;
   imageCount: number;
   fileSize: number;
@@ -20,8 +19,6 @@ interface BackupImportPreview {
 
 interface BackupImportReport {
   mode: 'merge' | 'replace';
-  importedTranslations: number;
-  skippedTranslations: number;
   importedClipboard: number;
   skippedClipboard: number;
   restoredImages: number;
@@ -50,8 +47,8 @@ export function BackupSettings({ t, available }: { t: Translate; available: bool
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  function formatCounts(translations: number, clipboard: number, images: number) {
-    return `${translations} ${t('backupTranslations')} · ${clipboard} ${t('backupClipboard')} · ${images} ${t('backupImages')}`;
+  function formatCounts(clipboard: number, images: number) {
+    return `${clipboard} ${t('backupClipboard')} · ${images} ${t('backupImages')}`;
   }
 
   function closeExportDialog() {
@@ -90,7 +87,7 @@ export function BackupSettings({ t, available }: { t: Translate; available: bool
       setExportConfirm('');
       if (summary) {
         const badge = password ? ` (${t('backupEncryptedBadge')})` : '';
-        setStatus(`${t('backupExported')}${badge} · ${formatCounts(summary.translationCount, summary.clipboardCount, summary.imageCount)}`);
+        setStatus(`${t('backupExported')}${badge} · ${formatCounts(summary.clipboardCount, summary.imageCount)}`);
       }
     } catch (cause) {
       setExportOpen(false);
@@ -160,7 +157,7 @@ export function BackupSettings({ t, available }: { t: Translate; available: bool
       setPreview(null);
       setImportPassword('');
       setUnlockError(null);
-      setStatus(`${t('backupImported')} · ${formatCounts(report.importedTranslations, report.importedClipboard, report.restoredImages)}`);
+      setStatus(`${t('backupImported')} · ${formatCounts(report.importedClipboard, report.restoredImages)}`);
     } catch (cause) {
       setPreview(null);
       setImportPassword('');
@@ -272,7 +269,7 @@ export function BackupSettings({ t, available }: { t: Translate; available: bool
       className="settings-backup-dialog"
     >
       <p className="settings-backup-summary">
-        {formatCounts(preview.summary.translationCount, preview.summary.clipboardCount, preview.summary.imageCount)}
+        {formatCounts(preview.summary.clipboardCount, preview.summary.imageCount)}
       </p>
       <div className="settings-dialog-actions">
         <button type="button" className="settings-action" disabled={busy === 'import'} onClick={closeImportDialog}>{t('clipboardCancel')}</button>

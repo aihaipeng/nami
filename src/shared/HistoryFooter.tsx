@@ -179,7 +179,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     if (!shortcut) return;
     event.preventDefault();
     if (event.repeat) return;
-    if (shortcut.action === 'pin') void command('window_pin', { region: 'history', pinned: !state.historyPinned });
+    if (shortcut.action === 'pin') void command('window_pin', { region: 'clipboard', pinned: !state.clipboardPinned });
     else if (shortcut.action === 'focusSearch') {
       setOpen(false);
       search.current?.focus({ preventScroll: true });

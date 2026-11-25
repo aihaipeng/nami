@@ -3,25 +3,52 @@ import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, 
 
 export type Locale = 'system' | 'zh-CN' | 'en';
 export type WindowPositionMode = 'lastPosition' | 'center' | 'mouse' | 'cursor';
-export type Region = 'translation' | 'history' | 'clipboard' | 'settings';
-export type WindowTarget = Exclude<Region, 'history'>;
+export type Region = 'translation' | 'clipboard' | 'settings';
+export type WindowTarget = Region;
+export type TranslationScope = 'standalone' | 'clipboard';
+
+export interface LanguageDetection {
+  rawLanguage: string;
+  language: string;
+  score: number | null;
+}
+
+export interface TranslationMetadata {
+  requestedSource: string;
+  engine: 'edge' | 'google';
+  targetEngines?: ('edge' | 'google')[];
+  strategyVersion: number;
+  detections: LanguageDetection[];
+}
+
+export interface TranslationOutput {
+  id: string;
+  text: string;
+  sourceLanguage: string;
+  translation: TranslationMetadata;
+  targetLanguages: string[];
+  translations: string[];
+}
 
 export interface WindowState {
   recordsBrowsing?: boolean;
   recordsEditorOpen?: boolean;
   clipboardDetailId?: string | null;
-  recordView?: 'clipboard' | 'translation';
+  clipboardTranslationRecordId?: string | null;
   recordsSession?: number;
   recordsFocus?: number;
-  translationVisible: boolean;
-  historyVisible: boolean;
+  standaloneTranslationVisible: boolean;
+  clipboardVisible: boolean;
+  clipboardDetailVisible: boolean;
+  clipboardTranslationVisible: boolean;
   translationPinned: boolean;
-  historyPinned: boolean;
   clipboardPinned: boolean;
-  historyWidth: number;
+  clipboardWidth: number;
+  clipboardDetailWidth: number;
+  clipboardTranslationWidth: number;
   translationWidth: number;
-  historyExtent: number;
-  translationExtent: number;
+  clipboardExtent: number;
+  rightExtent: number;
   secondaryEnabled: boolean;
 }
 
@@ -105,23 +132,27 @@ export const initialSnapshot: AppSnapshot = {
   clipboardRecordingTypes: { text: true, image: true, files: true },
   clipboardBinding: defaultClipboardBinding,
   clipboardShortcutEnabled: true,
-  clipboardControls: { recordsOpenFocus: 'list', previewLines: { clipboard: 3, translation: 3 }, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
+  clipboardControls: { recordsOpenFocus: 'list', previewLines: { clipboard: 3 }, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
   accessibility: false,
   shortcutErrors: [],
   window: {
     recordsBrowsing: true,
-    recordView: 'clipboard',
+    clipboardDetailId: null,
+    clipboardTranslationRecordId: null,
     recordsSession: 0,
     recordsFocus: 0,
-    translationVisible: true,
-    historyVisible: false,
+    standaloneTranslationVisible: true,
+    clipboardVisible: false,
+    clipboardDetailVisible: false,
+    clipboardTranslationVisible: false,
     translationPinned: false,
-    historyPinned: false,
     clipboardPinned: false,
-    historyWidth: 360,
+    clipboardWidth: 360,
+    clipboardDetailWidth: 480,
+    clipboardTranslationWidth: 440,
     translationWidth: 920,
-    historyExtent: 0,
-    translationExtent: 920,
+    clipboardExtent: 0,
+    rightExtent: 920,
     secondaryEnabled: true,
   },
 };

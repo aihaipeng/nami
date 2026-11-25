@@ -1,20 +1,17 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, within, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { bridge, calls, emit, flushFrames, mount, windowState } from './harness';
-import { historySamples } from '../../src/translation/history';
 // @ts-expect-error Vitest runs in Node; the app's TypeScript configuration includes browser types only.
 import { readFileSync } from 'node:fs';
 
 const source = () => screen.getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement;
-const sample = historySamples[0];
-const select = (id = sample.id, retranslate = false) => act(async () => { await bridge.invoke('history_sample_select', { sampleId: id, retranslate }); });
 
 // These tests exercise DOM behavior and the native bridge contract. AppKit geometry,
 // glass rendering and frame pacing are covered by the separate native checks.
 describe('translation input and shortcuts', () => {
-  it('uses the shared focus binding in the translation detail without changing the draft', async () => {
+  it('uses the shared focus binding in the translation window without changing the draft', async () => {
     const preferences = bridge.snapshot.translationPreferences;
     preferences.shortcuts.focusSearch = { code: 'F6', modifiers: [] };
     await mount();
@@ -32,57 +29,10 @@ describe('translation input and shortcuts', () => {
     expect(document.activeElement).toBe(result);
   });
 
-  it('consumes clipboard text once and translates without requiring selection capability', async () => {
-    bridge.snapshot.capabilities.selection = false;
-    const original = bridge.invoke.getMockImplementation()!;
-    let pending: { text: string; error: null } | null = null;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_translation_take') { const context = pending; pending = null; return context; }
-      return original(name, args);
-    });
+  it('does not render the removed history clock trigger in standalone translation', async () => {
     await mount();
-    pending = { text: 'Complete clipboard text\nSecond line', error: null };
-    await emit('clipboard_translation_ready', null);
-    await waitFor(() => expect(source().value).toBe('Complete clipboard text Second line'));
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]).toMatchObject({ text: 'Complete clipboard text\nSecond line', fromSelection: true });
-    await emit('clipboard_translation_ready', null);
-    expect(calls('translation_run')).toHaveLength(1);
-    expect(calls('selection_take')).toHaveLength(0);
-    expect(calls('clipboard_record_use')).toHaveLength(0);
-  });
-
-  it('receives pending clipboard translation after the translation view subscribes', async () => {
-    const original = bridge.invoke.getMockImplementation()!;
-    let pending = true;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_translation_take') { if (!pending) return null; pending = false; return { text: 'Queued clipboard content', error: null }; }
-      return original(name, args);
-    });
-    await mount();
-    await waitFor(() => expect(source().value).toBe('Queued clipboard content'));
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-  });
-
-  it.each(['edit', 'hide', 'history'] as const)('rejects a clipboard handoff arriving after a newer %s action', async (action) => {
-    const original = bridge.invoke.getMockImplementation()!;
-    let intercept = false;
-    let deliver!: (context: { text: string; error: null }) => void;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_translation_take') return intercept ? new Promise((resolve) => { deliver = resolve; }) : null;
-      return original(name, args);
-    });
-    await mount();
-    intercept = true;
-    await emit('clipboard_translation_ready', null);
-    const editor = source();
-    if (action === 'edit') fireEvent.change(source(), { target: { value: 'Keep newer draft' } });
-    else if (action === 'hide') await windowState({ translationVisible: false, translationExtent: 0 });
-    else await select();
-    const retained = editor.value;
-    await act(async () => deliver({ text: 'Outdated clipboard text', error: null }));
-    expect(editor.value).toBe(retained);
-    expect(calls('translation_run')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Translation history' })).toBeNull();
+    expect(document.querySelector('.history-trigger')).toBeNull();
   });
 
   it('dismisses the language picker on hide and preserves the translation draft', async () => {
@@ -90,9 +40,9 @@ describe('translation input and shortcuts', () => {
     fireEvent.change(source(), { target: { value: 'Preserved draft' } });
     fireEvent.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
     expect(screen.getByRole('dialog', { name: 'Source language' })).toBeTruthy();
-    await windowState({ translationVisible: false, translationExtent: 0 });
+    await windowState({ standaloneTranslationVisible: false, rightExtent: 0 });
     expect(screen.queryByRole('dialog', { name: 'Source language' })).toBeNull();
-    await windowState({ translationVisible: true, translationExtent: 920 });
+    await windowState({ standaloneTranslationVisible: true, rightExtent: 920 });
     expect(source().value).toBe('Preserved draft');
   });
 
@@ -101,11 +51,12 @@ describe('translation input and shortcuts', () => {
     expect(document.querySelector('.translation-panel')?.getAttribute('data-tauri-drag-region')).toBe('deep');
     for (const result of document.querySelectorAll('.result-column')) expect(result.getAttribute('data-tauri-drag-region')).toBe('deep');
     expect(source().hasAttribute('data-tauri-drag-region')).toBe(false);
-    expect(screen.getByRole('button', { name: 'Translation history' }).hasAttribute('data-tauri-drag-region')).toBe(false);
-    await emit('history_sample_selected', { sampleId: sample.id, retranslate: false });
+    fireEvent.change(source(), { target: { value: 'Draggable test' } });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(document.querySelectorAll('.result-column > span')).toHaveLength(2));
     for (const text of document.querySelectorAll('.result-column > span')) expect(text.getAttribute('data-tauri-drag-region')).toBe('false');
-    expect(document.querySelectorAll('.result-column > span')).toHaveLength(2);
   });
+
   it('scrolls hidden source text while dragging a selection past either edge', async () => {
     await mount();
     const text = 'a'.repeat(80);
@@ -187,44 +138,6 @@ describe('translation input and shortcuts', () => {
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
     await waitFor(() => expect(calls('translation_run')).toHaveLength(2));
     expect(calls('translation_run')[1][1]?.source).toBe('auto');
-  });
-
-  it('restores an automatic history request without fixing its detected language as the source', async () => {
-    await mount();
-    const record = { ...sample, id: 'automatic-history', sourceLanguage: 'mul', translation: { requestedSource: 'auto', engine: 'edge', strategyVersion: 1, detections: [] } };
-    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
-    const button = screen.getByRole('button', { name: 'Source language: Multiple languages' });
-    expect(button.getAttribute('title')).toBe('Detected: Multiple languages');
-    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]?.source).toBe('auto');
-  });
-
-  it('shows the complete detected name while the source menu still selects automatic mode', async () => {
-    bridge.snapshot.translationEngine = 'google';
-    bridge.snapshot.translationPreferences.engine = 'google';
-    await mount();
-    const record = { ...sample, id: 'long-detected-name', sourceLanguage: 'nhe', translation: { requestedSource: 'auto', engine: 'google', strategyVersion: 1, detections: [] } };
-    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
-    const button = screen.getByRole('button', { name: 'Source language: Nahuatl (Eastern Huasteca)' });
-    expect(button.textContent).toBe('Nahuatl (Eastern Huasteca)');
-    expect(calls('translation_chrome_update').at(-1)?.[1]?.state.sourceLabel).toBe('Nahuatl (Eastern Huasteca)');
-    fireEvent.click(button);
-    expect(screen.getByRole('option', { name: 'Auto-Detect' }).getAttribute('aria-selected')).toBe('true');
-    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Escape' });
-    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]?.source).toBe('auto');
-  });
-
-  it('preserves an explicit legacy history source instead of guessing that it was automatic', async () => {
-    await mount();
-    const record = { ...sample, id: 'legacy-history', sourceLanguage: 'fr' };
-    await emit('history_sample_selected', { sampleId: record.id, retranslate: false, record });
-    expect(screen.getByRole('button', { name: 'Source language: French' })).toBeTruthy();
-    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]?.source).toBe('fr');
   });
 
   it('keeps an explicit source even if the service responds with a different detection', async () => {
@@ -317,18 +230,6 @@ describe('translation input and shortcuts', () => {
     expect(source().value).toHaveLength(5001);
   });
 
-  it('toggles history through the native command without replacing the draft', async () => {
-    const user = userEvent.setup(); await mount();
-    await user.type(source(), 'A draft worth keeping');
-    const trigger = screen.getByRole('button', { name: 'Translation history' });
-    await user.click(trigger); await windowState({ historyVisible: false, historyExtent: 0 });
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    await user.click(trigger); await windowState({ historyVisible: true, historyExtent: 360 });
-    expect(calls('history_toggle')).toHaveLength(2);
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    expect(source().value).toBe('A draft worth keeping');
-  });
-
   it('dismisses the language picker before hiding the translation and restores trigger focus', async () => {
     await mount();
     fireEvent.click(screen.getByRole('button', { name: 'Source language: Auto-Detect' }));
@@ -350,293 +251,28 @@ describe('translation input and shortcuts', () => {
     fireEvent.keyDown(source(), { key: 'w', metaKey: true });
     expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation' }]);
   });
-});
 
-describe('selection across native webviews', () => {
-  it('restores the selected source, paired cached translations and language controls', async () => {
-    await mount(); await select();
-    expect(source().value).toBe(sample.text);
-    expect(screen.getByRole('button', { name: 'Source language: English' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Primary language: Chinese (Simplified)' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Secondary language: French' })).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
-    expect(screen.getByRole('region', { name: 'Secondary language' }).textContent).toBe(sample.translations[1]);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
-    expect(calls('window_show')).toHaveLength(0);
-  });
-
-  it('selecting the same record again keeps translation and history visible', async () => {
-    await mount(); await select(); await select();
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
-    expect(bridge.snapshot.window.historyVisible).toBe(true);
-    expect(calls('window_hide')).toHaveLength(0);
-    expect((document.querySelector('.source-input') as HTMLTextAreaElement).value).toBe(sample.text);
-  });
-
-  it('keeps details open across rapid repeated selection commands', async () => {
+  it('copies primary and secondary results via standalone translation_copy', async () => {
     await mount();
-    const visible: boolean[] = [];
-    await act(async () => {
-      for (let index = 0; index < 3; index += 1) {
-        await bridge.invoke('history_sample_select', { sampleId: sample.id, retranslate: false });
-        visible.push(bridge.snapshot.window.translationVisible);
-      }
-    });
-    expect(visible).toEqual([true, true, true]);
-    expect(source().value).toBe(sample.text);
-    expect(calls('window_show')).toHaveLength(0);
-    expect(calls('window_hide')).toHaveLength(0);
-  });
-
-  it('restores data without toggling windows when selection events arrive before delayed window state', async () => {
-    await mount();
-    await act(async () => {
-      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
-      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
-      await emit('history_sample_selected', { sampleId: sample.id, retranslate: false, record: sample });
-    });
-    expect(source().value).toBe(sample.text);
-    expect(calls('window_show')).toHaveLength(0);
-    expect(calls('window_hide')).toHaveLength(0);
-    await windowState({ translationVisible: false, translationExtent: 0 });
-    expect(calls('window_show')).toHaveLength(0);
-    expect(calls('window_hide')).toHaveLength(0);
-  });
-
-  it('finishes a background translation without reopening details or changing the clipboard view', async () => {
-    const original = bridge.invoke.getMockImplementation()!;
-    let finish!: () => void;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'translation_run') await new Promise<void>((resolve) => { finish = resolve; });
-      return original(name, args);
-    });
-    await mount();
-    fireEvent.change(source(), { target: { value: 'Background synthetic request' } });
+    fireEvent.change(source(), { target: { value: 'Copy shortcuts test' } });
     fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    await windowState({ recordView: 'clipboard', translationVisible: false, translationExtent: 0 });
-    await act(async () => finish());
-    await waitFor(() => expect(bridge.history.records.some((record) => record.text === 'Background synthetic request')).toBe(true));
-    expect(bridge.snapshot.window.recordView).toBe('clipboard');
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
-    expect(calls('window_show')).toHaveLength(0);
-    await windowState({ recordView: 'translation', translationVisible: true, translationExtent: 920 });
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1');
-  });
-
-  it('can copy restored results after visual history selection has been cleared', async () => {
-    await mount(); await select();
-    await windowState({ translationVisible: false, translationExtent: 0 });
-    await emit('history_sample_selected', { sampleId: null, retranslate: false, record: null });
-    await windowState({ translationVisible: true, translationExtent: 920 });
-    fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: sample.id, part: 'primary' });
-    expect(source().value).toBe(sample.text);
-  });
-
-  it('clears backend selection without changing translation visibility', async () => {
-    await mount(); await select();
-    await windowState({ translationVisible: false, translationExtent: 0 });
-    await act(async () => { await bridge.invoke('history_sample_select', { sampleId: null, retranslate: false }); });
-    expect(bridge.history.selectedId).toBeNull();
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
-    expect(calls('window_show')).toHaveLength(0);
-    expect(calls('window_hide')).toHaveLength(0);
-  });
-
-  it('keeps a pinned translation visible when selecting the same record again', async () => {
-    bridge.snapshot.window.translationPinned = true;
-    await mount(); await select(); await select();
-    expect(calls('window_hide')).toHaveLength(0);
-    expect(calls('window_show')).toHaveLength(0);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
-  });
-
-  it('retranslation submits the record through the selected service', async () => {
-    await mount(); await select(); await select(sample.id, true);
-    expect(screen.queryByText(sample.translations[0])).toBeNull();
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('window_hide')).toHaveLength(0);
-  });
-
-  it('moves the only history selection to the new record after retranslation', async () => {
-    await mount(); const history = await mount('history');
-    await select();
-    const original = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
-    expect(original.getAttribute('aria-pressed')).toBe('true');
-    await select(sample.id, true);
-    await waitFor(() => expect(history.container.querySelector('[data-record-id="translation-test"] .history-row-select')?.getAttribute('aria-pressed')).toBe('true'));
-    expect(original.getAttribute('aria-pressed')).toBe('false');
-    expect(history.container.querySelectorAll('.history-row.selected')).toHaveLength(1);
-  });
-
-  it.each(['history', 'detail'] as const)('retranslates from %s and focuses the new history row', async (origin) => {
-    const translation = await mount(); const history = await mount('history');
-    const record = historySamples[2];
-    const original = within(history.container).getByRole('button', { name: `Translation: ${record.text}` });
-    let target: HTMLElement = original;
-    if (origin === 'detail') {
-      await select(record.id);
-      target = within(translation.container).getByRole('region', { name: 'Primary language' });
-    } else {
-      await windowState({ translationVisible: false, translationExtent: 0 });
-    }
-    act(() => target.focus());
-    fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', metaKey: true });
-    await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-    expect(calls('translation_run')[0][1]).toMatchObject({ text: record.text, targets: record.targetLanguages });
-    await waitFor(() => {
-      const newest = history.container.querySelector('[data-record-id="translation-test"] .history-row-select');
-      expect(newest?.getAttribute('aria-pressed')).toBe('true');
-      expect(document.activeElement).toBe(newest);
-    });
-    expect(original.getAttribute('aria-pressed')).toBe('false');
-  });
-
-  it('focuses search instead of the translation input from the selected history row with open details', async () => {
-    const translation = await mount(); const history = await mount('history');
-    await select(sample.id);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
-    const row = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
-    act(() => row.focus());
-    fireEvent.keyDown(row, { key: 'f', code: 'KeyF', metaKey: true });
-    expect(document.activeElement).toBe(history.container.querySelector<HTMLInputElement>('.history-search input'));
-    expect(within(translation.container).getByRole('textbox', { name: 'Source text' })).not.toBe(document.activeElement);
-    expect(calls('translation_focus_input')).toHaveLength(0);
-  });
-
-  it('reveals the fresh unstarred result when retranslating from Favorites', async () => {
-    await mount(); const history = await mount('history');
-    const list = within(history.container);
-    fireEvent.click(list.getByRole('button', { name: 'Favorite history' }));
-    const original = await list.findByRole('button', { name: `Translation: ${historySamples[1].text}` });
-    act(() => original.focus());
-    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true });
-    await waitFor(() => {
-      const result = history.container.querySelector('[data-record-id="translation-test"] .history-row-select');
-      expect(result).not.toBeNull();
-      expect(document.activeElement).toBe(result);
-    });
-    expect(list.getByRole('button', { name: 'Favorite history' }).getAttribute('aria-pressed')).toBe('false');
-  });
-
-  it('does not move focus or create another record when retranslation fails', async () => {
-    const invoke = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'translation_run') throw 'synthetic translation failure';
-      return invoke(name, args);
-    });
-    await mount(); const history = await mount('history');
-    await select(sample.id);
-    const original = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
-    act(() => original.focus());
-    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true, repeat: true });
-    fireEvent.keyDown(original, { key: 'Enter', code: 'Enter', metaKey: true });
-    await screen.findByText('synthetic translation failure');
-    expect(calls('translation_run')).toHaveLength(1);
-    expect(document.activeElement).toBe(original);
-    expect(original.getAttribute('aria-pressed')).toBe('true');
-    expect(history.container.querySelector('[data-record-id="translation-test"]')).toBeNull();
-  });
-
-  it('selecting a row in the history view restores translation through the shared event bus', async () => {
-    const user = userEvent.setup(); const translation = await mount(); const history = await mount('history');
-    const button = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
-    await user.click(button);
-    expect((within(translation.container).getByRole('textbox', { name: 'Source text' }) as HTMLTextAreaElement).value).toBe(sample.text);
-    expect(within(translation.container).getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
-    expect(button.getAttribute('aria-pressed')).toBe('true');
-    await user.click(button);
-    expect(bridge.snapshot.window.translationVisible).toBe(false);
-    expect(bridge.snapshot.window.historyVisible).toBe(true);
-    await user.click(button);
-    expect(bridge.snapshot.window.translationVisible).toBe(true);
-    expect(calls('window_hide')).toHaveLength(0);
-  });
-
-  it('retranslating from the detail input keeps the old selection until the new result is saved', async () => {
-    await mount(); await select();
-    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
-    expect(bridge.history.selectedId).toBe(sample.id);
-    expect(screen.queryByText(sample.translations[0])).toBeNull();
-    expect(source().value).toBe(sample.text);
-    await waitFor(() => expect(bridge.history.selectedId).toBe('translation-test'));
-  });
-
-  it('a one-target record turns off the second column and settings can re-enable it', async () => {
-    await mount(); await select('sample-07');
-    expect(screen.queryByRole('region', { name: 'Secondary language' })).toBeNull();
-    expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: false });
-    await emit('translation_preferences_changed', { ...bridge.snapshot.translationPreferences, secondaryLanguage: 'fr' });
-    expect(screen.getByRole('region', { name: 'Secondary language' })).toBeTruthy();
-    expect(calls('translation_columns_set').at(-1)?.[1]).toEqual({ secondaryEnabled: true });
-  });
-
-  it('copies primary and secondary cached results by sample ID, never by arbitrary source text', async () => {
-    await mount(); await select();
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
     fireEvent.keyDown(source(), { key: '1', metaKey: true });
     fireEvent.keyDown(source(), { key: '2', metaKey: true });
-    expect(calls('translation_sample_copy')).toEqual([
-      ['translation_sample_copy', { sampleId: sample.id, part: 'primary' }],
-      ['translation_sample_copy', { sampleId: sample.id, part: 'secondary' }],
+    expect(calls('translation_copy')).toEqual([
+      ['translation_copy', { scope: 'standalone', part: 'primary' }],
+      ['translation_copy', { scope: 'standalone', part: 'secondary' }],
     ]);
   });
 
-  it('copies the primary result with the secondary shortcut for a one-target detail', async () => {
-    await mount(); await select('sample-07');
+  it('copies the primary result with the secondary shortcut for a single-target translation', async () => {
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'none';
+    await mount();
+    fireEvent.change(source(), { target: { value: 'Single target copy' } });
+    fireEvent.keyDown(source(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
     fireEvent.keyDown(source(), { key: '2', code: 'Digit2', metaKey: true });
-    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: 'sample-07', part: 'primary' });
-    expect(screen.queryByText(/translation copied/)).toBeNull();
-  });
-
-  it('clears a detail removed by history cleanup but preserves a newer draft', async () => {
-    await mount(); await select();
-    await emit('history_detail_removed', 'another-record');
-    expect(source().value).toBe(sample.text);
-    await emit('history_detail_removed', sample.id);
-    expect(source().value).toBe('');
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('');
-    await select();
-    fireEvent.change(source(), { target: { value: 'New draft' } });
-    await emit('history_detail_removed', sample.id);
-    expect(source().value).toBe('New draft');
-  });
-
-  it('editing source clears selection and cached results in both webviews', async () => {
-    const translation = await mount();
-    const history = await mount('history');
-    await select();
-    const selected = within(history.container).getByRole('button', { name: `Translation: ${sample.text}` });
-    expect(selected.getAttribute('aria-pressed')).toBe('true');
-    const input = within(translation.container).getByRole('textbox', { name: 'Source text' });
-    fireEvent.change(input, { target: { value: 'Edited draft' } });
-    await act(async () => {});
-    expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: null, retranslate: false }]);
-    expect(selected.getAttribute('aria-pressed')).toBe('false');
-    expect(within(translation.container).queryByText(sample.translations[0])).toBeNull();
-  });
-
-  it('changing a selected language clears the history selection and cached results', async () => {
-    const user = userEvent.setup(); await mount(); await select();
-    await user.click(screen.getByRole('button', { name: 'Primary language: Chinese (Simplified)' }));
-    await user.click(screen.getByRole('option', { name: 'German' }));
-    expect(calls('history_sample_select').at(-1)).toEqual(['history_sample_select', { sampleId: null, retranslate: false }]);
-    expect(screen.queryByText(sample.translations[0])).toBeNull();
-  });
-
-  it('clearing visual selection preserves the current source, cached text and copy association', async () => {
-    await mount(); await select(); await emit('history_sample_selected', { sampleId: null, retranslate: false });
-    expect(source().value).toBe(sample.text);
-    expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe(sample.translations[0]);
-    fireEvent.keyDown(source(), { key: '1', metaKey: true });
-    expect(calls('translation_sample_copy').at(-1)?.[1]).toEqual({ sampleId: sample.id, part: 'primary' });
-  });
-
-  it('ignores unknown record IDs instead of replacing the current draft', async () => {
-    await mount(); fireEvent.change(source(), { target: { value: 'Private local draft' } });
-    await emit('history_sample_selected', { sampleId: 'missing-record', retranslate: false });
-    expect(source().value).toBe('Private local draft');
-    expect(calls('window_show')).toHaveLength(0);
+    expect(calls('translation_copy').at(-1)?.[1]).toEqual({ scope: 'standalone', part: 'primary' });
   });
 });
 
@@ -736,16 +372,5 @@ describe('language dropdown and menu keyboard behavior', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByRole('button', { name: 'Primary language: English' })).toBeTruthy();
     await waitFor(() => expect(calls('translation_run')).toHaveLength(1));
-  });
-
-  it('uses the history shortcut without opening the retired Actions menu', async () => {
-    bridge.snapshot.capabilities.selection = false;
-    await mount();
-    const key = { key: '/', code: 'Slash', metaKey: true };
-    expect(fireEvent.keyDown(source(), key)).toBe(false);
-    expect(calls('history_toggle')).toHaveLength(1);
-    expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
-    fireEvent.keyDown(source(), { ...key, repeat: true });
-    expect(calls('history_toggle')).toHaveLength(1);
   });
 });

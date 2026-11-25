@@ -9,8 +9,7 @@
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
     "allow-p0-common",
-    "allow-p0-clipboard",
-    "allow-p0-records-history"
+    "allow-p0-clipboard"
   ],
   "webviews": [
     "clipboard"
