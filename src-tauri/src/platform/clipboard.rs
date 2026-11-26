@@ -115,59 +115,42 @@ unsafe fn read_version(
             }
         }
     }
-    let mut image = None;
-    for (kind, extension) in [("public.png", "png"), ("public.tiff", "tiff")] {
-        let data = match bytes(board, kind) {
-            Err("clipboard_capture_limit") if !files.is_empty() => continue,
-            result => result?,
-        };
-        if let Some(bytes) = data.filter(|bytes| !bytes.is_empty()) {
-            if total
-                .checked_add(bytes.len())
-                .is_none_or(|size| size > LIMIT)
-            {
-                continue;
-            }
-            image = Some((bytes, extension.to_owned()));
-            break;
-        }
-    }
-    let payload = if let Some((bytes, extension)) = image {
-        Some(if files.is_empty() {
-            ClipboardPayload::Image { bytes, extension }
-        } else {
-            ClipboardPayload::FilesImage {
-                paths: files,
-                bytes,
-                extension,
-                image_fallback: false,
-            }
-        })
-    } else if !files.is_empty() {
+    let payload = if !files.is_empty() {
         Some(ClipboardPayload::Files(files))
-    } else if let Some(bytes) = bytes(board, "public.utf8-plain-text")? {
-        let text = String::from_utf8(bytes).map_err(|_| "clipboard_text_encoding")?;
-        if text.trim().is_empty() {
-            None
-        } else if let Some(item) = single_item {
-            let optional = |kind| match bounded_bytes(item, kind, MAX_RICH_TEXT_BYTES) {
-                Err("clipboard_capture_limit") => Ok(None),
-                other => other.map(|data| data.filter(|bytes| !bytes.is_empty())),
-            };
-            let formatting = ClipboardTextFormatting {
-                html: optional("public.html")?,
-                rtf: optional("public.rtf")?,
-            };
-            Some(if formatting.valid() {
-                ClipboardPayload::RichText { text, formatting }
-            } else {
-                ClipboardPayload::Text(text)
-            })
-        } else {
-            Some(ClipboardPayload::Text(text))
-        }
     } else {
-        None
+        let mut image = None;
+        for (kind, extension) in [("public.png", "png"), ("public.tiff", "tiff")] {
+            if let Some(bytes) = bytes(board, kind)?.filter(|bytes| !bytes.is_empty()) {
+                image = Some((bytes, extension.to_owned()));
+                break;
+            }
+        }
+        if let Some((bytes, extension)) = image {
+            Some(ClipboardPayload::Image { bytes, extension })
+        } else if let Some(bytes) = bytes(board, "public.utf8-plain-text")? {
+            let text = String::from_utf8(bytes).map_err(|_| "clipboard_text_encoding")?;
+            if text.trim().is_empty() {
+                None
+            } else if let Some(item) = single_item {
+                let optional = |kind| match bounded_bytes(item, kind, MAX_RICH_TEXT_BYTES) {
+                    Err("clipboard_capture_limit") => Ok(None),
+                    other => other.map(|data| data.filter(|bytes| !bytes.is_empty())),
+                };
+                let formatting = ClipboardTextFormatting {
+                    html: optional("public.html")?,
+                    rtf: optional("public.rtf")?,
+                };
+                Some(if formatting.valid() {
+                    ClipboardPayload::RichText { text, formatting }
+                } else {
+                    ClipboardPayload::Text(text)
+                })
+            } else {
+                Some(ClipboardPayload::Text(text))
+            }
+        } else {
+            None
+        }
     };
     if version(board) != initial {
         return Err("clipboard_changed");
@@ -218,54 +201,43 @@ unsafe fn set_bytes(item: &AnyObject, kind: &str, bytes: &[u8]) -> Result<(), &'
 }
 
 unsafe fn set_image(item: &AnyObject, bytes: &[u8], extension: &str) -> Result<(), &'static str> {
-    let kind = match extension {
-        "png" => "public.png",
-        "tiff" => "public.tiff",
-        _ => return Err("invalid_argument"),
-    };
     if bytes.is_empty() || bytes.len() > LIMIT {
         return Err("invalid_argument");
     }
-    set_bytes(item, kind, bytes)
+    match extension {
+        "png" => set_bytes(item, "public.png", bytes),
+        "tiff" => set_bytes(item, "public.tiff", bytes),
+        ext if nami::clipboard::is_supported_image_extension(ext) => {
+            let png = encode_png(bytes).ok_or("clipboard_image_invalid")?;
+            set_bytes(item, "public.png", &png)
+        }
+        _ => Err("invalid_argument"),
+    }
 }
 
 fn png_bytes(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n")
 }
 
-// Decode a stored TIFF (or any bitmap NSBitmapImageRep accepts) into PNG once.
+// Decode a stored non-PNG raster image (TIFF, JPEG, WebP, HEIC, AVIF, GIF, BMP, ICO) into PNG once
+// via ImageIO so EXIF orientation and modern formats are preserved.
 // Already-PNG bytes are not re-encoded. Undecodable bytes return None so the caller can keep the original type.
-unsafe fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
+fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() || bytes.len() > LIMIT || png_bytes(bytes) {
         return None;
     }
-    objc2::rc::autoreleasepool(|_| {
-        let data: Retained<AnyObject> =
-            msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
-        let bitmap: Option<Retained<AnyObject>> =
-            msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
-        let bitmap = bitmap?;
-        let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
-        let png: Option<Retained<AnyObject>> =
-            msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
-        let png = png?;
-        let length: usize = msg_send![&*png, length];
-        let pointer: *const u8 = msg_send![&*png, bytes];
-        if length == 0 || length > LIMIT || pointer.is_null() {
-            return None;
-        }
-        let encoded = std::slice::from_raw_parts(pointer, length).to_vec();
-        png_bytes(&encoded).then_some(encoded)
-    })
+    let (width, height) = super::image_dimensions(bytes).ok()?;
+    let encoded = clipboard_image_preview(bytes, width.max(height)).ok()?;
+    (encoded.len() <= LIMIT && png_bytes(&encoded)).then_some(encoded)
 }
 
-// TIFF conversion happens before the main-thread pasteboard write. PNG bytes stay untouched.
+// Non-PNG conversion happens before the main-thread pasteboard write. PNG bytes stay untouched.
 pub fn prepare_image_paste(payload: ClipboardPayload) -> ClipboardPayload {
     let convert = |bytes: Vec<u8>, extension: String| -> (Vec<u8>, String) {
-        if png_bytes(&bytes) || !matches!(extension.as_str(), "png" | "tiff") {
+        if png_bytes(&bytes) || !nami::clipboard::is_supported_image_extension(&extension) {
             return (bytes, extension);
         }
-        match unsafe { encode_png(&bytes) } {
+        match encode_png(&bytes) {
             Some(png) => (png, "png".into()),
             None => (bytes, extension),
         }
@@ -344,13 +316,16 @@ fn browser_png(payload: &ClipboardPayload) -> Result<Option<Cow<'_, [u8]>>, &'st
     if let Some(paths) = paths {
         fallback_paths(paths, bytes.len())?;
     }
-    if !matches!(extension, "png" | "tiff") || bytes.is_empty() || bytes.len() > LIMIT {
+    if !nami::clipboard::is_supported_image_extension(extension)
+        || bytes.is_empty()
+        || bytes.len() > LIMIT
+    {
         return Err("invalid_argument");
     }
     if png_bytes(bytes) {
         return Ok(Some(Cow::Borrowed(bytes)));
     }
-    match unsafe { encode_png(bytes) } {
+    match encode_png(bytes) {
         Some(png) => Ok(Some(Cow::Owned(png))),
         None => Ok(None),
     }
@@ -791,7 +766,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_and_file_representations_are_not_discarded_during_capture() {
+    fn file_urls_take_precedence_over_auxiliary_pasteboard_images_during_capture() {
         unsafe {
             let name =
                 NSString::from_str(&format!("dev.local.nami.mixed.{}", uuid::Uuid::new_v4()));
@@ -807,20 +782,12 @@ mod tests {
             let _: bool = msg_send![board, setData: &*data, forType: ns_string!("public.png")];
             let captured = read(board).unwrap().unwrap().1;
             let _: () = msg_send![board, releaseGlobally];
-            assert_eq!(
-                captured,
-                ClipboardPayload::FilesImage {
-                    paths,
-                    bytes: image.to_vec(),
-                    extension: "png".into(),
-                    image_fallback: false
-                }
-            );
+            assert_eq!(captured, ClipboardPayload::Files(paths));
         }
     }
 
     #[test]
-    fn mixed_copy_restores_both_formats_and_only_images_can_fall_back_when_files_disappear() {
+    fn legacy_mixed_write_still_publishes_files_and_only_image_fallback_survives_missing_files() {
         unsafe {
             let name = NSString::from_str(&format!(
                 "dev.local.nami.mixed-copy.{}",
@@ -846,7 +813,10 @@ mod tests {
                 image_fallback: false,
             };
             write(board, &mixed).unwrap();
-            assert_eq!(read(board).unwrap().unwrap().1, mixed);
+            assert_eq!(
+                read(board).unwrap().unwrap().1,
+                ClipboardPayload::Files(paths.clone())
+            );
             let items: Retained<AnyObject> = msg_send![board, pasteboardItems];
             let count: usize = msg_send![&*items, count];
             assert_eq!(count, 2);
@@ -967,6 +937,33 @@ mod tests {
                     extension: "png".into()
                 }
             );
+            assert_eq!(file_url(board), None);
+            let jpeg = include_bytes!("../../../tests/fixtures/clipboard-wide.jpg").to_vec();
+            let prepared_jpeg = prepare_image_paste(ClipboardPayload::Image {
+                bytes: jpeg.clone(),
+                extension: "jpg".into(),
+            });
+            let ClipboardPayload::Image {
+                bytes: jpeg_png,
+                extension: jpeg_ext,
+            } = &prepared_jpeg
+            else {
+                panic!("jpeg image must stay an image");
+            };
+            assert_eq!(jpeg_ext, "png");
+            assert!(jpeg_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert_eq!(
+                crate::platform::image_dimensions(jpeg_png).unwrap(),
+                crate::platform::image_dimensions(&jpeg).unwrap()
+            );
+            write(board, &prepared_jpeg).unwrap();
+            match read(board).unwrap().unwrap().1 {
+                ClipboardPayload::Image { bytes, extension } => {
+                    assert_eq!(extension, "png");
+                    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+                }
+                other => panic!("jpeg write must be read back as png, got {other:?}"),
+            }
             assert_eq!(file_url(board), None);
             let _: () = msg_send![board, releaseGlobally];
             std::fs::remove_dir_all(root).unwrap();

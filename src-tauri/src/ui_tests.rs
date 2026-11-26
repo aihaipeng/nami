@@ -2042,7 +2042,7 @@ return {ready:true,narrowAddressWidth:address.width};
 const field=document.querySelector('#translation-proxy-url'), row=field.parentElement;
 const address=field.getBoundingClientRect(), bounds=row.getBoundingClientRect();
 const save=row.querySelector('button[type=submit]'), checkbox=row.querySelector('input[type=checkbox]');
-if(!save||Math.abs(address.left+address.width/2-bounds.left-bounds.width/2)>.5||save.getBoundingClientRect().right>checkbox.getBoundingClientRect().left)throw Error('showing Save must not shift the input or overlap the checkbox');
+if(save||Math.abs(address.left+address.width/2-bounds.left-bounds.width/2)>.5||address.right>=checkbox.getBoundingClientRect().left)throw Error('editing proxy must not render a Save button, shift the input, or overlap the checkbox');
 return {centeredWhileEditing:true};
 "#)?);
         evaluate_view_dom(
@@ -2252,8 +2252,9 @@ fn run_clipboard_capture_setting(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
         on_main(app, |app| {
-            crate::clipboard_preferences::recording_menu_item(app)
-                .map_err(|err| err.to_string())?;
+            crate::tray_menu::build(app).map_err(|err| err.to_string())?;
+            #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+            crate::platform::test_verify_tray_disk_usage_kvo()?;
             create(app, "translation")?;
             let window = create(app, "settings")?;
             if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
@@ -2513,16 +2514,53 @@ return {{ready:master?.checked==={enabled}&&paused!=={enabled}&&!image.checked&&
         evaluate_view_dom(
             app,
             "settings",
-            "document.querySelector('.clipboard-storage-value button').click();return true;",
+            r#"
+const image=document.querySelector('#clipboard-type-image');
+if(image.matches(':disabled')||image.checked)throw Error('pause must retain the editable image preference');
+document.querySelector('button[aria-label="Storage"]').click();return true;
+"#,
         )?;
         wait_view_dom(
             app,
             "settings",
             r#"
-const storage=document.querySelector('.clipboard-storage-value [aria-live]');
-if(!storage||!(parseFloat(storage.textContent)>0))return {ready:false};
-window.__storageBeforeCleanup=storage.textContent;
+const heading=document.querySelector('#clipboard-storage-usage-heading');
+const usageSection=heading?.closest('section');
+const locationSection=document.querySelector('#storage-location-heading')?.closest('section');
+const retentionSection=document.querySelector('#clipboard-storage-heading')?.closest('section');
+const locationIcon=locationSection?.querySelector('.clipboard-icon-button');
+const rows=[...document.querySelectorAll('.storage-usage-row')];
+const locationItems=[...(locationSection?.querySelectorAll('.storage-location-item')??[])];
+const retentionInputs=[...(retentionSection?.querySelectorAll('.settings-history-limit .settings-text-input')??[])];
+const retentionUnits=[...(retentionSection?.querySelectorAll('.settings-history-limit .settings-input-unit')??[])];
+if(!heading||!usageSection||!locationSection||!retentionSection||!locationIcon||rows.length!==3||locationItems.length!==2||retentionInputs.length!==4||retentionUnits.length!==4)return {ready:false};
+if(locationSection.querySelectorAll('.settings-field').length!==2)throw Error('storage location must show only Data Directory and Log Directory');
+if(usageSection.querySelector('.clipboard-icon-button'))throw Error('storage usage must not render a manual refresh button');
+if(locationSection.querySelector('.clipboard-setting-icon')||retentionSection.querySelector('.clipboard-setting-icon'))throw Error('storage location and retention rows must omit left title icons');
+for(const item of locationItems){
+  const title=item.querySelector('.settings-shortcut-name'), detail=item.querySelector('.storage-location-detail'), path=detail?.querySelector('.storage-location-path'), actions=detail?.querySelector('.storage-location-actions');
+  if(!title||!detail||!path||!actions||!path.textContent||path.textContent==='—')return {ready:false};
+  const titleBox=title.getBoundingClientRect(), detailBox=detail.getBoundingClientRect();
+  if(detailBox.top<titleBox.bottom-1)throw Error('storage path and actions must render on a dedicated row below the title');
+}
+const inputLefts=retentionInputs.map(el=>el.getBoundingClientRect().left);
+const inputWidths=retentionInputs.map(el=>el.getBoundingClientRect().width);
+if(Math.max(...inputLefts)-Math.min(...inputLefts)>.5||Math.max(...inputWidths)-Math.min(...inputWidths)>.5)throw Error('retention numeric inputs must align strictly in position and width');
+const unitWidths=retentionUnits.map(el=>el.getBoundingClientRect().width);
+if(Math.max(...unitWidths)-Math.min(...unitWidths)>.5||retentionUnits.some(el=>getComputedStyle(el).textAlign!=='center'))throw Error('retention input units must share equal width and be center-aligned');
+if(getComputedStyle(locationIcon).color!==window.__clipboardMutedIcon)throw Error('storage icon actions must share the muted icon color');
 return {ready:true};
+"#,
+        )?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const storage=document.querySelector('.storage-usage-total');
+const textCount=document.querySelector('.storage-usage-row[data-storage-kind="text"] .storage-usage-count')?.textContent;
+if(!storage||!(parseFloat(storage.textContent)>0)||textCount!=='4 items')return {ready:false};
+window.__storageBeforeCleanup=storage.textContent;
+return {ready:true,textCount};
 "#,
         )?;
         evaluate_view_dom(
@@ -2565,7 +2603,7 @@ return {ready:true};
             r#"
 const dialog=document.querySelector('dialog[open]');if(!dialog)return {ready:false};
 const options=[...dialog.querySelectorAll('input[type=checkbox]')], confirm=dialog.querySelector('.clipboard-confirm-action');
-if(options.length!==3||options.some(option=>option.checked)||!confirm.disabled||dialog.querySelector('p'))throw Error('cleanup must show just three unselected categories and actions');
+if(options.length!==3||options.some(option=>option.checked)||!confirm.disabled||dialog.querySelector('p'))throw Error('manual cleanup must show three unselected record categories');
 if(dialog.getBoundingClientRect().width>330||dialog.getBoundingClientRect().height>185||confirm.querySelector('kbd')?.textContent!=='↵')throw Error('cleanup dialog should be compact and show Enter');
 const counts=[...dialog.querySelectorAll('.clipboard-cleanup-count')].map(node=>Number(node.textContent));
 if(counts.join(',')!=='1,2,2')throw Error('favorite and pinned rows must count in both categories');
@@ -2590,17 +2628,13 @@ options[2].click();return {ready:true};
         }
         samples.push(wait_view_dom(app, "settings", r#"
 const section=document.querySelector('[aria-labelledby=clipboard-storage-heading]');
-const before=window.__storageBeforeCleanup, after=section.querySelector('.clipboard-storage-value [aria-live]').textContent;
-return {ready:!document.querySelector('dialog[open]')&&before!==after&&parseFloat(after)>=0&&!section.querySelector('[role=status], [role=alert]'),before,after};
+const before=window.__storageBeforeCleanup, after=document.querySelector('.storage-usage-total')?.textContent;
+return {ready:!document.querySelector('dialog[open]')&&!!after&&before!==after&&parseFloat(after)>=0&&!section.querySelector('[role=status], [role=alert]'),before,after};
 "#)?);
         evaluate_view_dom(
             app,
             "settings",
-            r#"
-const image=document.querySelector('#clipboard-type-image');
-if(image.matches(':disabled')||image.checked)throw Error('pause must retain the editable image preference');
-document.querySelector('button[aria-label="HotKey"]').click();return true;
-"#,
+            r#"document.querySelector('button[aria-label="HotKey"]').click();return true;"#,
         )?;
         wait_view_dom(
             app,
@@ -2721,7 +2755,11 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   if(excluded.some(app=>app.bundleId==='com.apple.Passwords'))throw Error('exclusion was not removed');
   window.clipboardSettingsProbe.stage='storage';
   const storage=await invoke('records_storage_info');
-  const policy={limit:1};
+  if(!storage.breakdown||storage.bytes!==storage.breakdown.text.bytes+storage.breakdown.image.bytes+storage.breakdown.files.bytes)throw Error('storage breakdown does not match total bytes');
+  if(storage.autoCleanupIntervalHours!==1)throw Error('expected default 1 hour auto cleanup interval');
+  const loc=await invoke('storage_location_info');
+  if(!loc.dataDir||!loc.logDir||loc.isCustomDataDir!==false)throw Error('unexpected storage_location_info');
+  const policy={limit:1,maxStorageMb:256,autoCleanupIntervalHours:6};
   window.clipboardSettingsProbe.stage='preview';
   const preview=await invoke('records_cleanup_preview',{policy});
   if(preview.count!==0||storage.limit!==500||storage.bytes<1)throw Error('clipboard count-only default or old row is missing');
@@ -2730,9 +2768,9 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   if(stale!=='clipboard_cleanup_changed')throw Error('cleanup accepted a mismatched preview');
   window.clipboardSettingsProbe.stage='apply';
   const result=await invoke('records_cleanup_apply',{policy,token:preview.token});
-  if(result.removed!==preview.count||result.mediaCleanupFailed)throw Error('cleanup did not match the preview');
+  if(result.removed!==preview.count||typeof result.reclaimedBytes!=='number'||result.mediaCleanupFailed)throw Error('cleanup did not match the preview');
   const saved=await invoke('clipboard_options_get');
-  if(saved.historyPolicy.limit!==1)throw Error('confirmed count was not saved');
+  if(saved.historyPolicy.limit!==1||saved.historyPolicy.maxStorageMb!==256||saved.historyPolicy.autoCleanupIntervalHours!==6)throw Error('confirmed retention policy was not saved');
   window.clipboardSettingsProbe={done:true,conflict,afterConflict:snapshot.clipboardBinding,removed:result.removed};
 })().catch(error=>window.clipboardSettingsProbe={...window.clipboardSettingsProbe,done:true,error:String(error)});
 return {paused:true};

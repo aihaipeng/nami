@@ -5,7 +5,7 @@ use crate::{
 };
 use nami::{
     clipboard::{CleanupPreview, ClipboardSearchOptions, HistoryPolicy},
-    database::HistoryDatabase,
+    database::{ClipboardStorageBreakdown, HistoryDatabase},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -782,15 +782,24 @@ pub async fn records_preview_lines_set(
     Ok(())
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageUsageSnapshot {
+    pub bytes: u64,
+    pub breakdown: ClipboardStorageBreakdown,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorageInfo {
     bytes: u64,
+    breakdown: ClipboardStorageBreakdown,
     limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_age_days: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_storage_mb: Option<u32>,
+    auto_cleanup_interval_hours: u32,
 }
 
 // Size of the image store, including files left behind by a failed cleanup. No external file paths.
@@ -825,12 +834,41 @@ fn image_bytes(root: &Path) -> Result<u64, String> {
     Ok(bytes)
 }
 
+pub(crate) async fn storage_usage_snapshot(
+    app: &AppHandle,
+) -> Result<StorageUsageSnapshot, String> {
+    let mut breakdown = database(app, |db| db.clipboard_storage_breakdown()).await?;
+    let root = image_root(app)?;
+    let media = tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
+        .await
+        .map_err(|_| "storage_worker")??;
+    breakdown.image.bytes = breakdown.image.bytes.saturating_add(media);
+    Ok(StorageUsageSnapshot {
+        bytes: breakdown.total_bytes(),
+        breakdown,
+    })
+}
+
 #[tauri::command]
 pub async fn records_storage_info(window: Webview, app: AppHandle) -> Result<StorageInfo, String> {
     authorize(&window, &["settings"])?;
-    let (data, policy) = database(&app, move |db| {
+    let state = app.state::<AppState>();
+    let cached = *state.tray_storage_snapshot.lock().unwrap();
+    if let Some(usage) = cached {
+        let policy = database(&app, |db| db.clipboard_history_policy()).await?;
+        return Ok(StorageInfo {
+            bytes: usage.bytes,
+            breakdown: usage.breakdown,
+            limit: policy.limit,
+            max_age_days: policy.max_age_days,
+            max_storage_mb: policy.max_storage_mb,
+            auto_cleanup_interval_hours: policy.auto_cleanup_interval_hours,
+        });
+    }
+    let revision = state.clipboard_revision.load(Ordering::SeqCst);
+    let (mut breakdown, policy) = database(&app, move |db| {
         Ok((
-            db.clipboard_storage_bytes()?,
+            db.clipboard_storage_breakdown()?,
             db.clipboard_history_policy()?,
         ))
     })
@@ -839,11 +877,22 @@ pub async fn records_storage_info(window: Webview, app: AppHandle) -> Result<Sto
     let media = tauri::async_runtime::spawn_blocking(move || image_bytes(&root))
         .await
         .map_err(|_| "storage_worker")??;
+    breakdown.image.bytes = breakdown.image.bytes.saturating_add(media);
+    let usage = StorageUsageSnapshot {
+        bytes: breakdown.total_bytes(),
+        breakdown,
+    };
+    *state.tray_storage_snapshot.lock().unwrap() = Some(usage);
+    state.tray_disk_revision.store(revision, Ordering::SeqCst);
+    let sync_app = app.clone();
+    let _ = on_main(&app, move |_| crate::tray_menu::sync(&sync_app)).await;
     Ok(StorageInfo {
-        bytes: data.saturating_add(media),
+        bytes: usage.bytes,
+        breakdown: usage.breakdown,
         limit: policy.limit,
         max_age_days: policy.max_age_days,
         max_storage_mb: policy.max_storage_mb,
+        auto_cleanup_interval_hours: policy.auto_cleanup_interval_hours,
     })
 }
 
@@ -851,6 +900,7 @@ pub async fn records_storage_info(window: Webview, app: AppHandle) -> Result<Sto
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CleanupResult {
     removed: usize,
+    reclaimed_bytes: u64,
     media_cleanup_failed: bool,
 }
 
@@ -886,6 +936,7 @@ pub async fn records_cleanup_apply(
     let result = cleanup_locked(&app, policy, categories, Some(token), true).await?;
     if let Some(policy) = policy {
         state.clipboard_options.lock().unwrap().history_policy = policy;
+        state.cleanup_schedule_notify.notify_one();
     }
     Ok(result)
 }
@@ -897,6 +948,14 @@ async fn cleanup_locked(
     token: Option<String>,
     notify: bool,
 ) -> Result<CleanupResult, String> {
+    let before_bytes = if notify {
+        storage_usage_snapshot(app)
+            .await
+            .ok()
+            .map(|usage| usage.bytes)
+    } else {
+        None
+    };
     let root = image_root(app)?;
     let root_for_db = root.clone();
     let (removed, images) = database(app, move |db| {
@@ -917,8 +976,32 @@ async fn cleanup_locked(
     } else {
         false
     };
+    let mut reclaimed_bytes = 0u64;
+    if removed > 0 || !images.is_empty() {
+        if let Ok(after_usage) = storage_usage_snapshot(app).await {
+            if let Some(before) = before_bytes {
+                reclaimed_bytes = before.saturating_sub(after_usage.bytes);
+            }
+            let state = app.state::<AppState>();
+            let revision = state.clipboard_revision.load(Ordering::SeqCst);
+            *state.tray_storage_snapshot.lock().unwrap() = Some(after_usage);
+            state.tray_disk_revision.store(revision, Ordering::SeqCst);
+            let _ = app.emit(
+                "records_storage_changed",
+                serde_json::json!({
+                    "bytes": after_usage.bytes,
+                    "breakdown": after_usage.breakdown,
+                }),
+            );
+            let sync_app = app.clone();
+            let _ = on_main(app, move |_| crate::tray_menu::sync(&sync_app)).await;
+        } else {
+            crate::tray_menu::refresh_disk_usage(app, 100);
+        }
+    }
     Ok(CleanupResult {
         removed,
+        reclaimed_bytes,
         media_cleanup_failed,
     })
 }
@@ -958,7 +1041,11 @@ pub(crate) async fn enforce_history(app: &AppHandle, notify: bool) {
         .lock()
         .unwrap()
         .history_policy;
-    if notify && policy.max_age_days.is_none() && policy.max_storage_mb.is_none() {
+    if notify
+        && policy.limit == 0
+        && policy.max_age_days.is_none()
+        && policy.max_storage_mb.is_none()
+    {
         return;
     }
     match cleanup_locked(app, Some(policy), 0, None, notify).await {
@@ -970,27 +1057,13 @@ pub(crate) async fn enforce_history(app: &AppHandle, notify: bool) {
     }
 }
 
-pub(crate) fn recording_menu_item(
-    app: &AppHandle,
-) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
-    let state = app.state::<AppState>();
-    let item = tauri::menu::MenuItem::with_id(
-        app,
-        "clipboard_recording",
-        recording_menu_label(state.clipboard_enabled.load(Ordering::SeqCst)),
-        state.storage_error.lock().unwrap().is_none(),
-        None::<&str>,
-    )?;
-    *state.clipboard_recording_menu.lock().unwrap() = Some(item.clone());
-    Ok(item)
-}
-
+#[cfg(all(
+    feature = "ui-tests",
+    target_os = "macos",
+    not(feature = "portable-ui")
+))]
 pub(crate) fn recording_menu_label(enabled: bool) -> &'static str {
-    if enabled {
-        "Pause Recording"
-    } else {
-        "Resume Recording"
-    }
+    crate::tray_menu::recording_label(enabled, false)
 }
 
 pub(crate) async fn set_recording(app: &AppHandle, enabled: Option<bool>) -> Result<(), String> {
@@ -1007,10 +1080,7 @@ pub(crate) async fn set_recording(app: &AppHandle, enabled: Option<bool>) -> Res
             .clipboard_version
             .store(platform::clipboard_version(), Ordering::SeqCst);
         state.clipboard_enabled.store(enabled, Ordering::SeqCst);
-        let menu = state.clipboard_recording_menu.lock().unwrap().clone();
-        if let Some(menu) = menu {
-            let _ = menu.set_text(recording_menu_label(enabled));
-        }
+        crate::tray_menu::sync(&app);
         for label in ["clipboard", "translation", "settings"] {
             if let Some(view) = app.get_webview(label) {
                 let _ = view.emit("clipboard_capture_changed", enabled);

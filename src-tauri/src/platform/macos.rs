@@ -28,6 +28,276 @@ pub fn activation_epoch() -> u64 {
     ACTIVATION_EPOCH.load(Ordering::SeqCst)
 }
 
+pub fn system_prefers_zh() -> bool {
+    unsafe {
+        let langs: Retained<NSArray<NSString>> = msg_send![class!(NSLocale), preferredLanguages];
+        langs.firstObject().is_some_and(|first| {
+            let tag = first.to_string().to_ascii_lowercase();
+            tag == "zh-cn"
+                || tag.starts_with("zh-cn-")
+                || tag == "zh-sg"
+                || tag.starts_with("zh-sg-")
+                || tag == "zh-hans"
+                || tag.starts_with("zh-hans-")
+        })
+    }
+}
+
+pub fn is_main_thread() -> bool {
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
+#[derive(Clone)]
+struct TrayDiskUsageConfig {
+    item_index: usize,
+    value: String,
+    min_width: f64,
+}
+
+struct TrayMenuObserverState {
+    observer_ptr: usize,
+    observed_status_item: usize,
+}
+
+static TRAY_DISK_USAGE_CONFIG: OnceLock<Mutex<Option<TrayDiskUsageConfig>>> = OnceLock::new();
+static TRAY_MENU_OBSERVER: OnceLock<Mutex<Option<TrayMenuObserverState>>> = OnceLock::new();
+
+objc2::define_class!(
+    #[unsafe(super = objc2_foundation::NSObject)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = ()]
+    struct NamiTrayMenuObserver;
+
+    impl NamiTrayMenuObserver {
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: *mut AnyObject,
+            object: *mut AnyObject,
+            _change: *mut AnyObject,
+            _context: *mut c_void,
+        ) {
+            if object.is_null() {
+                return;
+            }
+            unsafe {
+                let menu: *mut AnyObject = msg_send![object, menu];
+                if menu.is_null() {
+                    return;
+                }
+                let config = TRAY_DISK_USAGE_CONFIG
+                    .get()
+                    .and_then(|lock| lock.lock().ok())
+                    .and_then(|guard| guard.clone());
+                if let Some(config) = config {
+                    apply_tray_disk_usage_to_menu(menu, &config);
+                }
+            }
+        }
+    }
+);
+
+unsafe fn apply_tray_disk_usage_to_menu(
+    menu: *mut AnyObject,
+    config: &TrayDiskUsageConfig,
+) -> bool {
+    if menu.is_null() {
+        return false;
+    }
+    let _: () = msg_send![menu, setMinimumWidth: config.min_width];
+    let count: isize = msg_send![menu, numberOfItems];
+    if config.item_index as isize >= count {
+        return false;
+    }
+    let Some(badge_class) = objc2::runtime::AnyClass::get(c"NSMenuItemBadge") else {
+        return false;
+    };
+    let item: *mut AnyObject = msg_send![menu, itemAtIndex: config.item_index as isize];
+    if item.is_null() {
+        return false;
+    }
+    let alloc: Allocated<AnyObject> = msg_send![badge_class, alloc];
+    let text = NSString::from_str(&config.value);
+    let badge: Option<Retained<AnyObject>> = msg_send![alloc, initWithString: &*text];
+    let Some(badge) = badge else {
+        return false;
+    };
+    let _: () = msg_send![item, setBadge: &*badge];
+    true
+}
+
+/// Applies a stable minimum width to the tray `NSMenu` attached to an `NSStatusItem`
+/// and places the disk usage metric in the right-aligned `NSMenuItemBadge` column (macOS 14+)
+/// matching shortcut alignment. Because `tray-icon` only attaches the `NSMenu` to `NSStatusItem`
+/// right before `performClick:` opens the menu, this installs a KVO observer on `NSStatusItem.menu`
+/// to apply the latest width and badge synchronously before every popup (and immediately if open).
+/// Returns `true` when the native badge mechanism is available and active.
+pub fn configure_tray_disk_usage(
+    ns_status_item: *mut c_void,
+    item_index: usize,
+    value: &str,
+    min_width: f64,
+) -> bool {
+    if ns_status_item.is_null() || objc2::runtime::AnyClass::get(c"NSMenuItemBadge").is_none() {
+        return false;
+    }
+    let Some(mtm) = objc2_foundation::MainThreadMarker::new() else {
+        return false;
+    };
+    let config = TrayDiskUsageConfig {
+        item_index,
+        value: value.to_owned(),
+        min_width,
+    };
+    if let Ok(mut guard) = TRAY_DISK_USAGE_CONFIG
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = Some(config.clone());
+    }
+    let status_item_addr = ns_status_item as usize;
+    unsafe {
+        let status_item = ns_status_item.cast::<AnyObject>();
+        if let Ok(mut observer_guard) = TRAY_MENU_OBSERVER.get_or_init(|| Mutex::new(None)).lock() {
+            let needs_attach = observer_guard
+                .as_ref()
+                .is_none_or(|state| state.observed_status_item != status_item_addr);
+            if needs_attach {
+                let observer: Retained<NamiTrayMenuObserver> = {
+                    let alloc = mtm.alloc::<NamiTrayMenuObserver>().set_ivars(());
+                    msg_send![super(alloc), init]
+                };
+                // NSKeyValueObservingOptionNew = 1
+                let _: () = msg_send![
+                    status_item,
+                    addObserver: &*observer,
+                    forKeyPath: ns_string!("menu"),
+                    options: 1usize,
+                    context: std::ptr::null_mut::<c_void>()
+                ];
+                *observer_guard = Some(TrayMenuObserverState {
+                    observer_ptr: Retained::into_raw(observer) as usize,
+                    observed_status_item: status_item_addr,
+                });
+            }
+        }
+        let menu: *mut AnyObject = msg_send![status_item, menu];
+        if !menu.is_null() {
+            apply_tray_disk_usage_to_menu(menu, &config);
+        }
+    }
+    true
+}
+
+/// Detaches the `NSStatusItem.menu` KVO observer before the tray icon is dropped on exit.
+pub fn cleanup_tray_disk_usage_observer(ns_status_item: *mut c_void) {
+    let Some(state) = TRAY_MENU_OBSERVER
+        .get()
+        .and_then(|lock| lock.lock().ok())
+        .and_then(|mut guard| guard.take())
+    else {
+        return;
+    };
+    unsafe {
+        if !ns_status_item.is_null() && state.observed_status_item == ns_status_item as usize {
+            let status_item = ns_status_item.cast::<AnyObject>();
+            let observer = state.observer_ptr as *mut AnyObject;
+            let _: () = msg_send![
+                status_item,
+                removeObserver: observer,
+                forKeyPath: ns_string!("menu")
+            ];
+        }
+        if let Some(observer) = Retained::from_raw(state.observer_ptr as *mut NamiTrayMenuObserver)
+        {
+            drop(observer);
+        }
+    }
+}
+
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+pub fn test_verify_tray_disk_usage_kvo() -> Result<(), String> {
+    if objc2::runtime::AnyClass::get(c"NSMenuItemBadge").is_none() {
+        return Ok(());
+    }
+    unsafe {
+        let status_bar: *mut AnyObject = msg_send![class!(NSStatusBar), systemStatusBar];
+        // NSVariableStatusItemLength = -1.0
+        let status_item: Retained<AnyObject> = msg_send![status_bar, statusItemWithLength: -1.0f64];
+        let menu_alloc: Allocated<AnyObject> = msg_send![class!(NSMenu), alloc];
+        let menu: Retained<AnyObject> = msg_send![menu_alloc, init];
+        for (title, key) in [
+            ("拷贝记录", "`"),
+            ("打开翻译", "t"),
+            ("选字翻译", "o"),
+            ("偏好设置", ","),
+            ("暂停监听", ""),
+            ("磁盘占用", ""),
+            ("退出 Nami", "q"),
+        ] {
+            let item_alloc: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
+            let title_ns = NSString::from_str(title);
+            let key_ns = NSString::from_str(key);
+            let item: Retained<AnyObject> = msg_send![
+                item_alloc,
+                initWithTitle: &*title_ns,
+                action: Option::<objc2::runtime::Sel>::None,
+                keyEquivalent: &*key_ns
+            ];
+            let _: () = msg_send![&*menu, addItem: &*item];
+        }
+        let disk_index = 5usize;
+        let status_ptr = Retained::as_ptr(&status_item) as *mut c_void;
+        let result = (|| -> Result<(), String> {
+            // Reproduces tray-icon behavior where NSStatusItem.menu is nil until popup.
+            if !configure_tray_disk_usage(status_ptr, disk_index, "1.3 MB", 200.0) {
+                return Err("configure_tray_disk_usage returned false on macOS 14+".into());
+            }
+            let _: () = msg_send![&*status_item, setMenu: &*menu];
+            let _: () = msg_send![&*menu, update];
+            let item: *mut AnyObject = msg_send![&*menu, itemAtIndex: disk_index as isize];
+            let title: Retained<NSString> = msg_send![item, title];
+            if title.to_string() != "磁盘占用" {
+                return Err(format!("unexpected disk usage title: {}", title));
+            }
+            let badge: Option<Retained<AnyObject>> = msg_send![item, badge];
+            let badge = badge.ok_or("missing NSMenuItemBadge after setMenu:")?;
+            let badge_text: Option<Retained<NSString>> = msg_send![&*badge, stringValue];
+            if badge_text.map(|s| s.to_string()).as_deref() != Some("1.3 MB") {
+                return Err("unexpected initial badge text".into());
+            }
+            let size1: NSSize = msg_send![&*menu, size];
+            if (size1.width - 200.0).abs() > 0.5 {
+                return Err(format!("unexpected menu width for 1.3 MB: {}", size1.width));
+            }
+            let _: () = msg_send![&*status_item, setMenu: std::ptr::null::<AnyObject>()];
+            if !configure_tray_disk_usage(status_ptr, disk_index, "999.9 GB", 200.0) {
+                return Err("configure_tray_disk_usage update returned false".into());
+            }
+            let _: () = msg_send![&*status_item, setMenu: &*menu];
+            let _: () = msg_send![&*menu, update];
+            let badge2: Option<Retained<AnyObject>> = msg_send![item, badge];
+            let badge2 = badge2.ok_or("missing updated NSMenuItemBadge")?;
+            let badge_text2: Option<Retained<NSString>> = msg_send![&*badge2, stringValue];
+            if badge_text2.map(|s| s.to_string()).as_deref() != Some("999.9 GB") {
+                return Err("unexpected updated badge text".into());
+            }
+            let size2: NSSize = msg_send![&*menu, size];
+            if (size2.width - size1.width).abs() > 0.01 {
+                return Err(format!(
+                    "menu width jittered from {} to {}",
+                    size1.width, size2.width
+                ));
+            }
+            Ok(())
+        })();
+        let _: () = msg_send![&*status_item, setMenu: std::ptr::null::<AnyObject>()];
+        cleanup_tray_disk_usage_observer(status_ptr);
+        let _: () = msg_send![status_bar, removeStatusItem: &*status_item];
+        result
+    }
+}
+
 const MAX_CLIPBOARD_FOCUS_SOURCES: usize = 32;
 
 #[derive(Default)]
@@ -547,6 +817,30 @@ unsafe extern "C" fn reveal_in_finder(context: *mut c_void) {
     FINDER_REVEALS.fetch_add(1, Ordering::SeqCst);
 }
 
+pub fn open_directory(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err("storage_path".into());
+    }
+    let path = path.to_str().ok_or("storage_path")?.to_owned();
+    unsafe {
+        dispatch_async_f(
+            std::ptr::from_ref(&_dispatch_main_q).cast_mut(),
+            Box::into_raw(Box::new(path)).cast(),
+            Some(open_directory_in_finder),
+        );
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn open_directory_in_finder(context: *mut c_void) {
+    let path = Box::from_raw(context.cast::<String>());
+    objc2::rc::autoreleasepool(|_| {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
+        let _: bool = msg_send![workspace, openURL: &*url];
+    });
+}
+
 #[cfg(feature = "ui-tests")]
 pub fn test_activate_fixture(pid: u32, bundle: &std::path::Path) -> Result<Target, &'static str> {
     let pid = i32::try_from(pid).map_err(|_| "invalid fixture PID")?;
@@ -901,6 +1195,54 @@ pub(crate) fn pick_excluded_app(
     Ok(())
 }
 
+pub(crate) fn pick_storage_directory(
+    window: &tauri::Window,
+    initial_dir: &std::path::Path,
+    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
+    unsafe {
+        let parent = window.ns_window().map_err(|_| "storage_dialog_failed")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("storage_dialog_failed".into());
+        }
+        let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
+        if let Some(dir_str) = initial_dir.to_str() {
+            if initial_dir.is_dir() {
+                let dir_url = NSURL::fileURLWithPath(&NSString::from_str(dir_str));
+                let _: () = msg_send![&*panel, setDirectoryURL: &*dir_url];
+            }
+        }
+        let _: () = msg_send![&*panel, setCanChooseFiles: false];
+        let _: () = msg_send![&*panel, setCanChooseDirectories: true];
+        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
+        let _: () = msg_send![&*panel, setAllowsMultipleSelection: false];
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            complete(match response {
+                1 => {
+                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
+                    url.and_then(|url| url.path())
+                        .map(|path| Some(path.to_string().into()))
+                        .ok_or_else(|| "storage_dialog_failed".into())
+                }
+                0 => Ok(None),
+                _ => Err("storage_dialog_failed".into()),
+            });
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
+    }
+    Ok(())
+}
+
 pub fn target_app_info(target: Target) -> Option<serde_json::Value> {
     unsafe {
         let application = running(target)?;
@@ -912,7 +1254,8 @@ pub fn target_app_info(target: Target) -> Option<serde_json::Value> {
             .unwrap_or_else(|| bundle.clone());
         let url: Option<Retained<AnyObject>> = msg_send![&*application, bundleURL];
         let path: Option<Retained<NSString>> = url.and_then(|url| msg_send![&*url, path]);
-        let icon_data_url = path.and_then(|path| file_icon_data_url(&path.to_string()));
+        let icon_data_url =
+            path.and_then(|path| file_icon_data_url(&path.to_string(), true, false));
         Some(serde_json::json!({
             "bundleId": bundle,
             "name": name,
@@ -1108,7 +1451,10 @@ pub fn test_move_pointer(x: f64, y: f64) -> Result<(), String> {
 }
 
 // NSWorkspace file icons may be queried on a worker; no window/view API is touched.
-pub fn file_icon_data_url(path: &str) -> Option<String> {
+pub fn file_icon_data_url(path: &str, exists: bool, is_dir: bool) -> Option<String> {
+    if !exists && is_dir {
+        return folder_icon_data_url();
+    }
     objc2::rc::autoreleasepool(|_| unsafe {
         let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
         let ns_path = NSString::from_str(path);
@@ -1119,6 +1465,29 @@ pub fn file_icon_data_url(path: &str) -> Option<String> {
             bitmap_png(&*bitmap?).map(|data| png_data_url(&data))
         })
     })
+}
+
+fn folder_icon_data_url() -> Option<String> {
+    static FOLDER_ICON: OnceLock<Option<String>> = OnceLock::new();
+    FOLDER_ICON
+        .get_or_init(|| {
+            objc2::rc::autoreleasepool(|_| unsafe {
+                let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let ut_type: Option<Retained<AnyObject>> =
+                    msg_send![class!(UTType), typeWithIdentifier: ns_string!("public.folder")];
+                let ut_type = ut_type?;
+                let icon: Option<Retained<AnyObject>> =
+                    msg_send![workspace, iconForContentType: &*ut_type];
+                let icon = icon?;
+                image_thumbnail(&icon).or_else(|| {
+                    let tiff: Option<Retained<NSData>> = msg_send![&*icon, TIFFRepresentation];
+                    let bitmap: Option<Retained<AnyObject>> =
+                        msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff?];
+                    bitmap_png(&*bitmap?).map(|data| png_data_url(&data))
+                })
+            })
+        })
+        .clone()
 }
 
 pub(crate) fn application_presentation(
@@ -1155,9 +1524,13 @@ unsafe fn application_bundle_name(bundle: &AnyObject) -> Option<String> {
 unsafe fn application_thumbnail(workspace: *mut AnyObject, path: &NSString) -> Option<String> {
     let icon: Option<Retained<AnyObject>> = msg_send![workspace, iconForFile: path];
     let icon = icon?;
+    image_thumbnail(&icon)
+}
+
+unsafe fn image_thumbnail(icon: &AnyObject) -> Option<String> {
     let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(40.0, 40.0));
     // Export a single representation; TIFFRepresentation can expand all sizes beyond 64 MiB.
-    let image: *const c_void = msg_send![&*icon, CGImageForProposedRect: &mut rect as *mut NSRect,
+    let image: *const c_void = msg_send![icon, CGImageForProposedRect: &mut rect as *mut NSRect,
         context: std::ptr::null::<AnyObject>(), hints: std::ptr::null::<AnyObject>()];
     if image.is_null() {
         return None;
@@ -1686,5 +2059,24 @@ mod tests {
         assert_eq!(chord[3].2, 0);
         assert!(chord[..2].iter().all(|(_, down, _)| *down));
         assert!(chord[2..].iter().all(|(_, down, _)| !*down));
+    }
+
+    #[test]
+    fn missing_directory_reuses_macos_folder_icon() {
+        let missing =
+            std::env::temp_dir().join(format!("nami-missing-folder-icon-{}", uuid::Uuid::new_v4()));
+        let path = missing.to_string_lossy();
+        let dir_icon = super::file_icon_data_url(&path, false, true);
+        let file_icon = super::file_icon_data_url(&path, false, false);
+        assert!(
+            dir_icon
+                .as_deref()
+                .is_some_and(|url| url.starts_with("data:image/png;base64,")),
+            "expected PNG data URL for missing folder icon"
+        );
+        assert_ne!(
+            dir_icon, file_icon,
+            "missing folder icon must reuse folder icon rather than generic missing file icon"
+        );
     }
 }

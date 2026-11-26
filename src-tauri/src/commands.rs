@@ -91,6 +91,8 @@ pub struct Snapshot {
     clipboard_binding: Option<crate::shortcuts::KeyBinding>,
     clipboard_shortcut_enabled: bool,
     clipboard_controls: crate::clipboard_preferences::ClipboardControls,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_settings_page: Option<String>,
     window: WindowState,
 }
 
@@ -99,6 +101,11 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
     authorize(&window, &["translation", "clipboard", "settings"])?;
     let state = app.state::<AppState>();
     let clipboard_shortcut = state.clipboard_shortcut.lock().unwrap().clone();
+    let initial_settings_page = if window.label() == "settings" {
+        state.pending_settings_page.lock().unwrap().take()
+    } else {
+        None
+    };
     let snapshot = Snapshot {
         capabilities: platform::capabilities(),
         locale: state.locale.lock().unwrap().clone(),
@@ -114,6 +121,7 @@ pub fn app_snapshot(window: Webview, app: AppHandle) -> Result<Snapshot, String>
         clipboard_binding: clipboard_shortcut.binding,
         clipboard_shortcut_enabled: clipboard_shortcut.enabled,
         clipboard_controls: state.clipboard_options.lock().unwrap().controls(),
+        initial_settings_page,
         window: state.windows.lock().unwrap().clone(),
     };
     Ok(snapshot)
@@ -138,6 +146,10 @@ pub async fn launch_at_login_set(
 pub fn window_show(window: Webview, app: AppHandle, target: String) -> Result<(), String> {
     authorize(&window, &["translation", "clipboard", "settings"])?;
     if target == "settings" {
+        *app.state::<AppState>()
+            .pending_settings_page
+            .lock()
+            .unwrap() = None;
         return crate::records_runtime::open_settings_window(&app);
     }
     windows::show(&app, &target)
@@ -535,6 +547,10 @@ pub async fn locale_set(window: Webview, app: AppHandle, locale: String) -> Resu
     })
     .await?;
     *state.locale.lock().unwrap() = locale.clone();
+    on_main(&app, |app| {
+        crate::tray_menu::sync(&app);
+    })
+    .await?;
     for label in ["translation", "clipboard", "settings"] {
         if let Some(window) = app.get_webview(label) {
             window
@@ -1338,10 +1354,14 @@ pub async fn translation_shortcuts_restore(
             *state.translation_preferences.lock().unwrap() = preferences.clone();
             if sync_globals {
                 crate::sync_global_shortcuts(&app);
+            } else {
+                crate::tray_menu::sync(&app);
             }
             publish_preferences(&app, &preferences)?;
         } else if sync_globals {
             crate::sync_global_shortcuts(&app);
+        } else {
+            crate::tray_menu::sync(&app);
         }
         Ok(())
     })
@@ -1946,7 +1966,8 @@ pub async fn clipboard_record_detail(
 ) -> Result<nami::clipboard::ClipboardDetail, String> {
     authorize(&window, &["clipboard", "translation"])?;
     let status_app = app.clone();
-    let (detail, measure_files, image_file_paths) =
+    let record_id_for_backfill = record_id.clone();
+    let (detail, measure_files, image_file_paths, directory_paths) =
         crate::clipboard_runtime::database(&app, move |database| {
             let mut detail = database.clipboard_detail(&record_id)?;
             if detail.kind == "image" && platform::capabilities().image_ocr {
@@ -1964,15 +1985,50 @@ pub async fn clipboard_record_detail(
             let image_file_paths = (detail.kind == "image")
                 .then(|| representation.map(|value| value.paths))
                 .flatten();
-            Ok((detail, measure_files, image_file_paths))
+            let directory_paths = if detail.kind == "files" {
+                database.clipboard_directory_paths(&record_id)?
+            } else {
+                Vec::new()
+            };
+            Ok((detail, measure_files, image_file_paths, directory_paths))
         })
         .await?;
     let root = crate::clipboard_runtime::image_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::clipboard_detail::enrich(detail, &root, measure_files, image_file_paths)
+    let (detail, updated_dirs) = tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = crate::clipboard_detail::enrich(
+            detail,
+            &root,
+            measure_files,
+            image_file_paths,
+            &directory_paths,
+        )?;
+        let updated_dirs = if detail.kind == "files" {
+            nami::clipboard::merge_observed_directory_paths(&directory_paths, &detail.files)
+        } else {
+            None
+        };
+        let single_existing_image = detail.kind == "files"
+            && matches!(
+                detail.files.as_slice(),
+                [entry] if entry.exists && !entry.is_dir && entry.is_image
+            );
+        if detail.kind == "files" && !single_existing_image {
+            for entry in &mut detail.files {
+                entry.icon_data_url =
+                    platform::file_icon_data_url(&entry.path, entry.exists, entry.is_dir);
+            }
+        }
+        Ok::<_, String>((detail, updated_dirs))
     })
     .await
-    .map_err(|_| "storage_worker")?
+    .map_err(|_| "storage_worker")??;
+    if let Some(updated_dirs) = updated_dirs {
+        let _ = crate::clipboard_runtime::database(&app, move |database| {
+            database.clipboard_set_directory_paths(&record_id_for_backfill, &updated_dirs)
+        })
+        .await;
+    }
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -1986,10 +2042,7 @@ pub async fn clipboard_image_save(
         return Err("platform_unavailable".into());
     }
     let png = crate::clipboard_runtime::image_export_png(&app, record_id).await?;
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "storage_unavailable")?;
+    let app_data = crate::storage_location::active_data_dir(&app)?;
     let parent = window.window();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     on_main(&app, move |_| {
@@ -2444,22 +2497,45 @@ pub async fn clipboard_files(
     record_id: String,
 ) -> Result<Vec<nami::clipboard::FileEntry>, String> {
     authorize(&window, &["clipboard", "translation"])?;
-    let record = crate::clipboard_runtime::database(&app, move |database| {
-        database.clipboard_record(&record_id)
+    let record_id_for_backfill = record_id.clone();
+    let (record, directory_paths) = crate::clipboard_runtime::database(&app, move |database| {
+        let record = database.clipboard_record(&record_id)?;
+        let directory_paths = if record.kind == "files" {
+            database.clipboard_directory_paths(&record_id)?
+        } else {
+            Vec::new()
+        };
+        Ok((record, directory_paths))
     })
     .await?;
     if record.kind != "files" {
         return Err("invalid_argument".into());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut entries = nami::clipboard::file_entries(&record.text)?;
-        for entry in &mut entries {
-            entry.icon_data_url = platform::file_icon_data_url(&entry.path);
+    let (entries, updated_dirs) = tauri::async_runtime::spawn_blocking(move || {
+        let mut entries = nami::clipboard::file_entries_with_dirs(&record.text, &directory_paths)?;
+        let updated_dirs =
+            nami::clipboard::merge_observed_directory_paths(&directory_paths, &entries);
+        let single_existing_image = matches!(
+            entries.as_slice(),
+            [entry] if entry.exists && !entry.is_dir && entry.is_image
+        );
+        if !single_existing_image {
+            for entry in &mut entries {
+                entry.icon_data_url =
+                    platform::file_icon_data_url(&entry.path, entry.exists, entry.is_dir);
+            }
         }
-        Ok(entries)
+        Ok::<_, String>((entries, updated_dirs))
     })
     .await
-    .map_err(|_| "storage_worker")?
+    .map_err(|_| "storage_worker")??;
+    if let Some(updated_dirs) = updated_dirs {
+        let _ = crate::clipboard_runtime::database(&app, move |database| {
+            database.clipboard_set_directory_paths(&record_id_for_backfill, &updated_dirs)
+        })
+        .await;
+    }
+    Ok(entries)
 }
 
 #[tauri::command]

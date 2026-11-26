@@ -48,6 +48,46 @@ pub fn finish_selection_copy(
 pub fn activation_epoch() -> u64 {
     0
 }
+
+pub fn system_prefers_zh() -> bool {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            let tag = value.to_ascii_lowercase();
+            if tag.starts_with("zh_cn")
+                || tag.starts_with("zh-cn")
+                || tag.starts_with("zh_sg")
+                || tag.starts_with("zh-sg")
+                || tag.starts_with("zh_hans")
+                || tag.starts_with("zh-hans")
+            {
+                return true;
+            }
+            if !tag.is_empty() {
+                return false;
+            }
+        }
+    }
+    false
+}
+#[allow(dead_code)]
+pub fn is_main_thread() -> bool {
+    true
+}
+#[allow(dead_code)]
+pub fn configure_tray_disk_usage(
+    _ns_status_item: *mut std::ffi::c_void,
+    _item_index: usize,
+    _value: &str,
+    _min_width: f64,
+) -> bool {
+    false
+}
+#[allow(dead_code)]
+pub fn cleanup_tray_disk_usage_observer(_ns_status_item: *mut std::ffi::c_void) {}
+#[cfg(all(feature = "ui-tests", not(feature = "portable-ui")))]
+pub fn test_verify_tray_disk_usage_kvo() -> Result<(), String> {
+    Ok(())
+}
 pub fn capture_target() -> Option<Target> {
     None
 }
@@ -146,7 +186,7 @@ pub(crate) fn application_presentation(_: &str) -> Option<(Option<String>, Optio
     None
 }
 
-pub fn file_icon_data_url(_: &str) -> Option<String> {
+pub fn file_icon_data_url(_: &str, _: bool, _: bool) -> Option<String> {
     None
 }
 
@@ -178,6 +218,18 @@ pub(crate) fn pick_backup_save_path(
 
 pub(crate) fn pick_backup_open_path(
     _: &tauri::Window,
+    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub fn open_directory(_: &std::path::Path) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub(crate) fn pick_storage_directory(
+    _: &tauri::Window,
+    _: &std::path::Path,
     _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
 ) -> Result<(), String> {
     Err(UNAVAILABLE.into())

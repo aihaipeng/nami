@@ -255,6 +255,125 @@ fn remove_file_thumbs_in(directory: &Path) {
     }
 }
 
+pub(crate) fn prune_stale_caches(
+    app: &AppHandle,
+    referenced_images: &std::collections::HashSet<String>,
+    drag_max_age: std::time::Duration,
+) -> (usize, u64) {
+    let Ok(cache_root) = app.path().app_cache_dir() else {
+        return (0, 0);
+    };
+    prune_stale_caches_in(
+        &cache_root,
+        referenced_images,
+        std::time::Duration::from_secs(60),
+        drag_max_age,
+    )
+}
+
+fn prune_stale_caches_in(
+    cache_root: &Path,
+    referenced_images: &std::collections::HashSet<String>,
+    min_tmp_age: std::time::Duration,
+    drag_max_age: std::time::Duration,
+) -> (usize, u64) {
+    let referenced_hashes: std::collections::HashSet<&str> = referenced_images
+        .iter()
+        .filter_map(|rel| extract_stored_image_hash(rel))
+        .collect();
+    let (thumb_removed, thumb_bytes) = prune_unreferenced_thumbs(
+        &cache_root.join("clipboard-thumbs"),
+        &referenced_hashes,
+        min_tmp_age,
+    );
+    let (drag_removed, drag_bytes) =
+        prune_expired_files(&cache_root.join("drag-exports"), drag_max_age);
+    (
+        thumb_removed + drag_removed,
+        thumb_bytes.saturating_add(drag_bytes),
+    )
+}
+
+fn prune_unreferenced_thumbs(
+    directory: &Path,
+    referenced_hashes: &std::collections::HashSet<&str>,
+    min_tmp_age: std::time::Duration,
+) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return (0, 0);
+    };
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let should_remove = if name.starts_with('.') && name.ends_with(".tmp") {
+            min_tmp_age.is_zero()
+                || metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age >= min_tmp_age)
+        } else if let Some(rest) = name.strip_prefix("img_") {
+            rest.split_once('_')
+                .map(|(hash, _)| !referenced_hashes.contains(hash))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !should_remove {
+            continue;
+        }
+        let len = metadata.len();
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            bytes = bytes.saturating_add(len);
+        }
+    }
+    (removed, bytes)
+}
+
+fn prune_expired_files(directory: &Path, max_age: std::time::Duration) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return (0, 0);
+    };
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let expired = max_age.is_zero()
+            || metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= max_age);
+        if !expired {
+            continue;
+        }
+        let len = metadata.len();
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            bytes = bytes.saturating_add(len);
+        }
+    }
+    (removed, bytes)
+}
+
 enum PreviewSource {
     StoredImage { relative: String },
     LocalFile { path: PathBuf },
@@ -352,6 +471,7 @@ fn load_preview_with_cache(
                 Ok(preview)
             }
             PreviewSource::LocalFile { path } => {
+                const MAX_LOCAL_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
                 let metadata = std::fs::metadata(&path).map_err(|_| "clipboard_file_missing")?;
                 if !metadata.is_file() {
                     return Err("invalid_argument".into());
@@ -365,7 +485,14 @@ fn load_preview_with_cache(
                         return Ok(cached);
                     }
                 }
-                let effective = target_pixels_for_path(&path);
+                let (w, h) = platform::image_dimensions_from_path(&path)?;
+                if u64::from(w) * u64::from(h) > MAX_LOCAL_IMAGE_PIXELS {
+                    return Err("clipboard_image_limit".into());
+                }
+                let effective = match max_height {
+                    Some(max_h) => fit_box_max_pixels(w, h, max_pixels, Some(max_h)),
+                    None => max_pixels,
+                };
                 let preview = platform::clipboard_image_preview_from_path(&path, effective)
                     .map_err(str::to_owned)?;
                 if let Some(dir) = cache_dir {
@@ -944,6 +1071,132 @@ mod tests {
             warm_avg_ms,
             cold_avg_ms / warm_avg_ms.max(0.0001),
             json_avg_ms,
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn prune_stale_caches_keeps_live_thumbs_and_prunes_stale_entries() {
+        let base = std::env::temp_dir().join(format!("nami-prune-cache-{}", uuid::Uuid::new_v4()));
+        let thumbs = base.join("clipboard-thumbs");
+        let drags = base.join("drag-exports");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        std::fs::create_dir_all(&drags).unwrap();
+
+        let live_hash = "a".repeat(64);
+        let orphan_hash = "b".repeat(64);
+        let live_thumb = thumbs.join(format!("img_{live_hash}_512.png"));
+        let orphan_thumb = thumbs.join(format!("img_{orphan_hash}_512.png"));
+        let stale_tmp = thumbs.join(".partial.tmp");
+        let file_thumb = thumbs.join("file_1234_512.png");
+        let drag_file = drags.join("Nami_export.png");
+
+        std::fs::write(&live_thumb, b"live-thumb").unwrap();
+        std::fs::write(&orphan_thumb, b"orphan-thumb").unwrap();
+        std::fs::write(&stale_tmp, b"tmp").unwrap();
+        std::fs::write(&file_thumb, b"file-thumb").unwrap();
+        std::fs::write(&drag_file, b"drag-export").unwrap();
+
+        let mut referenced = std::collections::HashSet::new();
+        referenced.insert(format!("origin/aa/{live_hash}.png"));
+
+        // With 30-min drag max age, a freshly created drag export is preserved while orphan thumb & tmp are pruned.
+        let (removed, bytes) = prune_stale_caches_in(
+            &base,
+            &referenced,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(30 * 60),
+        );
+        assert_eq!(removed, 2);
+        assert_eq!(bytes, (b"orphan-thumb".len() + b"tmp".len()) as u64);
+        assert!(live_thumb.exists());
+        assert!(file_thumb.exists());
+        assert!(drag_file.exists());
+        assert!(!orphan_thumb.exists());
+        assert!(!stale_tmp.exists());
+
+        // Once expired (ZERO max age), drag export is pruned while live thumb stays intact.
+        let (removed_expired, _) = prune_stale_caches_in(
+            &base,
+            &referenced,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(removed_expired, 1);
+        assert!(live_thumb.exists());
+        assert!(!drag_file.exists());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
+    fn local_file_preview_caches_valid_images_and_rejects_pixel_bombs_and_missing_files() {
+        let base = std::env::temp_dir().join(format!("nami-local-media-{}", uuid::Uuid::new_v4()));
+        let cache = base.join("thumbs");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let valid = base.join("photo.jpg");
+        std::fs::write(
+            &valid,
+            include_bytes!("../../tests/fixtures/clipboard-wide.jpg"),
+        )
+        .unwrap();
+        let first = load_preview_with_cache(
+            &base,
+            Some(&cache),
+            PreviewSource::LocalFile {
+                path: valid.clone(),
+            },
+            512,
+            Some(128),
+        )
+        .unwrap();
+        assert!(first.starts_with(PNG_SIGNATURE));
+        let second = load_preview_with_cache(
+            &base,
+            Some(&cache),
+            PreviewSource::LocalFile {
+                path: valid.clone(),
+            },
+            512,
+            Some(128),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+
+        // Removing the local file immediately fails with clipboard_file_missing.
+        std::fs::remove_file(&valid).unwrap();
+        assert_eq!(
+            load_preview_with_cache(
+                &base,
+                Some(&cache),
+                PreviewSource::LocalFile { path: valid },
+                512,
+                Some(128),
+            )
+            .unwrap_err(),
+            "clipboard_file_missing"
+        );
+
+        // A compressed pixel bomb (8193x8193 > 64M pixels) is rejected before decoding.
+        let bomb = base.join("bomb.png");
+        std::fs::write(
+            &bomb,
+            include_bytes!("../../tests/fixtures/clipboard-oversized.png"),
+        )
+        .unwrap();
+        assert_eq!(
+            load_preview_with_cache(
+                &base,
+                Some(&cache),
+                PreviewSource::LocalFile { path: bomb },
+                512,
+                Some(128),
+            )
+            .unwrap_err(),
+            "clipboard_image_limit"
         );
 
         std::fs::remove_dir_all(base).unwrap();

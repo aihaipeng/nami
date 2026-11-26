@@ -153,10 +153,15 @@ pub(crate) async fn image_export_png(app: &AppHandle, id: String) -> Result<Vec<
 }
 
 fn export_png(payload: platform::ClipboardPayload) -> Result<Vec<u8>, String> {
-    let platform::ClipboardPayload::Image { bytes, extension } =
-        platform::prepare_image_paste(payload)
-    else {
-        return Err("invalid_argument".into());
+    let (bytes, extension) = match platform::prepare_image_paste(payload) {
+        platform::ClipboardPayload::Image { bytes, extension }
+        | platform::ClipboardPayload::FilesImage {
+            bytes,
+            extension,
+            image_fallback: true,
+            ..
+        } => (bytes, extension),
+        _ => return Err("invalid_argument".into()),
     };
     if extension != "png" || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err("clipboard_image_format".into());
@@ -315,9 +320,14 @@ pub(crate) async fn prepare_drag_item(
         let _write = state.clipboard_writes.lock().await;
         payload(app, id, PayloadMode::Stored).await?
     };
-    tauri::async_runtime::spawn_blocking(move || prepare_drag_payload(&cache_dir, payload))
-        .await
-        .map_err(|_| "storage_worker")?
+    let item =
+        tauri::async_runtime::spawn_blocking(move || prepare_drag_payload(&cache_dir, payload))
+            .await
+            .map_err(|_| "storage_worker")??;
+    app.state::<AppState>()
+        .cache_cleanup_dirty
+        .store(true, Ordering::SeqCst);
+    Ok(item)
 }
 
 fn record_payload(
@@ -327,6 +337,8 @@ fn record_payload(
 ) -> Result<platform::ClipboardPayload, String> {
     if let Some(mut representation) = representation {
         let bytes = clipboard::read_image(root, &representation.image_path)?;
+        let extension = clipboard::image_extension_from_path(&representation.image_path)
+            .ok_or("storage_corrupt")?;
         if record.kind == "image" {
             // Image history is immutable; never let a reused screenshot path change its file payload.
             representation.paths = vec![root
@@ -337,12 +349,7 @@ fn record_payload(
         return Ok(platform::ClipboardPayload::FilesImage {
             paths: representation.paths,
             bytes,
-            extension: if representation.image_path.ends_with(".png") {
-                "png"
-            } else {
-                "tiff"
-            }
-            .into(),
+            extension: extension.into(),
             image_fallback: record.kind == "image",
         });
     }
@@ -354,11 +361,7 @@ fn record_payload(
         "image" => {
             let path = record.image_path.ok_or("storage_corrupt")?;
             let bytes = clipboard::read_image(root, &path)?;
-            let extension = if path.ends_with(".png") {
-                "png"
-            } else {
-                "tiff"
-            };
+            let extension = clipboard::image_extension_from_path(&path).ok_or("storage_corrupt")?;
             Ok(platform::ClipboardPayload::Image {
                 bytes,
                 extension: extension.into(),
@@ -431,13 +434,51 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
         .store(platform::clipboard_version(), Ordering::SeqCst);
     let maintenance = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Always run retention cleanup once on launch, even when periodic cleanup is set to 0.
+        {
+            let state = maintenance.state::<AppState>();
+            let _write = state.clipboard_writes.lock().await;
+            crate::clipboard_preferences::enforce_history(&maintenance, true).await;
+        }
+        loop {
+            let interval_hours = maintenance
+                .state::<AppState>()
+                .clipboard_options
+                .lock()
+                .unwrap()
+                .history_policy
+                .auto_cleanup_interval_hours;
+            if interval_hours == 0 {
+                maintenance
+                    .state::<AppState>()
+                    .cleanup_schedule_notify
+                    .notified()
+                    .await;
+                continue;
+            }
+            let delay = std::time::Duration::from_secs(u64::from(interval_hours) * 3600);
+            let state = maintenance.state::<AppState>();
+            let wakeup = state.cleanup_schedule_notify.notified();
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {
+                    let _write = state.clipboard_writes.lock().await;
+                    crate::clipboard_preferences::enforce_history(&maintenance, true).await;
+                }
+                _ = wakeup => {}
+            }
+        }
+    });
+    let cache_maintenance = app.clone();
+    tauri::async_runtime::spawn(async move {
+        const CACHE_CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        // Run lossless cache maintenance independently on launch and every fixed 30 minutes.
         loop {
             {
-                let state = maintenance.state::<AppState>();
+                let state = cache_maintenance.state::<AppState>();
                 let _write = state.clipboard_writes.lock().await;
-                crate::clipboard_preferences::enforce_history(&maintenance, true).await;
+                crate::storage_location::run_auto_cache_cleanup_locked(&cache_maintenance).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(CACHE_CLEANUP_INTERVAL).await;
         }
     });
     let (index_tx, mut index_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -529,25 +570,25 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
             let worker = app.clone();
             let auto_index = platform::capabilities().image_ocr;
             let result = tauri::async_runtime::spawn_blocking(move || {
-                let had_image = matches!(
-                    capture.payload,
-                    platform::ClipboardPayload::Image { .. }
-                        | platform::ClipboardPayload::FilesImage { .. }
-                );
+                let had_image = matches!(capture.payload, platform::ClipboardPayload::Image { .. });
                 let mut index_job = Ok(None);
                 let saved = persist_capture_with(
                     &root,
                     capture,
                     types,
-                    |record, representation, formatting| {
+                    |record, representation, formatting, directory_paths| {
                         let state = worker.state::<AppState>();
                         if let Some(error) = state.storage_error.lock().unwrap().clone() {
                             return Err(error);
                         }
                         let mut database = state.database.lock().unwrap();
                         let db = database.as_mut().ok_or("storage_unavailable")?;
-                        let persisted =
-                            db.clipboard_insert_capture(record, representation, formatting)?;
+                        let persisted = db.clipboard_insert_capture_with_dirs(
+                            record,
+                            representation,
+                            formatting,
+                            directory_paths,
+                        )?;
                         // OCR lookup happens after commit; its failure must not trigger image cleanup.
                         index_job = pending_image_index(db, persisted, auto_index);
                         Ok(())
@@ -621,10 +662,8 @@ fn capture_error(app: &AppHandle, error: &str) {
 }
 
 pub(crate) fn image_root(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+    crate::storage_location::active_data_dir(app)
         .map(|root| root.join("resources").join("clipboard-images"))
-        .map_err(|_| "storage_unavailable".into())
 }
 
 #[cfg(any(
@@ -644,62 +683,18 @@ pub(crate) fn persist_capture(
         root,
         capture,
         RecordingTypes::default(),
-        |record, representation, formatting| {
+        |record, representation, formatting, directory_paths| {
             database
-                .clipboard_insert_capture(record, representation, formatting)
+                .clipboard_insert_capture_with_dirs(
+                    record,
+                    representation,
+                    formatting,
+                    directory_paths,
+                )
                 .map(|_| ())
         },
     )
     .map(|_| ())
-}
-
-fn image_file(path: &Path) -> Option<(Vec<u8>, String)> {
-    use std::io::Read;
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > clipboard::MAX_IMAGE_BYTES as u64 {
-        return None;
-    }
-    // Reject ordinary files with a bounded header read, before loading or decoding their contents.
-    let mut header = Vec::with_capacity(32);
-    std::fs::File::open(path)
-        .ok()?
-        .take(32)
-        .read_to_end(&mut header)
-        .ok()?;
-    let raster = header.starts_with(b"\x89PNG\r\n\x1a\n")
-        || header.starts_with(b"II*\0")
-        || header.starts_with(b"MM\0*")
-        || header.starts_with(b"\xff\xd8\xff")
-        || header.starts_with(b"GIF87a")
-        || header.starts_with(b"GIF89a")
-        || header.starts_with(b"BM")
-        || header.starts_with(b"\0\0\x01\0")
-        || header.starts_with(b"RIFF") && header.get(8..12) == Some(b"WEBP")
-        || header.get(4..8) == Some(b"ftyp")
-            && header.get(8..12).is_some_and(|brand| {
-                [
-                    b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"avif", b"avis",
-                ]
-                .contains(&brand.try_into().unwrap())
-            });
-    if !raster {
-        return None;
-    }
-    let bytes = clipboard::read_file_preview(path).ok()?;
-    let (width, height) = platform::image_dimensions(&bytes).ok()?;
-    if u64::from(width) * u64::from(height) > 64 * 1024 * 1024 {
-        return None;
-    }
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some((bytes, "png".into()))
-    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
-        Some((bytes, "tiff".into()))
-    } else {
-        platform::clipboard_image_preview(&bytes, width.max(height))
-            .ok()
-            .filter(|bytes| bytes.len() <= clipboard::MAX_IMAGE_BYTES)
-            .map(|bytes| (bytes, "png".into()))
-    }
 }
 
 fn persist_capture_with(
@@ -710,11 +705,13 @@ fn persist_capture_with(
         &ClipboardRecord,
         Option<&ClipboardFileRepresentation>,
         Option<&ClipboardTextFormatting>,
+        Option<&[String]>,
     ) -> Result<(), String>,
 ) -> Result<bool, String> {
     let mut created_image = None;
-    let mut representation = None;
+    let representation = None;
     let mut formatting = None;
+    let mut directory_paths = None;
     let (kind, text, image_path, fingerprint) = match capture.payload {
         platform::ClipboardPayload::Text(text) => {
             if !types.text {
@@ -734,61 +731,15 @@ fn persist_capture_with(
             formatting = Some(rich);
             ("text", text, None, fingerprint)
         }
-        payload @ (platform::ClipboardPayload::Files(_)
-        | platform::ClipboardPayload::FilesImage { .. }) => {
-            if !types.files && !types.image {
+        platform::ClipboardPayload::Files(paths)
+        | platform::ClipboardPayload::FilesImage { paths, .. } => {
+            if !types.files {
                 return Ok(false);
             }
-            let (paths, image) = match payload {
-                platform::ClipboardPayload::Files(paths) => (paths, None),
-                platform::ClipboardPayload::FilesImage {
-                    paths,
-                    bytes,
-                    extension,
-                    ..
-                } => (paths, Some((bytes, extension))),
-                _ => unreachable!(),
-            };
             let text = serde_json::to_string(&paths).map_err(|_| "storage_unavailable")?;
-            let content = if paths.len() == 1 {
-                image_file(Path::new(&paths[0]))
-            } else {
-                None
-            };
-            let is_image = content.is_some();
-            if (is_image && !types.image) || (!is_image && !types.files) {
-                return Ok(false);
-            }
-            // A file record can carry an image representation independently of its kind.
-            let image = if types.image {
-                content.or_else(|| {
-                    image.filter(|(bytes, _)| platform::image_dimensions(bytes).is_ok())
-                })
-            } else {
-                None
-            };
-            if let Some((bytes, extension)) = image {
-                let (path, created) = clipboard::store_image_with_status(root, &bytes, &extension)?;
-                if created {
-                    created_image = Some(path.clone());
-                }
-                let kind = if is_image { "image" } else { "files" };
-                let fingerprint =
-                    clipboard::fingerprint(kind, format!("{text}\0{path}").as_bytes());
-                representation = Some(ClipboardFileRepresentation {
-                    paths,
-                    image_path: path.clone(),
-                });
-                (
-                    kind,
-                    if is_image { String::new() } else { text },
-                    is_image.then_some(path),
-                    fingerprint,
-                )
-            } else {
-                let fingerprint = clipboard::fingerprint("files", text.as_bytes());
-                ("files", text, None, fingerprint)
-            }
+            directory_paths = Some(clipboard::detect_directory_paths(&paths));
+            let fingerprint = clipboard::fingerprint("files", text.as_bytes());
+            ("files", text, None, fingerprint)
         }
         platform::ClipboardPayload::Image { bytes, extension } => {
             if !types.image {
@@ -813,7 +764,12 @@ fn persist_capture_with(
         image_path,
         fingerprint,
     };
-    let saved = insert(&record, representation.as_ref(), formatting.as_ref());
+    let saved = insert(
+        &record,
+        representation.as_ref(),
+        formatting.as_ref(),
+        directory_paths.as_deref(),
+    );
     if saved.is_err() {
         if let Some(path) = created_image {
             clipboard::remove_image(root, &path)?;
@@ -941,7 +897,7 @@ mod tests {
                 source_app: None,
             };
             assert!(
-                !persist_capture_with(root, capture, types, |_, _, _| panic!(
+                !persist_capture_with(root, capture, types, |_, _, _, _| panic!(
                     "filtered copy was saved"
                 ))
                 .unwrap()
@@ -951,7 +907,7 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn recording_types_classify_single_image_files_and_drop_file_attachments() {
+    fn recording_types_keep_local_image_files_in_files_and_only_raw_images_in_image() {
         let root =
             std::env::temp_dir().join(format!("nami-recording-kinds-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -959,7 +915,7 @@ mod tests {
         let picture = root.join("picture.png");
         std::fs::write(&picture, bytes).unwrap();
         let picture = picture.to_string_lossy().into_owned();
-        let capture = |paths| platform::ClipboardCapture {
+        let file_capture = |paths| platform::ClipboardCapture {
             version: 1,
             source_app: None,
             payload: platform::ClipboardPayload::FilesImage {
@@ -967,6 +923,14 @@ mod tests {
                 bytes: bytes.to_vec(),
                 extension: "png".into(),
                 image_fallback: false,
+            },
+        };
+        let raw_image_capture = || platform::ClipboardCapture {
+            version: 2,
+            source_app: None,
+            payload: platform::ClipboardPayload::Image {
+                bytes: bytes.to_vec(),
+                extension: "png".into(),
             },
         };
         let files_only = RecordingTypes {
@@ -978,34 +942,49 @@ mod tests {
             ..Default::default()
         };
         let store = root.join("images");
-        assert!(!persist_capture_with(
-            &store,
-            capture(vec![picture.clone()]),
-            files_only,
-            |_, _, _| panic!("single image was saved as a file")
-        )
-        .unwrap());
+        // Local image files follow the files toggle and never write into images/origin/.
         assert!(persist_capture_with(
             &store,
-            capture(vec![picture.clone(), "/other".into()]),
+            file_capture(vec![picture.clone()]),
             files_only,
-            |record, representation, formatting| {
+            |record, representation, formatting, _| {
                 assert_eq!(record.kind, "files");
+                assert!(record.image_path.is_none());
                 assert!(formatting.is_none());
                 assert!(representation.is_none());
                 Ok(())
             }
         )
         .unwrap());
-        assert!(!store.exists(), "disabled image recording wrote a snapshot");
+        assert!(
+            !store.exists(),
+            "local image file capture must not copy bytes into private image storage"
+        );
+        assert!(!persist_capture_with(
+            &store,
+            file_capture(vec![picture]),
+            images_only,
+            |_, _, _, _| panic!("local file must not be saved when files recording is disabled")
+        )
+        .unwrap());
+        assert!(!persist_capture_with(
+            &store,
+            raw_image_capture(),
+            files_only,
+            |_, _, _, _| panic!(
+                "raw clipboard image must not be saved when image recording is disabled"
+            )
+        )
+        .unwrap());
         assert!(persist_capture_with(
             &store,
-            capture(vec![picture]),
+            raw_image_capture(),
             images_only,
-            |record, representation, formatting| {
+            |record, representation, formatting, _| {
                 assert_eq!(record.kind, "image");
+                assert!(record.image_path.is_some());
                 assert!(formatting.is_none());
-                assert!(representation.is_some());
+                assert!(representation.is_none());
                 Ok(())
             }
         )
@@ -1015,12 +994,13 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn single_image_files_use_verified_content_and_keep_file_copy_representations() {
+    fn local_image_files_stay_path_references_and_fail_cleanly_when_deleted() {
         let root = std::env::temp_dir().join(format!("nami-image-kind-{}", uuid::Uuid::new_v4()));
+        let store = root.join("images");
         std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("screenshot.data");
-        let bytes = include_bytes!("../../tests/fixtures/clipboard-wide.png");
-        std::fs::write(&source, bytes).unwrap();
+        let source = root.join("photo.jpg");
+        let jpeg = include_bytes!("../../tests/fixtures/clipboard-wide.jpg");
+        std::fs::write(&source, jpeg).unwrap();
         let paths = vec![source.to_string_lossy().into_owned()];
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         for payload in [
@@ -1034,7 +1014,7 @@ mod tests {
         ] {
             persist_capture(
                 &mut database,
-                &root,
+                &store,
                 platform::ClipboardCapture {
                     version: 1,
                     payload,
@@ -1043,117 +1023,123 @@ mod tests {
             )
             .unwrap();
             let page = database
-                .clipboard_page_filtered("", false, Some("image"), None, 100)
+                .clipboard_page_filtered("", false, Some("files"), None, 100)
                 .unwrap();
+            assert_eq!(page.total_records, 1);
             assert_eq!(
-                page.total_records, 1,
-                "different source representations retain one content classification"
+                database
+                    .clipboard_page_filtered("", false, Some("image"), None, 100)
+                    .unwrap()
+                    .total_records,
+                0
             );
             let id = &page.records[0].id;
             let record = database.clipboard_record(id).unwrap();
-            assert_eq!(
-                clipboard::read_image(&root, record.image_path.as_deref().unwrap()).unwrap(),
-                bytes
+            assert_eq!(record.kind, "files");
+            assert!(record.image_path.is_none());
+            assert!(database
+                .clipboard_file_representation(id)
+                .unwrap()
+                .is_none());
+            assert!(
+                !store.exists(),
+                "local image file capture must not create images/origin files"
             );
-            let representation = database.clipboard_file_representation(id).unwrap().unwrap();
-            assert_eq!(representation.paths, paths);
-            let snapshot_path = root
-                .join(record.image_path.as_deref().unwrap())
-                .to_string_lossy()
-                .into_owned();
             assert_eq!(
-                record_payload(&root, record, Some(representation)).unwrap(),
-                platform::ClipboardPayload::FilesImage {
-                    paths: vec![snapshot_path],
-                    bytes: bytes.to_vec(),
-                    extension: "png".into(),
-                    image_fallback: true
-                }
+                record_payload(&store, record, None).unwrap(),
+                platform::ClipboardPayload::Files(paths.clone())
             );
         }
+
         let id = database
             .clipboard_page("", false, None, 100)
             .unwrap()
             .records[0]
             .id
             .clone();
-        for state in ["changed", "missing", "directory"] {
-            match state {
-                "changed" => {
-                    std::fs::write(&source, b"replacement file must never be pasted").unwrap()
-                }
-                "missing" => std::fs::remove_file(&source).unwrap(),
-                _ => std::fs::create_dir(&source).unwrap(),
-            }
-            let record = database.clipboard_record(&id).unwrap();
-            let saved_path = root
-                .join(record.image_path.as_deref().unwrap())
-                .to_string_lossy()
-                .into_owned();
-            let restored = record_payload(
-                &root,
-                record,
-                database.clipboard_file_representation(&id).unwrap(),
-            )
-            .unwrap();
-            assert!(
-                matches!(restored, platform::ClipboardPayload::FilesImage { paths, bytes: pixels, image_fallback: true, .. } if paths == vec![saved_path] && pixels == bytes),
-                "{state} source must restore the saved image as both pixels and file"
-            );
-        }
+        // While the original file exists: detail reports original size & dimensions, drag uses original file path.
+        let live_detail = crate::clipboard_detail::enrich(
+            database.clipboard_detail(&id).unwrap(),
+            &store,
+            true,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(live_detail.files.len(), 1);
+        assert!(live_detail.files[0].exists);
+        assert!(live_detail.files[0].is_image);
+        assert_eq!(live_detail.size, Some(jpeg.len() as u64));
         assert_eq!(
-            database
-                .clipboard_page_filtered("", false, Some("image"), None, 100)
+            (live_detail.width, live_detail.height),
+            platform::image_dimensions(jpeg)
+                .map(|(w, h)| (Some(w), Some(h)))
                 .unwrap()
-                .total_records,
-            1,
-            "classification is persisted, not re-evaluated during list reads"
+        );
+        let live_drag = prepare_drag_payload(
+            &root.join("cache"),
+            record_payload(&store, database.clipboard_record(&id).unwrap(), None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            live_drag,
+            platform::DragItem::Files {
+                paths: vec![source.clone()],
+                preview_image: Some(source.clone()),
+            }
+        );
+
+        // Once the original file is removed/moved: detail cleanly drops image metadata & drag fails with missing.
+        std::fs::remove_file(&source).unwrap();
+        let missing_detail = crate::clipboard_detail::enrich(
+            database.clipboard_detail(&id).unwrap(),
+            &store,
+            true,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(missing_detail.files.len(), 1);
+        assert!(!missing_detail.files[0].exists);
+        assert_eq!(
+            (
+                missing_detail.width,
+                missing_detail.height,
+                missing_detail.size
+            ),
+            (None, None, None)
         );
         assert_eq!(
-            database
-                .clipboard_page_filtered("", false, Some("files"), None, 100)
-                .unwrap()
-                .total_records,
-            0
+            prepare_drag_payload(
+                &root.join("cache"),
+                record_payload(&store, database.clipboard_record(&id).unwrap(), None).unwrap(),
+            )
+            .unwrap_err(),
+            "clipboard_file_missing"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn image_classification_bounds_pixels_and_never_reads_oversized_files() {
+    fn oversized_local_image_files_capture_without_decoding_and_skip_dimensions() {
         let root = std::env::temp_dir().join(format!("nami-image-bounds-{}", uuid::Uuid::new_v4()));
+        let store = root.join("images");
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("large.png");
         let png = include_bytes!("../../tests/fixtures/clipboard-oversized.png");
         assert_eq!(platform::image_dimensions(png).unwrap(), (8193, 8193));
         std::fs::write(&source, png).unwrap();
-        assert!(
-            image_file(&source).is_none(),
-            "huge compressed dimensions must not allocate pixels"
-        );
         std::fs::OpenOptions::new()
             .write(true)
             .open(&source)
             .unwrap()
             .set_len(clipboard::MAX_IMAGE_BYTES as u64 + 1)
             .unwrap();
-        assert!(image_file(&source).is_none());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-    #[test]
-    fn jpeg_file_content_is_normalized_once_without_changing_its_dimensions() {
-        let root = std::env::temp_dir().join(format!("nami-jpeg-kind-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("no-extension");
-        let jpeg = include_bytes!("../../tests/fixtures/clipboard-wide.jpg");
-        std::fs::write(&source, jpeg).unwrap();
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
         persist_capture(
             &mut database,
-            &root,
+            &store,
             platform::ClipboardCapture {
                 version: 1,
                 payload: platform::ClipboardPayload::Files(vec![source
@@ -1163,17 +1149,97 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(!store.exists());
+        let id = database
+            .clipboard_page("", false, None, 100)
+            .unwrap()
+            .records[0]
+            .id
+            .clone();
+        let detail = crate::clipboard_detail::enrich(
+            database.clipboard_detail(&id).unwrap(),
+            &store,
+            true,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(detail.kind, "files");
+        assert_eq!((detail.width, detail.height), (None, None));
+        assert_eq!(detail.size, Some(clipboard::MAX_IMAGE_BYTES as u64 + 1));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
+    fn raw_non_png_image_payload_is_stored_verbatim_and_converts_to_png_on_paste_and_export() {
+        let root = std::env::temp_dir().join(format!("nami-jpeg-kind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let jpeg = include_bytes!("../../tests/fixtures/clipboard-wide.jpg");
+        let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        persist_capture(
+            &mut database,
+            &root,
+            platform::ClipboardCapture {
+                version: 1,
+                payload: platform::ClipboardPayload::Image {
+                    bytes: jpeg.to_vec(),
+                    extension: "jpg".into(),
+                },
+                source_app: None,
+            },
+        )
+        .unwrap();
         let page = database
             .clipboard_page_filtered("", false, Some("image"), None, 100)
             .unwrap();
         assert_eq!(page.total_records, 1);
         let record = database.clipboard_record(&page.records[0].id).unwrap();
-        let png = clipboard::read_image(&root, record.image_path.as_deref().unwrap()).unwrap();
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let image_path = record.image_path.as_deref().unwrap();
+        assert!(
+            image_path.ends_with(".jpg"),
+            "non-PNG image should be stored verbatim without PNG expansion, got {image_path}"
+        );
+        let stored = clipboard::read_image(&root, image_path).unwrap();
+        assert_eq!(stored.as_slice(), jpeg);
+        let detail = crate::clipboard_detail::enrich(
+            database.clipboard_detail(&record.id).unwrap(),
+            &root,
+            false,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(detail.size, Some(jpeg.len() as u64));
         assert_eq!(
-            platform::image_dimensions(&png).unwrap(),
+            (detail.width, detail.height),
+            platform::image_dimensions(jpeg)
+                .map(|(w, h)| (Some(w), Some(h)))
+                .unwrap()
+        );
+
+        let stored_payload = record_payload(&root, record, None).unwrap();
+        let exported = export_png(stored_payload.clone()).unwrap();
+        assert!(exported.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(
+            platform::image_dimensions(&exported).unwrap(),
             platform::image_dimensions(jpeg).unwrap()
         );
+
+        let drag_cache = root.join("cache");
+        let drag = prepare_drag_payload(&drag_cache, stored_payload).unwrap();
+        match drag {
+            platform::DragItem::Files {
+                paths,
+                preview_image,
+            } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(preview_image.as_ref(), Some(&paths[0]));
+                let drag_bytes = std::fs::read(&paths[0]).unwrap();
+                assert!(drag_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+            }
+            other => panic!("expected dragged image file, got {other:?}"),
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1207,7 +1273,7 @@ mod tests {
         }
         let first = samples.remove(0);
         samples.sort_by(f64::total_cmp);
-        let report = serde_json::json!({"scope":"synthetic 2048x256 PNG file; background classification, content-addressed snapshot and SQLite FULL commit; no UI or polling interval", "firstMs":first,"p50Ms":samples[15],"p95Ms":samples[28],"samples":samples.len(),"imageBytes":bytes.len()});
+        let report = serde_json::json!({"scope":"synthetic 2048x256 PNG file; path-only files capture and SQLite FULL commit; no UI or polling interval", "firstMs":first,"p50Ms":samples[15],"p95Ms":samples[28],"samples":samples.len(),"imageBytes":bytes.len()});
         std::fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("target/clipboard-image-capture-benchmark.json"),
@@ -1217,7 +1283,7 @@ mod tests {
         println!("{report}");
         assert_eq!(
             database
-                .clipboard_page_filtered("", false, Some("image"), None, 100)
+                .clipboard_page_filtered("", false, Some("files"), None, 100)
                 .unwrap()
                 .total_records,
             1
@@ -1228,8 +1294,134 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
+    #[ignore = "explicit synthetic JPEG path-only capture vs verbatim copy vs legacy PNG normalization measurement"]
+    fn benchmark_jpeg_verbatim_vs_png_normalization() {
+        let root =
+            std::env::temp_dir().join(format!("nami-jpeg-benchmark-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Synthesize a deterministic 2560x1440 photographic-texture BMP and encode it as JPEG (q=85).
+        let width: u32 = 2560;
+        let height: u32 = 1440;
+        let row_bytes = (width as usize) * 3;
+        let pixel_bytes = row_bytes * (height as usize);
+        let file_size = 54 + pixel_bytes;
+        let mut bmp = Vec::with_capacity(file_size);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(width as i32).to_le_bytes());
+        bmp.extend_from_slice(&(height as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        for y in 0..height {
+            for x in 0..width {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let grain = (state & 0x1f) as u8;
+                let r = (((x * 255) / width) as u8).saturating_add(grain);
+                let g = (((y * 255) / height) as u8).saturating_add(grain >> 1);
+                let b = ((((x ^ y) & 0xff) as u8) / 2).saturating_add(grain);
+                bmp.push(b);
+                bmp.push(g);
+                bmp.push(r);
+            }
+        }
+        let bmp_path = root.join("synthetic-2560x1440.bmp");
+        let jpg_path = root.join("synthetic-2560x1440.jpg");
+        std::fs::write(&bmp_path, &bmp).unwrap();
+        let status = std::process::Command::new("sips")
+            .args([
+                "-s",
+                "format",
+                "jpeg",
+                "-s",
+                "formatOptions",
+                "85",
+                bmp_path.to_str().unwrap(),
+                "--out",
+                jpg_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "sips jpeg encoding failed");
+        let jpg_bytes = std::fs::read(&jpg_path).unwrap();
+
+        let mut legacy_ms = Vec::new();
+        let mut verbatim_ms = Vec::new();
+        let mut path_only_ms = Vec::new();
+        let mut legacy_png_len = 0usize;
+        for round in 0..11 {
+            let legacy_root = root.join(format!("legacy-{round}"));
+            let t0 = std::time::Instant::now();
+            let raw = clipboard::read_file_preview(&jpg_path).unwrap();
+            let (w, h) = platform::image_dimensions(&raw).unwrap();
+            let png = platform::clipboard_image_preview(&raw, w.max(h)).unwrap();
+            legacy_png_len = png.len();
+            let _ = clipboard::store_image(&legacy_root, &png, "png").unwrap();
+            legacy_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+
+            let verbatim_root = root.join(format!("verbatim-{round}"));
+            let t1 = std::time::Instant::now();
+            let raw = clipboard::read_file_preview(&jpg_path).unwrap();
+            let _ = platform::image_dimensions(&raw).unwrap();
+            let _ = clipboard::store_image(&verbatim_root, &raw, "jpg").unwrap();
+            verbatim_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+
+            let path_root = root.join(format!("path-only-{round}"));
+            let mut db =
+                HistoryDatabase::open(&root.join(format!("path-only-{round}.sqlite3"))).unwrap();
+            let t2 = std::time::Instant::now();
+            persist_capture(
+                &mut db,
+                &path_root,
+                platform::ClipboardCapture {
+                    version: round as i64,
+                    payload: platform::ClipboardPayload::Files(vec![jpg_path
+                        .to_string_lossy()
+                        .into_owned()]),
+                    source_app: None,
+                },
+            )
+            .unwrap();
+            path_only_ms.push(t2.elapsed().as_secs_f64() * 1000.0);
+        }
+        legacy_ms.remove(0);
+        verbatim_ms.remove(0);
+        path_only_ms.remove(0);
+        legacy_ms.sort_by(f64::total_cmp);
+        verbatim_ms.sort_by(f64::total_cmp);
+        path_only_ms.sort_by(f64::total_cmp);
+        let report = serde_json::json!({
+            "dimensions": [width, height],
+            "jpegBytes": jpg_bytes.len(),
+            "legacyPngBytes": legacy_png_len,
+            "pathOnlyPrivateBytes": 0,
+            "sizeRatio": (legacy_png_len as f64) / (jpg_bytes.len() as f64),
+            "legacyMedianMs": legacy_ms[legacy_ms.len() / 2],
+            "verbatimMedianMs": verbatim_ms[verbatim_ms.len() / 2],
+            "pathOnlyMedianMs": path_only_ms[path_only_ms.len() / 2],
+            "rounds": legacy_ms.len(),
+        });
+        println!("{report}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
     fn file_icons_multiple_images_and_text_paths_do_not_override_file_semantics() {
         let root = std::env::temp_dir().join(format!("nami-file-kind-{}", uuid::Uuid::new_v4()));
+        let store = root.join("images");
         std::fs::create_dir_all(&root).unwrap();
         let ordinary = root.join("not-an-image.png");
         let picture = root.join("actual-image.txt");
@@ -1252,7 +1444,7 @@ mod tests {
                 .collect();
             persist_capture(
                 &mut database,
-                &root,
+                &store,
                 platform::ClipboardCapture {
                     version: 1,
                     payload: platform::ClipboardPayload::FilesImage {
@@ -1273,22 +1465,19 @@ mod tests {
                 serde_json::from_str::<Vec<String>>(&record.text).unwrap(),
                 paths
             );
-            assert!(matches!(
-                record_payload(
-                    &root,
-                    record,
-                    database.clipboard_file_representation(id).unwrap()
-                )
-                .unwrap(),
-                platform::ClipboardPayload::FilesImage {
-                    image_fallback: false,
-                    ..
-                }
-            ));
+            assert!(database
+                .clipboard_file_representation(id)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                record_payload(&store, record, None).unwrap(),
+                platform::ClipboardPayload::Files(paths)
+            );
         }
+        assert!(!store.exists());
         persist_capture(
             &mut database,
-            &root,
+            &store,
             platform::ClipboardCapture {
                 version: 1,
                 payload: platform::ClipboardPayload::Text(picture.to_string_lossy().into_owned()),
@@ -1315,34 +1504,31 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn mixed_image_preparation_stays_outside_sql_and_cleans_up_after_failed_commit() {
+    fn raw_image_preparation_stays_outside_sql_and_cleans_up_after_failed_commit() {
         let root =
-            std::env::temp_dir().join(format!("nami-mixed-rollback-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nami-image-rollback-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("screenshot.png");
-        std::fs::write(
-            &source,
-            include_bytes!("../../tests/fixtures/clipboard-wide.png"),
-        )
-        .unwrap();
+        let bytes = include_bytes!("../../tests/fixtures/clipboard-wide.png").to_vec();
         let database = std::sync::Mutex::new(HistoryDatabase::open(Path::new(":memory:")).unwrap());
         let snapshot = std::cell::RefCell::new(String::new());
         let result = persist_capture_with(
             &root,
             platform::ClipboardCapture {
                 version: 1,
-                payload: platform::ClipboardPayload::Files(vec![source
-                    .to_string_lossy()
-                    .into_owned()]),
+                payload: platform::ClipboardPayload::Image {
+                    bytes,
+                    extension: "png".into(),
+                },
                 source_app: None,
             },
             RecordingTypes::default(),
-            |record, representation, _formatting| {
+            |record, representation, _formatting, _dirs| {
                 let _guard = database
                     .try_lock()
-                    .expect("file IO and image recognition must precede the SQL lock");
+                    .expect("file IO and image storage must precede the SQL lock");
                 assert_eq!(record.kind, "image");
-                let path = representation.unwrap().image_path.clone();
+                assert!(representation.is_none());
+                let path = record.image_path.clone().unwrap();
                 assert!(root.join(&path).is_file());
                 *snapshot.borrow_mut() = path;
                 Err("storage_busy".into())
@@ -1350,7 +1536,6 @@ mod tests {
         );
         assert_eq!(result.unwrap_err(), "storage_busy");
         assert!(!root.join(snapshot.into_inner()).exists());
-        assert!(source.exists());
         assert!(database
             .lock()
             .unwrap()
@@ -1568,13 +1753,17 @@ mod tests {
             &root,
             capture(),
             RecordingTypes::default(),
-            |record, representation, formatting| {
+            |record, representation, formatting, directory_paths| {
                 assert_eq!(clipboard::read_image(&root, &relative).unwrap(), bytes);
                 let mut guard = database
                     .try_lock()
                     .expect("preparation must not hold the SQL lock");
-                *saved.borrow_mut() =
-                    Some(guard.clipboard_insert_capture(record, representation, formatting)?);
+                *saved.borrow_mut() = Some(guard.clipboard_insert_capture_with_dirs(
+                    record,
+                    representation,
+                    formatting,
+                    directory_paths,
+                )?);
                 Ok(())
             },
         )
@@ -1603,7 +1792,7 @@ mod tests {
                 source_app: None,
             },
             RecordingTypes::default(),
-            |record, _representation, _formatting| {
+            |record, _representation, _formatting, _dirs| {
                 let guard = database
                     .try_lock()
                     .expect("resource preparation must release the SQL lock");
@@ -1902,6 +2091,63 @@ mod tests {
             }
             other => panic!("unexpected drag item: {other:?}"),
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn captured_folder_retains_directory_flag_after_deletion() {
+        let root =
+            std::env::temp_dir().join(format!("nami-folder-capture-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("ArchivedFolder");
+        let file = root.join("note.txt");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&file, b"synthetic").unwrap();
+        let folder_path = folder.to_string_lossy().into_owned();
+        let file_path = file.to_string_lossy().into_owned();
+
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let capture = platform::ClipboardCapture {
+            version: 1,
+            payload: platform::ClipboardPayload::Files(vec![
+                folder_path.clone(),
+                file_path.clone(),
+            ]),
+            source_app: None,
+        };
+        let saved_id = std::cell::RefCell::new(String::new());
+        persist_capture_with(
+            &root,
+            capture,
+            RecordingTypes::default(),
+            |record, representation, formatting, directory_paths| {
+                let persisted = db.clipboard_insert_capture_with_dirs(
+                    record,
+                    representation,
+                    formatting,
+                    directory_paths,
+                )?;
+                *saved_id.borrow_mut() = persisted.id;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let id = saved_id.into_inner();
+        assert_eq!(
+            db.clipboard_directory_paths(&id).unwrap(),
+            vec![folder_path.clone()]
+        );
+
+        // Delete the folder from disk (simulating Move to Trash / delete).
+        std::fs::remove_dir_all(&folder).unwrap();
+        let record = db.clipboard_record(&id).unwrap();
+        let dirs = db.clipboard_directory_paths(&id).unwrap();
+        let entries = clipboard::file_entries_with_dirs(&record.text, &dirs).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, folder_path);
+        assert!(!entries[0].exists);
+        assert!(entries[0].is_dir);
+        assert!(entries[1].exists && !entries[1].is_dir);
 
         let _ = std::fs::remove_dir_all(root);
     }

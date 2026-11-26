@@ -7,6 +7,7 @@ pub(crate) fn enrich(
     root: &Path,
     measure_files: bool,
     image_file_paths: Option<Vec<String>>,
+    directory_paths: &[String],
 ) -> Result<ClipboardDetail, String> {
     let image = match detail.kind.as_str() {
         "image" => {
@@ -23,7 +24,7 @@ pub(crate) fn enrich(
                 })
         }
         "files" => {
-            detail.files = clipboard::all_file_entries(&detail.text)?;
+            detail.files = clipboard::all_file_entries_with_dirs(&detail.text, directory_paths)?;
             if measure_files {
                 detail.size = detail.files.iter().try_fold(0u64, |total, entry| {
                     let metadata = std::fs::metadata(&entry.path).ok()?;
@@ -84,7 +85,7 @@ mod tests {
     #[test]
     fn text_detail_returns_complete_unicode_content_and_record_metadata() {
         let text = "Full 🌊\n中文 text ".repeat(200);
-        let result = enrich(detail("text", &text), Path::new("unused"), true, None).unwrap();
+        let result = enrich(detail("text", &text), Path::new("unused"), true, None, &[]).unwrap();
         assert_eq!(result.text, text);
         assert_eq!(result.character_count, Some(text.chars().count()));
         assert_eq!(result.id, "detail");
@@ -102,29 +103,35 @@ mod tests {
             std::fs::write(path, b"synthetic").unwrap();
         }
         let text = serde_json::to_string(&paths).unwrap();
-        let result = enrich(detail("files", &text), &root, true, None).unwrap();
+        let result = enrich(detail("files", &text), &root, true, None, &[]).unwrap();
         assert_eq!(result.files.len(), 5);
         assert_eq!(result.size, Some(45));
-        assert!(enrich(detail("files", &text), &root, false, None)
+        assert!(enrich(detail("files", &text), &root, false, None, &[])
             .unwrap()
             .size
             .is_none());
         assert!(result.character_count.is_none() && result.width.is_none());
         std::fs::remove_file(&paths[1]).unwrap();
-        let missing = enrich(detail("files", &text), &root, true, None).unwrap();
+        let missing = enrich(detail("files", &text), &root, true, None, &[]).unwrap();
         assert!(!missing.files[1].exists);
         assert!(missing.size.is_none());
         let directory = serde_json::to_string(&vec![root.clone()]).unwrap();
-        assert!(enrich(detail("files", &directory), &root, true, None)
-            .unwrap()
-            .size
-            .is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let dir_path = root.to_string_lossy().into_owned();
+        let live_dir = enrich(detail("files", &directory), &root, true, None, &[]).unwrap();
+        assert!(live_dir.size.is_none());
+        assert!(live_dir.files[0].exists && live_dir.files[0].is_dir);
+        std::fs::remove_dir_all(&root).unwrap();
+        let deleted_dir =
+            enrich(detail("files", &directory), &root, true, None, &[dir_path]).unwrap();
+        assert!(!deleted_dir.files[0].exists);
+        assert!(deleted_dir.files[0].is_dir);
+        assert!(!deleted_dir.files[0].is_image);
+        assert!(deleted_dir.size.is_none());
     }
 
     fn files_detail(root: &Path, paths: &[&Path], measure_files: bool) -> ClipboardDetail {
         let text = serde_json::to_string(paths).unwrap();
-        enrich(detail("files", &text), root, measure_files, None).unwrap()
+        enrich(detail("files", &text), root, measure_files, None, &[]).unwrap()
     }
 
     #[test]
@@ -188,7 +195,7 @@ mod tests {
             value.image_path = Some(relative.clone());
             value
         };
-        let result = enrich(make_detail(), &root, true, None).unwrap();
+        let result = enrich(make_detail(), &root, true, None, &[]).unwrap();
         assert_eq!((result.width, result.height), WIDE_DIMENSIONS);
         assert_eq!(result.size, Some(WIDE_PNG.len() as u64));
         assert!(result.character_count.is_none());
@@ -200,6 +207,7 @@ mod tests {
                 &root,
                 false,
                 Some(vec![original.to_string_lossy().into_owned()]),
+                &[],
             )
             .unwrap()
         };
@@ -254,14 +262,14 @@ mod tests {
         let mut value = detail("text", "");
         value.kind = "image".into();
         value.image_path = Some(relative.clone());
-        let verified = enrich(value.clone(), &root, false, None).unwrap();
+        let verified = enrich(value.clone(), &root, false, None, &[]).unwrap();
         assert_eq!(
             (verified.width, verified.height, verified.size),
             (None, None, Some(bytes.len() as u64))
         );
         *bytes.last_mut().unwrap() = 1;
         std::fs::write(root.join(relative), bytes).unwrap();
-        let corrupt = enrich(value, &root, false, None).unwrap();
+        let corrupt = enrich(value, &root, false, None, &[]).unwrap();
         assert_eq!(
             (corrupt.width, corrupt.height, corrupt.size),
             (None, None, None)
@@ -274,7 +282,7 @@ mod tests {
         let mut value = detail("text", "");
         value.kind = "image".into();
         value.image_path = Some("../outside.png".into());
-        let unavailable = enrich(value, Path::new("unused"), true, None).unwrap();
+        let unavailable = enrich(value, Path::new("unused"), true, None, &[]).unwrap();
         assert!(
             unavailable.width.is_none()
                 && unavailable.height.is_none()

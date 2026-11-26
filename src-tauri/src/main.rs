@@ -17,6 +17,8 @@ use nami::{
 };
 mod platform;
 mod selection;
+mod storage_location;
+mod tray_menu;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 mod windows;
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
@@ -31,11 +33,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     Mutex,
 };
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Emitter, Manager,
-};
+use tauri::{menu::MenuItem, tray::TrayIconBuilder, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 mod records_runtime;
@@ -79,10 +77,17 @@ pub struct AppState {
     clipboard_enabled: AtomicBool,
     clipboard_options: Mutex<clipboard_preferences::ClipboardOptions>,
     clipboard_recording_menu: Mutex<Option<MenuItem<tauri::Wry>>>,
+    tray_menu: Mutex<Option<tray_menu::TrayMenu>>,
+    tray_storage_snapshot: Mutex<Option<clipboard_preferences::StorageUsageSnapshot>>,
+    tray_disk_revision: AtomicU64,
+    tray_disk_refresh_generation: AtomicU64,
+    pending_settings_page: Mutex<Option<String>>,
     clipboard_recording_types: Mutex<RecordingTypes>,
     clipboard_shortcut: Mutex<ClipboardShortcut>,
     clipboard_version: AtomicI64,
     clipboard_revision: AtomicU64,
+    cache_cleanup_revision: AtomicU64,
+    cache_cleanup_dirty: AtomicBool,
     clipboard_dragging: AtomicBool,
     clipboard_writes: tokio::sync::Mutex<()>,
     // The lock admits one Vision job before loading its image, for QR, OCR and indexing.
@@ -91,6 +96,8 @@ pub struct AppState {
     image_index_jobs: Mutex<clipboard_text::IndexJobs>,
     clipboard_translation: Mutex<Option<ClipboardTranslationContext>>,
     database: Mutex<Option<database::HistoryDatabase>>,
+    data_dir: Mutex<Option<std::path::PathBuf>>,
+    cleanup_schedule_notify: tokio::sync::Notify,
     storage_error: Mutex<Option<String>>,
     windows: Mutex<WindowState>,
     window_position_mode: Mutex<model::WindowPositionMode>,
@@ -139,6 +146,11 @@ impl Default for AppState {
             clipboard_enabled: AtomicBool::new(false),
             clipboard_options: Mutex::new(clipboard_preferences::ClipboardOptions::default()),
             clipboard_recording_menu: Mutex::new(None),
+            tray_menu: Mutex::new(None),
+            tray_storage_snapshot: Mutex::new(None),
+            tray_disk_revision: AtomicU64::new(u64::MAX),
+            tray_disk_refresh_generation: AtomicU64::new(0),
+            pending_settings_page: Mutex::new(None),
             clipboard_recording_types: Mutex::new(RecordingTypes::default()),
             clipboard_shortcut: Mutex::new(ClipboardShortcut {
                 binding: Some(shortcuts::clipboard_binding()),
@@ -146,6 +158,8 @@ impl Default for AppState {
             }),
             clipboard_version: AtomicI64::new(-1),
             clipboard_revision: AtomicU64::new(0),
+            cache_cleanup_revision: AtomicU64::new(u64::MAX),
+            cache_cleanup_dirty: AtomicBool::new(true),
             clipboard_dragging: AtomicBool::new(false),
             clipboard_writes: tokio::sync::Mutex::new(()),
             vision_work: Default::default(),
@@ -153,6 +167,8 @@ impl Default for AppState {
             image_index_jobs: Mutex::default(),
             clipboard_translation: Mutex::new(None),
             database: Mutex::new(None),
+            data_dir: Mutex::new(None),
+            cleanup_schedule_notify: tokio::sync::Notify::new(),
             storage_error: Mutex::new(None),
             windows: Mutex::new(windows),
             window_position_mode: Mutex::new(model::WindowPositionMode::default()),
@@ -271,6 +287,7 @@ fn same_shortcut(left: &Shortcut, right: &Shortcut) -> bool {
 }
 
 pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
+    tray_menu::sync(app);
     if !platform::capabilities().selection {
         return;
     }
@@ -490,6 +507,11 @@ fn main() {
             clipboard_preferences::records_storage_info,
             clipboard_preferences::records_cleanup_preview,
             clipboard_preferences::records_cleanup_apply,
+            storage_location::storage_location_info,
+            storage_location::storage_open_data_dir,
+            storage_location::storage_open_log_dir,
+            storage_location::storage_data_dir_pick,
+            storage_location::storage_data_dir_reset,
             commands::clipboard_shortcut_set,
             commands::clipboard_image,
             commands::clipboard_files,
@@ -542,7 +564,9 @@ fn main() {
                 windows::start_ui_regression(app.handle()).map_err(std::io::Error::other)?;
                 return Ok(());
             }
-            let directory = app.path().app_data_dir()?;
+            let default_directory = app.path().app_data_dir()?;
+            let directory = storage_location::resolve_startup_data_dir(&default_directory);
+            *app.state::<AppState>().data_dir.lock().unwrap() = Some(directory.clone());
             let loaded = std::thread::spawn(move || -> Result<_, String> {
                 std::fs::create_dir_all(&directory).map_err(|_| "storage_unavailable")?;
                 #[cfg(unix)]
@@ -669,17 +693,8 @@ fn main() {
             }
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            let translation =
-                MenuItem::with_id(app, "translation", "Translate", true, None::<&str>)?;
-            let clipboard = MenuItem::with_id(app, "clipboard", "Clipboard", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Nami", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&translation, &clipboard])?;
-            if platform::capabilities().clipboard_write {
-                menu.append(&clipboard_preferences::recording_menu_item(app.handle())?)?;
-            }
-            menu.append_items(&[&settings, &quit])?;
-            let tray = TrayIconBuilder::new()
+            let menu = tray_menu::build(app.handle())?;
+            let tray = TrayIconBuilder::with_id(tray_menu::TRAY_ID)
                 .tooltip("Nami")
                 .menu(&menu)
                 .on_menu_event(|app, event| {
@@ -696,6 +711,43 @@ fn main() {
                                 eprintln!("Nami clipboard recording: {error}");
                             }
                         });
+                    } else if id == "translation" {
+                        if let Err(code) = selection::show_blank(app) {
+                            app.state::<AppState>()
+                                .shortcut_errors
+                                .lock()
+                                .unwrap()
+                                .push(code);
+                        }
+                    } else if id == "selection" {
+                        selection::prepare_selected(app);
+                        if let Err(code) = selection::show_selected(app, false) {
+                            app.state::<AppState>()
+                                .shortcut_errors
+                                .lock()
+                                .unwrap()
+                                .push(code);
+                        }
+                    } else if id == "disk_usage" {
+                        if let Err(code) = tray_menu::open_storage_settings(app) {
+                            app.state::<AppState>()
+                                .shortcut_errors
+                                .lock()
+                                .unwrap()
+                                .push(code);
+                        }
+                    } else if id == "settings" {
+                        *app.state::<AppState>()
+                            .pending_settings_page
+                            .lock()
+                            .unwrap() = None;
+                        if let Err(code) = windows::show(app, id) {
+                            app.state::<AppState>()
+                                .shortcut_errors
+                                .lock()
+                                .unwrap()
+                                .push(code);
+                        }
                     } else if let Err(code) = windows::show(app, id) {
                         app.state::<AppState>()
                             .shortcut_errors
@@ -713,6 +765,8 @@ fn main() {
                 .title("N")
                 .icon(app.default_window_icon().ok_or("missing app icon")?.clone());
             tray.build(app)?;
+            tray_menu::sync(app.handle());
+            tray_menu::start_disk_usage_loop(app.handle());
             if let Err(error) = windows::prewarm_records(app.handle()) {
                 eprintln!("Nami records prewarm: {error}");
             }
@@ -732,6 +786,7 @@ fn main() {
                 }
             }
             tauri::RunEvent::Exit => {
+                tray_menu::cleanup(app);
                 platform::shutdown_vision_worker();
                 record_lifecycle(app, "exit", None);
             }

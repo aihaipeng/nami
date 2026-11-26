@@ -98,10 +98,7 @@ pub async fn backup_export(
     {
         return Err("invalid_argument".into());
     }
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "storage_unavailable")?;
+    let app_data = crate::storage_location::active_data_dir(&app)?;
     let image_root = clipboard_runtime::image_root(&app)?;
     let parent = window.window();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -167,10 +164,7 @@ pub async fn backup_import_pick(
     if !platform::capabilities().local_backup {
         return Err("platform_unavailable".into());
     }
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "storage_unavailable")?;
+    let app_data = crate::storage_location::active_data_dir(&app)?;
     let parent = window.window();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     on_main(&app, move |_| {
@@ -423,19 +417,12 @@ pub async fn backup_import_apply(
             .clipboard_enabled
             .store(capture_active, Ordering::SeqCst);
 
-        if let Some(menu) = state.clipboard_recording_menu.lock().unwrap().as_ref() {
-            let _ = menu.set_text(if capture_active {
-                "Pause Clipboard Recording"
-            } else {
-                "Resume Clipboard Recording"
-            });
-        }
-
         let sync_app = app.clone();
         let _ = on_main(&app, move |_| {
             sync_global_shortcuts(&sync_app);
         })
         .await;
+        crate::tray_menu::refresh_disk_usage(&app, 0);
 
         for label in ["translation", "clipboard", "settings"] {
             if let Some(view) = app.get_webview(label) {
