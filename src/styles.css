@@ -204,7 +204,7 @@
   .history-footer .history-filters { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 1px; }
   .history-footer .history-kinds { margin-left: 3px; display: flex; align-items: center; gap: 1px; }
   .history-record-count { max-width: calc(50% - 28px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .history-footer:has(.history-kinds) .history-record-count { max-width: calc(50% - 64px); }
+  .history-footer:has(.history-kinds) .history-record-count { max-width: calc(50% - 77px); }
   .history-footer .history-filters .icon-button { color: var(--history-secondary); background: transparent; }
   .history-footer .history-filters .icon-button[aria-pressed=true] { color: var(--history-label); }
   .history-footer .history-favorites:hover, .history-footer .history-favorites:active { background: transparent; }

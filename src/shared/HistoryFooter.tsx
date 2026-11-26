@@ -199,6 +199,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
     <span className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</span>
     <div className="history-filters" role="group" aria-label="Filter records">
+      {onKindChange && <button type="button" className="icon-button history-all" aria-label="All clipboard records" title="All" aria-pressed={!favoritesOnly && kind === null} onClick={() => { if (favoritesOnly || kind !== null) onKindChange(null); }}><HistoryIcon name="list.bullet" /></button>}
       {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
       {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
     </div>

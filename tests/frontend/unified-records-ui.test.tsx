@@ -537,14 +537,19 @@ describe('unified records workspace', () => {
   it('cycles clipboard categories with left/right arrows', async () => {
     await mount('clipboard');
     const arrow = (key: string) => fireEvent.keyDown(search(), { key });
+    const pressed = (label: string) => screen.getByRole('button', { name: label }).getAttribute('aria-pressed');
+    expect(pressed('All clipboard records')).toBe('true');
     for (const label of ['Favorite clipboard records', 'Text clipboard records', 'Image clipboard records', 'File clipboard records']) {
       arrow('ArrowRight');
-      expect(screen.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+      expect(pressed(label)).toBe('true');
+      expect(pressed('All clipboard records')).toBe('false');
     }
     arrow('ArrowRight');
-    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('false');
+    expect(pressed('File clipboard records')).toBe('false');
+    expect(pressed('All clipboard records')).toBe('true');
     arrow('ArrowLeft');
-    expect(screen.getByRole('button', { name: 'File clipboard records' }).getAttribute('aria-pressed')).toBe('true');
+    expect(pressed('File clipboard records')).toBe('true');
+    expect(pressed('All clipboard records')).toBe('false');
   });
 
   it('has one ordered toolbar without view-switcher buttons and centered footer filter groups', async () => {
