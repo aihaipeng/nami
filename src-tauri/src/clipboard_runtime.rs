@@ -55,6 +55,14 @@ pub(crate) fn changed(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) async fn sync_pin_paste_keys(app: &AppHandle) -> Result<(), String> {
+    let changed_keys = database(app, HistoryDatabase::reconcile_pin_paste_keys).await?;
+    if changed_keys {
+        changed(app)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum PayloadMode {
     Stored,

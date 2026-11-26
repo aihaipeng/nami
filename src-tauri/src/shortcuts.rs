@@ -726,6 +726,88 @@ pub fn validate_quick_paste_reservation(binding: &KeyBinding) -> Result<(), Stri
     Ok(())
 }
 
+/// Letters a pinned clipboard record may keep for Command-paste.
+/// Skips letters already used by Command chords, including text editing.
+pub const PIN_PASTE_LETTERS: &str = "BEGHIJLMQRUY";
+
+pub fn pin_paste_letter(binding: &KeyBinding) -> Option<char> {
+    let binding = normalize_binding(binding.clone()).ok()?;
+    if binding.modifiers != ["meta"] {
+        return None;
+    }
+    let mut chars = binding.code.strip_prefix("Key")?.chars();
+    let letter = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    normalize_pin_paste_letter(&letter.to_string())
+}
+
+pub fn normalize_pin_paste_letter(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if chars.next().is_some() || !PIN_PASTE_LETTERS.contains(letter) {
+        return None;
+    }
+    Some(letter)
+}
+
+pub fn blocked_pin_paste_letters(
+    read: impl Fn(&str) -> Option<String>,
+) -> std::collections::HashSet<char> {
+    let mut blocked = std::collections::HashSet::new();
+    let primary = if cfg!(target_os = "macos") {
+        "meta"
+    } else {
+        "control"
+    };
+    let records = ClipboardRecordShortcuts::from_store(read("clipboard_record_shortcuts"));
+    for (_, slot) in records.entries() {
+        if slot.enabled {
+            if let Some(letter) = slot.binding.as_ref().and_then(pin_paste_letter) {
+                blocked.insert(letter);
+            }
+        }
+    }
+    let translation = TranslationShortcuts::from_store(&read, primary);
+    let disabled = read("translation_disabled_shortcuts")
+        .and_then(|value| serde_json::from_str::<Vec<ShortcutAction>>(&value).ok())
+        .unwrap_or_default();
+    let selection_enabled = read("translation_selection_enabled").as_deref() != Some("false");
+    for action in [
+        ShortcutAction::Selection,
+        ShortcutAction::OpenTranslation,
+        ShortcutAction::Translate,
+        ShortcutAction::CopyPrimary,
+        ShortcutAction::CopySecondary,
+        ShortcutAction::Pin,
+        ShortcutAction::ShowShortcuts,
+        ShortcutAction::FocusSearch,
+        ShortcutAction::OpenSettings,
+    ] {
+        let enabled = if action == ShortcutAction::Selection {
+            selection_enabled
+        } else {
+            !disabled.contains(&action)
+        };
+        if enabled {
+            if let Some(letter) = translation.get(action).and_then(pin_paste_letter) {
+                blocked.insert(letter);
+            }
+        }
+    }
+    if read("clipboard_shortcut_enabled").as_deref() != Some("false") {
+        let binding = match read("clipboard_shortcut") {
+            Some(value) => serde_json::from_str::<Option<KeyBinding>>(&value).unwrap_or(None),
+            None => Some(clipboard_binding()),
+        };
+        if let Some(letter) = binding.as_ref().and_then(pin_paste_letter) {
+            blocked.insert(letter);
+        }
+    }
+    blocked
+}
+
 pub fn validate_clipboard_binding(
     binding: KeyBinding,
     shortcuts: &TranslationShortcuts,

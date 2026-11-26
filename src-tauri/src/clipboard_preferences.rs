@@ -615,12 +615,16 @@ pub async fn clipboard_record_shortcut_set(
         .clone();
     shortcuts.set(action, binding, enabled, &reserved)?;
     let value = serde_json::to_string(&shortcuts).map_err(|_| "storage_record")?;
-    database(&app, move |db| {
-        db.preference_set("clipboard_record_shortcuts", &value)
+    let letters_changed = database(&app, move |db| {
+        db.preference_set("clipboard_record_shortcuts", &value)?;
+        db.reconcile_pin_paste_keys()
     })
     .await?;
     state.clipboard_options.lock().unwrap().record_shortcuts = shortcuts;
     publish_controls(&app, &state);
+    if letters_changed {
+        changed(&app)?;
+    }
     Ok(())
 }
 

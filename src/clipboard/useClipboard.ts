@@ -14,6 +14,7 @@ export interface ClipboardRecord {
   date: string;
   isFavorite: boolean;
   isPinned: boolean;
+  pinPasteKey?: string;
   sourceApp?: { name: string; iconDataUrl?: string | null } | null;
   imagePath?: string | null;
 }
@@ -21,7 +22,7 @@ export type ClipboardKind = ClipboardRecord['kind'];
 const cacheKey = (kind: ClipboardKind | null, favorites: boolean) => `${kind ?? 'all'}:${favorites}`;
 const matchesCache = (record: ClipboardRecord, key: string) => key === cacheKey(record.kind, false) || (record.isFavorite && key === cacheKey(record.kind, true)) || key === cacheKey(null, false) || (record.isFavorite && key === cacheKey(null, true));
 export interface ClipboardCursor { pinned: boolean; createdAt: number; sequence: number }
-export interface ClipboardPage { records: ClipboardRecord[]; cursor: ClipboardCursor | null; hasMore: boolean; totalRecords: number }
+export interface ClipboardPage { records: ClipboardRecord[]; pinPasteKeys?: { id: string; key: string }[]; cursor: ClipboardCursor | null; hasMore: boolean; totalRecords: number }
 interface ClipboardWirePage extends Omit<ClipboardPage, 'records'> {
   records: (Omit<ClipboardRecord, 'sourceApp' | 'imagePath'> & { sourceAppId: number | null })[];
   sources: Record<string, NonNullable<ClipboardRecord['sourceApp']>>;

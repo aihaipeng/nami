@@ -13,7 +13,7 @@ use rusqlite::{Connection, ErrorCode, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 11;
+const VERSION: i64 = 12;
 pub const PAGE_SIZE: usize = 100;
 
 pub struct HistoryDatabase {
@@ -50,6 +50,27 @@ fn migrate_v11(connection: &mut Connection) -> Result<(), String> {
         PRAGMA user_version=11;",
     )
     .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
+fn migrate_v12(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    if !clipboard::has_column(&tx, "clipboard_records", "pin_paste_key")? {
+        tx.execute(
+            "ALTER TABLE clipboard_records ADD COLUMN pin_paste_key TEXT",
+            [],
+        )
+        .map_err(storage_error)?;
+    }
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS clipboard_pin_paste_key ON clipboard_records(pin_paste_key) WHERE pin_paste_key IS NOT NULL",
+        [],
+    )
+    .map_err(storage_error)?;
+    tx.pragma_update(None, "user_version", 12)
+        .map_err(storage_error)?;
     tx.commit().map_err(storage_error)
 }
 
@@ -143,8 +164,12 @@ impl HistoryDatabase {
         if version < 11 {
             migrate_v11(&mut connection)?;
         }
+        if version < 12 {
+            migrate_v12(&mut connection)?;
+        }
         clipboard::ensure_filter_indexes(&connection)?;
         clipboard::ensure_translation_preferences(&connection)?;
+        clipboard::sync_pin_paste_keys(&connection)?;
         let clipboard_total_records = connection
             .query_row("SELECT count(*) FROM clipboard_records", [], |row| {
                 row.get::<_, i64>(0)
@@ -230,7 +255,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         for dropped in ["translation_records", "translation_search"] {
             let exists: bool = db
                 .connection

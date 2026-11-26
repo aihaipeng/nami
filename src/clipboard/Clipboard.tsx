@@ -17,8 +17,9 @@ import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
 import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
-import { clipboardCategoryDirection, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
-import { matchesBinding } from '../shared/shortcuts';
+import { clipboardCategoryDirection, clipboardGlobalBindings, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
+import { translationShortcutEnabled } from '../shared/contracts';
+import { editsText, matchesBinding, shortcutActions } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
 import { ClipboardNotePreview } from './ClipboardNotePreview';
@@ -423,6 +424,17 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat && clipboard.displayReady && !clipboard.error && record && !(target as HTMLElement).closest('[role=dialog]')) void useRecord(record.id, 'paste');
       return;
     }
+    const letter = /^Key([BEGHIJLMQRUY])$/.exec(key.code)?.[1];
+    const pinPaste = letter && (clipboard.page.pinPasteKeys ?? []).find((item) => item.key === letter);
+    const letterTaken = editsText(key)
+      || Boolean(clipboardKeyAction(shortcuts, key))
+      || clipboardGlobalBindings(snapshot).some((binding) => matchesBinding(binding, key))
+      || shortcutActions.some((action) => translationShortcutEnabled(snapshot.translationPreferences, action) && matchesBinding(snapshot.translationPreferences.shortcuts[action], key));
+    if (quickPaste && pinPaste && isQuickPasteModifier(key) && !letterTaken) {
+      event.preventDefault();
+      if (!key.repeat && clipboard.displayReady && !clipboard.error && !(target as HTMLElement).closest('[role=dialog]')) void useRecord(pinPaste.id, 'paste');
+      return;
+    }
     const id = fromRecord || control ? (target as HTMLElement).closest<HTMLElement>('[data-record-id]')?.dataset.recordId ?? keyboardId : keyboardId;
     const rowButton = id ? rowRefs.current.get(id) : undefined;
     const action = clipboardKeyAction(shortcuts, key);
@@ -519,6 +531,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
           : t('clipboardPlainText');
     const keyboardCurrent = keyboardId === record.id;
     const slot = quickPaste && clipboard.displayReady && !clipboard.error ? quickPasteCandidates.findIndex(({ id }) => id === record.id) : -1;
+    const quickHint = active && showQuickPasteHints && !menu && !editing && !pendingDelete
+      ? (record.isPinned ? record.pinPasteKey : slot >= 0 ? String(slot + 1) : undefined)
+      : undefined;
     const description = [
       record.kind !== 'text' && record.text ? kind : null,
       record.title ? `Note: ${record.title}` : null,
@@ -531,8 +546,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!active || editing || menu || !clipboard.displayReady || !visibleIds.has(record.id)) return;
       targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); });
     }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
-      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={slot >= 0 ? `Meta+${slot + 1}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
-        <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={active && showQuickPasteHints && !menu && !editing && slot >= 0 ? slot + 1 : undefined} />
+      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={quickHint ? `Meta+${quickHint}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
+        <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={quickHint} />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <ClipboardTextPreview text={historyPreview(record.text)} className="history-preview history-text-preview" />}
         {record.imageTextMatch && <span className="clipboard-search-match">{t('clipboardImageTextMatch')}</span>}
       </button>

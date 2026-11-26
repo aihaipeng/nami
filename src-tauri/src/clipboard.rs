@@ -302,6 +302,16 @@ pub struct ClipboardSummary {
     /// Image OCR finished and stored an empty original. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_text_empty: bool,
+    /// Saved Command letter for a pinned record. Omitted when the pin has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_paste_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinPasteKey {
+    pub id: String,
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -312,6 +322,9 @@ pub struct ClipboardPage {
     pub cursor: Option<ClipboardCursor>,
     pub has_more: bool,
     pub total_records: usize,
+    /// Every pinned letter, including records outside this page or filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pin_paste_keys: Vec<PinPasteKey>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

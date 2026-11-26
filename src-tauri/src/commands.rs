@@ -1077,7 +1077,8 @@ pub async fn translation_shortcut_set(
         preferences.set_shortcut_enabled(&action, enabled)?;
     }
     if !shortcut_action.is_global() || !platform::capabilities().selection {
-        return commit_preferences(&app, preferences, false).await;
+        commit_preferences(&app, preferences, false).await?;
+        return crate::clipboard_runtime::sync_pin_paste_keys(&app).await;
     }
     let next = preferences
         .global_binding(shortcut_action)
@@ -1101,7 +1102,8 @@ pub async fn translation_shortcut_set(
         crate::sync_global_shortcuts(&app);
         publish_preferences(&app, &preferences)
     })
-    .await?
+    .await??;
+    crate::clipboard_runtime::sync_pin_paste_keys(&app).await
 }
 
 #[tauri::command]
@@ -1191,7 +1193,8 @@ pub async fn translation_shortcuts_restore(
         }
         publish_preferences(&app, &preferences)
     })
-    .await?
+    .await??;
+    crate::clipboard_runtime::sync_pin_paste_keys(&app).await
 }
 
 #[tauri::command]
@@ -2283,6 +2286,7 @@ pub async fn clipboard_shortcut_set(
         Ok(())
     })
     .await??;
+    crate::clipboard_runtime::sync_pin_paste_keys(&app).await?;
     let _ = app.emit(
         "clipboard_binding_changed",
         serde_json::json!({

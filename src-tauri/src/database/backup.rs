@@ -878,6 +878,38 @@ impl HistoryDatabase {
             }
         }
 
+        if mode == BackupImportMode::Replace
+            && super::clipboard::has_column(&backup, "clipboard_records", "pin_paste_key")?
+        {
+            let mut stmt = backup
+                .prepare(
+                    "SELECT id, pin_paste_key FROM clipboard_records WHERE pin_paste_key IS NOT NULL",
+                )
+                .map_err(backup_error)?;
+            let saved = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backup_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(backup_error)?;
+            drop(stmt);
+            let mut used = HashSet::new();
+            for (id, key) in saved {
+                if crate::shortcuts::normalize_pin_paste_letter(&key).is_none()
+                    || !used.insert(key.clone())
+                {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE clipboard_records SET pin_paste_key=?1 WHERE id=?2 AND is_pinned=1",
+                    params![key, id],
+                )
+                .map_err(storage_error)?;
+            }
+        }
+        super::clipboard::sync_pin_paste_keys(&tx)?;
+
         tx.commit().map_err(storage_error)?;
 
         let clipboard_total: i64 = self

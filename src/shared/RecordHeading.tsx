@@ -4,7 +4,7 @@ import fallbackIcon from '../assets/history/reference-nami.png';
 export function RecordHeading({ date: value, label, sourceApp, quickPasteHint }: {
   date: string;
   label: string;
-  quickPasteHint?: number;
+  quickPasteHint?: string;
   sourceApp?: { name: string; iconDataUrl?: string | null } | null;
 }) {
   const date = new Date(value);

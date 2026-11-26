@@ -25,7 +25,11 @@ fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
         .map_err(storage_error)
 }
 
-fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+pub(super) fn has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, String> {
     connection
         .prepare_cached(&format!(
             "SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"
@@ -33,6 +37,115 @@ fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool
         .map_err(storage_error)?
         .exists([column])
         .map_err(storage_error)
+}
+
+pub(super) fn sync_pin_paste_keys(connection: &Connection) -> Result<bool, String> {
+    if !has_column(connection, "clipboard_records", "pin_paste_key")? {
+        return Ok(false);
+    }
+    let mut preferences = connection
+        .prepare("SELECT key, value FROM preferences")
+        .map_err(storage_error)?;
+    let stored = preferences
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage_error)?
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()
+        .map_err(storage_error)?;
+    drop(preferences);
+    let blocked = crate::shortcuts::blocked_pin_paste_letters(|key| stored.get(key).cloned());
+    let mut statement = connection
+        .prepare(
+            "SELECT id, pin_paste_key FROM clipboard_records WHERE is_pinned=1 ORDER BY created_at ASC, sequence ASC",
+        )
+        .map_err(storage_error)?;
+    let pinned = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    drop(statement);
+    let mut used = std::collections::HashSet::new();
+    let mut kept = std::collections::HashMap::new();
+    for (id, key) in &pinned {
+        let Some(letter) = key
+            .as_deref()
+            .and_then(crate::shortcuts::normalize_pin_paste_letter)
+            .filter(|letter| !blocked.contains(letter) && used.insert(*letter))
+        else {
+            continue;
+        };
+        kept.insert(id.clone(), letter);
+    }
+    let free = crate::shortcuts::PIN_PASTE_LETTERS
+        .chars()
+        .filter(|letter| !blocked.contains(letter) && !used.contains(letter))
+        .collect::<Vec<_>>();
+    let mut next_free = 0;
+    let desired = pinned
+        .iter()
+        .map(|(id, _)| {
+            if let Some(letter) = kept.get(id) {
+                return (id.clone(), Some(letter.to_string()));
+            }
+            let letter = free.get(next_free).copied();
+            if letter.is_some() {
+                next_free += 1;
+            }
+            (id.clone(), letter.map(|value| value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    let stray: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM clipboard_records WHERE is_pinned=0 AND pin_paste_key IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    let unchanged = !stray
+        && desired
+            .iter()
+            .zip(&pinned)
+            .all(|((id, letter), (current_id, current))| {
+                id == current_id && letter.as_deref() == current.as_deref()
+            });
+    if unchanged {
+        return Ok(false);
+    }
+    connection
+        .execute("SAVEPOINT pin_paste_keys", [])
+        .map_err(storage_error)?;
+    let write = (|| {
+        connection
+            .execute(
+                "UPDATE clipboard_records SET pin_paste_key=NULL WHERE pin_paste_key IS NOT NULL",
+                [],
+            )
+            .map_err(storage_error)?;
+        for (id, letter) in &desired {
+            if let Some(letter) = letter {
+                connection
+                    .execute(
+                        "UPDATE clipboard_records SET pin_paste_key=?1 WHERE id=?2",
+                        params![letter, id],
+                    )
+                    .map_err(storage_error)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = write {
+        let _ = connection.execute("ROLLBACK TO pin_paste_keys", []);
+        let _ = connection.execute("RELEASE pin_paste_keys", []);
+        return Err(error);
+    }
+    connection
+        .execute("RELEASE pin_paste_keys", [])
+        .map_err(storage_error)?;
+    Ok(true)
 }
 
 pub(super) fn migrate(connection: &mut rusqlite::Connection) -> Result<(), String> {
@@ -729,7 +842,7 @@ impl HistoryDatabase {
         } else {
             "0"
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},{has_file_paths},{has_rich_text},{image_text_empty} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},{has_file_paths},{has_rich_text},{image_text_empty},r.pin_paste_key FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -808,6 +921,16 @@ impl HistoryDatabase {
                 has_file_paths: row.get(11).map_err(storage_error)?,
                 has_rich_text: row.get(12).map_err(storage_error)?,
                 image_text_empty: row.get(13).map_err(storage_error)?,
+                pin_paste_key: (|| {
+                    let pinned = row.get::<_, bool>(6).map_err(storage_error)?;
+                    row.get::<_, Option<String>>(14)
+                        .map_err(storage_error)
+                        .map(|key| {
+                            key.filter(|_| pinned).filter(|value| {
+                                crate::shortcuts::normalize_pin_paste_letter(value).is_some()
+                            })
+                        })
+                })()?,
             };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
@@ -830,12 +953,29 @@ impl HistoryDatabase {
                 }
             }
         }
+        let mut keys = self
+            .connection
+            .prepare_cached(
+                "SELECT id, pin_paste_key FROM clipboard_records WHERE pin_paste_key IS NOT NULL ORDER BY pin_paste_key",
+            )
+            .map_err(storage_error)?;
+        let pin_paste_keys = keys
+            .query_map([], |row| {
+                Ok(crate::clipboard::PinPasteKey {
+                    id: row.get(0)?,
+                    key: row.get(1)?,
+                })
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
         Ok(ClipboardPage {
             records,
             cursor,
             has_more,
             total_records,
             sources,
+            pin_paste_keys,
         })
     }
 
@@ -1304,6 +1444,10 @@ impl HistoryDatabase {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn reconcile_pin_paste_keys(&mut self) -> Result<bool, String> {
+        sync_pin_paste_keys(&self.connection)
+    }
+
     pub fn clipboard_update(&mut self, id: &str, action: &str) -> Result<(), String> {
         let transaction = self
             .connection
@@ -1336,6 +1480,7 @@ impl HistoryDatabase {
                     transaction.query_row("SELECT MAX(?1,COALESCE(MAX(created_at),0)+1) FROM clipboard_records WHERE is_pinned=1", [chrono::Utc::now().timestamp_millis()], |row| row.get::<_, i64>(0)).map_err(storage_error)?
                 };
                 transaction.execute("UPDATE clipboard_records SET is_pinned=NOT is_pinned,created_at=?2 WHERE id=?1", params![id,order]).map_err(storage_error)?;
+                sync_pin_paste_keys(&transaction)?;
                 transaction.commit().map_err(storage_error)?;
                 return Ok(());
             }
@@ -1963,6 +2108,102 @@ mod tests {
         assert!(db.clipboard_record("favorite").unwrap().is_favorite);
         assert!(db.clipboard_record("pin").unwrap().is_pinned);
         assert_eq!(db.clipboard_history_policy().unwrap(), policy);
+    }
+
+    #[test]
+    fn pinned_records_keep_a_stable_command_letter() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let key = |db: &HistoryDatabase, id: &str| {
+            db.connection
+                .query_row(
+                    "SELECT pin_paste_key FROM clipboard_records WHERE id=?1",
+                    [id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+        };
+        for id in ["oldest", "middle", "newest"] {
+            db.clipboard_insert(&record(id, id)).unwrap();
+            db.clipboard_update(id, "pin").unwrap();
+        }
+        assert_eq!(key(&db, "oldest").as_deref(), Some("B"));
+        assert_eq!(key(&db, "middle").as_deref(), Some("E"));
+        assert_eq!(key(&db, "newest").as_deref(), Some("G"));
+        db.clipboard_update("oldest", "pin").unwrap();
+        assert_eq!(key(&db, "oldest"), None);
+        assert_eq!(key(&db, "middle").as_deref(), Some("E"));
+        assert_eq!(key(&db, "newest").as_deref(), Some("G"));
+        db.clipboard_update("oldest", "pin").unwrap();
+        assert_eq!(key(&db, "oldest").as_deref(), Some("B"));
+        db.clipboard_insert(&record("plain", "plain")).unwrap();
+        assert_eq!(key(&db, "plain"), None);
+        let hidden = db.clipboard_page("middle", false, None, 100).unwrap();
+        assert_eq!(hidden.records.len(), 1);
+        assert!(hidden
+            .pin_paste_keys
+            .iter()
+            .any(|item| item.id == "oldest" && item.key == "B"));
+        assert_eq!(
+            hidden
+                .records
+                .iter()
+                .find(|item| item.id == "middle")
+                .and_then(|item| item.pin_paste_key.as_deref()),
+            Some("E")
+        );
+
+        let mut shortcuts = crate::shortcuts::ClipboardRecordShortcuts::default();
+        shortcuts
+            .set(
+                crate::shortcuts::ClipboardRecordAction::Favorite,
+                Some(crate::shortcuts::KeyBinding::new("KeyB", &["alt", "meta"])),
+                None,
+                &[],
+            )
+            .unwrap();
+        db.preference_set(
+            "clipboard_record_shortcuts",
+            &serde_json::to_string(&shortcuts).unwrap(),
+        )
+        .unwrap();
+        assert!(!db.reconcile_pin_paste_keys().unwrap());
+        assert_eq!(key(&db, "oldest").as_deref(), Some("B"));
+
+        shortcuts
+            .set(
+                crate::shortcuts::ClipboardRecordAction::Favorite,
+                Some(crate::shortcuts::KeyBinding::new("KeyB", &["meta"])),
+                None,
+                &[],
+            )
+            .unwrap();
+        db.preference_set(
+            "clipboard_record_shortcuts",
+            &serde_json::to_string(&shortcuts).unwrap(),
+        )
+        .unwrap();
+        assert!(db.reconcile_pin_paste_keys().unwrap());
+        assert_eq!(key(&db, "oldest").as_deref(), Some("H"));
+        assert_eq!(key(&db, "middle").as_deref(), Some("E"));
+        assert_eq!(key(&db, "newest").as_deref(), Some("G"));
+        for index in 0..10 {
+            let id = format!("extra-{index}");
+            db.clipboard_insert(&record(&id, &id)).unwrap();
+            db.clipboard_update(&id, "pin").unwrap();
+        }
+        assert_eq!(key(&db, "oldest").as_deref(), Some("H"));
+        assert_eq!(key(&db, "extra-7").as_deref(), Some("Y"));
+        assert_eq!(key(&db, "extra-8"), None);
+        assert_eq!(key(&db, "extra-9"), None);
+        let assigned: i64 = db
+            .connection
+            .query_row(
+                "SELECT count(*) FROM clipboard_records WHERE pin_paste_key IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assigned, 11);
     }
 
     #[test]

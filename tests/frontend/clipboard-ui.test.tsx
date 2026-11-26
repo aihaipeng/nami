@@ -16,7 +16,8 @@ let queryHandler: ((args: { query: string; favoritesOnly: boolean; kind?: Clipbo
 const cursor = { pinned: false, createdAt: 1794650400000, sequence: 100 };
 function page(query = '', favoritesOnly = false, kind?: ClipboardKind): ClipboardPage {
   const matches = records.filter((record) => (!favoritesOnly || record.isFavorite) && (!kind || record.kind === kind) && record.text.toLowerCase().includes(query.toLowerCase()));
-  return { records: structuredClone(matches), cursor: null, hasMore: false, totalRecords: matches.length };
+  const pinPasteKeys = records.flatMap((record) => record.isPinned && record.pinPasteKey ? [{ id: record.id, key: record.pinPasteKey }] : []);
+  return { records: structuredClone(matches), cursor: null, hasMore: false, totalRecords: matches.length, ...(pinPasteKeys.length ? { pinPasteKeys } : {}) };
 }
 const row = (id: string) => document.querySelector<HTMLElement>(`[data-record-id="${id}"]`)!;
 function scrollNearEnd() {
@@ -1573,6 +1574,45 @@ describe('database clipboard history', () => {
     expect(hint('image')).toBe('1');
     fireEvent.blur(window);
     expect(hint('image')).toBeUndefined();
+  });
+
+  it('pastes a pinned record from its saved Command letter, including when that row is filtered out', async () => {
+    records[1].pinPasteKey = 'B';
+    records.push({ ...records[0], id: 'second', text: 'Second text' });
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(3));
+    const search = screen.getByRole('searchbox');
+    const hint = (id: string) => row(id).querySelector('.clipboard-quick-paste-hint')?.textContent;
+    fireEvent.keyDown(search, { key: 'Meta', code: 'MetaLeft', metaKey: true });
+    expect(hint('pinned')).toBe('B');
+    expect(hint('first')).toBe('1');
+    expect(hint('second')).toBe('2');
+    expect(row('pinned').querySelector('.history-row-select')?.getAttribute('aria-keyshortcuts')).toBe('Meta+B');
+    const press = (code: string, extra = {}) => fireEvent.keyDown(search, { key: code.slice(3).toLowerCase(), code, metaKey: true, ...extra });
+    press('KeyB');
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'paste' });
+    fireEvent.keyDown(search, { key: '1', code: 'Digit1', metaKey: true });
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'paste' });
+    press('KeyB', { repeat: true });
+    press('KeyB', { isComposing: true });
+    press('KeyB', { shiftKey: true });
+    press('KeyA');
+    expect(calls('clipboard_record_use')).toHaveLength(2);
+    fireEvent.click(within(row('pinned')).getByRole('button', { name: 'Delete clipboard record' }));
+    await screen.findByRole('alertdialog', { name: 'Delete this record?' });
+    press('KeyB');
+    expect(calls('clipboard_record_use')).toHaveLength(2);
+    fireEvent.keyDown(document.body, { key: 'Escape', code: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    fireEvent.change(search, { target: { value: 'Second' } });
+    await waitFor(() => expect(listRows()).toHaveLength(1));
+    expect(row('pinned').hidden).toBe(true);
+    press('KeyB');
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'paste' });
+    const { activation, shortcuts } = bridge.snapshot.clipboardControls;
+    await emit('clipboard_controls_changed', { activation, shortcuts: { ...shortcuts, favorite: { ...shortcuts.favorite, binding: { code: 'KeyB', modifiers: ['meta'] } } } });
+    press('KeyB');
+    expect(calls('clipboard_record_use')).toHaveLength(3);
   });
 
   it('shows source and copy time on records without exposing source or date filters', async () => {
