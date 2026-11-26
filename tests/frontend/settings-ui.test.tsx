@@ -106,7 +106,7 @@ describe('Settings', () => {
     });
 
     const view = await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
     const backupSection = screen.getByRole('region', { name: 'Backup & Migration' });
 
     fireEvent.click(within(backupSection).getByRole('button', { name: 'Export Backup' }));
@@ -135,7 +135,7 @@ describe('Settings', () => {
     // Unsupported platform disables backup actions cleanly.
     bridge.snapshot.capabilities.localBackup = false;
     await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
     expect(within(screen.getByRole('region', { name: 'Backup & Migration' })).queryByRole('button', { name: 'Export Backup' })).toBeNull();
   });
 
@@ -166,7 +166,7 @@ describe('Settings', () => {
     });
 
     await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
     const backupSection = screen.getByRole('region', { name: 'Backup & Migration' });
 
     // Export with password validates confirmation mismatch before submitting.

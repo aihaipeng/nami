@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
 
 describe('clipboard recording settings', () => {
@@ -80,12 +80,14 @@ describe('clipboard recording settings', () => {
     expect([...screen.getByRole('button', { name: 'Open Clipboard History shortcut' }).closest('.settings-shortcut-row')!.querySelectorAll('.keycaps kbd')].map((key) => key.textContent)).toEqual(['⌃', '`']);
   });
 
-  it('uses text-only headings and plain action labels in clipboard settings', async () => {
+  it('uses text-only headings and plain action labels in clipboard and storage settings', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
     expect(screen.getAllByRole('heading').every((heading) => !heading.querySelector('svg'))).toBe(true);
     expect(screen.getByRole('button', { name: 'Add App' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Clear Records' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
+    expect(screen.getAllByRole('heading').every((heading) => !heading.querySelector('svg'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'Manual Cleanup' })).toBeTruthy();
   });
 
   it('groups global, window, record, and translation shortcuts and keeps them out of the Clipboard settings page', async () => {
@@ -257,10 +259,12 @@ describe('clipboard recording settings', () => {
     expect(screen.queryByRole('button', { name: 'Preview info' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Favorite/Unfavorite info' })).toBeNull();
 
-    // Hover shows the tooltip, clicking while hovered keeps it open, and mouse leave dismisses it.
+    // Hover shows the tooltip (one sentence per line), clicking while hovered keeps it open, and mouse leave dismisses it.
     const openTip = screen.getByRole('button', { name: 'Open Translation info' });
     fireEvent.mouseEnter(openTip);
-    expect(screen.getByRole('tooltip').textContent).toContain('selected text takes priority');
+    const openTooltip = screen.getByRole('tooltip');
+    expect(openTooltip.textContent).toContain('selected text takes priority');
+    expect(openTooltip.querySelectorAll('.clipboard-tip-lines > div')).toHaveLength(2);
     fireEvent.click(openTip);
     expect(screen.getByRole('tooltip').textContent).toContain('selected text takes priority');
     fireEvent.mouseLeave(openTip);
@@ -494,6 +498,11 @@ describe('clipboard privacy, retention and behavior', () => {
     { bundleId: 'com.apple.Passwords', name: 'Passwords' },
     { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' },
   ];
+  const defaultBreakdown = {
+    text: { bytes: 1500, count: 12 },
+    image: { bytes: 2000, count: 2 },
+    files: { bytes: 500, count: 1 },
+  };
   async function openSettings(apps = excludedApps) {
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
@@ -504,21 +513,39 @@ describe('clipboard privacy, retention and behavior', () => {
       };
       if (name === 'clipboard_excluded_app_pick') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }, { bundleId: 'com.example.synthetic', name: 'Synthetic App' }];
       if (name === 'clipboard_excluded_app_remove') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }];
-      if (name === 'records_storage_info') return { bytes: 4000, limit: 500 };
+      if (name === 'records_storage_info') return { bytes: 4000, limit: 500, autoCleanupIntervalHours: 1, breakdown: defaultBreakdown };
+      if (name === 'storage_location_info') {
+        return {
+          dataDir: '/Users/synthetic/Library/Application Support/dev.local.nami',
+          defaultDataDir: '/Users/synthetic/Library/Application Support/dev.local.nami',
+          isCustomDataDir: false,
+          logDir: '/Users/synthetic/Library/Logs/dev.local.nami',
+        };
+      }
       if (name === 'records_cleanup_preview') return { count: 4, token: 'preview-token', ...(!(args as { policy: unknown }).policy && { categories: [1, 2, 2] }) };
-      if (name === 'records_cleanup_apply') return { removed: (args as { categories?: number }).categories === 6 ? 3 : 4, mediaCleanupFailed: false };
+      if (name === 'records_cleanup_apply') {
+        const categories = (args as { categories?: number }).categories;
+        return { removed: categories === 6 ? 3 : 4, reclaimedBytes: categories === 6 ? 2_000_000 : 1_500_000, mediaCleanupFailed: false };
+      }
       return invoke(name, args);
     });
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
+    await waitFor(() => expect(calls('clipboard_options_get').length).toBeGreaterThan(0));
+    await screen.findByRole('region', { name: 'Ignore Rules' });
+  }
+  async function openStorageSettings() {
+    await openSettings();
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
     await screen.findByText('4 kB');
   }
 
   it('groups apps, pasteboard types, and text patterns under one Ignore Rules heading with compact chips and on-demand inputs', async () => {
     await openSettings();
-    for (const name of ['Clipboard Recording', 'Ignore Rules', 'History & Storage', 'Search', 'Behavior']) {
+    for (const name of ['Clipboard Recording', 'Ignore Rules', 'Search', 'Behavior']) {
       expect(screen.getByRole('region', { name })).toBeTruthy();
     }
+    expect(screen.queryByRole('region', { name: 'Retention & Cleanup' })).toBeNull();
     const heading = screen.getByRole('heading', { level: 2, name: 'Clipboard Recording' });
     expect(heading.parentElement?.querySelector('[role=switch]')).toBeNull();
     const types = screen.getByRole('group', { name: 'Content types' });
@@ -625,71 +652,121 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.queryByText('com.apple.keychainaccess')).toBeNull();
   });
 
-  it('defaults to 500, has no age rule, and confirms a lower custom count before removing items', async () => {
-    await openSettings();
-    const limit = screen.getByRole<HTMLInputElement>('textbox', { name: 'History Limit' });
+  it('defaults to 500 items, 0 days, 1 hr cleanup interval, auto-saves after 2s inactivity without Save button, and confirms a lower custom count', async () => {
+    await openStorageSettings();
+    const limit = screen.getByRole<HTMLInputElement>('textbox', { name: 'Max History Items' });
+    const age = screen.getByRole<HTMLInputElement>('textbox', { name: 'Retention Period' });
+    const interval = screen.getByRole<HTMLInputElement>('textbox', { name: 'Auto Cleanup Interval' });
     expect(limit.value).toBe('500');
+    expect(age.value).toBe('0');
+    expect(interval.value).toBe('1');
     expect(screen.queryByText('Keep History For')).toBeNull();
-    expect(limit.getAttribute('aria-description')).toBe('Max unprotected items (1–1,000,000); excludes favorites and pins.');
-    for (const value of ['0', '5.5', '1000001']) {
-      fireEvent.change(limit, { target: { value } });
+    expect(limit.getAttribute('aria-description')).toContain('0 means unlimited');
+
+    vi.useFakeTimers();
+    try {
+      for (const value of ['-1', '5.5', '1000001']) {
+        fireEvent.change(limit, { target: { value } });
+        expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+        expect(limit.getAttribute('aria-invalid')).toBe('true');
+      }
+      await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+      expect(calls('records_cleanup_preview')).toHaveLength(0);
+
+      fireEvent.change(limit, { target: { value: '13' } });
       expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(calls('records_cleanup_preview')).toHaveLength(0);
+
+      // Continuing to type resets the 2-second inactivity timer.
+      fireEvent.change(limit, { target: { value: '137' } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(calls('records_cleanup_preview')).toHaveLength(0);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+      const dialog = screen.getByRole('alertdialog');
+      expect(dialog.textContent).toContain('permanently removes 4 unprotected items');
+      expect(calls('records_cleanup_preview')[0][1]).toEqual({ policy: { limit: 137, autoCleanupIntervalHours: 1 } });
+      const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+      expect(cancel).toBe(document.activeElement);
+      expect(cancel.textContent).toBe('CancelEsc');
+      fireEvent.keyDown(cancel, { key: 'Escape' });
+      expect(limit.value).toBe('500');
+      expect(calls('records_cleanup_apply')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
     }
-    fireEvent.change(limit, { target: { value: '137' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    const dialog = await screen.findByRole('alertdialog');
-    expect(dialog.textContent).toContain('permanently removes 4 unprotected items');
-    expect(calls('records_cleanup_preview')[0][1]).toEqual({ policy: { limit: 137 } });
-    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
-    expect(cancel).toBe(document.activeElement);
-    expect(cancel.textContent).toBe('CancelEsc');
-    fireEvent.keyDown(cancel, { key: 'Escape' });
-    expect(limit.value).toBe('500');
-    expect(calls('records_cleanup_apply')).toHaveLength(0);
   });
 
-  it('saves a clipboard limit without dialog when the preview affects no items', async () => {
-    await openSettings();
+  it('auto-saves unlimited count (0) and auto cleanup interval after 2s inactivity without dialog when preview affects no items', async () => {
+    await openStorageSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     let limit = 500;
+    let autoCleanupIntervalHours = 1;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      const request = args as { policy?: { limit: number } };
-      if (name === 'records_storage_info') return { bytes: 1900, limit };
+      const request = args as { policy?: { limit: number; autoCleanupIntervalHours: number } };
+      if (name === 'records_storage_info') return { bytes: 1900, limit, autoCleanupIntervalHours, breakdown: defaultBreakdown };
       if (name === 'records_cleanup_preview') return { count: 0, token: 'empty-preview' };
-      if (name === 'records_cleanup_apply') { limit = request.policy!.limit; return { removed: 0, mediaCleanupFailed: false }; }
+      if (name === 'records_cleanup_apply') {
+        limit = request.policy!.limit;
+        autoCleanupIntervalHours = request.policy!.autoCleanupIntervalHours;
+        return { removed: 0, mediaCleanupFailed: false };
+      }
       return invoke(name, args);
     });
-    fireEvent.change(screen.getByRole('textbox', { name: 'History Limit' }), { target: { value: '713' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(calls('records_cleanup_apply')[0][1]).toEqual({ policy: { limit: 713 }, token: 'empty-preview' }));
-    expect(screen.queryByRole('alertdialog')).toBeNull();
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByRole('textbox', { name: 'Max History Items' }), { target: { value: '0' } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(calls('records_cleanup_apply')[0][1]).toEqual({
+        policy: { limit: 0, autoCleanupIntervalHours: 1 },
+        token: 'empty-preview',
+      });
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+
+      fireEvent.change(screen.getByRole('textbox', { name: 'Auto Cleanup Interval' }), { target: { value: '6' } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({
+        policy: { limit: 0, autoCleanupIntervalHours: 6 },
+        token: 'empty-preview',
+      });
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('confirms changing the clipboard time limit without changing its count limit', async () => {
-    await openSettings();
-    const label = 'Unprotected Item Retention: No Time Limit';
-    fireEvent.click(screen.getByRole('button', { name: label }));
-    fireEvent.click(screen.getByRole('option', { name: '7 Days' }));
+  it('confirms changing custom retention period days without changing count limit', async () => {
+    await openStorageSettings();
+    const age = screen.getByRole<HTMLInputElement>('textbox', { name: 'Retention Period' });
+    fireEvent.change(age, { target: { value: '14' } });
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    fireEvent.submit(age.closest('form')!);
     const dialog = await screen.findByRole('alertdialog', { name: 'Change history retention?' });
     expect(dialog.textContent).toContain('4 unprotected items');
     expect(calls('records_cleanup_apply')).toHaveLength(0);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Apply & Remove' }));
-    await waitFor(() => expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({ policy: { limit: 500, maxAgeDays: 7 }, token: 'preview-token' }));
+    await waitFor(() => expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({
+      policy: { limit: 500, maxAgeDays: 14, autoCleanupIntervalHours: 1 },
+      token: 'preview-token',
+    }));
   });
 
-  it('clears only the selected clipboard categories by keyboard and refreshes its size', async () => {
-    await openSettings();
+  it('runs manual cleanup for selected record categories by keyboard, shows unified summary toast, and refreshes storage', async () => {
+    await openStorageSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'records_storage_info') return { bytes: 2000, limit: 500 };
+      if (name === 'records_storage_info') return { bytes: 2000, limit: 500, autoCleanupIntervalHours: 1, breakdown: { text: { bytes: 1000, count: 5 }, image: { bytes: 1000, count: 1 }, files: { bytes: 0, count: 0 } } };
       return invoke(name, args);
     });
     expect(screen.queryByText('Clear Last 15 Minutes')).toBeNull();
-    const trigger = screen.getByRole('button', { name: 'Clear Records' });
-    expect(trigger.parentElement?.contains(screen.getByRole('heading', { name: 'History & Storage' }))).toBe(true);
+    const trigger = screen.getByRole('button', { name: 'Manual Cleanup' });
+    expect(trigger.parentElement?.contains(screen.getByRole('heading', { name: 'Retention & Cleanup' }))).toBe(true);
     fireEvent.click(trigger);
-    const dialog = await screen.findByRole('alertdialog', { name: 'Clear Records' });
-    const confirm = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Clear Records' });
+    const dialog = await screen.findByRole('alertdialog', { name: 'Manual Cleanup' });
+    const confirm = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Clean Up' });
     const checkbox = (name: RegExp) => within(dialog).getByRole<HTMLInputElement>('checkbox', { name });
     const options = within(dialog).getAllByRole<HTMLInputElement>('checkbox');
     expect(options).toHaveLength(3);
@@ -697,7 +774,7 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(dialog.querySelector('p')).toBeNull();
     expect(dialog.hasAttribute('aria-describedby')).toBe(false);
     expect(confirm.disabled).toBe(true);
-    expect(confirm.textContent).toBe('Clear Records↵');
+    expect(confirm.textContent).toBe('Clean Up↵');
     fireEvent.keyDown(within(dialog).getByRole('button', { name: 'Cancel' }), { key: 'Enter' });
     expect(calls('records_cleanup_apply')).toHaveLength(0);
     fireEvent.click(checkbox(/^Favorites/));
@@ -709,52 +786,56 @@ describe('clipboard privacy, retention and behavior', () => {
     dialog.focus();
     expect(document.activeElement).toBe(dialog);
     fireEvent.keyDown(dialog, { key: 'Enter' });
-    await screen.findByText('2 kB');
+    await waitFor(() => expect(document.querySelector('.storage-usage-total')?.textContent).toBe('2 kB'));
     expect(screen.queryByText('4 kB')).toBeNull();
-    expect(within(screen.getByRole('region', { name: 'History & Storage' })).queryByRole('status')).toBeNull();
+    expect(document.querySelector('.storage-toast')?.textContent).toBe('Cleaned up 3 items, freed ~2 MB');
+    expect(within(screen.getByRole('region', { name: 'Retention & Cleanup' })).queryByRole('status')).toBeNull();
     expect(calls('records_cleanup_apply')[0][1]).toEqual({ policy: null, categories: 6, token: 'preview-token' });
     expect(calls('records_storage_info').length).toBeGreaterThanOrEqual(2);
   });
 
   it('refreshes storage and reports an image cleanup failure after records were removed', async () => {
-    await openSettings();
+    await openStorageSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'records_cleanup_apply') return { removed: 1, mediaCleanupFailed: true };
-      if (name === 'records_storage_info') return { bytes: 2000, limit: 500 };
+      if (name === 'records_cleanup_apply') return { removed: 1, reclaimedBytes: 512_000, mediaCleanupFailed: true };
+      if (name === 'records_storage_info') return { bytes: 2000, limit: 500, breakdown: { text: { bytes: 2000, count: 5 }, image: { bytes: 0, count: 0 }, files: { bytes: 0, count: 0 } } };
       return invoke(name, args);
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Records' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual Cleanup' }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /^Ordinary/ }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear Records' }));
-    await screen.findByText('2 kB');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clean Up' }));
+    await waitFor(() => expect(document.querySelector('.storage-usage-total')?.textContent).toBe('2 kB'));
+    expect(document.querySelector('.storage-toast')?.textContent).toBe('Cleaned up 1 item, freed ~512 kB');
     expect(screen.getByRole('alert').textContent).toContain('some local image copies');
   });
 
   it('does not enable confirmation when the clipboard history is empty', async () => {
-    await openSettings();
+    await openStorageSettings();
     bridge.invoke.mockResolvedValueOnce({ count: 0, token: 'empty-preview', categories: [0, 0, 0] });
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Records' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual Cleanup' }));
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog.querySelector('p')).toBeNull();
-    expect(within(dialog).getAllByRole('checkbox').every((item) => (item as HTMLInputElement).disabled)).toBe(true);
-    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Clear Records' }).disabled).toBe(true);
+    const boxes = within(dialog).getAllByRole<HTMLInputElement>('checkbox');
+    expect(boxes).toHaveLength(3);
+    expect(boxes.every((item) => item.disabled)).toBe(true);
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Clean Up' }).disabled).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(calls('records_cleanup_apply')).toHaveLength(0);
   });
 
   it('requires another preview if the history changed and never retries deletion on its own', async () => {
-    await openSettings();
+    await openStorageSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'records_cleanup_apply') throw 'clipboard_cleanup_changed';
       return invoke(name, args);
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Records' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual Cleanup' }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /^Ordinary/ }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear Records' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clean Up' }));
     await screen.findByText(/History changed/);
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(calls('records_cleanup_preview')).toHaveLength(1);
@@ -886,7 +967,7 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('clipboard_behavior_set')[0][1]).toEqual({ activation: 'copy' });
   });
 
-  it('previews and applies clipboard storage space limits while preserving existing retention fields', async () => {
+  it('previews and applies custom MB clipboard storage space limits while preserving existing retention fields', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     let storedPolicy: { limit: number; maxAgeDays?: number; maxStorageMb?: number } = { limit: 500, maxAgeDays: 7 };
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
@@ -901,20 +982,41 @@ describe('clipboard privacy, retention and behavior', () => {
       return invoke(name, args);
     });
     await mount('settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
-    const storageLimit = await screen.findByRole('button', { name: 'Storage Limit: No Limit' });
-    fireEvent.click(storageLimit);
-    fireEvent.click(screen.getByRole('option', { name: '500 MB' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Change history retention?' });
-    fireEvent.click(within(dialog).getByRole('button', { name: /Apply & Remove/i }));
-    await screen.findByRole('button', { name: 'Storage Limit: 500 MB' });
-    expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({
-      policy: { limit: 500, maxAgeDays: 7, maxStorageMb: 500 },
-      token: 'storage-limit-token',
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
+    const storageLimit = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Storage Limit' });
+    expect(storageLimit.value).toBe('0');
+    expect(storageLimit.closest('.settings-history-limit')?.querySelector('.settings-input-unit')?.textContent).toBe('MB');
+    const storageLimitTip = screen.getByRole('button', { name: 'Storage Limit info' });
+    fireEvent.mouseEnter(storageLimitTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('0 means no limit');
+    fireEvent.mouseLeave(storageLimitTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    for (const invalid of ['-1', '12.5', '100001']) {
+      fireEvent.change(storageLimit, { target: { value: invalid } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      expect(storageLimit.getAttribute('aria-invalid')).toBe('true');
+    }
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(storageLimit, { target: { value: '300' } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      const dialog = screen.getByRole('alertdialog', { name: 'Change history retention?' });
+      fireEvent.click(within(dialog).getByRole('button', { name: /Apply & Remove/i }));
+      await act(async () => { await Promise.resolve(); });
+      expect(storageLimit.value).toBe('300');
+      expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({
+        policy: { limit: 500, maxAgeDays: 7, maxStorageMb: 300, autoCleanupIntervalHours: 1 },
+        token: 'storage-limit-token',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('edits pre-populated pasteboard types inline and toggles Universal Clipboard and sensitive credential presets', async () => {
+  it('edits pre-populated pasteboard types inline with 2s inactivity auto-save and toggles privacy presets', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     let types = [
       'Pasteboard generator type',
@@ -956,16 +1058,25 @@ describe('clipboard privacy, retention and behavior', () => {
     await within(ignoreRules).findByText('Pasteboard generator type');
     await within(ignoreRules).findByText('com.agilebits.onepassword');
 
-    // Inline edit a pre-populated type.
-    fireEvent.click(within(ignoreRules).getByRole('button', { name: 'Edit com.agilebits.onepassword' }));
-    const editInput = within(ignoreRules).getByRole<HTMLInputElement>('textbox', { name: 'Edit com.agilebits.onepassword' });
-    fireEvent.change(editInput, { target: { value: 'com.custom.vault' } });
-    fireEvent.click(within(ignoreRules).getByRole('button', { name: 'Save' }));
-    await within(ignoreRules).findByText('com.custom.vault');
-    expect(calls('clipboard_ignored_type_update').at(-1)?.[1]).toEqual({
-      oldPasteboardType: 'com.agilebits.onepassword',
-      newPasteboardType: 'com.custom.vault',
-    });
+    // Inline edit a pre-populated type without a Save button; auto-saves after 2s inactivity.
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(within(ignoreRules).getByRole('button', { name: 'Edit com.agilebits.onepassword' }));
+      const editInput = within(ignoreRules).getByRole<HTMLInputElement>('textbox', { name: 'Edit com.agilebits.onepassword' });
+      expect(within(ignoreRules).queryByRole('button', { name: 'Save' })).toBeNull();
+      fireEvent.change(editInput, { target: { value: 'com.custom.vault' } });
+      expect(within(ignoreRules).queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(calls('clipboard_ignored_type_update')).toHaveLength(0);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(within(ignoreRules).getByText('com.custom.vault')).toBeTruthy();
+      expect(calls('clipboard_ignored_type_update').at(-1)?.[1]).toEqual({
+        oldPasteboardType: 'com.agilebits.onepassword',
+        newPasteboardType: 'com.custom.vault',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
 
     // Toggle Universal Clipboard adds/removes com.apple.is-remote-clipboard.
     const universal = within(ignoreRules).getByRole<HTMLInputElement>('checkbox', { name: 'Ignore Universal Clipboard' });
@@ -986,7 +1097,7 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('clipboard_ignore_secrets_set').at(-1)?.[1]).toEqual({ enabled: true });
   });
 
-  it('toggles auto-open preview, shows range tooltip, and applies valid preview delay edits immediately', async () => {
+  it('toggles auto-open preview, shows range tooltip, and auto-saves valid preview delay after 2s inactivity', async () => {
     await openSettings();
     const behavior = screen.getByRole('region', { name: 'Behavior' });
     const toggle = within(behavior).getByRole<HTMLInputElement>('checkbox', { name: 'Auto-open Preview' });
@@ -1008,23 +1119,38 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewEnabled: true });
     expect(delay.disabled).toBe(false);
 
-    // Editing never renders a Save button and applies valid values immediately.
-    fireEvent.change(delay, { target: { value: '0' } });
-    expect(within(behavior).queryByRole('button', { name: 'Save' })).toBeNull();
-    await waitFor(() => expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 0 }));
+    // Editing never renders a Save button and waits 2s of inactivity before saving.
+    vi.useFakeTimers();
+    try {
+      const beforeEdits = calls('clipboard_behavior_set').length;
+      fireEvent.change(delay, { target: { value: '0' } });
+      expect(within(behavior).queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(calls('clipboard_behavior_set')).toHaveLength(beforeEdits);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 0 });
 
-    fireEvent.change(delay, { target: { value: '450' } });
-    await waitFor(() => expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 450 }));
+      fireEvent.change(delay, { target: { value: '45' } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+      fireEvent.change(delay, { target: { value: '450' } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 0 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 450 });
 
-    // Out-of-range values mark the input invalid without saving or shifting layout, and blur restores the last saved value.
-    const countBeforeInvalid = calls('clipboard_behavior_set').length;
-    fireEvent.change(delay, { target: { value: '5001' } });
-    expect(delay.getAttribute('aria-invalid')).toBe('true');
-    expect(within(behavior).queryByRole('alert')).toBeNull();
-    expect(calls('clipboard_behavior_set')).toHaveLength(countBeforeInvalid);
-    fireEvent.blur(delay);
-    expect(delay.value).toBe('450');
-    expect(delay.getAttribute('aria-invalid')).toBeNull();
+      // Out-of-range values mark the input invalid without saving or shifting layout, and blur restores the last saved value.
+      const countBeforeInvalid = calls('clipboard_behavior_set').length;
+      fireEvent.change(delay, { target: { value: '5001' } });
+      expect(delay.getAttribute('aria-invalid')).toBe('true');
+      expect(within(behavior).queryByRole('alert')).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+      expect(calls('clipboard_behavior_set')).toHaveLength(countBeforeInvalid);
+      fireEvent.blur(delay);
+      expect(delay.value).toBe('450');
+      expect(delay.getAttribute('aria-invalid')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
 
     // Disabling keeps the saved delay visible while locking the field.
     fireEvent.click(toggle);
@@ -1044,19 +1170,72 @@ describe('clipboard privacy, retention and behavior', () => {
     fireEvent.click(screen.getByText('Ignore Universal Clipboard'));
     expect(universal.checked).toBe(false);
 
-    // Unified info tips expose concise explanations on hover and dismiss on mouse leave.
-    for (const [tipName, snippet] of [
-      ['Images info', 'single image files'],
-      ['Apps info', 'active app only'],
-      ['Search Rule info', 'Mixed tries Exact'],
-      ['Automatic Paste Format info', 'auto-pasted text only'],
-    ]) {
+    // Unified info tips expose concise one-sentence-per-line explanations on hover and dismiss on mouse leave.
+    for (const [tipName, snippet, expectedLines] of [
+      ['Images info', 'single image files', 1],
+      ['Files info', 'Original files', 2],
+      ['Apps info', 'active app only', 1],
+      ['Search Rule info', 'Mixed tries Exact', 3],
+      ['Automatic Paste Format info', 'auto-pasted text only', 2],
+    ] as const) {
       const tip = screen.getByRole('button', { name: tipName });
       fireEvent.mouseEnter(tip);
-      expect(screen.getByRole('tooltip').textContent).toContain(snippet);
+      const panel = screen.getByRole('tooltip');
+      expect(panel.textContent).toContain(snippet);
+      if (expectedLines > 1) expect(panel.querySelectorAll('.clipboard-tip-lines > div')).toHaveLength(expectedLines);
       fireEvent.mouseLeave(tip);
       expect(screen.queryByRole('tooltip')).toBeNull();
     }
+
+    // Storage page renders the 5-minute tip without a manual refresh button, per-type breakdown, stacked proportion bar, and live updates.
+    fireEvent.click(screen.getByRole('button', { name: 'Storage' }));
+    await screen.findByText('4 kB');
+    expect(screen.queryByRole('button', { name: 'Refresh Storage Estimate' })).toBeNull();
+    const storageTip = screen.getByRole('button', { name: 'Estimated Storage info' });
+    fireEvent.mouseEnter(storageTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('every 5 minutes');
+    fireEvent.mouseLeave(storageTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    // Storage Location keeps only Data Directory and Log Directory (no standalone Clear Cache row), with multiline tips.
+    const locationRegion = screen.getByRole('region', { name: 'Storage Location' });
+    expect(locationRegion.textContent).not.toContain('Runtime logs for troubleshooting');
+    expect(within(locationRegion).queryByRole('button', { name: 'Clear Cache' })).toBeNull();
+    for (const [tipName, snippet, minLines] of [
+      ['Log Directory info', 'Runtime logs', 1],
+      ['Storage Limit info', '0 means no limit', 2],
+      ['Auto Cleanup Interval info', 'stale thumbnails', 3],
+    ] as const) {
+      const tip = screen.getByRole('button', { name: tipName });
+      fireEvent.mouseEnter(tip);
+      const panel = screen.getByRole('tooltip');
+      expect(panel.textContent).toContain(snippet);
+      if (minLines > 1) expect(panel.querySelectorAll('.clipboard-tip-lines > div').length).toBeGreaterThanOrEqual(minLines);
+      fireEvent.mouseLeave(tip);
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    }
+
+    const usageRegion = screen.getByRole('region', { name: 'Storage Usage' });
+    expect(usageRegion.querySelectorAll('.storage-usage-segment')).toHaveLength(3);
+    expect(within(usageRegion).getByText('12 items')).toBeTruthy();
+    expect(within(usageRegion).getByText('1.5 kB')).toBeTruthy();
+    expect(within(usageRegion).getByText('2 items')).toBeTruthy();
+    expect(within(usageRegion).getByText('2 kB')).toBeTruthy();
+    expect(within(usageRegion).getByText('1 item')).toBeTruthy();
+    expect(within(usageRegion).getByText('500 byte')).toBeTruthy();
+
+    // Periodic 5-minute storage updates from the tray loop sync total and breakdown live.
+    await emit('records_storage_changed', {
+      bytes: 12_400_000,
+      breakdown: {
+        text: { bytes: 2_400_000, count: 20 },
+        image: { bytes: 9_000_000, count: 3 },
+        files: { bytes: 1_000_000, count: 1 },
+      },
+    });
+    expect(within(usageRegion).getByText('12.4 MB')).toBeTruthy();
+    expect(within(usageRegion).getByText('20 items')).toBeTruthy();
+    expect(within(usageRegion).getByText('9 MB')).toBeTruthy();
 
     // General, Translation, HotKey, and Privacy & data share the same rules.
     fireEvent.click(screen.getByRole('button', { name: 'General' }));
@@ -1076,5 +1255,88 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(screen.getByRole('tooltip').textContent).toContain('selection translation and automatic paste');
     fireEvent.mouseLeave(accessTip);
     expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('opens directly to Storage from initialSettingsPage and navigates on settings_page_requested', async () => {
+    bridge.snapshot.initialSettingsPage = 'storage';
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'records_storage_info') return { bytes: 4000, limit: 500, breakdown: defaultBreakdown };
+      return invoke(name, args);
+    });
+    await mount('settings');
+    expect(screen.getByRole('heading', { level: 1, name: 'Storage' })).toBeTruthy();
+    await screen.findByText('4 kB');
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'General' })).toBeTruthy();
+    await emit('settings_page_requested', 'storage');
+    expect(screen.getByRole('heading', { level: 1, name: 'Storage' })).toBeTruthy();
+  });
+
+  it('manages storage data directory and log directory with clear feedback and error handling', async () => {
+    await openStorageSettings();
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'storage_open_data_dir' || name === 'storage_open_log_dir') return undefined;
+      if (name === 'storage_data_dir_pick') {
+        return {
+          dataDir: '/Users/synthetic/NamiData',
+          defaultDataDir: '/Users/synthetic/Library/Application Support/dev.local.nami',
+          isCustomDataDir: true,
+          logDir: '/Users/synthetic/Library/Logs/dev.local.nami',
+        };
+      }
+      if (name === 'storage_data_dir_reset') {
+        return {
+          dataDir: '/Users/synthetic/Library/Application Support/dev.local.nami',
+          defaultDataDir: '/Users/synthetic/Library/Application Support/dev.local.nami',
+          isCustomDataDir: false,
+          logDir: '/Users/synthetic/Library/Logs/dev.local.nami',
+        };
+      }
+      return invoke(name, args);
+    });
+
+    const locationRegion = screen.getByRole('region', { name: 'Storage Location' });
+    const retentionRegion = screen.getByRole('region', { name: 'Retention & Cleanup' });
+    expect(locationRegion.querySelectorAll('.clipboard-setting-icon')).toHaveLength(0);
+    expect(retentionRegion.querySelectorAll('.clipboard-setting-icon')).toHaveLength(0);
+    expect(locationRegion.querySelectorAll('.settings-field')).toHaveLength(2);
+    expect(within(locationRegion).queryByRole('button', { name: 'Clear Cache' })).toBeNull();
+    const locationItems = locationRegion.querySelectorAll('.storage-location-item');
+    expect(locationItems).toHaveLength(2);
+    expect(locationItems[0].querySelector('.storage-location-detail .storage-location-path')?.textContent).toBe('/Users/synthetic/Library/Application Support/dev.local.nami');
+    expect(locationItems[0].querySelectorAll('.storage-location-detail .storage-location-actions button')).toHaveLength(3);
+    expect(locationItems[1].querySelector('.storage-location-detail .storage-location-path')?.textContent).toBe('/Users/synthetic/Library/Logs/dev.local.nami');
+    expect(locationItems[1].querySelectorAll('.storage-location-detail .storage-location-actions button')).toHaveLength(1);
+    const resetBtn = within(locationRegion).getByRole<HTMLButtonElement>('button', { name: 'Reset to Default' });
+    expect(resetBtn.disabled).toBe(true);
+
+    // Open data & log folders via icon buttons.
+    fireEvent.click(within(locationRegion).getByRole('button', { name: 'Open Folder' }));
+    await waitFor(() => expect(calls('storage_open_data_dir')).toHaveLength(1));
+    const openLogBtn = within(locationRegion).getByRole('button', { name: 'Open Log Folder' });
+    expect(openLogBtn.textContent).toBe('');
+    expect(openLogBtn.querySelector('svg')).toBeTruthy();
+    fireEvent.click(openLogBtn);
+    await waitFor(() => expect(calls('storage_open_log_dir')).toHaveLength(1));
+
+    // Change data folder -> enables Reset to Default and updates displayed path.
+    fireEvent.click(within(locationRegion).getByRole('button', { name: 'Change Folder' }));
+    await within(locationRegion).findByText('/Users/synthetic/NamiData');
+    expect(within(locationRegion).getByRole('status').textContent).toContain('Data directory updated and migrated.');
+    expect(resetBtn.disabled).toBe(false);
+
+    // Reset back to default folder.
+    fireEvent.click(resetBtn);
+    await within(locationRegion).findByText('/Users/synthetic/Library/Application Support/dev.local.nami');
+    expect(within(locationRegion).getByRole('status').textContent).toContain('Restored default data directory.');
+    expect(resetBtn.disabled).toBe(true);
+    expect(calls('records_storage_info').every(([, args]) => args === undefined)).toBe(true);
+
+    // Migration error surfaces specific alert.
+    bridge.invoke.mockImplementationOnce(() => Promise.reject('storage_dir_not_empty'));
+    fireEvent.click(within(locationRegion).getByRole('button', { name: 'Change Folder' }));
+    expect((await within(locationRegion).findByRole('alert')).textContent).toContain('already contains Nami data files');
   });
 });

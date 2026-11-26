@@ -67,6 +67,7 @@ export interface PlatformCapabilities {
   clipboardImageSave: boolean;
   clipboardDrag: boolean;
   localBackup: boolean;
+  storageLocations: boolean;
   launchAtLogin: boolean;
   accessibilityPermission: boolean;
   primaryModifier: 'meta' | 'control';
@@ -101,6 +102,7 @@ export interface AppSnapshot {
   clipboardBinding: KeyBinding | null;
   clipboardShortcutEnabled: boolean;
   clipboardControls: ClipboardControls;
+  initialSettingsPage?: string;
   accessibility: boolean;
   shortcutErrors: string[];
   window: WindowState;
@@ -113,7 +115,7 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, storageLocations: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   windowPositionMode: 'lastPosition',
   launchAtLogin: false,

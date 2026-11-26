@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Check, ClipboardList, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { Check, ClipboardList, HardDrive, Keyboard, Languages, Settings2, ShieldCheck } from 'lucide-react';
 import type { ViewProps } from '../App';
 import type { RecordsOpenFocus } from '../shared/clipboardShortcuts';
 import type { Locale, WindowPositionMode } from '../shared/contracts';
+import { resolveLanguage } from '../shared/i18n';
 import './settings.css';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
-import { BackupSettings } from './BackupSettings';
 import { HotKeySettings } from './HotKeySettings';
 import { ClipboardSettings } from './ClipboardSettings';
+import { HistoryStorageSettings } from './HistoryStorageSettings';
 import { SettingHintTip } from './SettingHintTip';
 import { TranslationSettings } from './TranslationSettings';
 
@@ -16,12 +18,19 @@ const pages = [
   { value: 'general', icon: Settings2 },
   { value: 'translationPage', icon: Languages },
   { value: 'clipboard', icon: ClipboardList },
+  { value: 'storage', icon: HardDrive },
   { value: 'hotKey', icon: Keyboard },
   { value: 'privacy', icon: ShieldCheck },
 ] as const;
 
+type SettingsPage = typeof pages[number]['value'];
+
+function resolveSettingsPage(candidate?: string): SettingsPage {
+  return pages.some(({ value }) => value === candidate) ? (candidate as SettingsPage) : 'general';
+}
+
 export function Settings({ t, snapshot, command, native }: ViewProps) {
-  const [page, setPage] = useState<typeof pages[number]['value']>('general');
+  const [page, setPage] = useState<SettingsPage>(() => resolveSettingsPage(snapshot.initialSettingsPage));
   const [openDropdown, setOpenDropdown] = useState<'language' | 'windowPosition' | 'recordsFocus' | 'clipboardPreviewLines' | null>(null);
   const [savingLaunch, setSavingLaunch] = useState(false);
   const [launchError, setLaunchError] = useState(false);
@@ -29,6 +38,15 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
   const savingPreview = useRef(false);
   const canManageRecords = native && !snapshot.storageError;
   useEffect(() => { setOpenDropdown(null); setLaunchError(false); setPreviewSaveFailed(false); }, [page, snapshot.locale]);
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    let remove: (() => void) | undefined;
+    void listen<string>('settings_page_requested', ({ payload }) => {
+      if (!disposed) setPage(resolveSettingsPage(payload));
+    }).then((unlisten) => { if (disposed) unlisten(); else remove = unlisten; }).catch(() => {});
+    return () => { disposed = true; remove?.(); };
+  }, [native]);
 
   async function saveLaunchAtLogin(enabled: boolean) {
     if (!native || !snapshot.capabilities.launchAtLogin || savingLaunch) return;
@@ -54,14 +72,14 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
       <div className="settings-brand" data-tauri-drag-region>{t('settings')}</div>
       <nav aria-label={t('settings')}>
         {pages.map(({ value, icon: Icon }) => {
-          const label = t(value);
+          const label = t(value === 'storage' ? 'storagePage' : value);
           return <button type="button" key={value} aria-label={label} title={label} aria-current={page === value ? 'page' : undefined} onClick={() => setPage(value)}><Icon aria-hidden="true" /><span>{label}</span></button>;
         })}
       </nav>
     </aside>
     <section key={page} className="settings-content" aria-labelledby="settings-page-title">
       <div className="settings-page">
-        <header className="settings-page-heading"><h1 id="settings-page-title">{t(page)}</h1></header>
+        <header className="settings-page-heading"><h1 id="settings-page-title">{t(page === 'storage' ? 'storagePage' : page)}</h1></header>
         {page === 'general' && <section aria-labelledby="settings-personalization">
           <h2 id="settings-personalization">{t('personalization')}</h2>
           <div className="settings-group">
@@ -112,6 +130,7 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
         </section>}
         {page === 'translationPage' && <TranslationSettings t={t} snapshot={snapshot} command={command} native={native} />}
         {page === 'clipboard' && <ClipboardSettings t={t} snapshot={snapshot} native={native} />}
+        {page === 'storage' && <HistoryStorageSettings t={t} available={canManageRecords} locationsAvailable={native && !snapshot.storageError && snapshot.capabilities.storageLocations} backupAvailable={native && !snapshot.storageError && snapshot.capabilities.localBackup} locale={resolveLanguage(snapshot.locale)} />}
         {page === 'hotKey' && <HotKeySettings t={t} snapshot={snapshot} native={native} />}
         {page === 'privacy' && <div className="settings-sections">
           <section aria-labelledby="settings-permission">
@@ -127,7 +146,6 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
               <div className="settings-field settings-permission-actions"><button type="button" className="settings-action" disabled={!native} onClick={() => void command('permission_request')}>{t('requestPermission')}</button><button type="button" className="settings-action" disabled={!native} onClick={() => void command('app_snapshot')}>{t('refreshPermission')}</button></div>
             </div> : <p className="settings-callout">{t('settingsPermissionUnavailable')}</p>}
           </section>
-          <BackupSettings t={t} available={native && !snapshot.storageError && snapshot.capabilities.localBackup} />
           <section aria-labelledby="settings-data">
             <h2 id="settings-data">{t('settingsDataHandling')}</h2>
             <div className="settings-group">

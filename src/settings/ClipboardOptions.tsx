@@ -4,6 +4,7 @@ import { AppWindow, Plus, X } from 'lucide-react';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { DEFAULT_HOVER_PREVIEW_DELAY_MS, MAX_HOVER_PREVIEW_DELAY_MS } from '../shared/clipboardShortcuts';
 import type { MessageKey, Translate } from '../shared/i18n';
+import { SETTINGS_AUTO_SAVE_DELAY_MS } from './autoSave';
 import { SettingHintTip } from './SettingHintTip';
 import { errorCode } from './ShortcutCapture';
 
@@ -230,7 +231,6 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         tipLabel={t('shortcutHintLabel').replace('{title}', t('clipboardIgnoredTypesHeading'))}
         addLabel={t('clipboardAddType')}
         submitLabel={t('clipboardAddRule')}
-        saveLabel={t('clipboardSaveRule')}
         placeholder={t('clipboardIgnoredTypesPlaceholder')}
         items={ignoredTypes}
         removeLabel={(value) => t('clipboardRemoveType').replace('{type}', value)}
@@ -296,10 +296,10 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
 }
 
 function IgnoreRuleBlock({
-  headingId, heading, note, tipLabel, addLabel, submitLabel, saveLabel, placeholder, items, removeLabel, editLabel,
+  headingId, heading, note, tipLabel, addLabel, submitLabel, placeholder, items, removeLabel, editLabel,
   open, onOpenChange, draft, onDraftChange, error, ready, busy, onSubmit, onEdit, onRemove,
 }: {
-  headingId: string; heading: string; note: string; tipLabel: string; addLabel: string; submitLabel: string; saveLabel?: string; placeholder: string;
+  headingId: string; heading: string; note: string; tipLabel: string; addLabel: string; submitLabel: string; placeholder: string;
   items: string[]; removeLabel: (value: string) => string; editLabel?: (value: string) => string; open: boolean; onOpenChange: (open: boolean) => void;
   draft: string; onDraftChange: (value: string) => void; error: string | null; ready: boolean; busy: boolean;
   onSubmit: () => Promise<void>; onEdit?: (oldValue: string, nextValue: string) => Promise<boolean>; onRemove: (value: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) => Promise<void>;
@@ -307,19 +307,30 @@ function IgnoreRuleBlock({
   const addButton = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
+  const editAutoSaveTimer = useRef<number | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+
+  function clearEditAutoSave() {
+    if (editAutoSaveTimer.current !== null) {
+      window.clearTimeout(editAutoSaveTimer.current);
+      editAutoSaveTimer.current = null;
+    }
+  }
+
+  useEffect(() => () => clearEditAutoSave(), []);
   useEffect(() => {
     if (open) inputRef.current?.focus({ preventScroll: true });
   }, [open]);
   useEffect(() => {
+    clearEditAutoSave();
     if (editing !== null) {
       editInputRef.current?.focus({ preventScroll: true });
       editInputRef.current?.select();
     }
   }, [editing]);
   useEffect(() => {
-    if (editing !== null && !items.includes(editing)) { setEditing(null); setEditDraft(''); }
+    if (editing !== null && !items.includes(editing)) { clearEditAutoSave(); setEditing(null); setEditDraft(''); }
   }, [items, editing]);
 
   function close(restoreFocus = false) {
@@ -328,10 +339,26 @@ function IgnoreRuleBlock({
   }
 
   async function saveEdit() {
+    clearEditAutoSave();
     if (editing === null || !onEdit) return;
     if (editDraft.trim() === editing) { setEditing(null); setEditDraft(''); return; }
     const saved = await onEdit(editing, editDraft);
     if (saved) { setEditing(null); setEditDraft(''); }
+  }
+
+  const latestSaveEditRef = useRef(saveEdit);
+  latestSaveEditRef.current = saveEdit;
+
+  function handleEditChange(nextValue: string) {
+    setEditDraft(nextValue);
+    clearEditAutoSave();
+    if (editing === null || !onEdit) return;
+    const trimmed = nextValue.trim();
+    if (!trimmed || trimmed === editing) return;
+    editAutoSaveTimer.current = window.setTimeout(() => {
+      editAutoSaveTimer.current = null;
+      void latestSaveEditRef.current();
+    }, SETTINGS_AUTO_SAVE_DELAY_MS);
   }
 
   return <div className="clipboard-ignore-block">
@@ -343,7 +370,7 @@ function IgnoreRuleBlock({
       <button type="button" ref={addButton} className="settings-action clipboard-icon-button clipboard-ignore-add"
         title={addLabel} aria-label={addLabel} aria-description={note} aria-expanded={open}
         disabled={!ready} aria-disabled={busy || undefined}
-        onClick={() => { setEditing(null); onOpenChange(!open); }}><Plus aria-hidden="true" /></button>
+        onClick={() => { clearEditAutoSave(); setEditing(null); onOpenChange(!open); }}><Plus aria-hidden="true" /></button>
     </div>
     {!!items.length && <ul className="clipboard-ignore-chips clipboard-rule-list" role="list" aria-labelledby={headingId}>
       {items.map((value) => {
@@ -354,16 +381,16 @@ function IgnoreRuleBlock({
               <input ref={editInputRef} type="text" className="settings-text-input clipboard-rule-input" value={editDraft}
                 disabled={!ready} readOnly={busy} spellCheck={false} autoComplete="off"
                 aria-label={editLabel ? editLabel(value) : heading} aria-invalid={error ? true : undefined}
-                onChange={(event) => setEditDraft(event.target.value)}
+                onChange={(event) => handleEditChange(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {
                     event.preventDefault();
                     event.stopPropagation();
+                    clearEditAutoSave();
                     setEditing(null);
                     setEditDraft('');
                   }
                 }} />
-              <button type="submit" className="settings-action clipboard-composer-submit" disabled={!ready || !editDraft.trim()} aria-disabled={busy || undefined}>{saveLabel ?? submitLabel}</button>
             </form>
           </li>;
         }
@@ -423,6 +450,7 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
   const behaviorPending = useRef(false);
   const delaySaving = useRef(false);
   const pendingDelay = useRef<number | null>(null);
+  const delayAutoSaveTimer = useRef<number | null>(null);
   const id = useId();
   const options = state.options;
   const canConfigurePreview = available ?? platformAvailable;
@@ -434,6 +462,15 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
   const parsedDelay = /^\d+$/.test(trimmedDelay) ? Number(trimmedDelay) : Number.NaN;
   const delayValid = Number.isInteger(parsedDelay) && parsedDelay >= 0 && parsedDelay <= MAX_HOVER_PREVIEW_DELAY_MS;
   const delayInvalid = delayDraft !== null && !delayValid;
+
+  function clearDelayAutoSave() {
+    if (delayAutoSaveTimer.current !== null) {
+      window.clearTimeout(delayAutoSaveTimer.current);
+      delayAutoSaveTimer.current = null;
+    }
+  }
+
+  useEffect(() => () => clearDelayAutoSave(), []);
   useEffect(() => { setOpen(null); }, [locale]);
 
   async function flushDelay() {
@@ -448,6 +485,9 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
         savedDelayRef.current = value;
         state.setOptions((previous) => previous && { ...previous, hoverPreviewDelayMs: value });
       }
+      if (pendingDelay.current === null && delayAutoSaveTimer.current === null) {
+        setDelayDraft(null);
+      }
     } catch {
       setBehaviorError(true);
     } finally {
@@ -459,12 +499,17 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
   function editDelay(raw: string) {
     setDelayDraft(raw);
     setBehaviorError(false);
+    clearDelayAutoSave();
     const trimmed = raw.trim();
     if (!/^\d+$/.test(trimmed)) return;
     const value = Number(trimmed);
     if (!Number.isInteger(value) || value < 0 || value > MAX_HOVER_PREVIEW_DELAY_MS) return;
-    pendingDelay.current = value;
-    void flushDelay();
+    if (value === savedDelayRef.current) return;
+    delayAutoSaveTimer.current = window.setTimeout(() => {
+      delayAutoSaveTimer.current = null;
+      pendingDelay.current = value;
+      void flushDelay();
+    }, SETTINGS_AUTO_SAVE_DELAY_MS);
   }
 
   async function changeBehavior(
@@ -481,7 +526,10 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
     try {
       await invoke('clipboard_behavior_set', next);
       state.setOptions((previous) => previous && { ...previous, ...next });
-      if ('hoverPreviewEnabled' in next && !next.hoverPreviewEnabled) setDelayDraft(null);
+      if ('hoverPreviewEnabled' in next && !next.hoverPreviewEnabled) {
+        clearDelayAutoSave();
+        setDelayDraft(null);
+      }
     } catch { setBehaviorError(true); }
     finally { behaviorPending.current = false; setSavingField(null); }
   }
@@ -526,8 +574,24 @@ export function ClipboardReuseSettings({ t, state, available, platformAvailable,
               value={delayDraft ?? String(savedDelay)} disabled={!hoverPreviewEnabled}
               aria-invalid={delayInvalid || undefined} aria-description={t('clipboardPreviewDelayHelp')}
               onChange={(event) => editDelay(event.target.value)}
-              onBlur={() => setDelayDraft(null)}
-              onKeyDown={(event) => { if (event.key === 'Escape') setDelayDraft(null); }} />
+              onBlur={() => {
+                if (delayDraft !== null && (!delayValid || parsedDelay === savedDelayRef.current)) {
+                  clearDelayAutoSave();
+                  setDelayDraft(null);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  clearDelayAutoSave();
+                  setDelayDraft(null);
+                  setBehaviorError(false);
+                } else if (event.key === 'Enter' && delayValid && parsedDelay !== savedDelayRef.current) {
+                  event.preventDefault();
+                  clearDelayAutoSave();
+                  pendingDelay.current = parsedDelay;
+                  void flushDelay();
+                }
+              }} />
             <span className="settings-input-unit">ms</span>
           </div> : <span className="settings-badge">{canConfigurePreview ? '—' : t('platformUnavailable')}</span>}
         </div>

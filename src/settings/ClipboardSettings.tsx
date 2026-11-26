@@ -6,7 +6,6 @@ import { resolveLanguage } from '../shared/i18n';
 import { defaultClipboardSearch } from '../shared/clipboardSearch';
 import { ClipboardSearchSettings } from './ClipboardSearchSettings';
 import { ClipboardIgnoreRules, ClipboardReuseSettings, useClipboardOptions } from './ClipboardOptions';
-import { HistoryStorageSettings } from './HistoryStorageSettings';
 import { SettingHintTip } from './SettingHintTip';
 
 const rows = [
@@ -72,7 +71,6 @@ export function ClipboardSettings({ t, snapshot, native }: Pick<ViewProps, 't' |
       </div>
     </section>
     <ClipboardIgnoreRules t={t} state={options} available={canCapture} />
-    <HistoryStorageSettings t={t} available={canManage} locale={resolveLanguage(snapshot.locale)} />
     <ClipboardSearchSettings t={t} search={snapshot.clipboardControls.search ?? defaultClipboardSearch} available={canManage} />
     <ClipboardReuseSettings t={t} state={options} available={canManage} platformAvailable={canCapture}
       locale={resolveLanguage(snapshot.locale)} />

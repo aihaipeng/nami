@@ -1,0 +1,1 @@
+export const SETTINGS_AUTO_SAVE_DELAY_MS = 2000;

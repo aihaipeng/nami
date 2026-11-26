@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount } from './harness';
 import type { TranslationOutput } from '../../src/shared/contracts';
 
@@ -224,7 +224,9 @@ describe('translation engine settings', () => {
     expect(screen.queryByText(/does not use the HTTP proxy/)).toBeNull();
     const serviceTip = await screen.findByRole('button', { name: 'Translation Service info' });
     await user.hover(serviceTip);
-    expect(screen.getByRole('tooltip').textContent).toContain('does not use the HTTP proxy');
+    const tipPanel = screen.getByRole('tooltip');
+    expect(tipPanel.textContent).toContain('Does not use the HTTP proxy');
+    expect(tipPanel.querySelectorAll('.clipboard-tip-lines > div')).toHaveLength(2);
     await user.unhover(serviceTip);
     expect(screen.queryByRole('tooltip')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Open Translation Languages Settings' }));
@@ -326,29 +328,49 @@ describe('translation engine settings', () => {
     await waitFor(() => expect(toggle.checked).toBe(true));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'http://127.0.0.1:7890', proxyEnabled: true });
     fireEvent.change(input, { target: { value: 'https://example.test:8443' } });
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     input.focus();
     await user.keyboard('{Enter}');
     await waitFor(() => expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://example.test:8443'));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'https://example.test:8443' });
     expect(document.activeElement).toBe(input);
 
-    fireEvent.change(input, { target: { value: 'https://other.example.test:8443' } });
-    bridge.invoke.mockRejectedValueOnce('storage_io');
-    await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect((await screen.findByRole('alert')).textContent).toContain('Could not save proxy settings.');
-    expect(toggle.checked).toBe(true);
-    expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://example.test:8443');
-    expect(input.value).toBe('https://other.example.test:8443');
-    await user.keyboard('{Escape}');
-    expect(input.value).toBe('https://example.test:8443');
-    expect(screen.queryByRole('alert')).toBeNull();
+    // Editing waits 2s of inactivity and auto-saves without rendering a Save button.
+    vi.useFakeTimers();
+    try {
+      const beforeAutoSave = calls('translation_preferences_set').length;
+      fireEvent.change(input, { target: { value: 'https://auto.example.test:8443' } });
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+      expect(calls('translation_preferences_set')).toHaveLength(beforeAutoSave);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://auto.example.test:8443');
+      expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyUrl: 'https://auto.example.test:8443' });
+
+      // Failed auto-save reports an alert once without looping, and Escape reverts the draft.
+      bridge.invoke.mockRejectedValueOnce('storage_io');
+      fireEvent.change(input, { target: { value: 'https://other.example.test:8443' } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByRole('alert').textContent).toContain('Could not save proxy settings.');
+      const countAfterFailure = calls('translation_preferences_set').length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      expect(calls('translation_preferences_set')).toHaveLength(countAfterFailure);
+      expect(toggle.checked).toBe(true);
+      expect(bridge.snapshot.translationPreferences.proxyUrl).toBe('https://auto.example.test:8443');
+      expect(input.value).toBe('https://other.example.test:8443');
+      fireEvent.keyDown(input, { key: 'Escape' });
+      expect(input.value).toBe('https://auto.example.test:8443');
+      expect(screen.queryByRole('alert')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
 
     await user.click(screen.getByText('Use HTTP Proxy', { exact: true }));
     expect(toggle.checked).toBe(true);
     await user.click(toggle);
     await waitFor(() => expect(toggle.checked).toBe(false));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyEnabled: false });
-    expect(input.value).toBe('https://example.test:8443');
+    expect(input.value).toBe('https://auto.example.test:8443');
     expect(input.readOnly).toBe(false);
   });
 

@@ -2,7 +2,7 @@ import { useId, useRef, useState } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { FloatingPanel } from '../shared/FloatingPanel';
 
-export function SettingHintTip({ label, text, conflict, className = '', width = 248 }: {
+export function SettingHintTip({ label, text, conflict, className = '', width = 420 }: {
   label: string; text: string; conflict?: boolean; className?: string; width?: number;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
@@ -31,7 +31,9 @@ export function SettingHintTip({ label, text, conflict, className = '', width = 
         if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
       }}><CircleAlert aria-hidden="true" /></button>
     {open && <FloatingPanel anchor={trigger} onClose={close} id={id} role="tooltip" width={width} side="bottom" className="settings-popover clipboard-tip-panel" dismissOnSettingsScroll>
-      {text}
+      {text.includes('\n')
+        ? <div className="clipboard-tip-lines">{text.split('\n').map((line, index) => <div key={index}>{line}</div>)}</div>
+        : text}
     </FloatingPanel>}
   </>;
 }
