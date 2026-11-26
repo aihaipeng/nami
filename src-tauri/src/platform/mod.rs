@@ -47,9 +47,9 @@ mod selection_copy;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 pub use selection_copy::*;
 mod image_metadata;
-pub use image_metadata::image_dimensions;
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 pub use image_metadata::image_dimensions_from_path;
+pub use image_metadata::{image_dimensions, image_dimensions_from_file};
 mod ocr;
 pub use ocr::{
     detect_image_qr_codes, maybe_run_vision_worker, recognize_image_text, shutdown_vision_worker,

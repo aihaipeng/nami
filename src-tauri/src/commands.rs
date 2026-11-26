@@ -331,7 +331,7 @@ pub fn clipboard_details_select(
         } else if !regions.records_browsing {
             return Ok(());
         }
-        regions.clipboard_detail_id = record_id;
+        regions.select_clipboard_detail(record_id);
     }
     windows::emit_state(&app)
 }
@@ -2072,37 +2072,7 @@ pub async fn clipboard_image_qr_codes(
     if !platform::capabilities().image_ocr {
         return Ok(Vec::new());
     }
-    let record = crate::clipboard_runtime::database(&app, move |database| {
-        database.clipboard_record(&record_id)
-    })
-    .await?;
-    let root = crate::clipboard_runtime::image_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
-        let bytes = match record.kind.as_str() {
-            "image" => record
-                .image_path
-                .as_deref()
-                .and_then(|path| nami::clipboard::read_image(&root, path).ok()),
-            "files" => {
-                let files = nami::clipboard::all_file_entries(&record.text)?;
-                if files.len() == 1 && files[0].exists && !files[0].is_dir && files[0].is_image {
-                    nami::clipboard::read_file_preview(std::path::Path::new(&files[0].path)).ok()
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        let Some(bytes) = bytes else {
-            return Ok(Vec::new());
-        };
-        match platform::detect_image_qr_codes(&bytes) {
-            Ok(codes) => Ok(codes),
-            Err(_) => Ok(Vec::new()),
-        }
-    })
-    .await
-    .map_err(|_| "storage_worker".to_owned())?
+    crate::clipboard_text::detail_qr_codes(&app, record_id).await
 }
 
 #[tauri::command]

@@ -628,6 +628,44 @@ it('renders L2 color, JSON, timestamp, and QR code views in details without modi
   expect(within(pane()).queryByRole('button', { name: 'Show QR Code' })).toBeNull();
 });
 
+it('shows image previews immediately but scans only a settled detail and ignores late QR results', async () => {
+  vi.useFakeTimers();
+  try {
+    for (const record of records) record.kind = 'image';
+    const original = bridge.invoke.getMockImplementation()!;
+    let finishOld!: (value: string[]) => void;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name !== 'clipboard_image_qr_codes') return original(name, args);
+      return (args as { recordId: string }).recordId === 'second'
+        ? new Promise<string[]>((resolve) => { finishOld = resolve; }) : ['current QR'];
+    });
+    const detail = (id: string, visible = true) => <ClipboardDetail native t={translator('en')} command={vi.fn()} activity={vi.fn()}
+      snapshot={{ ...bridge.snapshot, window: { ...bridge.snapshot.window, clipboardDetailVisible: visible, clipboardDetailId: id } }} />;
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const view = render(detail('first'));
+    await act(async () => {});
+    expect(pane().querySelector('.clipboard-image-preview')).not.toBeNull();
+    await advance(100);
+    view.rerender(detail('second'));
+    await act(async () => {});
+    await advance(100);
+    expect(calls('clipboard_image_qr_codes')).toHaveLength(0);
+    await advance(50);
+    expect(calls('clipboard_image_qr_codes').map((call) => call[1])).toEqual([{ recordId: 'second' }]);
+    view.rerender(detail('pinned'));
+    await act(async () => {});
+    await advance(150);
+    expect(within(pane()).getByText('current QR')).toBeTruthy();
+    await act(async () => finishOld(['obsolete QR']));
+    expect(within(pane()).queryByText('obsolete QR')).toBeNull();
+    view.rerender(detail('first'));
+    await act(async () => {});
+    view.rerender(detail('first', false));
+    await advance(200);
+    expect(calls('clipboard_image_qr_codes').map((call) => call[1])).toEqual([{ recordId: 'second' }, { recordId: 'pinned' }]);
+  } finally { vi.useRealTimers(); }
+});
+
 it('displays locally detected QR codes on images and opens links only on explicit click', async () => {
   records[1] = { ...first(), id: 'qr-img', kind: 'image', text: 'Image', imageIndexStatus: 'indexed', width: 400, height: 400, characterCount: null, size: 12_000 };
   bridge.snapshot.window.clipboardDetailId = 'qr-img';
@@ -1070,6 +1108,7 @@ it('extracts a 48x48 offscreen image palette below single images alongside QR an
     expect(swatches).toHaveLength(5);
 
     // Ordering under single image: ImagePreview -> Color Palette -> QR -> Compact Path card
+    await within(pane()).findByText('https://example.test/img-qr');
     const qrCard = pane().querySelector('.clipboard-smart-qr-list')!;
     const pathCard = pane().querySelector('.clipboard-smart-files')!;
     expect(img.compareDocumentPosition(paletteGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

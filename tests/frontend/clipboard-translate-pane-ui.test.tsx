@@ -120,7 +120,7 @@ describe('clipboard attached translate pane', () => {
     const rowTranslate = () => within(listRow('first')).getByRole('button', { name: 'Translate' });
     const detailTranslate = () => within(detailPane()).getByRole('button', { name: 'Translate' });
     expect(rowTranslate().getAttribute('aria-pressed')).toBe('false');
-    expect(detailTranslate().getAttribute('aria-pressed')).toBe('false');
+    await waitFor(() => expect(detailTranslate().getAttribute('aria-pressed')).toBe('false'));
 
     // Open translate for first record
     fireEvent.click(rowTranslate());

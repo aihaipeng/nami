@@ -79,6 +79,84 @@ fn image_bytes(
     nami::clipboard::read_file_preview(std::path::Path::new(&entry.path)).map(Some)
 }
 
+struct PreviewQr {
+    id: String,
+    session: u64,
+    revision: u64,
+}
+
+impl PreviewQr {
+    fn visible_session(windows: &crate::model::WindowState, id: &str) -> Option<u64> {
+        (windows.clipboard_visible
+            && windows.clipboard_detail_visible
+            && windows.clipboard_detail_id.as_deref() == Some(id))
+        .then_some(windows.records_session)
+    }
+
+    fn begin(state: &AppState, id: String) -> Option<Self> {
+        let mut windows = state.windows.lock().unwrap();
+        Some(Self {
+            session: Self::visible_session(&windows, &id)?,
+            revision: windows.invalidate_preview_qr(),
+            id,
+        })
+    }
+
+    fn is_current(&self, state: &AppState) -> bool {
+        let windows = state.windows.lock().unwrap();
+        Self::visible_session(&windows, &self.id) == Some(self.session)
+            && windows.preview_qr_revision == self.revision
+    }
+
+    async fn acquire(
+        &self,
+        state: &AppState,
+    ) -> Option<tokio::sync::OwnedMutexGuard<ImageTextCache>> {
+        let turn = state.vision_work.clone().lock_owned().await;
+        self.is_current(state).then_some(turn)
+    }
+}
+
+pub(crate) async fn detail_qr_codes(app: &AppHandle, id: String) -> Result<Vec<String>, String> {
+    let state = app.state::<AppState>();
+    let Some(request) = PreviewQr::begin(&state, id) else {
+        return Ok(Vec::new());
+    };
+    let Some(turn) = request.acquire(&state).await else {
+        return Ok(Vec::new());
+    };
+    let id = request.id.clone();
+    let record = clipboard_runtime::database(app, move |db| db.clipboard_record(&id)).await?;
+    let root = clipboard_runtime::image_root(app)?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Keep the permit with the actual work even if the IPC waiter goes away.
+        let _turn = turn;
+        let state = app.state::<AppState>();
+        if !request.is_current(&state) {
+            return Ok(Vec::new());
+        }
+        let bytes = match record.kind.as_str() {
+            "image" => image_bytes(&record, &root).ok().flatten(),
+            "files" => match nami::clipboard::all_file_entries(&record.text)?.as_slice() {
+                [entry] if entry.exists && !entry.is_dir && entry.is_image => {
+                    nami::clipboard::read_file_preview(std::path::Path::new(&entry.path)).ok()
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        Ok(match bytes {
+            Some(bytes) if request.is_current(&state) => {
+                platform::detect_image_qr_codes(&bytes).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        })
+    })
+    .await
+    .map_err(|_| "storage_worker".to_owned())?
+}
+
 #[derive(Default)]
 pub(crate) struct IndexJobs {
     pending: HashSet<String>,
@@ -151,7 +229,7 @@ async fn text(
     }
     let state = app.state::<AppState>();
     // One Vision worker, shared by indexing and explicit actions; never hold the database mutex here.
-    let mut cache = state.image_text.lock().await;
+    let mut cache = state.vision_work.lock().await;
     if record.kind == "image" {
         let id = record.id.clone();
         if let Some(text) =
@@ -373,7 +451,7 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
                 && state.image_text_operation.load(Ordering::SeqCst) == operation
                 && state.operation.load(Ordering::SeqCst) == clipboard_operation;
             if follow {
-                windows.clipboard_detail_id = Some(selected_id);
+                windows.select_clipboard_detail(Some(selected_id));
             }
             drop(windows);
             windows::emit_state(&app)?;
@@ -397,6 +475,111 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_latest_visible_qr_gets_the_vision_slot_before_reading() {
+        let state = AppState::default();
+        {
+            let mut windows = state.windows.lock().unwrap();
+            windows.clipboard_visible = true;
+            windows.clipboard_detail_visible = true;
+            windows.clipboard_detail_id = Some("a".into());
+        }
+        let ocr = state.vision_work.lock().await;
+        let first = PreviewQr::begin(&state, "a".into()).unwrap();
+        let waiting = first.acquire(&state);
+        tokio::pin!(waiting);
+        tokio::select! { biased; _ = &mut waiting => panic!("started reading during OCR"), _ = std::future::ready(()) => {} }
+        state.windows.lock().unwrap().clipboard_detail_id = Some("b".into());
+        let middle = PreviewQr::begin(&state, "b".into()).unwrap();
+        state.windows.lock().unwrap().clipboard_detail_id = Some("a".into());
+        let latest = PreviewQr::begin(&state, "a".into()).unwrap();
+        assert!(PreviewQr::begin(&state, "b".into()).is_none());
+        drop(ocr);
+        assert!(waiting.await.is_none());
+        assert!(middle.acquire(&state).await.is_none());
+        let turn = latest.acquire(&state).await.unwrap();
+        assert!(state.vision_work.try_lock().is_err());
+        state.windows.lock().unwrap().clipboard_detail_visible = false;
+        assert!(!latest.is_current(&state), "dismissed during image read");
+        drop(turn);
+        assert!(state.vision_work.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn leaving_and_returning_to_a_detail_invalidates_queued_qr_before_the_next_dwell() {
+        for transition in ["select", "preview", "close"] {
+            let state = AppState::default();
+            let ocr = state.vision_work.lock().await;
+            {
+                let mut w = state.windows.lock().unwrap();
+                w.show_clipboard();
+                w.preview_clipboard_record("image".into());
+            }
+            let old = PreviewQr::begin(&state, "image".into()).unwrap();
+            {
+                let mut w = state.windows.lock().unwrap();
+                match transition {
+                    "select" => {
+                        // Hovering a text row never sends a QR request of its own.
+                        w.select_clipboard_detail(Some("text".into()));
+                        w.select_clipboard_detail(Some("image".into()));
+                    }
+                    "preview" => {
+                        w.preview_clipboard_record("text".into());
+                        w.preview_clipboard_record("image".into());
+                    }
+                    _ => {
+                        w.toggle_clipboard_details();
+                        w.toggle_clipboard_details();
+                    }
+                }
+            }
+            drop(ocr);
+            assert!(
+                old.acquire(&state).await.is_none(),
+                "old QR revived after {transition}"
+            );
+            let fresh = PreviewQr::begin(&state, "image".into()).unwrap();
+            state
+                .windows
+                .lock()
+                .unwrap()
+                .select_clipboard_detail(Some("image".into()));
+            assert!(
+                fresh.acquire(&state).await.is_some(),
+                "unchanged selection invalidated QR"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn previous_session_cannot_scan_the_same_image_after_reopen() {
+        let state = AppState::default();
+        let id = "same-image";
+        assert!(PreviewQr::begin(&state, id.into()).is_none());
+        {
+            let mut w = state.windows.lock().unwrap();
+            w.clipboard_visible = true;
+            w.sync_records_session();
+            w.preview_clipboard_record(id.into());
+        }
+        let old = PreviewQr::begin(&state, id.into()).unwrap();
+        {
+            let mut w = state.windows.lock().unwrap();
+            w.dismiss();
+            w.sync_records_session();
+            w.clipboard_visible = true;
+            w.sync_records_session();
+            w.preview_clipboard_record(id.into());
+        }
+        assert!(old.acquire(&state).await.is_none());
+        assert!(PreviewQr::begin(&state, id.into())
+            .unwrap()
+            .acquire(&state)
+            .await
+            .is_some());
+    }
 
     #[test]
     fn duplicate_index_jobs_do_not_start_twice() {

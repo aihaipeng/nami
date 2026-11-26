@@ -7552,7 +7552,7 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             *lock = Some(db);
         }
         tauri::async_runtime::block_on(async {
-            *state.image_text.lock().await = Default::default();
+            *state.vision_work.lock().await = Default::default();
         });
         let calls = VISION_CALLS.load(Ordering::SeqCst);
         if calls != 10 {
@@ -8020,6 +8020,12 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
         {
             return Err("closing detail note left the shared editor open".into());
         }
+        // Closing the editor restores row focus in the list WebView. Its DOM disappearing
+        // (or the right WebView releasing inert) alone does not settle that handoff.
+        wait_records(
+            app,
+            r#"const panel=document.querySelector('.clipboard-panel'),focus=document.activeElement?.closest('[data-record-id]')?.dataset.recordId,selected=panel?.querySelector('.history-row.selected')?.dataset.recordId;return {ready:focus==='detail-first'&&selected===focus,focus,selected};"#,
+        )?;
         let before_entry = app
             .state::<AppState>()
             .windows
@@ -8046,7 +8052,7 @@ return {{ready:true,deleteAvailableWith:{action:?}}};
         evaluate_view_dom(
             app,
             "clipboard",
-            r#"document.querySelector('.clipboard-panel [data-record-id="detail-second"]').dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));return true;"#,
+            r#"const row=document.querySelector('.clipboard-panel [data-record-id="detail-second"]'),rect=row.getBoundingClientRect();row.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:rect.left+2,clientY:rect.top+2}));return true;"#,
         )?;
         samples.push(wait_dom(app, r#"const text=document.querySelector('.clipboard-detail-text')?.textContent;return {ready:text==='Second synthetic detail',text};"#)?);
         wait_records(
@@ -8293,7 +8299,7 @@ fn run_clipboard_kind_text(app: &AppHandle) -> DomCase {
                     r#"
 const p=document.querySelector('.clipboard-panel'),f=p.querySelector('.history-footer'),filters=f.querySelector('.history-filters');
 const box=e=>{{const r=e.getBoundingClientRect();return {{left:r.left,right:r.right,width:r.width,height:r.height}};}};
-return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width,count:box(f.querySelector('.history-record-count')),filters:box(filters),keyboard:box(f.querySelector('.history-shortcuts')),centerOffset:(Math.min(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().left))+Math.max(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().right)))/2-(p.getBoundingClientRect().left+p.getBoundingClientRect().width/2),icons:[...filters.querySelectorAll('.history-symbol')].map(box)}};
+return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getBoundingClientRect().width,count:box(f.querySelector('.history-record-count')),filters:box(filters),keyboard:box(f.querySelector('.history-shortcuts')),centerOffset:(Math.min(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().left))+Math.max(...[...filters.querySelectorAll('button')].map(b=>b.getBoundingClientRect().right)))/2-(p.getBoundingClientRect().left+p.getBoundingClientRect().width/2),icons:[...filters.querySelectorAll('.history-symbol')].map(icon=>({{...box(icon),label:icon.closest('button')?.getAttribute('aria-label')}}))}};
 "#
                 ),
             )?;
@@ -8306,10 +8312,15 @@ return {{ready:Math.abs(p.getBoundingClientRect().width-{width})<.1,width:p.getB
                 return Err(format!("footer filters overlap at {width}: {sample}"));
             }
             if sample["icons"].as_array().is_none_or(|icons| {
-                icons.len() != 4
-                    || icons
-                        .iter()
-                        .any(|icon| icon["width"] != 14 || icon["height"] != 14)
+                icons.iter().map(|icon| icon["label"].as_str()).ne([
+                    Some("All clipboard records"),
+                    Some("Favorite clipboard records"),
+                    Some("Text clipboard records"),
+                    Some("Image clipboard records"),
+                    Some("File clipboard records"),
+                ]) || icons
+                    .iter()
+                    .any(|icon| icon["width"] != 14 || icon["height"] != 14)
             }) {
                 return Err(format!("footer filter icon sizing: {sample}"));
             }
@@ -8637,7 +8648,7 @@ return true;
         let (release_send, release_receive) = tokio::sync::oneshot::channel();
         tauri::async_runtime::spawn(async move {
             let state = handle.state::<AppState>();
-            let _lock = state.image_text.lock().await;
+            let _lock = state.vision_work.lock().await;
             let _ = locked_send.send(());
             let _ = release_receive.await;
         });

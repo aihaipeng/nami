@@ -2691,10 +2691,12 @@ describe('database clipboard history', () => {
   });
 
   describe('hidden page reclamation', () => {
-    const open = (kind: ClipboardKind | null = null) => renderHook(
-      ({ active, kind }) => useClipboard(true, '', false, undefined, kind, '', active),
-      { initialProps: { active: true, kind } },
-    );
+    async function open() {
+      const hook = renderHook(({ active, kind }) => useClipboard(true, '', false, undefined, kind, '', active),
+        { initialProps: { active: true, kind: null as ClipboardKind | null } });
+      await act(async () => {});
+      return hook;
+    }
     const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
     const batch = (offset: number): ClipboardPage => ({
       records: records.slice(offset, offset + 100), cursor: offset ? null : cursor,
@@ -2708,8 +2710,7 @@ describe('database clipboard history', () => {
     afterEach(() => { vi.useRealTimers(); });
 
     it('ignores a late append after 20 seconds hidden and releases the cursor for reuse', async () => {
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       expect(hook.result.current.page.records).toHaveLength(100);
       let finish!: (page: ClipboardPage) => void;
       queryHandler = () => new Promise((resolve) => { finish = resolve; });
@@ -2731,8 +2732,7 @@ describe('database clipboard history', () => {
     it('publishes cache-only eviction to React while still hidden', async () => {
       records[0].kind = 'image';
       queryHandler = async ({ kind }) => kind ? page('', false, kind) : batch(0);
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       hook.rerender({ active: true, kind: 'image' });
       await act(async () => {});
       expect(hook.result.current.page.records).toHaveLength(1);
@@ -2745,8 +2745,7 @@ describe('database clipboard history', () => {
     });
 
     it('keeps a deep page on quick reopen but requires a valid first-page cursor after trimming', async () => {
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       await act(async () => hook.result.current.loadMore());
       const deep = hook.result.current.page;
       hook.rerender({ active: false, kind: null });
@@ -2781,8 +2780,7 @@ describe('database clipboard history', () => {
         if (name === 'clipboard_capture_error') await new Promise<void>((resolve) => { subscribed = resolve; });
         return listen(name, callback);
       });
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       hook.rerender({ active: false, kind: null });
       advance(20_000);
       await emit('clipboard_changed', 1);
@@ -2794,15 +2792,17 @@ describe('database clipboard history', () => {
       expect(hook.result.current.displayReady).toBe(true);
     });
 
-    it('coalesces hidden changes across a local write that finishes after reopen', async () => {
+    it.each([false, true])('refreshes once after a pending local write settles on reopen (failed=%s)', async (failed) => {
       const invoke = bridge.invoke.getMockImplementation()!;
       let finishWrite!: () => void;
       bridge.invoke.mockImplementation(async (name, args) => {
-        if (name === 'clipboard_record_update') await new Promise<void>((resolve) => { finishWrite = resolve; });
+        if (name === 'clipboard_record_update') {
+          await new Promise<void>((resolve) => { finishWrite = resolve; });
+          if (failed) throw new Error('storage_unavailable');
+        }
         return invoke(name, args);
       });
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       act(() => { void hook.result.current.update('synthetic-0', 'favorite'); });
       hook.rerender({ active: false, kind: null });
       advance(20_000);
@@ -2812,8 +2812,34 @@ describe('database clipboard history', () => {
       expect(calls('clipboard_query')).toHaveLength(1);
       await act(async () => finishWrite());
       expect(calls('clipboard_query')).toHaveLength(2);
-      expect(hook.result.current.page.records[0].isFavorite).toBe(true);
+      expect(hook.result.current.page.records[0].isFavorite).toBe(!failed);
+      expect(hook.result.current.error).toBe(failed);
       expect(hook.result.current.displayReady).toBe(true);
+    });
+
+    it('keeps a write rejected while hidden through the reopen query until the next explicit write', async () => {
+      const hook = await open();
+      let rejectWrite!: (error: Error) => void;
+      bridge.invoke.mockImplementationOnce(() => new Promise((_, reject) => { rejectWrite = reject; }));
+      await act(async () => { void hook.result.current.update('synthetic-0', 'favorite'); });
+      hook.rerender({ active: false, kind: null });
+      advance(20_000);
+      await emit('clipboard_changed', 1);
+      await act(async () => rejectWrite(new Error('storage_unavailable')));
+      expect(hook.result.current.error).toBe(true);
+      expect(calls('clipboard_query')).toHaveLength(1);
+
+      hook.rerender({ active: true, kind: null });
+      await act(async () => {});
+      expect(calls('clipboard_query')).toHaveLength(2);
+      expect(hook.result.current.displayReady).toBe(true);
+      expect(hook.result.current.error).toBe(true);
+      await act(async () => hook.result.current.update('synthetic-1', 'favorite'));
+      expect(hook.result.current.error).toBe(false);
+      expect(hook.result.current.page.records.slice(0, 2).map((record) => record.isFavorite)).toEqual([false, true]);
+      expect(calls('clipboard_record_update').map(([, args]) => args)).toEqual([
+        { recordId: 'synthetic-0', action: 'favorite' }, { recordId: 'synthetic-1', action: 'favorite' },
+      ]);
     });
 
     it.each(['initial', 'refresh'])('restarts an unfinished %s query once on reopen', async (phase) => {
@@ -2821,8 +2847,7 @@ describe('database clipboard history', () => {
       let fail!: (error: Error) => void;
       const pending = () => new Promise<ClipboardPage>((resolve, reject) => { finish = resolve; fail = reject; });
       if (phase === 'initial') queryHandler = pending;
-      const hook = open();
-      await act(async () => {});
+      const hook = await open();
       if (phase === 'refresh') {
         queryHandler = pending;
         act(() => hook.result.current.refresh());
@@ -2994,6 +3019,52 @@ describe('database clipboard history', () => {
     scrollNearEnd();
     await waitFor(() => expect(listRows()).toHaveLength(3));
     expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ cursor });
+  });
+
+  it('keeps a failed favorite visible on reopen and makes Retry query without repeating the write', async () => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = 'list';
+    const user = userEvent.setup();
+    await mount('clipboard');
+    const invoke = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'clipboard_record_update') throw new Error('storage_unavailable');
+      return invoke(name, args);
+    });
+    await user.click(within(row('first')).getByRole('button', { name: 'Favorite' }));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    await windowState({ clipboardVisible: false, clipboardExtent: 0, recordsSession: (bridge.snapshot.window.recordsSession ?? 0) + 1 });
+    await emit('clipboard_changed', 1);
+    await windowState({ clipboardVisible: true, clipboardExtent: bridge.snapshot.window.clipboardWidth, recordsFocus: (bridge.snapshot.window.recordsFocus ?? 0) + 1 });
+
+    const first = row('first').querySelector<HTMLButtonElement>('.history-row-select')!;
+    expect(document.activeElement).toBe(first);
+    expect(calls('clipboard_query')).toHaveLength(2);
+    const retry = within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' });
+    const quickPaste = () => fireEvent.keyDown(first, { key: '1', code: 'Digit1', metaKey: true });
+    quickPaste();
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    await user.click(retry);
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(calls('clipboard_query')).toHaveLength(3);
+    expect(calls('clipboard_record_update')).toHaveLength(1);
+    expect(within(row('first')).getByRole('button', { name: 'Favorite' }).getAttribute('aria-pressed')).toBe('false');
+    act(() => first.focus());
+    quickPaste();
+    await waitFor(() => expect(calls('clipboard_record_use').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'paste' }]));
+  });
+
+  it('keeps a failed write retryable when a silent search also fails', async () => {
+    const hook = renderHook(() => useClipboard(true, 'Saved', false));
+    await waitFor(() => expect(hook.result.current.page.records).toHaveLength(1));
+    bridge.invoke.mockRejectedValueOnce(new Error('storage_unavailable'));
+    await act(async () => hook.result.current.update('first', 'favorite'));
+    queryHandler = async () => { throw new Error('clipboard_search_too_broad'); };
+    await emit('clipboard_changed', 1);
+    expect(hook.result.current.error).toBe(true);
+    expect(hook.result.current.searchError).toBeNull();
+    await act(async () => hook.result.current.refresh());
+    expect(hook.result.current.searchError).toBe('tooBroad');
+    expect(calls('clipboard_record_update')).toHaveLength(1);
   });
 
   it('clears capture errors after a successful retry and preserves them when retry fails', async () => {

@@ -177,6 +177,8 @@ pub const STANDALONE_TRANSLATION_DUAL_MIN_WIDTH: f64 = 700.0;
 pub struct WindowState {
     pub records_browsing: bool,
     pub clipboard_detail_id: Option<String>,
+    #[serde(skip)]
+    pub preview_qr_revision: u64,
     pub clipboard_translation_record_id: Option<String>,
     pub records_editor_open: bool,
     pub records_session: u64,
@@ -213,6 +215,7 @@ impl Default for WindowState {
         Self {
             records_browsing: true,
             clipboard_detail_id: None,
+            preview_qr_revision: 0,
             clipboard_translation_record_id: None,
             records_editor_open: false,
             records_session: 0,
@@ -298,9 +301,9 @@ impl WindowState {
     pub fn summon_standalone_translation(&mut self) {
         self.records_browsing = false;
         self.clipboard_visible = false;
-        self.clipboard_detail_visible = false;
+        self.set_clipboard_detail_visible(false);
         self.clipboard_translation_visible = false;
-        self.clipboard_detail_id = None;
+        self.select_clipboard_detail(None);
         self.clipboard_translation_record_id = None;
         self.standalone_translation_visible = true;
     }
@@ -311,10 +314,29 @@ impl WindowState {
         self.clipboard_visible = true;
         self.records_browsing = true;
         if !was_clipboard {
-            self.clipboard_detail_visible = false;
+            self.set_clipboard_detail_visible(false);
             self.clipboard_translation_visible = false;
-            self.clipboard_detail_id = None;
+            self.select_clipboard_detail(None);
             self.clipboard_translation_record_id = None;
+        }
+    }
+
+    pub fn invalidate_preview_qr(&mut self) -> u64 {
+        self.preview_qr_revision = self.preview_qr_revision.wrapping_add(1);
+        self.preview_qr_revision
+    }
+
+    pub fn select_clipboard_detail(&mut self, id: Option<String>) {
+        if self.clipboard_detail_id != id {
+            self.clipboard_detail_id = id;
+            self.invalidate_preview_qr();
+        }
+    }
+
+    fn set_clipboard_detail_visible(&mut self, visible: bool) {
+        if self.clipboard_detail_visible != visible {
+            self.clipboard_detail_visible = visible;
+            self.invalidate_preview_qr();
         }
     }
 
@@ -323,7 +345,7 @@ impl WindowState {
             return;
         }
         self.records_browsing = true;
-        self.clipboard_detail_visible = !self.clipboard_detail_visible;
+        self.set_clipboard_detail_visible(!self.clipboard_detail_visible);
         if self.clipboard_detail_visible {
             self.clipboard_detail_width =
                 self.clipboard_detail_width.max(CLIPBOARD_DETAIL_MIN_WIDTH);
@@ -338,7 +360,7 @@ impl WindowState {
             self.toggle_clipboard_details();
         }
         self.records_browsing = true;
-        self.clipboard_detail_id = Some(record_id);
+        self.select_clipboard_detail(Some(record_id));
     }
 
     pub fn open_clipboard_translation(&mut self, record_id: String) {
@@ -367,8 +389,8 @@ impl WindowState {
             self.records_session += 1;
             self.records_browsing = true;
             self.records_editor_open = false;
-            self.clipboard_detail_id = None;
-            self.clipboard_detail_visible = false;
+            self.select_clipboard_detail(None);
+            self.set_clipboard_detail_visible(false);
             self.clipboard_translation_visible = false;
             self.clipboard_translation_record_id = None;
         }
@@ -382,7 +404,7 @@ impl WindowState {
         }
         if self.clipboard_visible && !self.clipboard_pinned {
             self.clipboard_visible = false;
-            self.clipboard_detail_visible = false;
+            self.set_clipboard_detail_visible(false);
             self.clipboard_translation_visible = false;
             self.clipboard_translation_record_id = None;
         }
@@ -391,7 +413,7 @@ impl WindowState {
     pub fn dismiss(&mut self) {
         self.standalone_translation_visible = false;
         self.clipboard_visible = false;
-        self.clipboard_detail_visible = false;
+        self.set_clipboard_detail_visible(false);
         self.clipboard_translation_visible = false;
         self.clipboard_translation_record_id = None;
     }

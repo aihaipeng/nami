@@ -45,8 +45,27 @@ pub fn image_dimensions_from_path(path: &std::path::Path) -> Result<(u32, u32), 
     source_dimensions(&source)
 }
 
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn image_dimensions_from_file(file: &std::fs::File) -> Result<(u32, u32), String> {
+    use std::os::fd::AsRawFd;
+    let metadata = file.metadata().map_err(|_| "clipboard_image_invalid")?;
+    if !metadata.is_file()
+        || !(1..=nami::clipboard::MAX_IMAGE_BYTES as u64).contains(&metadata.len())
+    {
+        return Err("clipboard_image_invalid".into());
+    }
+    // Let ImageIO reopen the checked file, not a potentially replaced directory entry.
+    let path = format!("/dev/fd/{}", file.as_raw_fd());
+    image_dimensions_from_path(std::path::Path::new(&path))
+}
+
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
 pub fn image_dimensions(_: &[u8]) -> Result<(u32, u32), String> {
+    Err("platform_unavailable".into())
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
+pub fn image_dimensions_from_file(_: &std::fs::File) -> Result<(u32, u32), String> {
     Err("platform_unavailable".into())
 }
 
@@ -85,20 +104,43 @@ mod tests {
             assert!(oriented_dimensions(width, height, orientation).is_err());
         }
     }
-    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
-    fn imageio_reads_original_dimensions_without_rendering_and_rejects_bad_data() {
+    fn file_dimensions_use_the_open_handle_or_report_platform_unavailable() {
         let png = include_bytes!("../../../tests/fixtures/clipboard-wide.png");
-        let expected = (
-            u32::from_be_bytes(png[16..20].try_into().unwrap()),
-            u32::from_be_bytes(png[20..24].try_into().unwrap()),
-        );
-        assert_eq!(image_dimensions(png).unwrap(), expected);
         let temp = std::env::temp_dir().join(format!("nami-dim-{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&temp, png).unwrap();
-        assert_eq!(image_dimensions_from_path(&temp).unwrap(), expected);
-        let _ = std::fs::remove_file(&temp);
-        assert!(image_dimensions(b"invalid image").is_err());
-        assert!(image_dimensions(&[]).is_err());
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&temp)
+            .unwrap();
+        #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+        {
+            let expected = (
+                u32::from_be_bytes(png[16..20].try_into().unwrap()),
+                u32::from_be_bytes(png[20..24].try_into().unwrap()),
+            );
+            assert_eq!(image_dimensions(png).unwrap(), expected);
+            assert_eq!(image_dimensions_from_path(&temp).unwrap(), expected);
+            std::fs::remove_file(&temp).unwrap();
+            std::fs::write(&temp, b"invalid image").unwrap();
+            assert!(image_dimensions_from_path(&temp).is_err());
+            assert_eq!(image_dimensions_from_file(&file).unwrap(), expected);
+            file.set_len(nami::clipboard::MAX_IMAGE_BYTES as u64 + 1)
+                .unwrap();
+            assert!(image_dimensions_from_file(&file).is_err());
+            assert!(image_dimensions(b"invalid image").is_err());
+            assert!(image_dimensions(&[]).is_err());
+        }
+        #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
+        {
+            assert_eq!(image_dimensions(png).unwrap_err(), "platform_unavailable");
+            assert_eq!(
+                image_dimensions_from_file(&file).unwrap_err(),
+                "platform_unavailable"
+            );
+        }
+        drop(file);
+        std::fs::remove_file(temp).unwrap();
     }
 }

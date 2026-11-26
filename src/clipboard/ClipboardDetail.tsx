@@ -51,6 +51,8 @@ export interface ClipboardDetailData extends ClipboardRecord {
   imageIndexStatus?: 'unindexed' | 'pending' | 'failed' | 'empty' | 'indexed';
 }
 
+const QR_PREVIEW_DWELL_MS = 150;
+
 function richFormatLabel(format: NonNullable<ClipboardDetailData['richTextFormat']>) {
   return format === 'html+rtf' ? 'Rich Text (HTML + RTF)' : format === 'html' ? 'Rich Text (HTML)' : 'Rich Text (RTF)';
 }
@@ -134,11 +136,13 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   useEffect(() => {
     if (!active || !native || !current || !singleImage || !snapshot.capabilities.imageOcr) { setQrCodes([]); return; }
     let disposed = false;
-    void invoke<string[]>('clipboard_image_qr_codes', { recordId: current.id })
-      .then((codes) => { if (!disposed) setQrCodes(Array.isArray(codes) ? codes : []); })
-      .catch(() => { if (!disposed) setQrCodes([]); });
-    return () => { disposed = true; };
-  }, [active, native, current?.id, singleImage, snapshot.capabilities.imageOcr]);
+    const timer = window.setTimeout(() => {
+      void invoke<string[]>('clipboard_image_qr_codes', { recordId: current.id })
+        .then((codes) => { if (!disposed) setQrCodes(Array.isArray(codes) ? codes : []); })
+        .catch(() => { if (!disposed) setQrCodes([]); });
+    }, QR_PREVIEW_DWELL_MS);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [active, native, current?.id, singleImage, snapshot.capabilities.imageOcr, snapshot.window.recordsSession]);
   async function openCurrentTarget() {
     if (!current || loading) return;
     const revision = operation.current;

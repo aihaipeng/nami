@@ -70,7 +70,8 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const [page, setPage] = useState(emptyPage);
   const [loading, setLoading] = useState(native);
   const [showActivity, setShowActivity] = useState(native);
-  const [error, setError] = useState<'load' | 'invalidRegex' | 'tooBroad' | null>(null);
+  const [queryError, setQueryError] = useState<'load' | 'invalidRegex' | 'tooBroad' | null>(null);
+  const [writeError, setWriteError] = useState(false);
   const [captureError, setCaptureError] = useState(false);
   const [connection, setConnection] = useState(0);
   const active = useRef(false);
@@ -119,7 +120,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const cacheRevision = defaultRevision.current;
     if (append) morePending.current = true;
     else { resetPending.current = true; morePending.current = false; }
-    setLoading(true); setShowActivity(animate); setError(null);
+    setLoading(true); setShowActivity(animate); setQueryError(null);
     try {
       const result = await invoke<{ page: ClipboardWirePage; alternate: ClipboardWirePage | null }>('clipboard_query', { query: queryFilters.query, favoritesOnly: queryFilters.favoritesOnly, ...(queryFilters.kind ? { kind: queryFilters.kind } : {}), cursor });
       if (!active.current || current !== request.current) return;
@@ -175,7 +176,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         const code = reason instanceof Error ? reason.message : reason;
         const failure = code === 'clipboard_invalid_regex' ? 'invalidRegex' : code === 'clipboard_search_too_broad' ? 'tooBroad' : 'load';
         if (failure !== 'load') { latest.current = emptyPage; setPage(emptyPage); }
-        setError(failure);
+        setQueryError(failure);
       }
     } finally {
       if (active.current && current === request.current) {
@@ -224,7 +225,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       }
       ready.current = true;
       await fetchPage();
-    })().catch(() => { if (!disposed) { setError('load'); setLoading(false); setShowActivity(false); } });
+    })().catch(() => { if (!disposed) { setQueryError('load'); setLoading(false); setShowActivity(false); } });
     return () => { disposed = true; active.current = false; ready.current = false; pages.current.clear(); invalidPages.current.clear(); defaultPage.current = null; ++defaultRevision.current; ++request.current; removers.forEach((remove) => remove()); };
   }, [native, fetchPage, connection]);
 
@@ -263,7 +264,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const kindChanged = filters.current.kind !== kind;
     const queryChanged = filters.current.query !== query || filters.current.searchKey !== searchKey;
     if (!queryChanged && !favoritesChanged && !kindChanged) return;
-    if (queryChanged) { pages.current.clear(); invalidPages.current.clear(); setError(null); }
+    if (queryChanged) { pages.current.clear(); invalidPages.current.clear(); setQueryError(null); }
     filters.current = { query, favoritesOnly, kind, searchKey };
     resetPending.current = true;
     ++request.current;
@@ -276,7 +277,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
       pages.current.set(cacheKey(kind, favoritesOnly), cached);
       resetPending.current = false;
       morePending.current = false;
-      setPage(cached); setLoading(false); setShowActivity(false); setError(null);
+      setPage(cached); setLoading(false); setShowActivity(false); setQueryError(null);
       // A category switch should show new copies even if the previous list was scrolled.
       if (deferred.current === 'external' && !localWrites.current) {
         invalidPages.current.set(cacheKey(kind, favoritesOnly), cached.records.length);
@@ -300,6 +301,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
 
   const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
     if (!native || !active.current) return;
+    setWriteError(false);
     const session = lifecycle.current;
     ++defaultRevision.current;
     const pending = writeQueue.current;
@@ -309,7 +311,6 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     await pending;
     if (!active.current || session !== lifecycle.current) { --localWrites.current; release(); return; }
     const previous = latest.current.records.find((record) => record.id === recordId);
-    setError(null);
     try {
       await invoke('clipboard_record_update', { recordId, action });
       if (!active.current || session !== lifecycle.current) return;
@@ -348,8 +349,9 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         const next = pages.current.get(cacheKey(filters.current.kind, filters.current.favoritesOnly));
         if (next) { latest.current = next; setPage(next); }
       }
-    } catch { if (active.current && session === lifecycle.current) setError('load'); }
-    finally {
+    } catch {
+      if (active.current && session === lifecycle.current) setWriteError(true);
+    } finally {
       --localWrites.current; release();
       if (panelActiveRef.current && hiddenDirty.current) void fetchPage(false, false);
     }
@@ -409,6 +411,14 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     morePending.current = false;
     if (ready.current) void fetchPage(false, false);
   }, [fetchPage, rulesKey]);
+  function refresh() {
+    setWriteError(false);
+    ++defaultRevision.current;
+    if (ready.current) void fetchPage();
+    else setConnection((value) => value + 1);
+  }
   const refreshPending = panelActive && hiddenDirty.current;
-  return { applyEdit, noteCopied, page: displayedPage, displayReady: !refreshPending && (Boolean(restoringDefault && home) || !searchChanged && loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly)))), retainedRecords, loading: (restoringDefault && home ? false : loading) || refreshPending, showActivity: restoringDefault ? false : showActivity, error: error !== null || captureError, searchError: error === 'load' ? null : error, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  // Keep Retry available for an unacknowledged write even if a background search also failed.
+  const searchError = writeError || queryError === 'load' ? null : queryError;
+  return { applyEdit, noteCopied, page: displayedPage, displayReady: !refreshPending && (Boolean(restoringDefault && home) || !searchChanged && loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly)))), retainedRecords, loading: (restoringDefault && home ? false : loading) || refreshPending, showActivity: restoringDefault ? false : showActivity, error: writeError || queryError !== null || captureError, searchError, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh };
 }

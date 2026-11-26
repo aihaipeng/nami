@@ -3,7 +3,7 @@ pub mod rich_text;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{io::Write, path::Path};
+use std::{fs::File, io::Write, path::Path};
 
 pub const MAX_FILE_COUNT: usize = 4096;
 pub const MAX_RICH_TEXT_BYTES: usize = 1024 * 1024;
@@ -432,8 +432,7 @@ fn file_entries_from_paths_with_limit(
         .collect()
 }
 
-pub fn read_file_preview(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
+pub fn open_file_preview(path: &Path) -> Result<File, String> {
     let metadata = std::fs::metadata(path).map_err(|_| "clipboard_file_missing")?;
     if !metadata.is_file() {
         return Err("invalid_argument".into());
@@ -441,7 +440,12 @@ pub fn read_file_preview(path: &Path) -> Result<Vec<u8>, String> {
     if metadata.len() > MAX_IMAGE_BYTES as u64 {
         return Err("clipboard_image_limit".into());
     }
-    let file = std::fs::File::open(path).map_err(|_| "clipboard_file_missing")?;
+    File::open(path).map_err(|_| "clipboard_file_missing".into())
+}
+
+pub fn read_file_preview(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = open_file_preview(path)?;
     let mut bytes = Vec::new();
     file.take(MAX_IMAGE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -547,7 +551,13 @@ pub fn store_image_with_status(
 }
 
 pub fn verified_image_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
-    use std::io::Read;
+    open_verified_image(root, relative)?;
+    Ok(root.join(relative))
+}
+
+/// Returns the rewound file and the byte count covered by the verified hash.
+pub fn open_verified_image(root: &Path, relative: &str) -> Result<(File, u64), String> {
+    use std::io::{Read, Seek};
     if !valid_image_name(relative) {
         return Err("storage_path".into());
     }
@@ -559,7 +569,7 @@ pub fn verified_image_path(root: &Path, relative: &str) -> Result<std::path::Pat
     }
     let filename = relative.rsplit('/').next().ok_or("storage_path")?;
     let expected = filename.split('.').next().ok_or("storage_path")?;
-    let mut file = std::fs::File::open(&path).map_err(|_| "storage_unavailable")?;
+    let mut file = File::open(&path).map_err(|_| "storage_unavailable")?;
     let mut hasher = Sha256::new();
     hasher.update(b"image");
     hasher.update([0]);
@@ -579,7 +589,8 @@ pub fn verified_image_path(root: &Path, relative: &str) -> Result<std::path::Pat
     if format!("{:x}", hasher.finalize()) != expected {
         return Err("storage_corrupt".into());
     }
-    Ok(path)
+    file.rewind().map_err(|_| "storage_unavailable")?;
+    Ok((file, total as u64))
 }
 
 pub fn read_image(root: &Path, relative: &str) -> Result<Vec<u8>, String> {

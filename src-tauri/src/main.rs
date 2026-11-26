@@ -85,7 +85,8 @@ pub struct AppState {
     clipboard_revision: AtomicU64,
     clipboard_dragging: AtomicBool,
     clipboard_writes: tokio::sync::Mutex<()>,
-    image_text: tokio::sync::Mutex<clipboard_text::ImageTextCache>,
+    // The lock admits one Vision job before loading its image, for QR, OCR and indexing.
+    vision_work: std::sync::Arc<tokio::sync::Mutex<clipboard_text::ImageTextCache>>,
     image_text_operation: AtomicU64,
     image_index_jobs: Mutex<clipboard_text::IndexJobs>,
     clipboard_translation: Mutex<Option<ClipboardTranslationContext>>,
@@ -147,7 +148,7 @@ impl Default for AppState {
             clipboard_revision: AtomicU64::new(0),
             clipboard_dragging: AtomicBool::new(false),
             clipboard_writes: tokio::sync::Mutex::new(()),
-            image_text: tokio::sync::Mutex::new(clipboard_text::ImageTextCache::default()),
+            vision_work: Default::default(),
             image_text_operation: AtomicU64::new(0),
             image_index_jobs: Mutex::default(),
             clipboard_translation: Mutex::new(None),

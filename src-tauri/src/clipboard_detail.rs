@@ -13,14 +13,14 @@ pub(crate) fn enrich(
             if let Some(paths) = image_file_paths {
                 detail.files = clipboard::file_entries_from_paths(paths)?;
             }
-            let bytes = detail
+            detail
                 .image_path
                 .as_deref()
-                .and_then(|path| clipboard::read_image(root, path).ok());
-            if let Some(bytes) = &bytes {
-                detail.size = Some(bytes.len() as u64);
-            }
-            bytes
+                .and_then(|relative| clipboard::open_verified_image(root, relative).ok())
+                .map(|(file, size)| {
+                    detail.size = Some(size);
+                    file
+                })
         }
         "files" => {
             detail.files = clipboard::all_file_entries(&detail.text)?;
@@ -31,16 +31,19 @@ pub(crate) fn enrich(
                     total.checked_add(metadata.len())
                 });
             }
-            if detail.files.len() == 1 && detail.files[0].exists && detail.files[0].is_image {
-                clipboard::read_file_preview(Path::new(&detail.files[0].path)).ok()
-            } else {
-                None
+            match detail.files.as_slice() {
+                [entry] if entry.exists && entry.is_image => {
+                    clipboard::open_file_preview(Path::new(&entry.path)).ok()
+                }
+                _ => None,
             }
         }
         "text" => None,
         _ => return Err("storage_corrupt".into()),
     };
-    if let Some((width, height)) = image.and_then(|bytes| platform::image_dimensions(&bytes).ok()) {
+    if let Some((width, height)) =
+        image.and_then(|file| platform::image_dimensions_from_file(&file).ok())
+    {
         detail.width = Some(width);
         detail.height = Some(height);
     }
@@ -51,6 +54,14 @@ pub(crate) fn enrich(
 mod tests {
     use super::*;
     use nami::{clipboard::ClipboardRecord, database::HistoryDatabase};
+
+    const WIDE_PNG: &[u8] = include_bytes!("../../tests/fixtures/clipboard-wide.png");
+    const WIDE_DIMENSIONS: (Option<u32>, Option<u32>) =
+        if cfg!(all(target_os = "macos", not(feature = "portable-ui"))) {
+            (Some(2048), Some(256))
+        } else {
+            (None, None)
+        };
 
     fn detail(kind: &str, text: &str) -> ClipboardDetail {
         let mut database = HistoryDatabase::open(Path::new(":memory:")).unwrap();
@@ -111,35 +122,65 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    fn files_detail(root: &Path, paths: &[&Path], measure_files: bool) -> ClipboardDetail {
+        let text = serde_json::to_string(paths).unwrap();
+        enrich(detail("files", &text), root, measure_files, None).unwrap()
+    }
+
     #[test]
     fn single_image_file_returns_original_dimensions_and_byte_size() {
         let root = std::env::temp_dir().join(format!("nami-detail-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let bytes = include_bytes!("../../tests/fixtures/clipboard-wide.png");
         let path = root.join("synthetic.png");
-        std::fs::write(&path, bytes).unwrap();
-        let text = serde_json::to_string(&vec![path]).unwrap();
-        let result = enrich(detail("files", &text), &root, true, None).unwrap();
-        assert_eq!(
-            result.width,
-            Some(u32::from_be_bytes(bytes[16..20].try_into().unwrap()))
-        );
-        assert_eq!(
-            result.height,
-            Some(u32::from_be_bytes(bytes[20..24].try_into().unwrap()))
-        );
-        assert_eq!(result.size, Some(bytes.len() as u64));
+        std::fs::write(&path, WIDE_PNG).unwrap();
+        for measure in [true, false] {
+            let result = files_detail(&root, &[&path], measure);
+            assert_eq!((result.width, result.height), WIDE_DIMENSIONS);
+            assert_eq!(result.size, measure.then_some(WIDE_PNG.len() as u64));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
+    fn invalid_oversized_and_multiple_images_keep_file_sizes_without_dimensions() {
+        let root =
+            std::env::temp_dir().join(format!("nami-detail-limits-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.png");
+        let second = root.join("second.png");
+        std::fs::write(&first, WIDE_PNG).unwrap();
+        std::fs::write(&second, WIDE_PNG).unwrap();
+        let multiple = files_detail(&root, &[&first, &second], true);
+        assert_eq!(multiple.files.len(), 2);
+        assert_eq!(multiple.size, Some(2 * WIDE_PNG.len() as u64));
+        assert_eq!((multiple.width, multiple.height), (None, None));
+
+        std::fs::write(&second, b"not a PNG").unwrap();
+        let invalid = files_detail(&root, &[&second], true);
+        assert_eq!(
+            (invalid.width, invalid.height, invalid.size),
+            (None, None, Some(9))
+        );
+        let over_limit = clipboard::MAX_IMAGE_BYTES as u64 + 1;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&first)
+            .unwrap()
+            .set_len(over_limit)
+            .unwrap();
+        for measure in [true, false] {
+            let large = files_detail(&root, &[&first], measure);
+            assert_eq!((large.width, large.height), (None, None));
+            assert_eq!(large.size, measure.then_some(over_limit));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn private_image_dimensions_use_verified_attachment_and_reject_changed_bytes() {
         let root =
             std::env::temp_dir().join(format!("nami-detail-private-{}", uuid::Uuid::new_v4()));
-        let bytes = include_bytes!("../../tests/fixtures/clipboard-wide.png");
-        let relative = clipboard::store_image(&root, bytes, "png").unwrap();
+        let relative = clipboard::store_image(&root, WIDE_PNG, "png").unwrap();
         let make_detail = || {
             let mut value = detail("text", "");
             value.kind = "image".into();
@@ -148,42 +189,82 @@ mod tests {
             value
         };
         let result = enrich(make_detail(), &root, true, None).unwrap();
-        assert!(result.width.is_some() && result.height.is_some());
-        assert_eq!(result.size, Some(bytes.len() as u64));
+        assert_eq!((result.width, result.height), WIDE_DIMENSIONS);
+        assert_eq!(result.size, Some(WIDE_PNG.len() as u64));
         assert!(result.character_count.is_none());
         assert!(result.files.is_empty());
         let original = root.join("local-photo.png");
-        std::fs::write(&original, bytes).unwrap();
-        let local = enrich(
-            make_detail(),
-            &root,
-            false,
-            Some(vec![original.to_string_lossy().into_owned()]),
-        )
-        .unwrap();
+        let with_original = || {
+            enrich(
+                make_detail(),
+                &root,
+                false,
+                Some(vec![original.to_string_lossy().into_owned()]),
+            )
+            .unwrap()
+        };
+        std::fs::write(&original, b"different local file").unwrap();
+        let local = with_original();
         assert_eq!(local.files.len(), 1);
         assert_eq!(local.files[0].path, original.to_string_lossy());
         assert_eq!(local.files[0].name, "local-photo.png");
         assert!(local.files[0].exists);
         assert!(local.files[0].is_image);
-        assert_eq!(local.size, Some(bytes.len() as u64));
+        assert_eq!((local.width, local.height), WIDE_DIMENSIONS);
+        assert_eq!(local.size, Some(WIDE_PNG.len() as u64));
         std::fs::remove_file(&original).unwrap();
-        let removed = enrich(
-            make_detail(),
-            &root,
-            false,
-            Some(vec![original.to_string_lossy().into_owned()]),
-        )
-        .unwrap();
+        let removed = with_original();
         assert_eq!(removed.files.len(), 1);
         assert_eq!(removed.files[0].path, original.to_string_lossy());
         assert!(!removed.files[0].exists);
-        std::fs::write(root.join(&relative), b"changed").unwrap();
-        let unavailable = enrich(make_detail(), &root, true, None).unwrap();
-        assert!(
-            unavailable.width.is_none()
-                && unavailable.height.is_none()
-                && unavailable.size.is_none()
+        assert_eq!((removed.width, removed.height), WIDE_DIMENSIONS);
+        assert_eq!(removed.size, Some(WIDE_PNG.len() as u64));
+
+        std::fs::write(&original, WIDE_PNG).unwrap();
+        let stored = root.join(&relative);
+        let assert_unavailable = || {
+            let unavailable = with_original();
+            assert_eq!(
+                (unavailable.width, unavailable.height, unavailable.size),
+                (None, None, None)
+            );
+        };
+        std::fs::write(
+            &stored,
+            include_bytes!("../../tests/fixtures/clipboard-preview.jpg"),
+        )
+        .unwrap();
+        assert_unavailable();
+        std::fs::remove_file(&stored).unwrap();
+        assert_unavailable();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&original, &stored).unwrap();
+            assert_unavailable();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_size_requires_a_full_hash_but_not_decodable_dimensions() {
+        let root = std::env::temp_dir().join(format!("nami-detail-hash-{}", uuid::Uuid::new_v4()));
+        let mut bytes = vec![0; 128 * 1024];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let relative = clipboard::store_image(&root, &bytes, "png").unwrap();
+        let mut value = detail("text", "");
+        value.kind = "image".into();
+        value.image_path = Some(relative.clone());
+        let verified = enrich(value.clone(), &root, false, None).unwrap();
+        assert_eq!(
+            (verified.width, verified.height, verified.size),
+            (None, None, Some(bytes.len() as u64))
+        );
+        *bytes.last_mut().unwrap() = 1;
+        std::fs::write(root.join(relative), bytes).unwrap();
+        let corrupt = enrich(value, &root, false, None).unwrap();
+        assert_eq!(
+            (corrupt.width, corrupt.height, corrupt.size),
+            (None, None, None)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
