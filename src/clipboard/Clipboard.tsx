@@ -19,7 +19,7 @@ import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useCli
 import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
 import { clipboardCategoryDirection, clipboardGlobalBindings, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
 import { translationShortcutEnabled } from '../shared/contracts';
-import { editsText, matchesBinding, shortcutActions } from '../shared/shortcuts';
+import { commandKeyLabel, editsText, matchesBinding, sameBinding, shortcutActions, type KeyBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
 import { ClipboardNotePreview } from './ClipboardNotePreview';
@@ -39,7 +39,7 @@ function isQuickPasteModifier(event: KeyboardEvent) {
 export function Clipboard({ t, snapshot, command, native, active = true }: ViewProps & { active?: boolean }) {
   const composing = useRef(false);
   const [session, setSession] = useState(0);
-  const [showQuickPasteHints, setShowQuickPasteHints] = useState(false);
+  const [commandHeld, setCommandHeld] = useState(false);
   const [kindFilter, setKindFilter] = useState<ClipboardKind | null>(null);
   const [processing, setProcessing] = useState<string | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
@@ -93,6 +93,19 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const ordered = [...records.filter((record) => record.isPinned), ...ordinary];
   const quickPasteCandidates = ordinary.slice(0, 5);
   const quickPaste = native && snapshot.capabilities.platform === 'macos' && snapshot.capabilities.autoPaste && !snapshot.storageError;
+  const showQuickPasteHints = commandHeld && quickPaste;
+  const commandHints = commandHeld && !menu && !editing && !pendingDelete;
+  const commandLetter = (binding: KeyBinding | null) => {
+    if (!binding) return;
+    const letter = commandKeyLabel(binding, snapshot.capabilities.platform === 'macos', t);
+    if (!letter) return;
+    const blocked = clipboardPanelShortcuts(snapshot).some((local) => local.action !== 'switchCategory' && local.enabled && !local.globalConflict && local.binding && clipboardShortcutAvailable(snapshot, native, local.action) && sameBinding(local.binding, binding));
+    return blocked ? undefined : letter;
+  };
+  const windowShortcut = (action: 'pin' | 'focusSearch' | 'showShortcuts') => {
+    const binding = snapshot.translationPreferences.shortcuts[action];
+    return commandHints && translationShortcutEnabled(snapshot.translationPreferences, action) ? commandLetter(binding) : undefined;
+  };
   const first = records.find((record) => !record.isPinned) ?? records[0];
   const targetOnMouseMove = useRecordPointer();
   const keyboardId = clipboard.displayReady ? (selected && visibleIds.has(selected) ? selected : first?.id) : undefined;
@@ -109,9 +122,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     return () => window.removeEventListener('blur', markOutside);
   }, [active]);
   useEffect(() => {
-    if (!active || !quickPaste) { setShowQuickPasteHints(false); return; }
-    const update = (event: KeyboardEvent) => setShowQuickPasteHints(isQuickPasteModifier(event));
-    const reset = () => setShowQuickPasteHints(false);
+    if (!active) { setCommandHeld(false); return; }
+    const update = (event: KeyboardEvent) => setCommandHeld(isQuickPasteModifier(event));
+    const reset = () => setCommandHeld(false);
     window.addEventListener('keydown', update, true);
     window.addEventListener('keyup', update, true);
     window.addEventListener('blur', reset);
@@ -120,7 +133,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       window.removeEventListener('keyup', update, true);
       window.removeEventListener('blur', reset);
     };
-  }, [active, quickPaste]);
+  }, [active]);
   useEffect(() => {
     if (!native) return;
     let disposed = false;
@@ -586,7 +599,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   return <section data-focus-ready={clipboard.displayReady || undefined} data-pointer-outside={pointerOutside || undefined} inert={editing !== null} onKeyDown={recordKeyDown} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
     <ActivityBeam label={t('working')} active={active && clipboard.showActivity} />
     <div className="drag-strip" data-tauri-drag-region />
-    <RecordToolbar t={t} snapshot={snapshot} command={command} query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />
+    <RecordToolbar t={t} snapshot={snapshot} command={command} query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} searchHint={windowShortcut('focusSearch')} pinHint={windowShortcut('pin')} />
     {clipboard.error && <p role="alert" className="history-error">{t(clipboard.searchError === 'invalidRegex' ? 'clipboardSearchInvalidRegex' : clipboard.searchError === 'tooBroad' ? 'clipboardSearchTooBroad' : 'nativeError')}
       {!clipboard.searchError && <> <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></>}
     </p>}
@@ -619,7 +632,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         }}>{t('clipboardResumeRecording')}</button>}
       </div>}
     </HistoryList>
-    <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing && !pendingDelete} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
+    <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing && !pendingDelete} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} shortcutsHint={windowShortcut('showShortcuts')} />
     {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} snapshot={snapshot} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canCopy={native && snapshot.capabilities.clipboardWrite} canSave={native && snapshot.capabilities.clipboardImageSave && !savingImage} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
       if (action === 'paste' || action === 'pastePlain' || action === 'pastePaths' || action === 'copy' || action === 'copyPlain') void useRecord(menuRecord.id, action);

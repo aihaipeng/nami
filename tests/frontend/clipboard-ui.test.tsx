@@ -1578,6 +1578,54 @@ describe('database clipboard history', () => {
     expect(hint('image')).toBeUndefined();
   });
 
+  it('replaces the pin, search, and shortcut icons with their Command letters while Command is held', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    const pin = () => screen.getByRole('button', { name: 'Pin records' });
+    const keys = () => screen.getByRole('button', { name: 'HotKey' });
+    const searchIcon = () => document.querySelector('.history-search > .history-symbol, .history-search > .history-command-hint');
+    const search = screen.getByRole('searchbox');
+    expect(pin().querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('pin');
+    expect(searchIcon()?.getAttribute('data-symbol')).toBe('magnifyingglass');
+    expect(keys().querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('keyboard');
+    expect(screen.getByRole('button', { name: 'Expand details' }).querySelector('.history-symbol')).toBeTruthy();
+    const hold = (extra: Record<string, boolean> = {}) => fireEvent.keyDown(search, { key: 'Meta', code: 'MetaLeft', metaKey: true, ...extra });
+    hold();
+    expect(pin().querySelector('.history-command-hint')?.textContent).toBe('P');
+    expect(searchIcon()?.textContent).toBe('F');
+    expect(keys().querySelector('.history-command-hint')?.textContent).toBe('K');
+    expect(pin().querySelector('.history-symbol')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Expand details' }).querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('chevron.right');
+    fireEvent.keyDown(search, { key: 'Shift', code: 'ShiftLeft', metaKey: true, shiftKey: true });
+    expect(pin().querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('pin');
+    expect(document.querySelector('.history-command-hint')).toBeNull();
+    hold();
+    fireEvent.keyUp(search, { key: 'Meta', code: 'MetaLeft' });
+    expect(pin().querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('pin');
+    hold();
+    fireEvent.blur(window);
+    expect(document.querySelector('.history-command-hint')).toBeNull();
+  });
+
+  it('keeps a chrome icon when its shortcut is not an available plain Command letter', async () => {
+    const preferences = bridge.snapshot.translationPreferences;
+    preferences.shortcuts.focusSearch = { code: 'KeyJ', modifiers: ['meta'] };
+    preferences.shortcuts.pin = { code: 'KeyP', modifiers: ['alt', 'meta'] };
+    preferences.disabledShortcuts = ['showShortcuts'];
+    bridge.snapshot.clipboardControls.shortcuts.favorite.binding = { code: 'KeyJ', modifiers: ['meta'] };
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Meta', code: 'MetaLeft', metaKey: true });
+    expect(document.querySelector('.history-search > .history-symbol')?.getAttribute('data-symbol')).toBe('magnifyingglass');
+    expect(screen.getByRole('button', { name: 'Pin records' }).querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('pin');
+    expect(screen.getByRole('button', { name: 'HotKey' }).querySelector('.history-symbol')?.getAttribute('data-symbol')).toBe('keyboard');
+    preferences.shortcuts.focusSearch = { code: 'KeyJ', modifiers: ['meta'] };
+    bridge.snapshot.clipboardControls.shortcuts.favorite.binding = { code: 'KeyD', modifiers: ['meta'] };
+    await emit('clipboard_controls_changed', bridge.snapshot.clipboardControls);
+    await emit('translation_preferences_changed', preferences);
+    expect(document.querySelector('.history-search > .history-command-hint')?.textContent).toBe('J');
+  });
+
   it('hides the last clipboard action strip after the pointer leaves the records', async () => {
     const style = document.createElement('style');
     const lines = (readFileSync('src/styles.css', 'utf8') as string).split('\n').map((line) => line.trim());

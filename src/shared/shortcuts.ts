@@ -76,6 +76,13 @@ export function matchesBinding(binding: KeyBinding | null, event: { code?: strin
   return Boolean(binding && pressed && sameBinding(binding, pressed));
 }
 
+export function commandKeyLabel(binding: KeyBinding | null, macos: boolean, t: Translate) {
+  const value = binding && normalizeBinding(binding);
+  if (!value || value.modifiers.length !== 1 || value.modifiers[0] !== 'meta') return;
+  const key = keycapLabels(value, macos, t).at(-1);
+  return key && [...key].length === 1 ? key : undefined;
+}
+
 export function keycapLabels(binding: KeyBinding, macos: boolean, t: Translate) {
   const symbols = macos
     ? { control: '⌃', alt: '⌥', shift: '⇧', meta: '⌘' }
