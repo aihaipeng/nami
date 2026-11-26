@@ -16,7 +16,7 @@ export function useRecordPointer() {
   return (event: MouseEvent<HTMLElement>, onTarget: () => void) => {
     const { clientX: x, clientY: y, buttons, currentTarget } = event;
     // A list update may retarget a mouse event without moving the pointer.
-    if (buttons || (position.current?.x === x && position.current?.y === y)) return;
+    if (buttons || (position.current?.x === x && position.current?.y === y)) return false;
     position.current = { x, y };
     const focusedRow = document.activeElement?.closest('.history-row');
     if (focusedRow && focusedRow !== currentTarget && focusedRow.closest('.history-panel') === currentTarget.closest('.history-panel')) {
@@ -27,10 +27,11 @@ export function useRecordPointer() {
         button.addEventListener('focus', mark, { once: true });
         button.focus({ preventScroll: true });
         button.removeEventListener('focus', mark);
-        if (focused) return;
+        if (focused) return true;
       }
     }
     onTarget();
+    return true;
   };
 }
 

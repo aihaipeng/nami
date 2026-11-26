@@ -1,7 +1,7 @@
 import { clipboardOpenError, clipboardOpenTarget } from './openTarget';
 import { focusRecordList, useRecordPointer, useRecordsOpenFocus } from '../shared/recordFocus';
 import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type CSSProperties } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { ViewProps } from '../App';
@@ -44,6 +44,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const [processing, setProcessing] = useState<string | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
+  const [pointerOutside, setPointerOutside] = useState(false);
   const [editing, setEditing] = useState<{ id: string } | null>(null);
   const [savingImage, setSavingImage] = useState(false);
   const [resumingCapture, setResumingCapture] = useState(false);
@@ -95,6 +96,18 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const first = records.find((record) => !record.isPinned) ?? records[0];
   const targetOnMouseMove = useRecordPointer();
   const keyboardId = clipboard.displayReady ? (selected && visibleIds.has(selected) ? selected : first?.id) : undefined;
+  const clipboardShown = useRef(false);
+  useEffect(() => {
+    const visible = active && snapshot.window.clipboardVisible;
+    if (visible && !clipboardShown.current) setPointerOutside(false);
+    clipboardShown.current = visible;
+  }, [active, snapshot.window.clipboardVisible]);
+  useEffect(() => {
+    if (!active) return;
+    const markOutside = () => setPointerOutside(true);
+    window.addEventListener('blur', markOutside);
+    return () => window.removeEventListener('blur', markOutside);
+  }, [active]);
   useEffect(() => {
     if (!active || !quickPaste) { setShowQuickPasteHints(false); return; }
     const update = (event: KeyboardEvent) => setShowQuickPasteHints(isQuickPasteModifier(event));
@@ -460,11 +473,15 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     if ((fromSearch || fromRecord) && plain && !action && (key.key === 'ArrowDown' || key.key === 'ArrowUp')) {
       event.preventDefault();
       if (fromSearch) {
-        if (key.key === 'ArrowDown') focusRecordList(input?.closest('.history-panel'));
+        if (key.key === 'ArrowDown') {
+          setPointerOutside(false);
+          focusRecordList(input?.closest('.history-panel'));
+        }
         return;
       }
       const next = ordered[index + (key.key === 'ArrowDown' ? 1 : -1)];
       if (next) {
+        setPointerOutside(false);
         focusRow(next.id);
         previewRecord(next.id, true);
       } else if (!fromSearch && key.key === 'ArrowUp') input?.focus();
@@ -515,6 +532,16 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     };
   }, [native, active]);
 
+  function pointerEnteredRow(event: ReactPointerEvent<HTMLElement>) {
+    const focused = document.activeElement?.closest('.clipboard-panel .history-row');
+    if (!focused || focused === event.currentTarget) setPointerOutside(false);
+  }
+  function pointerLeftRow(event: ReactPointerEvent<HTMLElement>) {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    if (next instanceof Element && next.closest('.clipboard-panel .history-row')) return;
+    setPointerOutside(true);
+  }
   function loadNearEnd(element: HTMLDivElement) {
     if (element.clientHeight > 0 && element.scrollHeight - element.scrollTop - element.clientHeight < 180) void clipboard.loadMore();
   }
@@ -542,10 +569,10 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       record.imageTextMatch ? t('clipboardImageTextMatch') : null,
     ].filter(Boolean).join(', ') || undefined;
     const translating = snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === record.id;
-    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-translating={translating || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onMouseMove={(event) => {
+    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-translating={translating || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onPointerEnter={pointerEnteredRow} onMouseMove={(event) => {
       if (!active || editing || menu || !clipboard.displayReady || !visibleIds.has(record.id)) return;
-      targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); });
-    }} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
+      if (targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); })) setPointerOutside(false);
+    }} onPointerLeave={pointerLeftRow} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
       <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={quickHint ? `Meta+${quickHint}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
         <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={quickHint} />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <ClipboardTextPreview text={historyPreview(record.text)} className="history-preview history-text-preview" />}
@@ -556,7 +583,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         onUpdate={(action) => { updateRecord(record, action); }} />
     </article>;
   }
-  return <section data-focus-ready={clipboard.displayReady || undefined} inert={editing !== null} onKeyDown={recordKeyDown} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
+  return <section data-focus-ready={clipboard.displayReady || undefined} data-pointer-outside={pointerOutside || undefined} inert={editing !== null} onKeyDown={recordKeyDown} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
     <ActivityBeam label={t('working')} active={active && clipboard.showActivity} />
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} />

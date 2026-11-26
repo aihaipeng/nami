@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+// @ts-expect-error Vitest runs in Node; the app's TypeScript configuration includes browser types only.
+import { readFileSync } from 'node:fs';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
@@ -1574,6 +1576,52 @@ describe('database clipboard history', () => {
     expect(hint('image')).toBe('1');
     fireEvent.blur(window);
     expect(hint('image')).toBeUndefined();
+  });
+
+  it('hides the last clipboard action strip after the pointer leaves the records', async () => {
+    const style = document.createElement('style');
+    const lines = (readFileSync('src/styles.css', 'utf8') as string).split('\n').map((line) => line.trim());
+    style.textContent = lines.filter((line) => line.includes('.history-row-actions {') || /\.history-row:(hover|focus-within) \.history-row-actions/.test(line) || line.includes('[data-pointer-outside]')).join('\n');
+    document.head.append(style);
+    try {
+      await mount('clipboard');
+      const panel = () => document.querySelector('.clipboard-panel')!;
+      const button = (id: string) => row(id).querySelector('.history-row-select')!;
+      const strip = (id: string) => getComputedStyle(row(id).querySelector('.history-row-actions')!);
+      await waitFor(() => expect(document.activeElement).toBe(button('first')));
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(strip('first').visibility).toBe('visible');
+      fireEvent.pointerLeave(row('first'), { relatedTarget: row('first').querySelector('.history-row-actions button') });
+      fireEvent.pointerLeave(row('first'), { relatedTarget: row('pinned') });
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(strip('first').visibility).toBe('visible');
+      fireEvent.pointerLeave(row('first'), { relatedTarget: screen.getByRole('searchbox') });
+      expect(panel().getAttribute('data-pointer-outside')).toBe('true');
+      expect(strip('first').visibility).toBe('hidden');
+      fireEvent.pointerEnter(row('first'));
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(strip('first').visibility).toBe('visible');
+      fireEvent.pointerLeave(row('first'));
+      fireEvent.pointerEnter(row('pinned'));
+      expect(panel().getAttribute('data-pointer-outside')).toBe('true');
+      expect(document.activeElement).toBe(button('first'));
+      fireEvent.mouseMove(row('pinned'), { clientX: 12, clientY: 40 });
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(document.activeElement).toBe(button('pinned'));
+      expect(strip('pinned').visibility).toBe('visible');
+      fireEvent.pointerLeave(row('pinned'), { relatedTarget: screen.getByRole('searchbox') });
+      expect(strip('pinned').visibility).toBe('hidden');
+      fireEvent.keyDown(button('pinned'), { key: 'ArrowDown', code: 'ArrowDown' });
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(document.activeElement).toBe(button('first'));
+      expect(strip('first').visibility).toBe('visible');
+      fireEvent.blur(window);
+      expect(panel().getAttribute('data-pointer-outside')).toBe('true');
+      expect(strip('first').visibility).toBe('hidden');
+      fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowDown', code: 'ArrowDown' });
+      expect(panel().hasAttribute('data-pointer-outside')).toBe(false);
+      expect(strip('first').visibility).toBe('visible');
+    } finally { style.remove(); }
   });
 
   it('pastes a pinned record from its saved Command letter, including when that row is filtered out', async () => {

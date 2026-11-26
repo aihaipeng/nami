@@ -247,6 +247,10 @@
   .history-row time { visibility: visible; opacity: 1; transition: opacity 150ms ease-out; transition-delay: 0ms; }
   :where(.history-panel:not(:has(.history-row:focus-within))) .history-row:hover time, .history-row:focus-within time { opacity: 0; }
   :where(.history-panel:not(:has(.history-row:focus-within))) .history-row:hover .history-languages, .history-row:focus-within .history-languages { margin-right: calc(var(--history-actions-width) - 36px); -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); mask-image: linear-gradient(to right, black calc(100% - 8px), transparent); }
+  /* Clipboard action buttons follow the pointer. Leaving the records hides the last row even while it keeps keyboard focus. */
+  .clipboard-panel[data-pointer-outside] .history-row:hover .history-row-actions, .clipboard-panel[data-pointer-outside] .history-row:focus-within .history-row-actions { opacity: 0; visibility: hidden; transform: translateX(4px); }
+  .clipboard-panel[data-pointer-outside] .history-row:hover time, .clipboard-panel[data-pointer-outside] .history-row:focus-within time { opacity: 1; }
+  .clipboard-panel[data-pointer-outside] .history-row:hover .history-languages, .clipboard-panel[data-pointer-outside] .history-row:focus-within .history-languages { margin-right: 0; -webkit-mask-image: none; mask-image: none; transition: none; }
   .history-row-actions .icon-button, .history-row-actions .icon-button[aria-pressed=true] { background: transparent; color: var(--history-label); }
   .history-row-actions .icon-button.record-active, .history-row-actions .icon-button.record-active[aria-pressed=true] { background: hsl(var(--foreground) / .12); color: var(--history-label); }
   .history-row-actions .icon-button:hover, .history-row-actions .icon-button:active { background: transparent; }
