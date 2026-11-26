@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { X } from 'lucide-react';
+import { CircleAlert, X } from 'lucide-react';
+import { FloatingPanel } from '../shared/FloatingPanel';
 import type { Translate } from '../shared/i18n';
-import { SettingsDialog } from './SettingsDialog';
-import { bindingFromEvent, keycapLabels, modifierKey, shortcutActions, shortcutTitles, type KeyBinding, type ShortcutAction, type ShortcutModifier } from '../shared/shortcuts';
+import { bindingFromEvent, keycapLabels, modifierKey, shortcutActions, shortcutTitles, type KeyBinding, type ShortcutAction } from '../shared/shortcuts';
 
 export function shortcutMessage(code: string, t: Translate) {
   if (code === 'shortcut_clipboard_panel') return t('clipboardShortcutConflict');
@@ -27,26 +27,61 @@ export function errorCode(error: unknown) {
   return 'shortcut_key';
 }
 
-export function ShortcutRow({ title, hint, unavailable, label, binding, macos, recording, enabled, saving, onEnabled, onToggle, onClear, onManual, t }: {
-  title: string; hint?: string; unavailable?: string; label: string; binding: KeyBinding | null; macos: boolean;
+export function ShortcutRow({ title, hint, hintConflict, unavailable, label, binding, macos, recording, enabled, saving, onEnabled, onToggle, onClear, t }: {
+  title: string; hint?: string; hintConflict?: boolean; unavailable?: string; label: string; binding: KeyBinding | null; macos: boolean;
   recording: boolean; enabled: boolean; saving?: boolean; onEnabled: (enabled: boolean) => void;
-  onToggle: () => void; onClear: () => void; onManual: () => void; t: Translate;
+  onToggle: () => void; onClear: () => void; t: Translate;
 }) {
   const id = useId();
   return <div className="settings-field settings-shortcut-row">
-    <label className="settings-field-content" htmlFor={unavailable ? undefined : id} title={hint}>{title}</label>
+    <div className="settings-shortcut-name">
+      <label className="settings-field-content" htmlFor={unavailable ? undefined : id}>{title}</label>
+      {hint && <ShortcutHintTip label={t('shortcutHintLabel').replace('{title}', title)} text={hint} conflict={hintConflict} />}
+    </div>
     {unavailable ? <span className="settings-badge">{unavailable}</span> : <>
       <ShortcutRecorder label={label} binding={binding} macos={macos} recording={recording}
-        saving={saving} onToggle={onToggle} onClear={onClear} onManual={onManual} t={t} />
+        saving={saving} onToggle={onToggle} onClear={onClear} t={t} />
       <input id={id} className="settings-checkbox" type="checkbox" aria-description={hint} aria-disabled={saving || undefined}
         checked={enabled} onChange={(event) => { if (!saving) onEnabled(event.target.checked); }} />
     </>}
   </div>;
 }
 
-function ShortcutRecorder({ label, binding, macos, recording, saving, onToggle, onClear, onManual, t }: {
+function ShortcutHintTip({ label, text, conflict }: { label: string; text: string; conflict?: boolean }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [clickOpen, setClickOpen] = useState(false);
+  const open = hoverOpen || clickOpen;
+
+  function close() {
+    setHoverOpen(false);
+    setClickOpen(false);
+  }
+
+  return <>
+    <button ref={trigger} type="button" className="settings-shortcut-tip" data-conflict={conflict || undefined}
+      aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open}
+      onMouseEnter={() => setHoverOpen(true)}
+      onMouseLeave={close}
+      onClick={(event) => {
+        event.currentTarget.focus({ preventScroll: true });
+        if (clickOpen) close();
+        else { setClickOpen(true); setHoverOpen(false); }
+      }}
+      onBlur={close}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+      }}><CircleAlert aria-hidden="true" /></button>
+    {open && <FloatingPanel anchor={trigger} onClose={close} id={id} role="tooltip" width={248} side="bottom" className="settings-popover clipboard-tip-panel" dismissOnSettingsScroll>
+      {text}
+    </FloatingPanel>}
+  </>;
+}
+
+function ShortcutRecorder({ label, binding, macos, recording, saving, onToggle, onClear, t }: {
   label: string; binding: KeyBinding | null; macos: boolean; recording: boolean; saving?: boolean;
-  onToggle: () => void; onClear: () => void; onManual: () => void; t: Translate;
+  onToggle: () => void; onClear: () => void; t: Translate;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const keys = binding ? keycapLabels(binding, macos, t) : [];
@@ -61,7 +96,6 @@ function ShortcutRecorder({ label, binding, macos, recording, saving, onToggle, 
         : binding ? <span className="keycaps" aria-hidden="true">{keys.map((key) => <kbd key={key}>{key}</kbd>)}</span>
           : <span className="settings-recorder-empty">{t('addHotkey')}</span>}
     </button>
-    {recording && <button type="button" className="settings-action settings-manual-shortcut" onClick={() => { trigger.current?.focus({ preventScroll: true }); onManual(); }}>{t('chooseShortcut')}</button>}
     {binding && <button type="button" className="settings-clear" aria-label={t('clearShortcut')}
       disabled={saving} onClick={() => { trigger.current?.focus({ preventScroll: true }); onClear(); }}><X aria-hidden="true" /></button>}
   </div>;
@@ -99,45 +133,4 @@ export function ShortcutCapture({ onCancel, onCommit }: { onCancel: () => void; 
     };
   }, []);
   return null;
-}
-
-const chooseModifiers: readonly [ShortcutModifier, string, string][] = [
-  ['control', 'Control', '⌃'], ['alt', 'Option', '⌥'], ['shift', 'Shift', '⇧'], ['meta', 'Command', '⌘'],
-];
-const chooseCodes = [
-  ...Array.from('ABCDEFGHIJKLMNOPQRSTUVWXYZ', (letter) => `Key${letter}`),
-  ...Array.from('0123456789', (digit) => `Digit${digit}`),
-  'Space', 'Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-  'Home', 'End', 'PageUp', 'PageDown', 'Insert', 'CapsLock',
-  'Backquote', 'Minus', 'Equal', 'BracketLeft', 'BracketRight', 'Backslash', 'Semicolon', 'Quote', 'Comma', 'Period', 'Slash',
-  ...Array.from({ length: 24 }, (_, index) => `F${index + 1}`),
-  ...chooseModifiers.flatMap(([_, name]) => {
-    const code = name === 'Command' ? 'Meta' : name === 'Option' ? 'Alt' : name;
-    return [`${code}Left`, `${code}Right`];
-  }),
-];
-
-export function ManualShortcut({ macos, t, onCancel, onCommit }: {
-  macos: boolean; t: Translate; onCancel: () => void; onCommit: (binding: KeyBinding) => void;
-}) {
-  const [code, setCode] = useState('');
-  const [modifiers, setModifiers] = useState<ShortcutModifier[]>([]);
-  return <SettingsDialog role="dialog" title={t('chooseShortcut')} onClose={onCancel}>
-    <form onSubmit={(event) => { event.preventDefault(); if (code) onCommit({ code, modifiers: modifierKey(code) ? [] : modifiers }); }}>
-      <div className="settings-manual-keys">
-        <label>{t('shortcutMainKey')}<select data-initial-focus value={code} onChange={(event) => setCode(event.target.value)}>
-          <option value="" disabled>{t('shortcutMainKey')}</option>
-          {chooseCodes.map((key) => <option key={key} value={key}>{keycapLabels({ code: key, modifiers: [] }, macos, t)[0]}</option>)}
-        </select></label>
-        <fieldset disabled={Boolean(modifierKey(code))}><legend>{t('shortcutModifiers')}</legend>
-          {chooseModifiers.map(([modifier, name, symbol]) => <label key={modifier}>
-            <input type="checkbox" className="settings-checkbox" checked={modifiers.includes(modifier)} onChange={(event) => {
-              setModifiers(event.target.checked ? [...modifiers, modifier] : modifiers.filter((current) => current !== modifier));
-            }} />{macos ? `${symbol} ${name}` : name}
-          </label>)}
-        </fieldset>
-      </div>
-      <div className="settings-dialog-actions"><button type="button" className="settings-action" onClick={onCancel}>{t('shortcutManualCancel')}</button><button type="submit" className="settings-action" disabled={!code}>{t('shortcutManualSave')}</button></div>
-    </form>
-  </SettingsDialog>;
 }

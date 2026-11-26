@@ -226,11 +226,12 @@ describe('clipboard recording settings', () => {
     expect(bridge.snapshot.clipboardControls.shortcuts.preview.binding).toEqual({ code, modifiers: shiftKey ? ['shift'] : [] });
   });
 
-  it('waits for a main key and can explicitly save a combination or a modifier alone', async () => {
+  it('waits for a main key during shortcut capture and omits the manual key picker', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     const recorder = screen.getByRole('button', { name: 'Copy shortcut' });
     fireEvent.click(recorder);
+    expect(screen.queryByRole('button', { name: 'Choose Keys' })).toBeNull();
     // A modifier-tap event emitted when WebView misses the main key must not replace the binding.
     fireEvent.keyDown(recorder, { key: 'Meta', code: 'MetaLeft' });
     expect(recorder.textContent).toBe('Press shortcut');
@@ -240,33 +241,86 @@ describe('clipboard recording settings', () => {
       expect(recorder.textContent).toBe('⌘C');
       expect(recorder.getAttribute('aria-disabled')).toBeNull();
     });
-
-    function choose() {
-      fireEvent.click(recorder);
-      fireEvent.click(screen.getByRole('button', { name: 'Choose Keys' }));
-      return within(screen.getByRole('dialog', { name: 'Choose Keys' }));
-    }
-    let manual = choose();
-    fireEvent.change(manual.getByRole('combobox', { name: 'Key' }), { target: { value: 'KeyC' } });
-    fireEvent.click(manual.getByRole('checkbox', { name: '⌘ Command' }));
-    fireEvent.click(manual.getByRole('button', { name: 'Save' }));
-    await waitFor(() => {
-      expect(calls('clipboard_record_shortcut_set')).toHaveLength(2);
-      expect(recorder.getAttribute('aria-disabled')).toBeNull();
-    });
+    expect(calls('clipboard_record_shortcut_set')).toHaveLength(1);
     expect(bridge.snapshot.clipboardControls.shortcuts.copyRecord.binding).toEqual({ code: 'KeyC', modifiers: ['meta'] });
+  });
 
-    manual = choose();
-    fireEvent.change(manual.getByRole('combobox', { name: 'Key' }), { target: { value: 'MetaLeft' } });
-    fireEvent.click(manual.getByRole('button', { name: 'Save' }));
-    await waitFor(() => {
-      expect(recorder.textContent).toBe('Left ⌘');
-      expect(recorder.getAttribute('aria-disabled')).toBeNull();
+  it('shows shortcut explanation tooltips on hover or click and dismisses them on mouse leave', async () => {
+    bridge.snapshot.clipboardControls.shortcuts.delete.binding = { ...bridge.snapshot.clipboardBinding! };
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+
+    // Only the 6 non-obvious actions (plus any conflicting row) render tip icons.
+    expect(document.querySelectorAll('.settings-shortcut-tip')).toHaveLength(7);
+    expect(screen.queryByRole('button', { name: 'Open Settings info' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Preview info' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Favorite/Unfavorite info' })).toBeNull();
+
+    // Hover shows the tooltip, clicking while hovered keeps it open, and mouse leave dismisses it.
+    const openTip = screen.getByRole('button', { name: 'Open Translation info' });
+    fireEvent.mouseEnter(openTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('selected text takes priority');
+    fireEvent.click(openTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('selected text takes priority');
+    fireEvent.mouseLeave(openTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    // Direct click opens the tooltip, mouse leave dismisses it, and clicking again toggles it off.
+    const switchTip = screen.getByRole('button', { name: 'Switch Group info' });
+    fireEvent.click(switchTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('Hold Shift to go backward');
+    fireEvent.mouseLeave(switchTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.click(switchTip);
+    expect(screen.getByRole('tooltip')).toBeTruthy();
+    fireEvent.click(switchTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    // Global conflict surfaces a warning tooltip on otherwise plain items.
+    const deleteTip = screen.getByRole('button', { name: 'Delete info' });
+    expect(deleteTip.dataset.conflict).toBe('true');
+    expect(deleteTip.closest('.settings-shortcut-name')?.querySelector('label')?.textContent).toBe('Delete');
+    expect(deleteTip.closest('.settings-shortcut-row')?.children).toHaveLength(3);
+    fireEvent.mouseEnter(deleteTip);
+    expect(screen.getByRole('tooltip').textContent).toBe('Conflicts with an existing global shortcut.');
+    fireEvent.mouseLeave(deleteTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('keeps other shortcut rows and restore actions active while toggling a clipboard shortcut', async () => {
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    const originalInvoke = bridge.invoke.getMockImplementation()!;
+    let finishSave!: () => void;
+    bridge.invoke.mockImplementation((name: string, args?: unknown) => {
+      if (name === 'clipboard_record_shortcut_set') {
+        return new Promise<void>((resolve) => {
+          finishSave = () => { void Promise.resolve(originalInvoke(name, args)).then(() => resolve()); };
+        });
+      }
+      return originalInvoke(name, args);
     });
-    expect(bridge.snapshot.clipboardControls.shortcuts.copyRecord.binding).toEqual({ code: 'MetaLeft', modifiers: [] });
-    fireEvent.click(choose().getByRole('button', { name: 'Cancel' }));
-    expect(recorder.textContent).toBe('Left ⌘');
-    expect(calls('clipboard_record_shortcut_set')).toHaveLength(3);
+
+    const previewToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Preview' });
+    const previewRecorder = screen.getByRole('button', { name: 'Preview shortcut' });
+    const copyToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Copy' });
+    const copyRecorder = screen.getByRole('button', { name: 'Copy shortcut' });
+    const globalToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Open Clipboard History' });
+    const restoreButtons = screen.getAllByRole<HTMLButtonElement>('button', { name: 'Restore Default Shortcuts' });
+
+    fireEvent.click(previewToggle);
+    await waitFor(() => expect(previewToggle.getAttribute('aria-disabled')).toBe('true'));
+    expect(previewRecorder.getAttribute('aria-disabled')).toBe('true');
+    expect(copyToggle.getAttribute('aria-disabled')).toBeNull();
+    expect(copyRecorder.getAttribute('aria-disabled')).toBeNull();
+    expect(globalToggle.getAttribute('aria-disabled')).toBeNull();
+    expect(restoreButtons.every((button) => !button.disabled)).toBe(true);
+
+    finishSave();
+    await waitFor(() => {
+      expect(previewToggle.checked).toBe(false);
+      expect(previewToggle.getAttribute('aria-disabled')).toBeNull();
+    });
   });
 
   it('reuses a chord across clipboard-only record actions and Translation, but rejects it for a shared record action', async () => {

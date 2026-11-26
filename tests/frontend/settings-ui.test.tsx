@@ -16,10 +16,10 @@ describe('Settings', () => {
   });
 
   it.each([
-    ['Open Translation', 'translation_shortcut_set', 'record'],
-    ['Preview', 'clipboard_record_shortcut_set', 'choose'],
-    ['Open Clipboard History', 'clipboard_shortcut_set', 'record'],
-  ])('explains why Command-W cannot replace the %s shortcut (%s, %s)', async (label, command, mode) => {
+    ['Open Translation', 'translation_shortcut_set'],
+    ['Preview', 'clipboard_record_shortcut_set'],
+    ['Open Clipboard History', 'clipboard_shortcut_set'],
+  ])('explains why Command-W cannot replace the %s shortcut (%s)', async (label, command) => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     const recorder = screen.getByRole('button', { name: `${label} shortcut` });
@@ -29,15 +29,8 @@ describe('Settings', () => {
       ? Promise.reject('shortcut_reserved_close_window') : invoke(name, args));
 
     fireEvent.click(recorder);
-    if (mode === 'choose') {
-      fireEvent.click(screen.getByRole('button', { name: 'Choose Keys' }));
-      const manual = within(screen.getByRole('dialog', { name: 'Choose Keys' }));
-      fireEvent.change(manual.getByRole('combobox', { name: 'Key' }), { target: { value: 'KeyW' } });
-      fireEvent.click(manual.getByRole('checkbox', { name: '⌘ Command' }));
-      fireEvent.click(manual.getByRole('button', { name: 'Save' }));
-    } else {
-      fireEvent.keyDown(recorder, { key: 'w', code: 'KeyW', metaKey: true });
-    }
+    expect(screen.queryByRole('button', { name: 'Choose Keys' })).toBeNull();
+    fireEvent.keyDown(recorder, { key: 'w', code: 'KeyW', metaKey: true });
 
     expect(await screen.findByText('⌘W is reserved for closing the current window.')).toBeTruthy();
     expect(calls(command)).toHaveLength(1);
