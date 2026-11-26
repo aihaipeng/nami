@@ -9,7 +9,17 @@ export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyA
 export type ClipboardRecordAction = typeof clipboardRecordActions[number];
 type RecordShortcut = { binding: KeyBinding | null; enabled: boolean };
 export type RecordsOpenFocus = 'search' | 'list';
-export type ClipboardControls = { search?: ClipboardSearchOptions; recordsOpenFocus?: RecordsOpenFocus; previewLines?: { clipboard: number }; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
+export const DEFAULT_HOVER_PREVIEW_DELAY_MS = 1000;
+export const MAX_HOVER_PREVIEW_DELAY_MS = 5000;
+export type ClipboardControls = {
+  search?: ClipboardSearchOptions;
+  recordsOpenFocus?: RecordsOpenFocus;
+  previewLines?: { clipboard: number };
+  hoverPreviewEnabled?: boolean;
+  hoverPreviewDelayMs?: number;
+  activation: 'copy' | 'paste';
+  shortcuts: Record<ClipboardRecordAction, RecordShortcut>;
+};
 
 export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
   const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = [primary]) => ({ enabled: true, binding: { code, modifiers } });

@@ -93,15 +93,16 @@ describe('clipboard recording settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
     expect(screen.getByRole('heading', { level: 1, name: 'HotKey' })).toBeTruthy();
     expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['Global', 'Window', 'Record Actions', 'Translation']);
+    const rowTitle = (toggle: Element) => toggle.closest('.settings-shortcut-row')?.querySelector('.settings-field-content')?.textContent;
     const globalGroup = within(screen.getByRole('group', { name: 'Global' }));
-    expect(globalGroup.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
+    expect(globalGroup.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual([
       'Open Clipboard History', 'Open Translation', 'Autofill Input',
     ]);
     expect(globalGroup.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
       '⌃`', '⌘T', '⌘T',
     ]);
     const windowGroup = within(screen.getByRole('group', { name: 'Window' }));
-    expect(windowGroup.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
+    expect(windowGroup.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual([
       'Focus Input', 'Switch Group', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
     expect(windowGroup.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
@@ -115,7 +116,7 @@ describe('clipboard recording settings', () => {
       'Preview', 'Copy', 'Paste as Plain Text', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note',
       'Translate', 'Extract Text', 'Open Link, Email or Locate File', 'Save Image', 'Delete',
     ];
-    expect(recordGroup.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(recordOrder);
+    expect(recordGroup.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual(recordOrder);
     expect(recordGroup.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
       'Space', '⌘C', '⌘↵', '⌘D', '⌥⌘P', '⌘N', '⌘T', '⇧⌘O', '⌘O', '⌘S', '⌘⌫',
     ]);
@@ -124,7 +125,7 @@ describe('clipboard recording settings', () => {
       expect(recordGroup.getByRole<HTMLInputElement>('checkbox', { name }).checked).toBe(true);
     }
     const translation = within(screen.getByRole('group', { name: 'Translation' }));
-    expect(translation.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
+    expect(translation.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual([
       'Translate', 'Copy Primary Translation', 'Copy Secondary Translation',
     ]);
     await emit('locale_changed', 'zh-CN');
@@ -279,7 +280,7 @@ describe('clipboard recording settings', () => {
     // Global conflict surfaces a warning tooltip on otherwise plain items.
     const deleteTip = screen.getByRole('button', { name: 'Delete info' });
     expect(deleteTip.dataset.conflict).toBe('true');
-    expect(deleteTip.closest('.settings-shortcut-name')?.querySelector('label')?.textContent).toBe('Delete');
+    expect(deleteTip.closest('.settings-shortcut-name')?.querySelector('.settings-field-content')?.textContent).toBe('Delete');
     expect(deleteTip.closest('.settings-shortcut-row')?.children).toHaveLength(3);
     fireEvent.mouseEnter(deleteTip);
     expect(screen.getByRole('tooltip').textContent).toBe('Conflicts with an existing global shortcut.');
@@ -379,14 +380,18 @@ describe('clipboard recording settings', () => {
     expect(within(capture).getByRole('checkbox', { name: 'Images' }).getAttribute('aria-description')).toBe('Includes supported single image files.');
   });
 
-  it('toggles content checkboxes from the row or keyboard and preserves them when recording resumes', async () => {
+  it('toggles content checkboxes only from the checkbox or keyboard and preserves them when recording resumes', async () => {
     const user = userEvent.setup();
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'Clipboard' }));
     const image = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Images' });
     expect(image.checked).toBe(true);
     expect(image.matches(':disabled')).toBe(false);
+    // Clicking the row label text must not accidentally toggle the checkbox.
     await user.click(screen.getByText('Images', { exact: true }));
+    expect(image.checked).toBe(true);
+    expect(calls('clipboard_recording_type_set')).toHaveLength(0);
+    await user.click(image);
     await waitFor(() => { expect(image.checked).toBe(false); expect(image.hasAttribute('aria-disabled')).toBe(false); });
     expect(calls('clipboard_recording_type_set')[0][1]).toEqual({ kind: 'image', enabled: false });
     expect(screen.getByText('Recording paused. Resume from the menu bar.')).toBeTruthy();
@@ -625,7 +630,7 @@ describe('clipboard privacy, retention and behavior', () => {
     const limit = screen.getByRole<HTMLInputElement>('textbox', { name: 'History Limit' });
     expect(limit.value).toBe('500');
     expect(screen.queryByText('Keep History For')).toBeNull();
-    expect(limit.getAttribute('aria-description')).toBe('Maximum number of unprotected items to keep.');
+    expect(limit.getAttribute('aria-description')).toBe('Max unprotected items (1–1,000,000); excludes favorites and pins.');
     for (const value of ['0', '5.5', '1000001']) {
       fireEvent.change(limit, { target: { value } });
       expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
@@ -979,5 +984,97 @@ describe('clipboard privacy, retention and behavior', () => {
     fireEvent.click(secrets);
     await waitFor(() => expect(secrets.checked).toBe(true));
     expect(calls('clipboard_ignore_secrets_set').at(-1)?.[1]).toEqual({ enabled: true });
+  });
+
+  it('toggles auto-open preview, shows range tooltip, and applies valid preview delay edits immediately', async () => {
+    await openSettings();
+    const behavior = screen.getByRole('region', { name: 'Behavior' });
+    const toggle = within(behavior).getByRole<HTMLInputElement>('checkbox', { name: 'Auto-open Preview' });
+    const delay = within(behavior).getByRole<HTMLInputElement>('textbox', { name: 'Preview Delay' });
+    const tip = within(behavior).getByRole('button', { name: 'Preview Delay info' });
+    expect(toggle.checked).toBe(false);
+    expect(delay.value).toBe('1000');
+    expect(delay.disabled).toBe(true);
+
+    // Range tip sits beside the Preview Delay label and opens on hover/click.
+    expect(tip.closest('.settings-shortcut-name')?.querySelector('label')?.textContent).toBe('Preview Delay');
+    fireEvent.mouseEnter(tip);
+    expect(screen.getByRole('tooltip').textContent).toContain('0–5000 ms');
+    fireEvent.mouseLeave(tip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewEnabled: true });
+    expect(delay.disabled).toBe(false);
+
+    // Editing never renders a Save button and applies valid values immediately.
+    fireEvent.change(delay, { target: { value: '0' } });
+    expect(within(behavior).queryByRole('button', { name: 'Save' })).toBeNull();
+    await waitFor(() => expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 0 }));
+
+    fireEvent.change(delay, { target: { value: '450' } });
+    await waitFor(() => expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewDelayMs: 450 }));
+
+    // Out-of-range values mark the input invalid without saving or shifting layout, and blur restores the last saved value.
+    const countBeforeInvalid = calls('clipboard_behavior_set').length;
+    fireEvent.change(delay, { target: { value: '5001' } });
+    expect(delay.getAttribute('aria-invalid')).toBe('true');
+    expect(within(behavior).queryByRole('alert')).toBeNull();
+    expect(calls('clipboard_behavior_set')).toHaveLength(countBeforeInvalid);
+    fireEvent.blur(delay);
+    expect(delay.value).toBe('450');
+    expect(delay.getAttribute('aria-invalid')).toBeNull();
+
+    // Disabling keeps the saved delay visible while locking the field.
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ hoverPreviewEnabled: false });
+    expect(delay.value).toBe('450');
+    expect(delay.disabled).toBe(true);
+  });
+
+  it('uses consistent hover tips across settings pages and never toggles checkboxes from row text clicks', async () => {
+    await openSettings();
+    // Clicking row text in Clipboard settings does not toggle checkboxes.
+    const autoPreview = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Auto-open Preview' });
+    fireEvent.click(screen.getByText('Auto-open Preview'));
+    expect(autoPreview.checked).toBe(false);
+    const universal = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Ignore Universal Clipboard' });
+    fireEvent.click(screen.getByText('Ignore Universal Clipboard'));
+    expect(universal.checked).toBe(false);
+
+    // Unified info tips expose concise explanations on hover and dismiss on mouse leave.
+    for (const [tipName, snippet] of [
+      ['Images info', 'single image files'],
+      ['Apps info', 'active app only'],
+      ['Search Rule info', 'Mixed tries Exact'],
+      ['Automatic Paste Format info', 'auto-pasted text only'],
+    ]) {
+      const tip = screen.getByRole('button', { name: tipName });
+      fireEvent.mouseEnter(tip);
+      expect(screen.getByRole('tooltip').textContent).toContain(snippet);
+      fireEvent.mouseLeave(tip);
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    }
+
+    // General, Translation, HotKey, and Privacy & data share the same rules.
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    const launch = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Launch at Login' });
+    fireEvent.click(screen.getByText('Launch at Login'));
+    expect(launch.checked).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    const preview = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Preview' });
+    fireEvent.click(screen.getByText('Preview'));
+    expect(preview.checked).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy & data' }));
+    expect(screen.queryByText(/Not granted; required/)).toBeNull();
+    const accessTip = screen.getByRole('button', { name: 'Accessibility info' });
+    fireEvent.mouseEnter(accessTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('selection translation and automatic paste');
+    fireEvent.mouseLeave(accessTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
   });
 });

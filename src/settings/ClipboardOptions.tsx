@@ -1,19 +1,32 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { AppWindow, Info, Plus, X } from 'lucide-react';
-import { FloatingPanel } from '../shared/FloatingPanel';
+import { AppWindow, Plus, X } from 'lucide-react';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
+import { DEFAULT_HOVER_PREVIEW_DELAY_MS, MAX_HOVER_PREVIEW_DELAY_MS } from '../shared/clipboardShortcuts';
 import type { MessageKey, Translate } from '../shared/i18n';
+import { SettingHintTip } from './SettingHintTip';
 import { errorCode } from './ShortcutCapture';
 
 type ExcludedApp = { bundleId: string; name: string; iconDataUrl?: string };
 type Activation = 'paste' | 'copy';
-type Options = { excludedApps: ExcludedApp[]; ignoredPasteboardTypes?: string[]; ignoredRegexps?: string[]; ignoreSecrets?: boolean; activation: Activation; pasteAsPlainText: boolean };
+type Options = {
+  excludedApps: ExcludedApp[];
+  ignoredPasteboardTypes?: string[];
+  ignoredRegexps?: string[];
+  ignoreSecrets?: boolean;
+  activation: Activation;
+  pasteAsPlainText: boolean;
+  hoverPreviewEnabled?: boolean;
+  hoverPreviewDelayMs?: number;
+};
 const UNIVERSAL_CLIPBOARD_TYPE = 'com.apple.is-remote-clipboard';
 
-function Setting({ label, children }: { label: string; children: ReactNode }) {
+function Setting({ label, hint, t, children }: { label: string; hint?: string; t?: Translate; children: ReactNode }) {
   return <div className="settings-field clipboard-option-row">
-    <div className="settings-field-content">{label}</div>
+    {hint && t ? <div className="settings-shortcut-name">
+      <span className="settings-field-content">{label}</span>
+      <SettingHintTip label={t('shortcutHintLabel').replace('{title}', label)} text={hint} />
+    </div> : <div className="settings-field-content">{label}</div>}
     {children}
   </div>;
 }
@@ -43,6 +56,7 @@ function ruleErrorMessage(error: unknown, kind: 'type' | 'regex'): MessageKey {
 
 export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; state: OptionsState; available: boolean }) {
   const [busy, setBusy] = useState(false);
+  const [savingPreset, setSavingPreset] = useState<'universal' | 'secrets' | null>(null);
   const pending = useRef(false);
   const [error, setError] = useState(false);
   const add = useRef<HTMLButtonElement>(null);
@@ -127,26 +141,26 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
   async function toggleUniversalClipboard(enabled: boolean) {
     if (pending.current || !state.options) return;
     pending.current = true;
-    setBusy(true);
+    setSavingPreset('universal');
     setPresetError(null);
     setTypeError(null);
     try {
       const next = await invoke<string[]>(enabled ? 'clipboard_ignored_type_add' : 'clipboard_ignored_type_remove', { pasteboardType: UNIVERSAL_CLIPBOARD_TYPE });
       state.setOptions((previous) => previous && { ...previous, ignoredPasteboardTypes: next });
     } catch (err) { setPresetError(ruleErrorMessage(err, 'type')); }
-    finally { pending.current = false; setBusy(false); }
+    finally { pending.current = false; setSavingPreset(null); }
   }
 
   async function toggleIgnoreSecrets(enabled: boolean) {
     if (pending.current || !state.options) return;
     pending.current = true;
-    setBusy(true);
+    setSavingPreset('secrets');
     setPresetError(null);
     try {
       const next = await invoke<boolean>('clipboard_ignore_secrets_set', { enabled });
       state.setOptions((previous) => previous && { ...previous, ignoreSecrets: next });
     } catch { setPresetError('clipboardSettingsSaveFailed'); }
-    finally { pending.current = false; setBusy(false); }
+    finally { pending.current = false; setSavingPreset(null); }
   }
 
   async function submitRegex() {
@@ -184,7 +198,10 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
     {available && <div className="settings-group clipboard-ignore-group">
       <div className="clipboard-ignore-block">
         <div className="settings-field clipboard-ignore-row">
-          <span id="clipboard-excluded-heading" className="settings-field-content" title={t('clipboardExcludedAppsDescription')}>{t('clipboardExcludedAppsHeading')}</span>
+          <div className="settings-shortcut-name">
+            <span id="clipboard-excluded-heading" className="settings-field-content">{t('clipboardExcludedAppsHeading')}</span>
+            <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardExcludedAppsHeading'))} text={t('clipboardExcludedAppsDescription')} />
+          </div>
           <button type="button" ref={add} className="settings-action clipboard-icon-button clipboard-ignore-add" disabled={!apps} aria-disabled={busy || undefined}
             title={t('clipboardAddApp')} aria-label={t('clipboardAddApp')} aria-description={t('clipboardExcludedAppsDescription')}
             onClick={() => void change()}><Plus aria-hidden="true" /></button>
@@ -210,6 +227,7 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         headingId="clipboard-ignored-types-heading"
         heading={t('clipboardIgnoredTypesHeading')}
         note={t('clipboardIgnoredTypesNote')}
+        tipLabel={t('shortcutHintLabel').replace('{title}', t('clipboardIgnoredTypesHeading'))}
         addLabel={t('clipboardAddType')}
         submitLabel={t('clipboardAddRule')}
         saveLabel={t('clipboardSaveRule')}
@@ -233,6 +251,7 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
         headingId="clipboard-ignored-regex-heading"
         heading={t('clipboardIgnoredRegexHeading')}
         note={t('clipboardIgnoredRegexNote')}
+        tipLabel={t('shortcutHintLabel').replace('{title}', t('clipboardIgnoredRegexHeading'))}
         addLabel={t('clipboardAddRegex')}
         submitLabel={t('clipboardAddRule')}
         placeholder={t('clipboardIgnoredRegexPlaceholder')}
@@ -250,20 +269,26 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
       />
 
       <div className="clipboard-ignore-block">
-        <label className="settings-field" title={t('clipboardIgnoreUniversalNote')}>
-          <span className="settings-field-content"><span>{t('clipboardIgnoreUniversal')}</span></span>
+        <div className="settings-field">
+          <div className="settings-shortcut-name">
+            <span id="clipboard-ignore-universal-label" className="settings-field-content">{t('clipboardIgnoreUniversal')}</span>
+            <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardIgnoreUniversal'))} text={t('clipboardIgnoreUniversalNote')} />
+          </div>
           <input className="settings-checkbox" id="clipboard-ignore-universal" type="checkbox"
-            aria-label={t('clipboardIgnoreUniversal')} aria-description={t('clipboardIgnoreUniversalNote')}
-            checked={ignoreUniversal} disabled={!state.options} aria-disabled={busy || undefined}
-            onChange={(event) => { if (!busy) void toggleUniversalClipboard(event.target.checked); }} />
-        </label>
-        <label className="settings-field" title={t('clipboardIgnoreSecretsNote')}>
-          <span className="settings-field-content"><span>{t('clipboardIgnoreSecrets')}</span></span>
+            aria-labelledby="clipboard-ignore-universal-label" aria-description={t('clipboardIgnoreUniversalNote')}
+            checked={ignoreUniversal} disabled={!state.options} aria-disabled={savingPreset === 'universal' || undefined}
+            onChange={(event) => { if (!pending.current) void toggleUniversalClipboard(event.target.checked); }} />
+        </div>
+        <div className="settings-field">
+          <div className="settings-shortcut-name">
+            <span id="clipboard-ignore-secrets-label" className="settings-field-content">{t('clipboardIgnoreSecrets')}</span>
+            <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardIgnoreSecrets'))} text={t('clipboardIgnoreSecretsNote')} />
+          </div>
           <input className="settings-checkbox" id="clipboard-ignore-secrets" type="checkbox"
-            aria-label={t('clipboardIgnoreSecrets')} aria-description={t('clipboardIgnoreSecretsNote')}
-            checked={ignoreSecrets} disabled={!state.options} aria-disabled={busy || undefined}
-            onChange={(event) => { if (!busy) void toggleIgnoreSecrets(event.target.checked); }} />
-        </label>
+            aria-labelledby="clipboard-ignore-secrets-label" aria-description={t('clipboardIgnoreSecretsNote')}
+            checked={ignoreSecrets} disabled={!state.options} aria-disabled={savingPreset === 'secrets' || undefined}
+            onChange={(event) => { if (!pending.current) void toggleIgnoreSecrets(event.target.checked); }} />
+        </div>
         {presetError && <p className="clipboard-setting-note" role="alert">{t(presetError)}</p>}
       </div>
     </div>}
@@ -271,10 +296,10 @@ export function ClipboardIgnoreRules({ t, state, available }: { t: Translate; st
 }
 
 function IgnoreRuleBlock({
-  headingId, heading, note, addLabel, submitLabel, saveLabel, placeholder, items, removeLabel, editLabel,
+  headingId, heading, note, tipLabel, addLabel, submitLabel, saveLabel, placeholder, items, removeLabel, editLabel,
   open, onOpenChange, draft, onDraftChange, error, ready, busy, onSubmit, onEdit, onRemove,
 }: {
-  headingId: string; heading: string; note: string; addLabel: string; submitLabel: string; saveLabel?: string; placeholder: string;
+  headingId: string; heading: string; note: string; tipLabel: string; addLabel: string; submitLabel: string; saveLabel?: string; placeholder: string;
   items: string[]; removeLabel: (value: string) => string; editLabel?: (value: string) => string; open: boolean; onOpenChange: (open: boolean) => void;
   draft: string; onDraftChange: (value: string) => void; error: string | null; ready: boolean; busy: boolean;
   onSubmit: () => Promise<void>; onEdit?: (oldValue: string, nextValue: string) => Promise<boolean>; onRemove: (value: string, trigger?: HTMLButtonElement, fallback?: HTMLButtonElement | null) => Promise<void>;
@@ -311,7 +336,10 @@ function IgnoreRuleBlock({
 
   return <div className="clipboard-ignore-block">
     <div className="settings-field clipboard-ignore-row">
-      <span id={headingId} className="settings-field-content" title={note}>{heading}</span>
+      <div className="settings-shortcut-name">
+        <span id={headingId} className="settings-field-content">{heading}</span>
+        <SettingHintTip label={tipLabel} text={note} />
+      </div>
       <button type="button" ref={addButton} className="settings-action clipboard-icon-button clipboard-ignore-add"
         title={addLabel} aria-label={addLabel} aria-description={note} aria-expanded={open}
         disabled={!ready} aria-disabled={busy || undefined}
@@ -382,64 +410,127 @@ function ExcludedAppIcon({ url }: { url?: string }) {
 }
 
 export function ClipboardSettingTip({ label, text }: { label: string; text: string }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const id = useId();
-  const [open, setOpen] = useState(false);
-  return <>
-    <button ref={trigger} type="button" className="settings-action clipboard-tip-trigger" aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open}
-      onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setOpen(!open); }} onBlur={() => setOpen(false)}
-      onKeyDown={(event) => {
-        if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); }
-      }}><Info aria-hidden="true" /></button>
-    {open && <FloatingPanel anchor={trigger} onClose={() => setOpen(false)} id={id} role="tooltip" width={220} side="bottom" className="settings-popover clipboard-tip-panel" dismissOnSettingsScroll>
-      {text}
-    </FloatingPanel>}
-  </>;
+  return <SettingHintTip label={label} text={text} className="clipboard-tip-trigger" width={220} />;
 }
 
-export function ClipboardReuseSettings({ t, state, platformAvailable, locale }: {
-  t: Translate; state: OptionsState; platformAvailable: boolean; locale: string;
+export function ClipboardReuseSettings({ t, state, available, platformAvailable, locale }: {
+  t: Translate; state: OptionsState; available?: boolean; platformAvailable: boolean; locale: string;
 }) {
   const [open, setOpen] = useState<'activation' | 'pasteFormat' | null>(null);
-  const [behaviorBusy, setBehaviorBusy] = useState(false);
+  const [savingField, setSavingField] = useState<'activation' | 'pasteFormat' | 'autoPreview' | null>(null);
   const [behaviorError, setBehaviorError] = useState(false);
+  const [delayDraft, setDelayDraft] = useState<string | null>(null);
   const behaviorPending = useRef(false);
+  const delaySaving = useRef(false);
+  const pendingDelay = useRef<number | null>(null);
+  const id = useId();
   const options = state.options;
+  const canConfigurePreview = available ?? platformAvailable;
+  const hoverPreviewEnabled = Boolean(options?.hoverPreviewEnabled);
+  const savedDelay = options?.hoverPreviewDelayMs ?? DEFAULT_HOVER_PREVIEW_DELAY_MS;
+  const savedDelayRef = useRef(savedDelay);
+  savedDelayRef.current = savedDelay;
+  const trimmedDelay = delayDraft?.trim() ?? '';
+  const parsedDelay = /^\d+$/.test(trimmedDelay) ? Number(trimmedDelay) : Number.NaN;
+  const delayValid = Number.isInteger(parsedDelay) && parsedDelay >= 0 && parsedDelay <= MAX_HOVER_PREVIEW_DELAY_MS;
+  const delayInvalid = delayDraft !== null && !delayValid;
   useEffect(() => { setOpen(null); }, [locale]);
 
-  async function changeBehavior(next: { activation: Activation } | { pasteAsPlainText: boolean }) {
-    if (!options || behaviorPending.current || ('activation' in next ? next.activation === options.activation : next.pasteAsPlainText === options.pasteAsPlainText)) return;
+  async function flushDelay() {
+    if (delaySaving.current) return;
+    delaySaving.current = true;
+    try {
+      while (pendingDelay.current !== null) {
+        const value = pendingDelay.current;
+        pendingDelay.current = null;
+        if (value === savedDelayRef.current) continue;
+        await invoke('clipboard_behavior_set', { hoverPreviewDelayMs: value });
+        savedDelayRef.current = value;
+        state.setOptions((previous) => previous && { ...previous, hoverPreviewDelayMs: value });
+      }
+    } catch {
+      setBehaviorError(true);
+    } finally {
+      delaySaving.current = false;
+      if (pendingDelay.current !== null) void flushDelay();
+    }
+  }
+
+  function editDelay(raw: string) {
+    setDelayDraft(raw);
+    setBehaviorError(false);
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) return;
+    const value = Number(trimmed);
+    if (!Number.isInteger(value) || value < 0 || value > MAX_HOVER_PREVIEW_DELAY_MS) return;
+    pendingDelay.current = value;
+    void flushDelay();
+  }
+
+  async function changeBehavior(
+    field: 'activation' | 'pasteFormat' | 'autoPreview',
+    next: { activation: Activation } | { pasteAsPlainText: boolean } | { hoverPreviewEnabled: boolean },
+  ) {
+    if (!options || behaviorPending.current) return;
+    if ('activation' in next && next.activation === options.activation) return;
+    if ('pasteAsPlainText' in next && next.pasteAsPlainText === options.pasteAsPlainText) return;
+    if ('hoverPreviewEnabled' in next && next.hoverPreviewEnabled === Boolean(options.hoverPreviewEnabled)) return;
     behaviorPending.current = true;
-    setBehaviorBusy(true);
+    setSavingField(field);
     setBehaviorError(false);
     try {
       await invoke('clipboard_behavior_set', next);
       state.setOptions((previous) => previous && { ...previous, ...next });
+      if ('hoverPreviewEnabled' in next && !next.hoverPreviewEnabled) setDelayDraft(null);
     } catch { setBehaviorError(true); }
-    finally { behaviorPending.current = false; setBehaviorBusy(false); }
+    finally { behaviorPending.current = false; setSavingField(null); }
   }
 
   const activations = [{ code: 'copy', name: t('clipboardActivationCopy') }, { code: 'paste', name: t('clipboardActivationPaste') }];
   const pasteFormats = [{ code: 'original', name: t('clipboardPasteOriginal') }, { code: 'plain', name: t('clipboardPastePlain') }];
   const unavailable = <span className="settings-badge">{platformAvailable ? '—' : t('platformUnavailable')}</span>;
+  const pickerPending = savingField === 'activation' || savingField === 'pasteFormat';
 
   return <section aria-labelledby="clipboard-behavior-heading">
       <h2 id="clipboard-behavior-heading">{t('clipboardBehavior')}</h2>
       <div className="settings-group">
-        <Setting label={t('clipboardActivation')}>
-          {platformAvailable && options ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
+        <Setting label={t('clipboardActivation')} hint={t('clipboardActivationHelp')} t={t}>
+          {platformAvailable && options ? <div className="clipboard-picker" data-pending={pickerPending || undefined}>
             <SearchableDropdown value={options.activation} label={t('clipboardActivation')} items={activations} t={t} settings searchable={false} description={t('clipboardActivationHelp')} side="top" menuWidth={218}
               open={open === 'activation'} onOpenChange={(next) => { if (!next || !behaviorPending.current) setOpen(next ? 'activation' : null); }}
-              onChange={(value) => void changeBehavior({ activation: value as Activation })} />
+              onChange={(value) => void changeBehavior('activation', { activation: value as Activation })} />
           </div> : unavailable}
         </Setting>
-        <Setting label={t('clipboardPasteFormat')}>
-          {platformAvailable && options ? <div className="clipboard-picker" data-pending={behaviorBusy || undefined}>
+        <Setting label={t('clipboardPasteFormat')} hint={t('clipboardPasteFormatHelp')} t={t}>
+          {platformAvailable && options ? <div className="clipboard-picker" data-pending={pickerPending || undefined}>
             <SearchableDropdown value={options.pasteAsPlainText ? 'plain' : 'original'} label={t('clipboardPasteFormat')} items={pasteFormats} t={t} settings searchable={false} description={t('clipboardPasteFormatHelp')} side="top" menuWidth={218}
               open={open === 'pasteFormat'} onOpenChange={(next) => { if (!next || !behaviorPending.current) setOpen(next ? 'pasteFormat' : null); }}
-              onChange={(value) => void changeBehavior({ pasteAsPlainText: value === 'plain' })} />
+              onChange={(value) => void changeBehavior('pasteFormat', { pasteAsPlainText: value === 'plain' })} />
           </div> : unavailable}
         </Setting>
+        <div className="settings-field">
+          <span id={`${id}-auto-preview-label`} className="settings-field-content">{t('clipboardAutoPreview')}</span>
+          {canConfigurePreview && options
+            ? <input id={`${id}-auto-preview`} type="checkbox" className="settings-checkbox clipboard-behavior-checkbox" aria-labelledby={`${id}-auto-preview-label`}
+              aria-description={t('clipboardAutoPreviewHelp')} checked={hoverPreviewEnabled} aria-disabled={savingField === 'autoPreview' || undefined}
+              onChange={(event) => { if (!behaviorPending.current) void changeBehavior('autoPreview', { hoverPreviewEnabled: event.target.checked }); }} />
+            : <span className="settings-badge">{canConfigurePreview ? '—' : t('platformUnavailable')}</span>}
+        </div>
+        <div className="settings-field settings-preview-delay" data-disabled={canConfigurePreview && options && !hoverPreviewEnabled || undefined}>
+          <div className="settings-shortcut-name">
+            <label className="settings-field-content" htmlFor={`${id}-preview-delay`}>{t('clipboardPreviewDelay')}</label>
+            <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardPreviewDelay'))} text={t('clipboardPreviewDelayHelp')} />
+          </div>
+          {canConfigurePreview && options ? <div className="settings-history-limit">
+            <input id={`${id}-preview-delay`} type="text" inputMode="numeric" pattern="[0-9]+" maxLength={5} className="settings-text-input"
+              value={delayDraft ?? String(savedDelay)} disabled={!hoverPreviewEnabled}
+              aria-invalid={delayInvalid || undefined} aria-description={t('clipboardPreviewDelayHelp')}
+              onChange={(event) => editDelay(event.target.value)}
+              onBlur={() => setDelayDraft(null)}
+              onKeyDown={(event) => { if (event.key === 'Escape') setDelayDraft(null); }} />
+            <span className="settings-input-unit">ms</span>
+          </div> : <span className="settings-badge">{canConfigurePreview ? '—' : t('platformUnavailable')}</span>}
+        </div>
         {behaviorError && <p className="clipboard-setting-note" role="alert">{t('clipboardSettingsSaveFailed')}</p>}
       </div>
     </section>;

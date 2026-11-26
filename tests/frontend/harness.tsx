@@ -276,9 +276,11 @@ beforeEach(() => {
       return;
     }
     if (name === 'clipboard_behavior_set') {
-      const { activation } = args as { activation?: 'copy' | 'paste' };
-      if (activation !== undefined) {
-        bridge.snapshot.clipboardControls.activation = activation;
+      const { activation, hoverPreviewEnabled, hoverPreviewDelayMs } = args as { activation?: 'copy' | 'paste'; hoverPreviewEnabled?: boolean; hoverPreviewDelayMs?: number };
+      if (activation !== undefined) bridge.snapshot.clipboardControls.activation = activation;
+      if (hoverPreviewEnabled !== undefined) bridge.snapshot.clipboardControls.hoverPreviewEnabled = hoverPreviewEnabled;
+      if (hoverPreviewDelayMs !== undefined) bridge.snapshot.clipboardControls.hoverPreviewDelayMs = hoverPreviewDelayMs;
+      if (activation !== undefined || hoverPreviewEnabled !== undefined || hoverPreviewDelayMs !== undefined) {
         deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
       }
       return;

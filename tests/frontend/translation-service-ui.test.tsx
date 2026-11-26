@@ -221,7 +221,12 @@ describe('translation engine settings', () => {
     expect(screen.getByRole('option', { name: 'Google Translate' }).querySelector('img.language-option-icon')).toBeTruthy();
     await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'apple' });
-    expect(await screen.findByText(/does not use the HTTP proxy/)).toBeTruthy();
+    expect(screen.queryByText(/does not use the HTTP proxy/)).toBeNull();
+    const serviceTip = await screen.findByRole('button', { name: 'Translation Service info' });
+    await user.hover(serviceTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('does not use the HTTP proxy');
+    await user.unhover(serviceTip);
+    expect(screen.queryByRole('tooltip')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Open Translation Languages Settings' }));
     expect(calls('translation_language_settings_open')).toHaveLength(1);
   });
@@ -339,6 +344,8 @@ describe('translation engine settings', () => {
     expect(screen.queryByRole('alert')).toBeNull();
 
     await user.click(screen.getByText('Use HTTP Proxy', { exact: true }));
+    expect(toggle.checked).toBe(true);
+    await user.click(toggle);
     await waitFor(() => expect(toggle.checked).toBe(false));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ proxyEnabled: false });
     expect(input.value).toBe('https://example.test:8443');

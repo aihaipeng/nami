@@ -60,6 +60,9 @@ impl RecordPreviewLines {
     }
 }
 
+pub(crate) const DEFAULT_HOVER_PREVIEW_DELAY_MS: u32 = 1000;
+pub(crate) const MAX_HOVER_PREVIEW_DELAY_MS: u32 = 5000;
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardOptions {
@@ -72,6 +75,8 @@ pub(crate) struct ClipboardOptions {
     pub history_policy: HistoryPolicy,
     pub activation: Activation,
     pub paste_as_plain_text: bool,
+    pub hover_preview_enabled: bool,
+    pub hover_preview_delay_ms: u32,
     pub search: ClipboardSearchOptions,
     pub(crate) records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
@@ -102,6 +107,8 @@ impl Default for ClipboardOptions {
             history_policy: HistoryPolicy::default(),
             activation: Activation::default(),
             paste_as_plain_text: false,
+            hover_preview_enabled: false,
+            hover_preview_delay_ms: DEFAULT_HOVER_PREVIEW_DELAY_MS,
             search: ClipboardSearchOptions::default(),
             records_open_focus: RecordsOpenFocus::default(),
             preview_lines: Default::default(),
@@ -159,6 +166,14 @@ impl ClipboardOptions {
         options.paste_as_plain_text = db
             .preference("clipboard_paste_as_plain_text")?
             .is_some_and(|value| value == "true");
+        options.hover_preview_enabled = db
+            .preference("clipboard_hover_preview_enabled")?
+            .is_some_and(|value| value == "true");
+        options.hover_preview_delay_ms = db
+            .preference("clipboard_hover_preview_delay_ms")?
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|delay| *delay <= MAX_HOVER_PREVIEW_DELAY_MS)
+            .unwrap_or(DEFAULT_HOVER_PREVIEW_DELAY_MS);
         options.search = db
             .preference("clipboard_search_options")?
             .and_then(|value| serde_json::from_str::<ClipboardSearchOptions>(&value).ok())
@@ -566,6 +581,8 @@ pub(crate) struct ClipboardControls {
     search: ClipboardSearchOptions,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
+    hover_preview_enabled: bool,
+    hover_preview_delay_ms: u32,
     shortcuts: nami::shortcuts::ClipboardRecordShortcuts,
 }
 
@@ -576,6 +593,8 @@ impl ClipboardOptions {
             search: self.search,
             records_open_focus: self.records_open_focus,
             preview_lines: self.preview_lines.clone(),
+            hover_preview_enabled: self.hover_preview_enabled,
+            hover_preview_delay_ms: self.hover_preview_delay_ms,
             shortcuts: self.record_shortcuts.clone(),
         }
     }
@@ -634,17 +653,42 @@ pub async fn clipboard_behavior_set(
     app: AppHandle,
     activation: Option<Activation>,
     paste_as_plain_text: Option<bool>,
+    hover_preview_enabled: Option<bool>,
+    hover_preview_delay_ms: Option<u32>,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
-    if !platform::capabilities().clipboard_write {
+    if (activation.is_some() || paste_as_plain_text.is_some())
+        && !platform::capabilities().clipboard_write
+    {
         return Err("platform_unavailable".into());
     }
-    let (key, value) = match (activation, paste_as_plain_text) {
-        (Some(activation), None) => (
+    let (key, value, broadcast) = match (
+        activation,
+        paste_as_plain_text,
+        hover_preview_enabled,
+        hover_preview_delay_ms,
+    ) {
+        (Some(activation), None, None, None) => (
             "clipboard_activation",
             serde_json::to_string(&activation).map_err(|_| "storage_record")?,
+            true,
         ),
-        (None, Some(plain)) => ("clipboard_paste_as_plain_text", plain.to_string()),
+        (None, Some(plain), None, None) => {
+            ("clipboard_paste_as_plain_text", plain.to_string(), false)
+        }
+        (None, None, Some(enabled), None) => {
+            ("clipboard_hover_preview_enabled", enabled.to_string(), true)
+        }
+        (None, None, None, Some(delay_ms)) => {
+            if delay_ms > MAX_HOVER_PREVIEW_DELAY_MS {
+                return Err("invalid_argument".into());
+            }
+            (
+                "clipboard_hover_preview_delay_ms",
+                delay_ms.to_string(),
+                true,
+            )
+        }
         _ => return Err("invalid_argument".into()),
     };
     let state = app.state::<AppState>();
@@ -658,8 +702,14 @@ pub async fn clipboard_behavior_set(
         if let Some(plain) = paste_as_plain_text {
             options.paste_as_plain_text = plain;
         }
+        if let Some(enabled) = hover_preview_enabled {
+            options.hover_preview_enabled = enabled;
+        }
+        if let Some(delay_ms) = hover_preview_delay_ms {
+            options.hover_preview_delay_ms = delay_ms;
+        }
     }
-    if activation.is_some() {
+    if broadcast {
         publish_controls(&app, &state);
     }
     Ok(())
@@ -1044,5 +1094,41 @@ mod tests {
         assert!(options.ignores_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc"));
         assert!(!options.ignores_text("plain note"));
         assert_eq!(options.ignored_regexps, vec!["^sk-[A-Za-z0-9]{6,}$"]);
+    }
+
+    #[test]
+    fn loads_hover_preview_preferences_with_safe_defaults_and_bounds() {
+        let mut db =
+            crate::database::HistoryDatabase::open(std::path::Path::new(":memory:")).unwrap();
+        let fresh = ClipboardOptions::load(&db).unwrap();
+        assert!(!fresh.hover_preview_enabled);
+        assert_eq!(fresh.hover_preview_delay_ms, DEFAULT_HOVER_PREVIEW_DELAY_MS);
+        let controls = fresh.controls();
+        assert!(!controls.hover_preview_enabled);
+        assert_eq!(controls.hover_preview_delay_ms, 1000);
+
+        for (stored, expected) in [
+            ("0", 0),
+            ("500", 500),
+            ("5000", 5000),
+            ("5001", DEFAULT_HOVER_PREVIEW_DELAY_MS),
+            ("-10", DEFAULT_HOVER_PREVIEW_DELAY_MS),
+            ("invalid", DEFAULT_HOVER_PREVIEW_DELAY_MS),
+        ] {
+            db.preference_set("clipboard_hover_preview_delay_ms", stored)
+                .unwrap();
+            let loaded = ClipboardOptions::load(&db).unwrap();
+            assert_eq!(loaded.hover_preview_delay_ms, expected, "stored {stored}");
+        }
+
+        db.preference_set("clipboard_hover_preview_enabled", "true")
+            .unwrap();
+        assert!(ClipboardOptions::load(&db).unwrap().hover_preview_enabled);
+        db.preference_set("clipboard_hover_preview_enabled", "false")
+            .unwrap();
+        assert!(!ClipboardOptions::load(&db).unwrap().hover_preview_enabled);
+        db.preference_set("clipboard_hover_preview_enabled", "yes")
+            .unwrap();
+        assert!(!ClipboardOptions::load(&db).unwrap().hover_preview_enabled);
     }
 }

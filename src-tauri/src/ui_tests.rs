@@ -2018,7 +2018,7 @@ if(!matchMedia('(max-width: 480px)').matches)return {ready:false};
 const field=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled');
 const row=toggle.parentElement, page=document.querySelector('.settings-content');
 const box=node=>node.getBoundingClientRect(), address=box(field), checkbox=box(toggle);
-if(Math.abs(address.left+address.width/2-box(row).left-box(row).width/2)>.5||box(row.querySelector('label')).bottom>address.top||Math.abs(checkbox.top+checkbox.height/2-address.top-address.height/2)>.1||address.width<170||address.width>240||page.scrollWidth!==page.clientWidth)throw Error('narrow proxy layout crowds the address or spills outside its page');
+if(Math.abs(address.left+address.width/2-box(row).left-box(row).width/2)>.5||box(row.querySelector('.settings-field-content')).bottom>address.top||Math.abs(checkbox.top+checkbox.height/2-address.top-address.height/2)>.1||address.width<170||address.width>240||page.scrollWidth!==page.clientWidth)throw Error('narrow proxy layout crowds the address or spills outside its page');
 return {ready:true,narrowAddressWidth:address.width};
 "#)?);
         on_main(app, |app| {
@@ -2083,7 +2083,7 @@ if(groups.some(group=>getComputedStyle(group).borderTopWidth!=='0px'||getCompute
 const divider=getComputedStyle(document.querySelector('.settings-field + .settings-field')).borderTopWidth;
 if(divider!=='1px')throw Error('row separators were removed');
 const proxy=document.querySelector('#translation-proxy-url'), toggle=document.querySelector('#translation-proxy-enabled');
-const row=toggle.closest('.settings-field'), label=row.querySelector('label');
+const row=toggle.closest('.settings-field'), label=row.querySelector('.settings-field-content');
 const box=node=>node.getBoundingClientRect(), checkbox=box(toggle), address=box(proxy);
 if(row!==proxy.closest('.settings-field')||toggle.checked||proxy.readOnly||getComputedStyle(row).opacity!=='1')throw Error('the disabled proxy should retain an editable address in the same row');
 if(checkbox.width!==16||checkbox.height!==16||Math.abs(checkbox.right-box(row).right)>.1||box(label).right>=address.left||address.right>=checkbox.left||Math.abs(checkbox.top+checkbox.height/2-address.top-address.height/2)>.1)throw Error('proxy label, address and checkbox do not align in one row');
@@ -2417,19 +2417,21 @@ return true;
             app,
             "settings",
             r#"
-const image=document.querySelector('#clipboard-type-image'), row=image.closest('label'), bounds=image.getBoundingClientRect();
+const image=document.querySelector('#clipboard-type-image'), row=image.closest('.settings-field'), bounds=image.getBoundingClientRect();
 if(image.matches(':disabled')||!image.checked)throw Error('image capture must be configurable while paused');
 const box=getComputedStyle(image), check=getComputedStyle(image,'::after');
 const centered=check.left===check.right&&check.top===check.bottom&&check.marginLeft===check.marginRight&&check.marginTop===check.marginBottom;
 const dimmed=color=>Number(color.split(',').at(-1).replace(')',''))<.6;
 if(image.type!=='checkbox'||image.hasAttribute('role')||bounds.width!==16||bounds.height!==16||check.clipPath==='none'||!centered||!dimmed(box.borderTopColor)||!dimmed(check.backgroundColor)||getComputedStyle(row).opacity!=='1')throw Error('content type must use a muted checkbox with a centered check');
-row.querySelector('.settings-field-content').click();return true;
+row.querySelector('.settings-field-content').click();
+if(!image.checked)throw Error('clicking row text must not toggle the checkbox');
+image.click();return true;
 "#,
         )?;
         samples.push(wait_view_dom(app, "settings", r#"
 const image=document.querySelector('#clipboard-type-image');
 if(image.checked||image.getAttribute('aria-disabled'))return {ready:false};
-const opacity=Number(getComputedStyle(image.closest('label')).opacity), adjacentOpacity=getComputedStyle(document.querySelector('#clipboard-type-text').closest('label')).opacity;
+const opacity=Number(getComputedStyle(image.closest('.settings-field')).opacity), adjacentOpacity=getComputedStyle(document.querySelector('#clipboard-type-text').closest('.settings-field')).opacity;
 if(!(opacity>0&&opacity<1)||adjacentOpacity!=='1'||image.matches(':disabled')||getComputedStyle(image,'::after').content!=='none')throw Error('unchecked row must dim without disabling it or affecting its neighbors');
 return {ready:true,editableWhilePaused:!image.matches(':disabled'),opacity};
 "#)?);

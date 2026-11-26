@@ -4,6 +4,7 @@ import { languageName, providerLanguages, supportsLanguage, supportsTranslation 
 import { availableTranslationServices, translationServices } from '../shared/translationServices';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { type Translate } from '../shared/i18n';
+import { SettingHintTip } from './SettingHintTip';
 import { TranslationProxySettings } from './TranslationProxySettings';
 
 export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewProps, 'activity'>) {
@@ -23,7 +24,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
         <h2 id="translation-languages-heading">{t('settingsLanguages')}</h2>
       </div>
       <div className="settings-group">
-        <SettingsChoice label={t('settingsService')} value={preferences.engine} open={open === 'engine'} onOpenChange={(value) => setOpen(value ? 'engine' : null)} searchable={false} menuWidth={240}
+        <SettingsChoice label={t('settingsService')} hint={appleSelected && appleAvailable ? t('appleTranslateOnDevice') : undefined} value={preferences.engine} open={open === 'engine'} onOpenChange={(value) => setOpen(value ? 'engine' : null)} searchable={false} menuWidth={240}
           items={availableTranslationServices(appleAvailable)} valueLabel={appleSelected && !appleAvailable ? translationServices.apple.name : undefined}
           onChange={(engine) => void command('translation_preferences_set', { engine })} t={t} />
         <SettingsChoice label={t('settingsSource')} value={preferences.sourceLanguage} open={open === 'source'} onOpenChange={(value) => setOpen(value ? 'source' : null)}
@@ -32,7 +33,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
           items={targetItems} valueLabel={selectedLabel(preferences.primaryLanguage, 'target')} onChange={(primaryLanguage) => void command('translation_preferences_set', { primaryLanguage })} t={t} />
         <SettingsChoice label={t('settingsSecondary')} value={preferences.secondaryLanguage} open={open === 'secondary'} onOpenChange={(value) => setOpen(value ? 'secondary' : null)}
           items={[{ code: 'none', name: 'None' }, ...targetItems]} valueLabel={selectedLabel(preferences.secondaryLanguage, 'target')} onChange={(secondaryLanguage) => void command('translation_preferences_set', { secondaryLanguage })} t={t} />
-        {appleSelected && <p className="settings-field-note" role="status">{t(appleAvailable ? 'appleTranslateOnDevice' : 'appleTranslateUnavailable')}</p>}
+        {appleSelected && !appleAvailable && <p className="settings-field-note" role="status">{t('appleTranslateUnavailable')}</p>}
         {appleSelected && appleAvailable && <div className="settings-field"><button type="button" className="settings-action" onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button></div>}
         {!languagesAvailable && <p className="settings-field-note" role="status">{t('languageNotSupported')}</p>}
       </div>
@@ -41,8 +42,14 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
   </div>;
 }
 
-function SettingsChoice({ label, value, items, open, onOpenChange, onChange, t, searchable = true, menuWidth = 200, valueLabel }: {
-  label: string; value: string; items: { code: string; name: string }[]; open: boolean; onOpenChange: (open: boolean) => void; onChange: (value: string) => void; t: Translate; searchable?: boolean; menuWidth?: number; valueLabel?: string;
+function SettingsChoice({ label, hint, value, items, open, onOpenChange, onChange, t, searchable = true, menuWidth = 200, valueLabel }: {
+  label: string; hint?: string; value: string; items: { code: string; name: string }[]; open: boolean; onOpenChange: (open: boolean) => void; onChange: (value: string) => void; t: Translate; searchable?: boolean; menuWidth?: number; valueLabel?: string;
 }) {
-  return <div className="settings-field"><span className="settings-field-content">{label}</span><SearchableDropdown label={label} value={value} items={items} open={open} onOpenChange={onOpenChange} onChange={onChange} t={t} side="bottom" searchable={searchable} settings menuWidth={menuWidth} valueLabel={valueLabel} /></div>;
+  return <div className="settings-field">
+    {hint ? <div className="settings-shortcut-name">
+      <span className="settings-field-content">{label}</span>
+      <SettingHintTip label={t('shortcutHintLabel').replace('{title}', label)} text={hint} />
+    </div> : <span className="settings-field-content">{label}</span>}
+    <SearchableDropdown label={label} value={value} items={items} open={open} onOpenChange={onOpenChange} onChange={onChange} t={t} side="bottom" searchable={searchable} settings menuWidth={menuWidth} valueLabel={valueLabel} />
+  </div>;
 }

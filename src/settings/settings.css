@@ -49,7 +49,7 @@
 .settings-shell input:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 .settings-shell button:focus-visible, .settings-popover .language-options button:focus-visible { outline: none; }
 .settings-shell button:focus-visible:not(.settings-clear, .settings-shortcut-tip, :hover, :active, :disabled, [aria-disabled=true]), .settings-popover .language-options button:focus-visible { background-color: hsl(var(--primary) / .17); transition-duration: 0s; }
-.settings-shell :is(.settings-action, .settings-recorder, .settings-checkbox):is(:disabled, [aria-disabled=true]) { opacity: .55; }
+.settings-shell :is(.settings-action, .settings-recorder):is(:disabled, [aria-disabled=true]), .settings-shell .settings-checkbox:disabled { opacity: .55; }
 .settings-shell .settings-dropdown { width: max-content; max-width: 58%; flex-shrink: 0; justify-content: space-between; gap: 8px; }
 .settings-dropdown > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-dropdown > svg { width: 11px; height: 11px; color: var(--settings-secondary); }
@@ -69,25 +69,23 @@
   .settings-checkbox:checked::after { forced-color-adjust: none; background: ButtonText; }
 }
 .settings-field:not(.settings-proxy-row):has(> .settings-checkbox:not(:checked)), .clipboard-recording-types:disabled .settings-field { opacity: .68; }
-label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true])) { cursor: pointer; }
 .settings-checkbox:disabled { cursor: default; }
 .settings-field.settings-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) min(224px, 48%) minmax(0, 1fr); }
-.settings-proxy-row label { grid-column: 1; grid-row: 1; cursor: pointer; }
+.settings-proxy-row > .settings-field-content { grid-column: 1; grid-row: 1; }
 .settings-proxy-row > :is(.settings-action, .settings-checkbox) { grid-column: 3; grid-row: 1; }
 .settings-proxy-row > .settings-action { justify-self: start; }
 .settings-proxy-row > .settings-checkbox { justify-self: end; }
-.settings-proxy-row:has(> .settings-checkbox:not(:checked)) label { color: var(--settings-secondary); }
+.settings-proxy-row:has(> .settings-checkbox:not(:checked)) > .settings-field-content { color: var(--settings-secondary); }
 .settings-field.settings-shortcut-row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) 16px; }
-.settings-shortcut-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.settings-shortcut-name { flex: 1; display: flex; align-items: center; gap: 5px; min-width: 0; }
 .settings-shortcut-name > .settings-field-content { flex: 0 1 auto; }
 .settings-shell .settings-shortcut-tip { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: hsl(var(--foreground) / .35); cursor: pointer; }
-.settings-shortcut-row:hover .settings-shortcut-tip, .settings-shell .settings-shortcut-tip:focus-visible { color: var(--settings-secondary); }
+.settings-shell .settings-shortcut-tip:focus-visible { color: var(--settings-secondary); }
 .settings-shell .settings-shortcut-tip:hover, .settings-shell .settings-shortcut-tip:active, .settings-shell .settings-shortcut-tip[aria-expanded=true] { background: transparent; border-color: transparent; color: hsl(var(--foreground)); }
-.settings-shell .settings-shortcut-tip[data-conflict=true], .settings-shortcut-row:hover .settings-shortcut-tip[data-conflict=true], .settings-shell .settings-shortcut-tip[data-conflict=true]:hover { color: hsl(var(--destructive)); }
+.settings-shell .settings-shortcut-tip[data-conflict=true], .settings-shell .settings-shortcut-tip[data-conflict=true]:hover { color: hsl(var(--destructive)); }
 .settings-shortcut-tip svg { width: 13.5px; height: 13.5px; }
 .settings-shortcut-row .settings-badge { grid-column: 2 / -1; justify-self: end; max-width: none; }
 .settings-shell .hotkey-group :is(.settings-recorder, .settings-checkbox)[aria-disabled=true] { opacity: 1; }
-.settings-shortcut-row label[for] { cursor: pointer; }
 .settings-recorder-wrap { position: relative; flex: none; }
 .settings-shell :is(.settings-recorder, .settings-shortcut-row > .keycaps) { padding: 3px 5px; white-space: nowrap; }
 .settings-shortcut-row > .keycaps { border: 1px solid transparent; justify-self: start; }
@@ -136,7 +134,7 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 .settings-shell .clipboard-chip-remove { flex: none; width: 20px; min-width: 20px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 5px; }
 .settings-shell .clipboard-chip-remove:not(:disabled, [aria-disabled=true]):hover { background: hsl(var(--foreground) / .11); color: hsl(var(--foreground)); border-color: transparent; }
 .clipboard-chip-remove svg { width: 11px; height: 11px; }
-.settings-shell .clipboard-ignore-chip .clipboard-tip-trigger { width: 20px; min-height: 20px; border-radius: 5px; }
+.settings-shell .clipboard-ignore-chip .clipboard-tip-trigger { width: 20px; height: 20px; min-height: 20px; }
 .clipboard-ignore-chip .clipboard-tip-trigger svg { width: 12px; height: 12px; }
 .clipboard-excluded-icon { display: block; flex: none; width: 16px; height: 16px; border-radius: 3.5px; object-fit: contain; }
 .clipboard-icon-fallback { color: var(--settings-secondary); }
@@ -188,13 +186,16 @@ label.settings-field:has(> .settings-checkbox:not(:disabled, [aria-disabled=true
 }
 @media (max-width: 560px) {
   .settings-field.settings-proxy-row { grid-template-columns: minmax(0, 1fr) min(224px, calc(100% - 48px)) minmax(0, 1fr); }
-  .settings-proxy-row label { grid-column: 1 / 3; }
+  .settings-proxy-row > .settings-field-content { grid-column: 1 / 3; }
   .settings-proxy-row > .settings-action { justify-self: end; }
   .settings-proxy-row > :is(.settings-text-input, .settings-checkbox) { grid-row: 2; }
 }
 
 .settings-history-limit { display: flex; align-items: center; gap: 6px; }
 .settings-history-limit .settings-text-input { width: 76px; }
+.settings-input-unit { color: var(--settings-secondary); font-size: 12px; }
+.settings-preview-delay[data-disabled=true] { opacity: .68; }
+.settings-shell .clipboard-behavior-checkbox[aria-disabled=true] { opacity: 1; }
 .settings-cleanup-dialog { width: min(330px, calc(100% - 32px)); padding: 14px; }
 .settings-cleanup-dialog .clipboard-cleanup-categories { margin-top: 6px; }
 .settings-cleanup-dialog .clipboard-cleanup-category { min-height: 28px; padding-block: 2px; }

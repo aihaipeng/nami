@@ -1767,6 +1767,8 @@ impl HistoryDatabase {
             "clipboard_ignore_secrets",
             "clipboard_activation",
             "clipboard_paste_as_plain_text",
+            "clipboard_hover_preview_enabled",
+            "clipboard_hover_preview_delay_ms",
             "clipboard_search_options",
             "records_open_focus",
             "clipboard_preview_lines",

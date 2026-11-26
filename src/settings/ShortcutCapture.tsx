@@ -1,9 +1,9 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { CircleAlert, X } from 'lucide-react';
-import { FloatingPanel } from '../shared/FloatingPanel';
+import { X } from 'lucide-react';
 import type { Translate } from '../shared/i18n';
 import { bindingFromEvent, keycapLabels, modifierKey, shortcutActions, shortcutTitles, type KeyBinding, type ShortcutAction } from '../shared/shortcuts';
+import { SettingHintTip } from './SettingHintTip';
 
 export function shortcutMessage(code: string, t: Translate) {
   if (code === 'shortcut_clipboard_panel') return t('clipboardShortcutConflict');
@@ -32,51 +32,19 @@ export function ShortcutRow({ title, hint, hintConflict, unavailable, label, bin
   recording: boolean; enabled: boolean; saving?: boolean; onEnabled: (enabled: boolean) => void;
   onToggle: () => void; onClear: () => void; t: Translate;
 }) {
-  const id = useId();
+  const labelId = useId();
   return <div className="settings-field settings-shortcut-row">
     <div className="settings-shortcut-name">
-      <label className="settings-field-content" htmlFor={unavailable ? undefined : id}>{title}</label>
-      {hint && <ShortcutHintTip label={t('shortcutHintLabel').replace('{title}', title)} text={hint} conflict={hintConflict} />}
+      <span id={labelId} className="settings-field-content">{title}</span>
+      {hint && <SettingHintTip label={t('shortcutHintLabel').replace('{title}', title)} text={hint} conflict={hintConflict} />}
     </div>
     {unavailable ? <span className="settings-badge">{unavailable}</span> : <>
       <ShortcutRecorder label={label} binding={binding} macos={macos} recording={recording}
         saving={saving} onToggle={onToggle} onClear={onClear} t={t} />
-      <input id={id} className="settings-checkbox" type="checkbox" aria-description={hint} aria-disabled={saving || undefined}
+      <input className="settings-checkbox" type="checkbox" aria-labelledby={labelId} aria-description={hint} aria-disabled={saving || undefined}
         checked={enabled} onChange={(event) => { if (!saving) onEnabled(event.target.checked); }} />
     </>}
   </div>;
-}
-
-function ShortcutHintTip({ label, text, conflict }: { label: string; text: string; conflict?: boolean }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const id = useId();
-  const [hoverOpen, setHoverOpen] = useState(false);
-  const [clickOpen, setClickOpen] = useState(false);
-  const open = hoverOpen || clickOpen;
-
-  function close() {
-    setHoverOpen(false);
-    setClickOpen(false);
-  }
-
-  return <>
-    <button ref={trigger} type="button" className="settings-shortcut-tip" data-conflict={conflict || undefined}
-      aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open}
-      onMouseEnter={() => setHoverOpen(true)}
-      onMouseLeave={close}
-      onClick={(event) => {
-        event.currentTarget.focus({ preventScroll: true });
-        if (clickOpen) close();
-        else { setClickOpen(true); setHoverOpen(false); }
-      }}
-      onBlur={close}
-      onKeyDown={(event) => {
-        if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
-      }}><CircleAlert aria-hidden="true" /></button>
-    {open && <FloatingPanel anchor={trigger} onClose={close} id={id} role="tooltip" width={248} side="bottom" className="settings-popover clipboard-tip-panel" dismissOnSettingsScroll>
-      {text}
-    </FloatingPanel>}
-  </>;
 }
 
 function ShortcutRecorder({ label, binding, macos, recording, saving, onToggle, onClear, t }: {

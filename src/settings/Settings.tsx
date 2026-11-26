@@ -9,6 +9,7 @@ import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { BackupSettings } from './BackupSettings';
 import { HotKeySettings } from './HotKeySettings';
 import { ClipboardSettings } from './ClipboardSettings';
+import { SettingHintTip } from './SettingHintTip';
 import { TranslationSettings } from './TranslationSettings';
 
 const pages = [
@@ -72,9 +73,9 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
                   open={openDropdown === 'language'} onOpenChange={(open) => setOpenDropdown(open ? 'language' : null)} t={t} side="bottom" searchable={false} settings />}
             </div>
             <div className="settings-field">
-              <label className="settings-field-content" htmlFor="launch-at-login">{t('launchAtLogin')}</label>
+              <span id="launch-at-login-label" className="settings-field-content">{t('launchAtLogin')}</span>
               {native && snapshot.capabilities.launchAtLogin
-                ? <input id="launch-at-login" type="checkbox" className="settings-checkbox" aria-label={t('launchAtLogin')} checked={snapshot.launchAtLogin} aria-disabled={savingLaunch || undefined} onChange={(event) => void saveLaunchAtLogin(event.target.checked)} />
+                ? <input id="launch-at-login" type="checkbox" className="settings-checkbox" aria-labelledby="launch-at-login-label" checked={snapshot.launchAtLogin} aria-disabled={savingLaunch || undefined} onChange={(event) => void saveLaunchAtLogin(event.target.checked)} />
                 : <span className="settings-badge">{t('platformUnavailable')}</span>}
             </div>
             {launchError && <p className="settings-field-note" role="alert">{t('launchAtLoginFailed')}</p>}
@@ -116,7 +117,13 @@ export function Settings({ t, snapshot, command, native }: ViewProps) {
           <section aria-labelledby="settings-permission">
             <h2 id="settings-permission">{t('systemPermission')}</h2>
             {snapshot.capabilities.accessibilityPermission ? <div className="settings-group">
-              <div className="settings-field"><div className="settings-field-content"><span>{t('accessibility')}</span>{!snapshot.accessibility && <p>{t('required')}</p>}</div><span className="settings-badge">{snapshot.accessibility ? <><Check aria-hidden="true" />{t('granted')}</> : t('notGranted')}</span></div>
+              <div className="settings-field">
+                <div className="settings-shortcut-name">
+                  <span className="settings-field-content">{t('accessibility')}</span>
+                  <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('accessibility'))} text={t('required')} />
+                </div>
+                <span className="settings-badge">{snapshot.accessibility ? <><Check aria-hidden="true" />{t('granted')}</> : t('notGranted')}</span>
+              </div>
               <div className="settings-field settings-permission-actions"><button type="button" className="settings-action" disabled={!native} onClick={() => void command('permission_request')}>{t('requestPermission')}</button><button type="button" className="settings-action" disabled={!native} onClick={() => void command('app_snapshot')}>{t('refreshPermission')}</button></div>
             </div> : <p className="settings-callout">{t('settingsPermissionUnavailable')}</p>}
           </section>

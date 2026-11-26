@@ -4,6 +4,7 @@ import { RefreshCw } from 'lucide-react';
 import type { MessageKey, Translate } from '../shared/i18n';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { SettingsDialog } from './SettingsDialog';
+import { SettingHintTip } from './SettingHintTip';
 import { errorCode } from './ShortcutCapture';
 
 type Policy = { limit: number; maxAgeDays?: number; maxStorageMb?: number };
@@ -118,10 +119,13 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
           });
         }
       }}>
-        <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
+        <div className="settings-shortcut-name">
+          <label className="settings-field-content" htmlFor={`${id}-limit`}>{t('clipboardHistoryLimit')}</label>
+          <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardHistoryLimit'))} text={t('clipboardHistoryLimitHelp')} />
+        </div>
         {available && storage ? <div className="settings-history-limit">
           <input id={`${id}-limit`} type="text" inputMode="numeric" pattern="[0-9]+" maxLength={7} className="settings-text-input"
-            value={draft ?? String(storage.limit)} readOnly={busy} title={t('clipboardHistoryLimitHelp')} aria-description={t('clipboardHistoryLimitHelp')}
+            value={draft ?? String(storage.limit)} readOnly={busy} aria-description={t('clipboardHistoryLimitHelp')}
             onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape' && !busy) setDraft(null); }} />
           {canSave && <button type="submit" className="settings-action" aria-disabled={busy || undefined}>{t('shortcutManualSave')}</button>}
         </div> : <span className="settings-badge">—</span>}
@@ -159,9 +163,12 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
           t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
       </div>
       <div className="settings-field">
-        <span className="settings-field-content">{t('clipboardStorageUsed')}</span>
+        <div className="settings-shortcut-name">
+          <span className="settings-field-content">{t('clipboardStorageUsed')}</span>
+          <SettingHintTip label={t('shortcutHintLabel').replace('{title}', t('clipboardStorageUsed'))} text={storageHelp} />
+        </div>
         <div className="clipboard-storage-value">
-          <span aria-live="polite" title={storageHelp}>{storageError ? t('clipboardStorageUnavailable') : storage ? storageSize(storage.bytes, locale) : '—'}</span>
+          <span aria-live="polite">{storageError ? t('clipboardStorageUnavailable') : storage ? storageSize(storage.bytes, locale) : '—'}</span>
           {available && <button type="button" className="settings-action clipboard-icon-button" title={t('clipboardRefreshStorage')}
             aria-label={t('clipboardRefreshStorage')} aria-description={storageHelp} onClick={reload}><RefreshCw aria-hidden="true" /></button>}
         </div>

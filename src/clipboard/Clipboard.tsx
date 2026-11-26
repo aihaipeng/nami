@@ -18,7 +18,7 @@ import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
 import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
-import { clipboardCategoryDirection, clipboardGlobalBindings, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
+import { clipboardCategoryDirection, clipboardGlobalBindings, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, DEFAULT_HOVER_PREVIEW_DELAY_MS, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
 import { translationShortcutEnabled } from '../shared/contracts';
 import { commandKeyLabel, editsText, matchesBinding, sameBinding, shortcutActions, type KeyBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
@@ -67,6 +67,21 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const pinnedList = useRef<HTMLDivElement>(null);
   const listHandle = useRef<HistoryListHandle>(null);
   const pendingFocus = useRef<string | null>(null);
+  const hoverPreviewTimer = useRef<number | null>(null);
+  const hoverPreviewTarget = useRef<string | null>(null);
+  const hoverPreviewOpening = useRef(false);
+  const hoveredRow = useRef<string | null>(null);
+  const suppressedHoverRow = useRef<string | null>(null);
+  const wasDetailVisible = useRef(snapshot.window.clipboardDetailVisible);
+  const hoverPreviewEnabled = Boolean(snapshot.clipboardControls.hoverPreviewEnabled);
+  const hoverPreviewDelayMs = snapshot.clipboardControls.hoverPreviewDelayMs ?? DEFAULT_HOVER_PREVIEW_DELAY_MS;
+  const cancelHoverPreview = useCallback(() => {
+    if (hoverPreviewTimer.current !== null) {
+      window.clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewTimer.current = null;
+    }
+    hoverPreviewTarget.current = null;
+  }, []);
   const browser = useRecordBrowser(snapshot.window.recordsSession, active, list, () => clipboard.displayReady, () => clipboard.page.records, kindFilter);
   const { query, setQuery, favoritesOnly, setFavoritesOnly, remember, restoreScroll } = browser;
   const searchOptions = snapshot.clipboardControls.search;
@@ -112,18 +127,88 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const first = records.find((record) => !record.isPinned) ?? records[0];
   const targetOnMouseMove = useRecordPointer();
   const keyboardId = clipboard.displayReady ? (selected && visibleIds.has(selected) ? selected : first?.id) : undefined;
+  const hoverPreviewContext = useRef({
+    active,
+    clipboardVisible: snapshot.window.clipboardVisible,
+    detailVisible: snapshot.window.clipboardDetailVisible,
+    enabled: hoverPreviewEnabled,
+    delayMs: hoverPreviewDelayMs,
+    blocked: Boolean(editing || menu || pendingDelete),
+    displayReady: clipboard.displayReady,
+    visibleIds,
+  });
+  hoverPreviewContext.current = {
+    active,
+    clipboardVisible: snapshot.window.clipboardVisible,
+    detailVisible: snapshot.window.clipboardDetailVisible,
+    enabled: hoverPreviewEnabled,
+    delayMs: hoverPreviewDelayMs,
+    blocked: Boolean(editing || menu || pendingDelete),
+    displayReady: clipboard.displayReady,
+    visibleIds,
+  };
+  const openHoveredDetail = useEffectEvent((recordId: string) => {
+    hoverPreviewTimer.current = null;
+    hoverPreviewTarget.current = null;
+    const ctx = hoverPreviewContext.current;
+    if (!ctx.active || !ctx.clipboardVisible || !ctx.enabled || ctx.detailVisible || hoverPreviewOpening.current || ctx.blocked || !ctx.displayReady || !ctx.visibleIds.has(recordId) || hoveredRow.current !== recordId || suppressedHoverRow.current === recordId) return;
+    hoverPreviewOpening.current = true;
+    void command('records_details_toggle', { recordId }).finally(() => { hoverPreviewOpening.current = false; });
+  });
+  function scheduleHoverPreview(recordId: string) {
+    const ctx = hoverPreviewContext.current;
+    if (!ctx.active || !ctx.clipboardVisible || !ctx.enabled || ctx.detailVisible || hoverPreviewOpening.current || ctx.blocked || !ctx.displayReady || !ctx.visibleIds.has(recordId) || suppressedHoverRow.current === recordId) {
+      cancelHoverPreview();
+      return;
+    }
+    if (hoverPreviewTarget.current === recordId && hoverPreviewTimer.current !== null) return;
+    cancelHoverPreview();
+    hoverPreviewTarget.current = recordId;
+    if (ctx.delayMs <= 0) {
+      openHoveredDetail(recordId);
+      return;
+    }
+    hoverPreviewTimer.current = window.setTimeout(() => openHoveredDetail(recordId), ctx.delayMs);
+  }
   const clipboardShown = useRef(false);
+  useEffect(() => cancelHoverPreview, [cancelHoverPreview]);
+  useEffect(() => {
+    const visible = snapshot.window.clipboardDetailVisible;
+    if (visible) {
+      hoverPreviewOpening.current = false;
+      cancelHoverPreview();
+    } else if (wasDetailVisible.current && active && snapshot.window.clipboardVisible) {
+      suppressedHoverRow.current = hoveredRow.current;
+      cancelHoverPreview();
+    }
+    wasDetailVisible.current = visible;
+  }, [snapshot.window.clipboardDetailVisible, active, snapshot.window.clipboardVisible, cancelHoverPreview]);
   useEffect(() => {
     const visible = active && snapshot.window.clipboardVisible;
     if (visible && !clipboardShown.current) setPointerOutside(false);
+    if (!visible) {
+      cancelHoverPreview();
+      hoveredRow.current = null;
+      suppressedHoverRow.current = null;
+      hoverPreviewOpening.current = false;
+    }
     clipboardShown.current = visible;
-  }, [active, snapshot.window.clipboardVisible]);
+  }, [active, snapshot.window.clipboardVisible, cancelHoverPreview]);
   useEffect(() => {
     if (!active) return;
-    const markOutside = () => setPointerOutside(true);
+    const markOutside = () => {
+      cancelHoverPreview();
+      hoveredRow.current = null;
+      suppressedHoverRow.current = null;
+      setPointerOutside(true);
+    };
     window.addEventListener('blur', markOutside);
     return () => window.removeEventListener('blur', markOutside);
-  }, [active]);
+  }, [active, cancelHoverPreview]);
+  useEffect(() => { cancelHoverPreview(); }, [hoverPreviewEnabled, hoverPreviewDelayMs, snapshot.window.recordsSession, cancelHoverPreview]);
+  useEffect(() => {
+    if (editing || menu || pendingDelete) cancelHoverPreview();
+  }, [editing, menu, pendingDelete, cancelHoverPreview]);
   useEffect(() => {
     if (!active) { setCommandHeld(false); return; }
     const update = (event: KeyboardEvent) => setCommandHeld(isQuickPasteModifier(event));
@@ -162,7 +247,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     return () => { disposed = true; void subscription.then((remove) => remove()); };
   }, [native]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; ++operation.current; }; }, []);
-  useEffect(() => { setMenu(null); setRevealed(null); }, [query, favoritesOnly, kindFilter]);
+  useEffect(() => { cancelHoverPreview(); setMenu(null); setRevealed(null); }, [query, favoritesOnly, kindFilter, cancelHoverPreview]);
   useEffect(() => {
     const dismiss = (event: Event) => {
       if (!(event.target instanceof Element && event.target.closest('.record-context-menu-keys'))) setMenu(null);
@@ -488,6 +573,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     if (!clipboard.displayReady || !record) return;
     if ((fromSearch || fromRecord) && plain && !action && (key.key === 'ArrowDown' || key.key === 'ArrowUp')) {
       event.preventDefault();
+      cancelHoverPreview();
       if (fromSearch) {
         if (key.key === 'ArrowDown') {
           setPointerOutside(false);
@@ -552,10 +638,13 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const focused = document.activeElement?.closest('.clipboard-panel .history-row');
     if (!focused || focused === event.currentTarget) setPointerOutside(false);
   }
-  function pointerLeftRow(event: ReactPointerEvent<HTMLElement>) {
+  function pointerLeftRow(event: ReactPointerEvent<HTMLElement>, recordId: string) {
     const next = event.relatedTarget;
     if (next instanceof Node && event.currentTarget.contains(next)) return;
+    if (hoverPreviewTarget.current === recordId) cancelHoverPreview();
+    if (hoveredRow.current === recordId) hoveredRow.current = null;
     if (next instanceof Element && next.closest('.clipboard-panel .history-row')) return;
+    suppressedHoverRow.current = null;
     setPointerOutside(true);
   }
   function loadNearEnd(element: HTMLDivElement) {
@@ -585,11 +674,20 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       record.imageTextMatch ? t('clipboardImageTextMatch') : null,
     ].filter(Boolean).join(', ') || undefined;
     const translating = snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === record.id;
-    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-translating={translating || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onPointerEnter={pointerEnteredRow} onMouseMove={(event) => {
+    return <article data-record-target={active && clipboard.displayReady && visibleIds.has(record.id) && (menu?.id ?? selected) === record.id || undefined} data-translating={translating || undefined} data-keyboard-current={keyboardCurrent || undefined} onFocus={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) { setSelected(record.id); previewRecord(record.id); } }} data-note-revealed={record.title ? revealed === record.id : undefined} onMouseEnter={() => { if (record.title) setRevealed(record.id); }} onPointerEnter={pointerEnteredRow} onMouseDown={() => { cancelHoverPreview(); suppressedHoverRow.current = record.id; }} onMouseMove={(event) => {
       if (!active || editing || menu || !clipboard.displayReady || !visibleIds.has(record.id)) return;
-      if (targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); })) setPointerOutside(false);
-    }} onPointerLeave={pointerLeftRow} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
-      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={quickHint ? `Meta+${quickHint}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
+      const overActions = event.target instanceof Element && Boolean(event.target.closest('.history-row-actions'));
+      if (targetOnMouseMove(event, () => { setSelected(record.id); previewRecord(record.id); })) {
+        setPointerOutside(false);
+        hoveredRow.current = record.id;
+        if (suppressedHoverRow.current && suppressedHoverRow.current !== record.id) suppressedHoverRow.current = null;
+        if (overActions) cancelHoverPreview();
+        else scheduleHoverPreview(record.id);
+      } else if (overActions && hoverPreviewTarget.current === record.id) {
+        cancelHoverPreview();
+      }
+    }} onPointerLeave={(event) => pointerLeftRow(event, record.id)} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${124 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
+      <button type="button" ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; cancelHoverPreview(); event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={quickHint ? `Meta+${quickHint}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
         <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={quickHint} />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <ClipboardTextPreview text={historyPreview(record.text)} className="history-preview history-text-preview" />}
         {record.imageTextMatch && <span className="clipboard-search-match">{t('clipboardImageTextMatch')}</span>}
@@ -609,7 +707,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     <HistoryList
       onScrollOwnerChange={restoreScroll}
       active={active}
-      onScroll={() => { remember(); clipboard.refreshDeferred(); }}
+      onScroll={() => { cancelHoverPreview(); remember(); clipboard.refreshDeferred(); }}
       list={list}
       pinnedList={pinnedList}
       handleRef={listHandle}

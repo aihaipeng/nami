@@ -41,14 +41,14 @@ export function TranslationProxySettings({ t, preferences, native, command }: Pi
       void save();
     }}>
       <div className="settings-field settings-proxy-row">
-        <label className="settings-field-content" htmlFor="translation-proxy-enabled">{t('useHttpProxy')}</label>
+        <span id="translation-proxy-label" className="settings-field-content">{t('useHttpProxy')}</span>
         <input ref={input} id="translation-proxy-url" className="settings-text-input" aria-label={t('httpProxy')} value={value} placeholder="http://proxy.example.com:8080"
           readOnly={saving} spellCheck={false} autoComplete="off" aria-invalid={feedback === 'proxyCredentials' || feedback === 'proxyUrlInvalid'}
           aria-describedby={feedback ? 'translation-proxy-error' : undefined}
           onChange={(event) => { setDraft(event.target.value); setError(null); }}
           onKeyDown={(event) => { if (event.key === 'Escape' && !saving) { setDraft(null); setError(null); } }} />
         {changed && <button type="submit" className="settings-action" aria-disabled={saving || undefined}>{t('saveProxy')}</button>}
-        <input id="translation-proxy-enabled" className="settings-checkbox" type="checkbox" aria-disabled={saving || undefined}
+        <input id="translation-proxy-enabled" className="settings-checkbox" type="checkbox" aria-labelledby="translation-proxy-label" aria-disabled={saving || undefined}
           aria-describedby={feedback ? 'translation-proxy-error' : undefined} checked={preferences.proxyEnabled}
           onChange={(event) => void save(event.target.checked)} />
       </div>

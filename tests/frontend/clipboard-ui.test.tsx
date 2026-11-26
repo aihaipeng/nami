@@ -3451,4 +3451,79 @@ describe('clipboard open target', () => {
     expect(row('plain-1').querySelector('.history-languages')?.textContent).toBe('Plain Text');
     expect(row('rich-1').querySelector('.history-languages')?.textContent).toBe('Rich Text');
   });
+
+  it('auto-opens details after hovering a record for the configured delay and respects cancellation guards', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(listRows()).toHaveLength(2));
+    vi.useFakeTimers();
+    try {
+      // Disabled by default: hovering never opens details.
+      fireEvent.mouseMove(row('first'), { clientX: 40, clientY: 80 });
+      await act(async () => { vi.advanceTimersByTime(1500); });
+      expect(calls('records_details_toggle')).toHaveLength(0);
+
+      // Enable auto-open preview with 600ms delay via live settings broadcast.
+      bridge.snapshot.clipboardControls.hoverPreviewEnabled = true;
+      bridge.snapshot.clipboardControls.hoverPreviewDelayMs = 600;
+      await emit('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
+
+      // Hovering over row actions cancels preview instead of opening details.
+      fireEvent.mouseMove(row('first'), { clientX: 42, clientY: 82 });
+      await act(async () => { vi.advanceTimersByTime(400); });
+      const copyButton = within(row('first')).getByRole('button', { name: 'Copy' });
+      fireEvent.mouseMove(copyButton, { clientX: 120, clientY: 82 });
+      await act(async () => { vi.advanceTimersByTime(700); });
+      expect(calls('records_details_toggle')).toHaveLength(0);
+
+      // Switching rows resets the timer; staying on the second row past the delay opens details.
+      fireEvent.mouseMove(row('first'), { clientX: 44, clientY: 82 });
+      await act(async () => { vi.advanceTimersByTime(400); });
+      fireEvent.pointerLeave(row('first'), { relatedTarget: row('pinned') });
+      fireEvent.mouseMove(row('pinned'), { clientX: 44, clientY: 20 });
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(calls('records_details_toggle')).toHaveLength(0);
+      await act(async () => { vi.advanceTimersByTime(100); });
+      expect(calls('records_details_toggle')).toHaveLength(1);
+      expect(calls('records_details_toggle')[0]?.[1]).toEqual({ recordId: 'pinned' });
+
+      // Manually closing details suppresses reopening in place until moving to another row.
+      await windowState({ clipboardDetailVisible: true, clipboardDetailId: 'pinned' });
+      await windowState({ clipboardDetailVisible: false });
+      fireEvent.mouseMove(row('pinned'), { clientX: 46, clientY: 20 });
+      await act(async () => { vi.advanceTimersByTime(800); });
+      expect(calls('records_details_toggle')).toHaveLength(1);
+
+      // Moving to another row lifts suppression and opens details after the delay.
+      fireEvent.pointerLeave(row('pinned'), { relatedTarget: row('first') });
+      fireEvent.mouseMove(row('first'), { clientX: 46, clientY: 84 });
+      await act(async () => { vi.advanceTimersByTime(600); });
+      expect(calls('records_details_toggle')).toHaveLength(2);
+      expect(calls('records_details_toggle')[1]?.[1]).toEqual({ recordId: 'first' });
+
+      // Close details again, then verify leaving rows, scrolling, or pressing ArrowUp cancels pending timers.
+      await windowState({ clipboardDetailVisible: false });
+      fireEvent.pointerLeave(row('first'), { relatedTarget: document.body });
+      fireEvent.mouseMove(row('first'), { clientX: 48, clientY: 84 });
+      await act(async () => { vi.advanceTimersByTime(300); });
+      fireEvent.scroll(document.querySelector('.history-list')!);
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(calls('records_details_toggle')).toHaveLength(2);
+
+      fireEvent.mouseMove(row('first'), { clientX: 50, clientY: 84 });
+      await act(async () => { vi.advanceTimersByTime(300); });
+      row('first').querySelector<HTMLButtonElement>('.history-row-select')!.focus();
+      fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'ArrowUp', code: 'ArrowUp' });
+      await act(async () => { vi.advanceTimersByTime(800); });
+      expect(calls('records_details_toggle')).toHaveLength(2);
+
+      // 0ms delay opens immediately upon real pointer movement.
+      bridge.snapshot.clipboardControls.hoverPreviewDelayMs = 0;
+      await emit('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
+      fireEvent.mouseMove(row('pinned'), { clientX: 52, clientY: 22 });
+      expect(calls('records_details_toggle')).toHaveLength(3);
+      expect(calls('records_details_toggle')[2]?.[1]).toEqual({ recordId: 'pinned' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
