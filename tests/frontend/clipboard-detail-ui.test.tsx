@@ -354,6 +354,22 @@ describe('clipboard details', () => {
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
   });
 
+  it('asks before deleting a pinned detail record and accepts Esc or Enter', async () => {
+    first().isFavorite = true;
+    direct();
+    fireEvent.click(await within(pane()).findByRole('button', { name: 'Delete clipboard record' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete this record?' });
+    expect(dialog.textContent).toContain('This record is favorited.');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' }).querySelector('kbd')?.textContent).toBe('Esc');
+    expect(within(dialog).getByRole('button', { name: 'Delete' }).querySelector('kbd')?.textContent).toBe('↵');
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    fireEvent.click(within(pane()).getByRole('button', { name: 'Delete clipboard record' }));
+    fireEvent.keyDown(await screen.findByRole('alertdialog'), { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'delete' }));
+  });
+
   it.each([
     ['Translate', 'clipboard_record_process', { recordId: 'first', action: 'translate' }],
     ['Pin record', 'clipboard_record_update', { recordId: 'first', action: 'pin' }],

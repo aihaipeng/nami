@@ -48,6 +48,11 @@
 .clipboard-editor-layer.closing .clipboard-editor { transition-duration: 140ms; }
 @media (prefers-reduced-motion: reduce) { .clipboard-record-title, .clipboard-record-content { transition-duration: 0ms !important; } .clipboard-editor-layer, .clipboard-editor.floating-panel { transition-duration: 1ms !important; } }
 
+.clipboard-delete-confirm { width: min(320px, calc(100vw - 32px)); padding: 16px; border: 1px solid hsl(var(--foreground) / .12); border-radius: 12px; background: var(--glass-surface); color: hsl(var(--foreground)); box-shadow: 0 8px 30px rgb(0 0 0 / .25); }
+.clipboard-delete-confirm::backdrop { background: rgb(0 0 0 / .32); }
+.clipboard-delete-confirm strong { display: block; font-size: 13px; font-weight: 650; }
+.clipboard-delete-confirm p { margin: 8px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.clipboard-delete-confirm .clipboard-delete-confirm-action { color: var(--history-red, hsl(var(--destructive))); }
 .clipboard-navigation-confirm { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 16px; border-radius: inherit; background: hsl(var(--background) / .96); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); font-size: 12px; }
 .clipboard-navigation-confirm strong { font-size: 13px; }
 .clipboard-navigation-confirm p { color: hsl(var(--muted-foreground)); margin: 8px 0; }

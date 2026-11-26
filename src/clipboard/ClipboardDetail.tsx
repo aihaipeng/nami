@@ -8,6 +8,7 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
+import { ClipboardDeleteConfirm, markedDeleteDescription } from './ClipboardDeleteConfirm';
 import { ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import { ClipboardRichText } from './ClipboardRichText';
 import {
@@ -76,6 +77,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const [imagePalette, setImagePalette] = useState<string[]>([]);
   const [openTargetKind, setOpenTargetKind] = useState<'file' | 'link' | 'email' | null>(null);
   const [recognizedEmpty, setRecognizedEmpty] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const operation = useRef(0);
   const feedbackOperation = useRef(0);
   const processing = useRef(false);
@@ -83,7 +85,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const list = useRef<HTMLDivElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    ++operation.current; processing.current = false; paletteRecord.current = null; setBusy(false); setFeedback(null); setFailed(null); setRecognizedEmpty(false); setTextViewMode('rich'); setJsonMode('original'); setImageDataMode('preview'); setImageDataDims(null); setShowQr(false); setQrCodes([]); setImagePalette([]); setOpenTargetKind(null);
+    ++operation.current; processing.current = false; paletteRecord.current = null; setBusy(false); setFeedback(null); setFailed(null); setRecognizedEmpty(false); setConfirmDelete(false); setTextViewMode('rich'); setJsonMode('original'); setImageDataMode('preview'); setImageDataDims(null); setShowQr(false); setQrCodes([]); setImagePalette([]); setOpenTargetKind(null);
     list.current?.scrollTo(0, 0);
     if (!active || !native || !id) { setDetail(null); setLoading(false); return; }
     let disposed = false;
@@ -216,10 +218,15 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     }
     return false;
   }
+  function requestDelete() {
+    if (!current || loading || processing.current) return;
+    if (current.isFavorite || current.isPinned) setConfirmDelete(true);
+    else void action('delete');
+  }
   useEffect(() => {
     if (!active || snapshot.window.recordsEditorOpen) return;
     const dismiss = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      if (confirmDelete || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
         event.preventDefault();
         if (snapshot.window.clipboardTranslationVisible) void command('clipboard_translation_close');
@@ -228,7 +235,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     };
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
-  }, [active, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, snapshot.capabilities.primaryModifier, command]);
+  }, [active, confirmDelete, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, snapshot.capabilities.primaryModifier, command]);
   const hasRichPreview = Boolean(current?.kind === 'text' && current.richTextHtml);
   const showingRich = hasRichPreview && textViewMode === 'rich';
   const copyPlain = hasRichPreview && !showingRich && !showQr;
@@ -260,7 +267,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         onOpenTarget={openTargetAction} onQrCode={qrAction}
         translateActive={snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === shown.id}
         onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
-        onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { void action(type); }} busy={busy} retainDelete />}
+        onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { if (type === 'delete') requestDelete(); else void action(type); }} busy={busy} retainDelete />}
     </header>
     <HistoryList scrollOnly active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
@@ -313,6 +320,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       {current.kind === 'text' && <div><span>Characters</span><span>{current.characterCount?.toLocaleString('en')}</span></div>}
       {current.kind === 'text' && current.richTextFormat && <div><span>{t('clipboardDetailFormat')}</span><span>{richFormatLabel(current.richTextFormat)}</span></div>}
     </footer>}
+    {confirmDelete && current && <ClipboardDeleteConfirm t={t} description={markedDeleteDescription(t, current)} onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void action('delete'); }} />}
     <RecordFeedback message={feedback} />
   </section>;
 }

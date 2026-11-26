@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent } from 'react';
 import type { AppSnapshot } from './contracts';
 import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, sharedRecordActions } from './clipboardShortcuts';
 
-const BLOCKING_OVERLAY_SELECTOR = '.clipboard-editor-layer, .clipboard-context-menu, .history-shortcuts-panel, .clipboard-navigation-confirm';
+const BLOCKING_OVERLAY_SELECTOR = '.clipboard-editor-layer, .clipboard-context-menu, .history-shortcuts-panel, .clipboard-navigation-confirm, .clipboard-delete-confirm';
 
 export function isPreviewShortcutEvent(
   event: KeyboardEvent,

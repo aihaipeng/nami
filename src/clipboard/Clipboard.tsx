@@ -23,6 +23,7 @@ import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
 import { ClipboardNotePreview } from './ClipboardNotePreview';
 import { ClipboardTextPreview } from './ClipboardTextPreview';
+import { ClipboardDeleteConfirm, markedDeleteDescription } from './ClipboardDeleteConfirm';
 import { ClipboardEditor } from './ClipboardEditor';
 import { ClipboardMenu } from './ClipboardMenu';
 import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
@@ -48,6 +49,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ record: ClipboardRecord; source: HTMLElement | null } | null>(null);
   const [textless, setTextless] = useState<ReadonlySet<string>>(() => new Set());
   const operation = useRef(0);
   const processingRevision = useRef(0);
@@ -362,16 +364,23 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
   }
 
+  function commitDelete(record: ClipboardRecord, origin: HTMLElement | null) {
+    if (processing) return;
+    setFeedback(null);
+    const index = ordered.findIndex(({ id }) => id === record.id);
+    if (origin?.closest('article')) {
+      refocus.current = { id: record.id, previous: origin, neighbor: (ordered[index + 1] ?? ordered[index - 1])?.id };
+    }
+    void clipboard.update(record.id, 'delete');
+  }
   function updateRecord(record: ClipboardRecord, action: 'favorite' | 'pin' | 'delete', source?: HTMLElement | null) {
     if (action === 'delete') {
-      if (processing) return;
-      setFeedback(null);
-      const index = ordered.findIndex(({ id }) => id === record.id);
       const origin = source ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-      if (origin?.closest('article')) {
-        refocus.current = { id: record.id, previous: origin, neighbor: (ordered[index + 1] ?? ordered[index - 1])?.id };
+      if (record.isFavorite || record.isPinned) {
+        setPendingDelete({ record, source: origin });
+        return;
       }
-      void clipboard.update(record.id, 'delete');
+      commitDelete(record, origin);
       return;
     }
     if (action === 'pin') {
@@ -385,7 +394,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const canPreview = snapshot.window.clipboardDetailVisible || (clipboard.displayReady && ordered.length > 0);
   useRecordsPreviewShortcut({
     active,
-    blocked: Boolean(editing || menu),
+    blocked: Boolean(editing || menu || pendingDelete),
     canTrigger: canPreview,
     excludedContainers: '.translation-panel, .clipboard-right-panes, .preview-bar',
     snapshot,
@@ -400,7 +409,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
 
   function recordKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     const key = event.nativeEvent;
-    if (!active || menu || editing || event.defaultPrevented || key.isComposing || event.keyCode === 229 || key.key === 'Dead') return;
+    if (!active || menu || editing || pendingDelete || event.defaultPrevented || key.isComposing || event.keyCode === 229 || key.key === 'Dead') return;
     const input = search.current;
     const fromSearch = event.target === input;
     const target = event.target;
@@ -568,7 +577,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
         }}>{t('clipboardResumeRecording')}</button>}
       </div>}
     </HistoryList>
-    <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
+    <HistoryFooter key={session} t={t} snapshot={snapshot} command={command} native={native} active={active && !menu && !editing && !pendingDelete} search={search} favoritesOnly={favoritesOnly} onFavorites={() => { remember(); setKindFilter(null); setFavoritesOnly(kindFilter !== null || !favoritesOnly); }} kind={kindFilter} onKindChange={(next) => { remember(); setFavoritesOnly(false); setKindFilter(next); }} total={clipboard.page.totalRecords} clipboard activation={snapshot.clipboardControls.activation} />
     {menu && menuRecord && <ClipboardMenu key={menuRecord.id} record={menuRecord} snapshot={snapshot} x={menu.x} y={menu.y} canPaste={native && snapshot.capabilities.autoPaste} canTranslate={canTranslateRecord(menuRecord)} canOcr={canOcrRecord(menuRecord)} canCopy={native && snapshot.capabilities.clipboardWrite} canSave={native && snapshot.capabilities.clipboardImageSave && !savingImage} canOpenTarget={usableShortcut('openTarget')} t={t} busy={processing !== null} onClose={() => setMenu(null)} onReturnFocus={() => focusRow(menuRecord.id)} onAction={(action) => {
       setMenu(null);
       if (action === 'paste' || action === 'pastePlain' || action === 'pastePaths' || action === 'copy' || action === 'copyPlain') void useRecord(menuRecord.id, action);
@@ -579,6 +588,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       else updateRecord(menuRecord, action, rowRefs.current.get(menuRecord.id));
     }} />}
     {editing && <ClipboardEditor recordId={editing.id} onClose={() => setEditing(null)} onSaved={(detail) => clipboard.applyEdit(editing.id, detail)} onReturnFocus={() => { editorReturn.current = editing.id; }} />}
+    {pendingDelete && <ClipboardDeleteConfirm t={t} description={markedDeleteDescription(t, pendingDelete.record)} onCancel={() => setPendingDelete(null)} onConfirm={() => { const pending = pendingDelete; setPendingDelete(null); commitDelete(pending.record, pending.source); }} />}
     <RecordFeedback message={active ? processingError ?? (feedback ? t(feedback) : null) : null} />
   </section>;
 }

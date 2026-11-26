@@ -724,7 +724,7 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
-  it('opens capability-matched record actions without pasting, with icons and direct delete for marked records', async () => {
+  it('opens capability-matched record actions without pasting, with icons and confirmed delete for marked records', async () => {
     await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(2));
     fireEvent.contextMenu(row('first'), { clientX: 190, clientY: 200 });
     const menu = screen.getByRole('menu');
@@ -748,6 +748,9 @@ describe('database clipboard history', () => {
     expect(screen.queryByRole('menuitem', { name: 'Paste as Plain Text' })).toBeNull();
     const remove = within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Delete' });
     fireEvent.click(remove);
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete this record?' });
+    expect(row('pinned')).toBeTruthy();
+    fireEvent.keyDown(dialog, { key: 'Enter', code: 'Enter' });
     await waitFor(() => expect(row('pinned')).toBeNull());
     expect(screen.queryByRole('menu')).toBeNull();
     expect(calls('window_hide')).toHaveLength(0);
@@ -1673,9 +1676,41 @@ describe('database clipboard history', () => {
     remove(search, true);
     expect(calls('clipboard_record_update')).toHaveLength(0);
     remove(search);
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete this record?' });
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    fireEvent.keyDown(dialog, { key: 'Enter', code: 'Enter' });
     await waitFor(() => expect(row('pinned')).toBeNull());
     expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'delete' });
     expect(document.activeElement).toBe(search);
+  });
+
+  it.each([
+    ['pinned', { isPinned: true, isFavorite: false }, 'This record is pinned.'],
+    ['favorite', { isPinned: false, isFavorite: true }, 'This record is favorited.'],
+    ['both', { isPinned: true, isFavorite: true }, 'This record is pinned and favorited.'],
+  ] as const)('asks before deleting a %s record and accepts Esc or Enter', async (id, marks, text) => {
+    records = [{ ...records[0], id, ...marks }];
+    await mount('clipboard');
+    await waitFor(() => expect(row(id)).toBeTruthy());
+    fireEvent.click(within(row(id)).getByRole('button', { name: 'Delete clipboard record' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete this record?' });
+    expect(dialog.textContent).toContain(text);
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const confirm = within(dialog).getByRole('button', { name: 'Delete' });
+    expect(cancel.querySelector('kbd')?.textContent).toBe('Esc');
+    expect(confirm.querySelector('kbd')?.textContent).toBe('↵');
+    expect(cancel.getAttribute('aria-keyshortcuts')).toBe('Escape');
+    expect(confirm.getAttribute('aria-keyshortcuts')).toBe('Enter');
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    fireEvent.contextMenu(row(id));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }));
+    expect(calls('clipboard_record_update')).toHaveLength(0);
+    fireEvent.keyDown(row(id).querySelector('.history-row-select')!, { key: 'Backspace', code: 'Backspace', metaKey: true });
+    fireEvent.keyDown(await screen.findByRole('alertdialog'), { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: id, action: 'delete' }));
   });
 
   it('previews the focused record without restoring the record', async () => {
@@ -2792,6 +2827,7 @@ describe('clipboard open target', () => {
     const deleteButton = within(row('first-text')).getByRole('button', { name: 'Delete clipboard record' });
     act(() => deleteButton.focus());
     fireEvent.click(deleteButton);
+    fireEvent.keyDown(await screen.findByRole('alertdialog', { name: 'Delete this record?' }), { key: 'Enter', code: 'Enter' });
     await waitFor(() => expect(listRows()).toHaveLength(2));
     expect(document.activeElement).toBe(within(row('second-text')).getByRole('button', { name: 'Clipboard: Second entry' }));
   });
