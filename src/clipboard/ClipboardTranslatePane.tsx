@@ -7,7 +7,7 @@ import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryList } from '../shared/HistoryList';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { restorePanelFocus } from '../shared/FloatingPanel';
-import { SearchableDropdown } from '../shared/SearchableDropdown';
+import { SearchableDropdown, ServiceMark } from '../shared/SearchableDropdown';
 import { translationShortcutEnabled, type TranslationOutput, type TranslationPreferences } from '../shared/contracts';
 import { inputWithinLimits } from '../shared/input';
 import { languageName, providerLanguages, supportsLanguage, supportsTranslation, type TranslationEngine as Engine } from '../shared/languages';
@@ -593,7 +593,7 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
       <div>
         <span>{t('translateMetaService')}</span>
         <span className="history-row-heading">
-          {serviceMeta.icon && <img className="history-origin" src={serviceMeta.icon} alt="" aria-hidden="true" />}
+          {serviceMeta.icon && <ServiceMark icon={serviceMeta.icon} monochrome={'monochrome' in serviceMeta} className="history-origin" />}
           <span className="history-languages" title={serviceMeta.name}>{serviceMeta.name}</span>
         </span>
       </div>

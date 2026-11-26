@@ -6,7 +6,7 @@ import { supportsTranslation, type TranslationEngine } from './languages';
 export const translationServices = {
   edge: { code: 'edge', name: 'Microsoft Edge Translate', icon: edgeIcon, retry: 'retryWithEdge' },
   google: { code: 'google', name: 'Google Translate', icon: googleIcon, retry: 'retryWithGoogle' },
-  apple: { code: 'apple', name: 'Apple Translate', icon: appleIcon, retry: 'retryWithApple' },
+  apple: { code: 'apple', name: 'Apple Translate', icon: appleIcon, monochrome: true, retry: 'retryWithApple' },
 } as const;
 
 export function availableTranslationServices(appleAvailable: boolean) {

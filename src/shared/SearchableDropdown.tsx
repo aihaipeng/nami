@@ -1,11 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { FloatingPanel, restorePanelFocus } from './FloatingPanel';
 import { matchesLanguage } from './languages';
 import type { Translate } from './i18n';
 
 export function SearchableDropdown({ value, onChange, label, items, t, side = 'top', open, onOpenChange, searchable = true, id: triggerId, capsule = false, settings = false, menuWidth = 200, hiddenTrigger = false, description, valueLabel, iconTrigger, triggerTitle }: {
-  value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string; icon?: string }[];
+  value: string; onChange: (value: string) => void; label: string; items: readonly { code: string; name: string; icon?: string; monochrome?: boolean }[];
   t: Translate; side?: 'top' | 'bottom'; open: boolean; onOpenChange: (open: boolean) => void; searchable?: boolean; id?: string; capsule?: boolean; settings?: boolean; menuWidth?: number;
   hiddenTrigger?: boolean; description?: string; valueLabel?: string; iconTrigger?: ReactNode; triggerTitle?: string;
 }) {
@@ -73,7 +73,7 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
           aria-selected={value === option.code} data-active={active === option.code} tabIndex={-1}
           onMouseDown={(event) => event.preventDefault()} onClick={() => choose(option.code)}>
           {option.icon
-            ? <span className="language-option-label"><img className="language-option-icon" src={option.icon} alt="" aria-hidden="true" /><span>{option.name}</span></span>
+            ? <span className="language-option-label"><ServiceMark icon={option.icon} monochrome={option.monochrome} className="language-option-icon" /><span>{option.name}</span></span>
             : <span>{option.name}</span>}
           {value === option.code && <Check aria-hidden="true" />}
         </button>)}
@@ -81,4 +81,11 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
       </div>
     </FloatingPanel>}
   </>;
+}
+
+export function ServiceMark({ icon, monochrome, className }: { icon: string; monochrome?: boolean; className: string }) {
+  if (monochrome) {
+    return <span className={`${className} history-symbol`} aria-hidden="true" style={{ '--symbol-url': `url("${icon}")` } as CSSProperties} />;
+  }
+  return <img className={className} src={icon} alt="" aria-hidden="true" />;
 }

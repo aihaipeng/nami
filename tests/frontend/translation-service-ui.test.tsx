@@ -214,7 +214,9 @@ describe('translation engine settings', () => {
     await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     await user.click(screen.getByRole('button', { name: 'Translation Service: Microsoft Edge Translate' }));
-    expect(screen.getByRole('option', { name: 'Apple Translate' }).querySelector('img.language-option-icon')?.getAttribute('src')).toContain('apple-translate');
+    const appleOptionIcon = screen.getByRole('option', { name: 'Apple Translate' }).querySelector('.language-option-icon');
+    expect(appleOptionIcon?.classList.contains('history-symbol')).toBe(true);
+    expect(appleOptionIcon?.getAttribute('style')).toContain('url(');
     expect(screen.getByRole('option', { name: 'Microsoft Edge Translate' }).querySelector('img.language-option-icon')).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Google Translate' }).querySelector('img.language-option-icon')).toBeTruthy();
     await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
