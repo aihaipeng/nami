@@ -109,6 +109,7 @@ export function ImagePreview({ recordId, native, active = true, maxDisplayHeight
 
 export function FileIcon({ entry }: { entry: FileEntry }) {
   const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [entry.iconDataUrl]);
   return entry.iconDataUrl && !failed ? <img src={entry.iconDataUrl} decoding="async" alt="" onError={() => setFailed(true)} /> : entry.isDir ? <Folder aria-hidden="true" /> : <File aria-hidden="true" />;
 }
 

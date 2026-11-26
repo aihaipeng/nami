@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { Link2, Mail } from 'lucide-react';
+import { Link, Mail } from 'lucide-react';
 import { recognizeClipboardText } from './contentRecognition';
 
 export function ClipboardTextPreview({
@@ -37,7 +37,7 @@ export function ClipboardTextPreview({
     return (
       <Tag className={className} data-content-kind={kind} data-tauri-drag-region={dragRegion}>
         {leading}
-        <Link2 className="clipboard-inline-icon" aria-hidden="true" />
+        <Link className="clipboard-inline-icon" aria-hidden="true" />
         {match.prefix && <span className="clipboard-link-muted">{match.prefix}</span>}
         <span className="clipboard-link-host">{match.host}</span>
         {match.rest && <span className="clipboard-link-rest">{match.rest}</span>}

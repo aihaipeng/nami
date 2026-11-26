@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { CircleCheck, ExternalLink, FolderOpen, ScanQrCode } from 'lucide-react';
 import type { Translate } from '../shared/i18n';
 import { HistoryIcon } from '../translation/HistoryIcon';
@@ -172,6 +172,66 @@ export function ClipboardDateTimeCard({ dateTime, locale, canCopy, onCopy, t }: 
   </div>;
 }
 
+function FilePathIcon({ className }: { className?: string }) {
+  const id = useId();
+  const topOverlapClip = `${id}-top-overlap`;
+  const upperRingMask = `${id}-upper-mask`;
+  const lowerRingMask = `${id}-lower-mask`;
+  return <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    className={className}
+    data-icon="file-path"
+    aria-hidden="true"
+  >
+    <defs>
+      <clipPath id={topOverlapClip}>
+        <rect x="7.5" y="4" width="9" height="8" />
+      </clipPath>
+      <mask id={upperRingMask}>
+        <rect x="9.3" y="8.2" width="12.6" height="7.6" rx="3.8" stroke="#FFFFFF" strokeWidth="2.8" />
+      </mask>
+      <mask id={lowerRingMask}>
+        <rect x="2.1" y="8.2" width="12.6" height="7.6" rx="3.8" stroke="#FFFFFF" strokeWidth="2.8" />
+      </mask>
+    </defs>
+    <g transform="rotate(-45 12 12)">
+      {/* Upper-right link (bright blue) */}
+      <rect x="9.3" y="8.2" width="12.6" height="7.6" rx="3.8" stroke="#1A9DE2" strokeWidth="2.8" />
+      {/* Contact shadow cast onto the upper-right link at the lower crossing */}
+      <rect
+        x="2.65"
+        y="8.2"
+        width="12.6"
+        height="7.6"
+        rx="3.8"
+        stroke="#003E78"
+        strokeOpacity="0.28"
+        strokeWidth="3.2"
+        mask={`url(#${upperRingMask})`}
+      />
+      {/* Lower-left link (deep blue) */}
+      <rect x="2.1" y="8.2" width="12.6" height="7.6" rx="3.8" stroke="#0178D4" strokeWidth="2.8" />
+      {/* Contact shadow cast onto the lower-left link at the upper crossing */}
+      <g clipPath={`url(#${topOverlapClip})`}>
+        <rect
+          x="8.75"
+          y="8.2"
+          width="12.6"
+          height="7.6"
+          rx="3.8"
+          stroke="#003E78"
+          strokeOpacity="0.28"
+          strokeWidth="3.2"
+          mask={`url(#${lowerRingMask})`}
+        />
+        {/* Interlocking top weave: upper-right link passes over lower-left link */}
+        <rect x="9.3" y="8.2" width="12.6" height="7.6" rx="3.8" stroke="#1A9DE2" strokeWidth="2.8" />
+      </g>
+    </g>
+  </svg>;
+}
+
 export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, onReveal, revealLabel, t }: {
   entries: ReadonlyArray<FileEntry>;
   compact?: boolean;
@@ -188,8 +248,13 @@ export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, 
     return <div className="clipboard-smart-card clipboard-smart-files" data-tauri-drag-region="false">
       <div className="clipboard-smart-rows">
         <div className="clipboard-smart-row">
-          <span className="clipboard-smart-key" title={t('clipboardFilePath')}>{t('clipboardFilePath')}</span>
-          <code className="clipboard-smart-value" title={single.path}>{single.path}</code>
+          <span className="clipboard-smart-key clipboard-smart-file-key" title={t('clipboardFilePath')}>
+            <FilePathIcon className="clipboard-smart-file-path-icon clipboard-smart-file-path-icon-compact" />
+            <span>{t('clipboardFilePath')}</span>
+          </span>
+          {single.exists
+            ? <code className="clipboard-smart-value" title={single.path}>{single.path}</code>
+            : <span className="clipboard-smart-value clipboard-smart-value-plain clipboard-smart-value-missing">{t('clipboardFilePathUnavailable')}</span>}
           <span className="clipboard-smart-actions">
             {onReveal && <button
               type="button"
@@ -202,7 +267,7 @@ export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, 
             >
               <FolderOpen aria-hidden="true" />
             </button>}
-            <SmartCopyButton active={copied === 'file-0'} disabled={!canCopy} label={`${t('copy')} ${single.name}`}
+            <SmartCopyButton active={copied === 'file-0'} disabled={!canCopy || !single.exists} label={`${t('copy')} ${single.name}`}
               onClick={() => { void copyValue('file-0', single.path, onCopy); }} />
           </span>
         </div>
@@ -214,7 +279,7 @@ export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, 
       const key = `file-${index}`;
       return <div className="clipboard-smart-card clipboard-smart-files clipboard-smart-file-item" key={`${index}:${entry.path}`}>
         <div className="clipboard-smart-row clipboard-smart-file-head">
-          <span className="clipboard-file" title={entry.path} data-missing={!entry.exists}>
+          <span className="clipboard-file" title={entry.exists ? entry.path : undefined} data-missing={!entry.exists}>
             <FileIcon entry={entry} />
             <span className="clipboard-file-name">{entry.name}</span>
           </span>
@@ -230,9 +295,12 @@ export function ClipboardFilesCard({ entries, compact = false, canCopy, onCopy, 
             <FolderOpen aria-hidden="true" />
           </button>}
         </div>
-        <div className="clipboard-smart-row clipboard-smart-row-wrap clipboard-smart-divider">
-          <code className="clipboard-smart-value clipboard-smart-value-wrap" title={entry.path}>{entry.path}</code>
-          <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${entry.name}`}
+        <div className="clipboard-smart-row clipboard-smart-row-wrap clipboard-smart-divider clipboard-smart-file-path" data-missing={!entry.exists || undefined}>
+          <FilePathIcon className="clipboard-smart-file-path-icon" />
+          {entry.exists
+            ? <code className="clipboard-smart-value clipboard-smart-value-wrap" title={entry.path}>{entry.path}</code>
+            : <span className="clipboard-smart-value clipboard-smart-value-plain clipboard-smart-value-wrap clipboard-smart-value-missing">{t('clipboardFilePathUnavailable')}</span>}
+          <SmartCopyButton active={copied === key} disabled={!canCopy || !entry.exists} label={`${t('copy')} ${entry.name}`}
             onClick={() => { void copyValue(key, entry.path, onCopy); }} />
         </div>
       </div>;

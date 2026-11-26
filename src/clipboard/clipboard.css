@@ -157,6 +157,11 @@
 .clipboard-smart-actions { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .clipboard-smart-file-head { justify-content: space-between; }
 .clipboard-smart-file-head .clipboard-file { flex: 1; min-width: 0; gap: 6px; }
+.clipboard-smart-file-path { gap: 6px; }
+.clipboard-smart-file-path-icon { width: 20px; height: 20px; flex: 0 0 20px; margin-top: 2px; }
+.clipboard-smart-file-path[data-missing=true] .clipboard-smart-file-path-icon { opacity: .5; filter: grayscale(.45); }
+.clipboard-smart-file-key { display: inline-flex; align-items: center; gap: 5px; }
+.clipboard-smart-file-path-icon-compact { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 0; }
 .clipboard-smart-color-preview { position: relative; height: 34px; border-radius: 7px; overflow: hidden; }
 .clipboard-smart-color-preview[data-alpha=true] { background: repeating-conic-gradient(hsl(var(--foreground) / .18) 0% 25%, hsl(var(--background) / .75) 0% 50%) 50% / 10px 10px; }
 .clipboard-smart-color-preview::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: var(--swatch-color); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .16); }
@@ -177,6 +182,7 @@
 .clipboard-smart-rows .clipboard-smart-value:last-child { grid-column: 2 / -1; }
 .clipboard-smart-params .clipboard-smart-value { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
 .clipboard-smart-value-plain { font-family: inherit; }
+.clipboard-smart-value-missing { color: var(--history-secondary); user-select: none; -webkit-user-select: none; }
 .clipboard-smart-value-wrap { white-space: normal; overflow-wrap: anywhere; }
 .clipboard-smart-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .clipboard-smart-header .clipboard-detail-mode { margin-right: 0; }

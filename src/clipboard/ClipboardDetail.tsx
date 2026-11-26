@@ -247,6 +247,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
     : current?.text ?? '';
   const canCopyDerived = native && current !== null && !loading && snapshot.capabilities.clipboardWrite;
+  const hasMissingFile = Boolean(shown?.kind === 'files' && shown.files.some((entry) => !entry.exists));
   const language = resolveLanguage(snapshot.locale);
   const mac = snapshot.capabilities.platform === 'macos';
   const openTargetAction = current && openTargetKind ? {
@@ -267,7 +268,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         <button type="button" aria-pressed={showingRich} onClick={() => setTextViewMode('rich')}>{t('clipboardRichView')}</button>
         <button type="button" aria-pressed={!showingRich} onClick={() => setTextViewMode('plain')}>{t('clipboardPlainView')}</button>
       </div>}
-      {shown && <RecordActions allowMarkedDelete recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} copyLabel={copyPlain ? t('clipboardCopyPlain') : undefined} deleteLabel={t('deleteClipboard')} canCopy={snapshot.capabilities.clipboardWrite} onCopy={() => action(copyPlain ? 'copyPlain' : 'copy')}
+      {shown && <RecordActions allowMarkedDelete recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} copyLabel={copyPlain ? t('clipboardCopyPlain') : undefined} deleteLabel={t('deleteClipboard')} canCopy={snapshot.capabilities.clipboardWrite && !hasMissingFile} onCopy={() => action(copyPlain ? 'copyPlain' : 'copy')}
         onOpenTarget={openTargetAction} onQrCode={qrAction}
         translateActive={snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === shown.id}
         onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}

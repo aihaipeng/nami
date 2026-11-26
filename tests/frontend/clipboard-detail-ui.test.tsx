@@ -831,13 +831,15 @@ it('shows unified file+path cards for single files, local images, and multi-file
   const record = first();
   record.kind = 'files';
   record.text = JSON.stringify(['/Users/apple/Downloads/report.pdf']);
-  record.files = [{ path: '/Users/apple/Downloads/report.pdf', name: 'report.pdf', exists: true, isDir: false, isImage: false, iconDataUrl: null }];
+  record.files = [{ path: '/Users/apple/Downloads/report.pdf', name: 'report.pdf', exists: true, isDir: false, isImage: false, iconDataUrl: 'data:image/png;base64,aWNvbg==' }];
   direct();
   const copyReport = await within(pane()).findByRole('button', { name: 'Copy report.pdf' });
   expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
   expect(pane().querySelector('.clipboard-files')).toBeNull();
   const singleBlocks = pane().querySelectorAll('.clipboard-smart-file-item');
   expect(singleBlocks).toHaveLength(1);
+  expect(singleBlocks[0].querySelector('.clipboard-file > img')?.getAttribute('src')).toBe('data:image/png;base64,aWNvbg==');
+  expect(singleBlocks[0].querySelector('.clipboard-smart-file-path svg[data-icon="file-path"]')).not.toBeNull();
   fireEvent.click(within(singleBlocks[0] as HTMLElement).getByRole('button', { name: 'Show in Finder: report.pdf' }));
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
   fireEvent.click(copyReport);
@@ -859,12 +861,15 @@ it('shows unified file+path cards for single files, local images, and multi-file
   fireEvent.click(copyImgBtn);
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Pictures/photo.png' }));
 
-  // Missing local image file disables card reveal button but keeps path copyable.
+  // Missing local image file disables card reveal and path copy buttons, and shows Path unavailable (toolbar Copy stays enabled for stored pixels).
   record.files = [{ path: '/Users/apple/Pictures/photo.png', name: 'photo.png', exists: false, isDir: false, isImage: true, iconDataUrl: null }];
   await emit('clipboard_changed', 3);
   const missingImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
   expect((missingImgBtn as HTMLButtonElement).disabled).toBe(true);
-  expect(within(pane()).getByRole('button', { name: 'Copy photo.png' })).toBeTruthy();
+  expect(within(pane()).getByText('Path unavailable')).toBeTruthy();
+  expect(within(pane()).queryByText('/Users/apple/Pictures/photo.png')).toBeNull();
+  expect((within(pane()).getByRole('button', { name: 'Copy photo.png' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((within(pane()).getByRole('button', { name: 'Copy' }) as HTMLButtonElement).disabled).toBe(false);
 
   // Pure pixel screenshot (kind === 'image' with empty files): no file card, no Show in Finder.
   record.files = [];
@@ -872,27 +877,42 @@ it('shows unified file+path cards for single files, local images, and multi-file
   await waitFor(() => expect(pane().querySelector('.clipboard-smart-files')).toBeNull());
   expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
 
-  // Multiple files: each file+path is a self-contained block with per-file reveal and copy buttons, and no Folder row.
+  // Multiple files: existing files show path + enabled copy; missing files show Path unavailable with disabled copy and disable toolbar Copy.
   record.kind = 'files';
-  record.text = JSON.stringify(['/Users/apple/Desktop/a.txt', '/Users/apple/Desktop/b.txt']);
+  record.text = JSON.stringify(['/Users/apple/Desktop/a.txt', '/Users/apple/Desktop/b.txt', '/Users/apple/Desktop/trashed-dir']);
   record.files = [
     { path: '/Users/apple/Desktop/a.txt', name: 'a.txt', exists: true, isDir: false, isImage: false, iconDataUrl: null },
     { path: '/Users/apple/Desktop/b.txt', name: 'b.txt', exists: false, isDir: false, isImage: false, iconDataUrl: null },
+    { path: '/Users/apple/Desktop/trashed-dir', name: 'trashed-dir', exists: false, isDir: true, isImage: false, iconDataUrl: null },
   ];
   await emit('clipboard_changed', 5);
-  await within(pane()).findByRole('button', { name: 'Copy b.txt' });
+  await within(pane()).findByRole('button', { name: 'Copy a.txt' });
+  expect((within(pane()).getByRole('button', { name: 'Copy' }) as HTMLButtonElement).disabled).toBe(true);
   expect(within(pane()).queryByText('Folder')).toBeNull();
   expect(pane().querySelector('.clipboard-files')).toBeNull();
   const blocks = pane().querySelectorAll('.clipboard-smart-file-item');
-  expect(blocks).toHaveLength(2);
+  expect(blocks).toHaveLength(3);
   const revealA = within(blocks[0] as HTMLElement).getByRole('button', { name: 'Show in Finder: a.txt' });
   expect((revealA as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(revealA);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
   const revealB = within(blocks[1] as HTMLElement).getByRole('button', { name: 'Show in Finder: b.txt' });
   expect((revealB as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(within(blocks[1] as HTMLElement).getByRole('button', { name: 'Copy b.txt' }));
-  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Desktop/b.txt' }));
+  expect(blocks[1].querySelector('.clipboard-file svg.lucide-file')).not.toBeNull();
+  expect(within(blocks[1] as HTMLElement).getByText('Path unavailable')).toBeTruthy();
+  expect(blocks[1].querySelector('.clipboard-smart-file-path svg[data-icon="file-path"]')).not.toBeNull();
+  expect(within(blocks[1] as HTMLElement).queryByText('/Users/apple/Desktop/b.txt')).toBeNull();
+  expect((within(blocks[1] as HTMLElement).getByRole('button', { name: 'Copy b.txt' }) as HTMLButtonElement).disabled).toBe(true);
+  // Trashed/deleted folder keeps the folder icon instead of falling back to a file icon, and shows Path unavailable with disabled copy.
+  const trashedFileEl = blocks[2].querySelector('.clipboard-file') as HTMLElement;
+  expect(trashedFileEl.dataset.missing).toBe('true');
+  expect(trashedFileEl.querySelector('svg.lucide-folder')).not.toBeNull();
+  expect(trashedFileEl.querySelector('svg.lucide-file')).toBeNull();
+  expect(within(blocks[2] as HTMLElement).getByText('Path unavailable')).toBeTruthy();
+  expect(within(blocks[2] as HTMLElement).queryByText('/Users/apple/Desktop/trashed-dir')).toBeNull();
+  expect((within(blocks[2] as HTMLElement).getByRole('button', { name: 'Copy trashed-dir' }) as HTMLButtonElement).disabled).toBe(true);
+  const revealTrashedDir = within(blocks[2] as HTMLElement).getByRole('button', { name: 'Show in Finder: trashed-dir' });
+  expect((revealTrashedDir as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('renders inline SVG/data-URI preview toggle, Cron schedule, safe math, and radix/chmod cards', async () => {

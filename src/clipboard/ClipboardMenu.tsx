@@ -35,7 +35,12 @@ export function ClipboardMenu({ record, snapshot, x, y, canPaste, canCopy, canSa
   ] : record.kind === 'files' ? [
     [paste, { action: 'pastePaths', label: t('clipboardPastePaths'), icon: pasteIcon, disabled: !canPaste }, copy],
     [{ action: 'openTarget', label: t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager'), icon: <FolderOpen aria-hidden="true" />, disabled: !canOpenTarget }],
-    marks, remove,
+    marks,
+    ...(canTranslate || canOcr ? [[
+      ...(canTranslate ? [{ action: 'translate' as const, label: 'Translate', description: t('clipboardTranslatePrivacy'), icon: <HistoryIcon name="languages" />, disabled: busy }] : []),
+      ...(canOcr ? [{ action: 'ocr' as const, label: t('clipboardShortcutOcr'), description: t('clipboardOcrPrivacy'), icon: <HistoryIcon name="ocr" />, disabled: busy }] : []),
+    ]] : []),
+    remove,
   ] : [
     [paste, { action: 'pastePlain', label: t('clipboardPastePlain'), icon: pasteIcon, disabled: !canPaste }, copy, { action: 'copyPlain', label: t('clipboardCopyPlain'), icon: <HistoryIcon name="doc.on.doc" />, disabled: !canCopy }],
     marks, remove,

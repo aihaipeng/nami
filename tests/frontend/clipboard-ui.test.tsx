@@ -436,6 +436,17 @@ describe('clipboard text processing', () => {
     }
     expect(within(row('blank-file')).getByRole('button', { name: 'Extract text' })).toBeTruthy();
     expect(calls('clipboard_record_has_text')).toHaveLength(0);
+    // Context menu mirrors row actions for single existing image files and omits them for ordinary files.
+    fireEvent.contextMenu(row('image-file'));
+    const imageMenu = screen.getByRole('menu');
+    expect(within(imageMenu).getByRole('menuitem', { name: /Translate/i })).toBeTruthy();
+    expect(within(imageMenu).getByRole('menuitem', { name: /Extract text/i })).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    fireEvent.contextMenu(row('document-file'));
+    const docMenu = screen.getByRole('menu');
+    expect(within(docMenu).queryByRole('menuitem', { name: /Translate/i })).toBeNull();
+    expect(within(docMenu).queryByRole('menuitem', { name: /Extract text/i })).toBeNull();
+    fireEvent.pointerDown(document.body);
     for (const label of ['Translate', 'Extract text']) await act(async () => fireEvent.click(within(row('image-file')).getByRole('button', { name: label })));
     expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'image-file', action: 'translate' }, { recordId: 'image-file', action: 'ocr' }]);
   });
@@ -2493,16 +2504,22 @@ describe('database clipboard history', () => {
     const entries = [
       { path: '/synthetic/report.pdf', name: 'report.pdf', exists: true, isDir: false, isImage: false, iconDataUrl: 'data:image/png;base64,aWNvbg==' },
       { path: '/synthetic/folder', name: 'folder', exists: true, isDir: true, isImage: false, iconDataUrl: null },
+      { path: '/synthetic/deleted-folder', name: 'deleted-folder', exists: false, isDir: true, isImage: false, iconDataUrl: null },
       { path: '/synthetic/missing.png', name: 'missing.png', exists: false, isDir: false, isImage: true, iconDataUrl: null },
     ];
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_files' ? entries : original(name, args));
     await mount('clipboard');
     await screen.findByText('report.pdf');
-    expect(row('first').querySelectorAll('.clipboard-file')).toHaveLength(3);
+    expect(row('first').querySelectorAll('.clipboard-file')).toHaveLength(4);
     expect(row('first').querySelector('[title="/synthetic/report.pdf"] img')?.getAttribute('src')).toBe(entries[0].iconDataUrl);
     expect(screen.getByText('folder').parentElement?.title).toBe('/synthetic/folder');
+    const deletedFolder = screen.getByText('deleted-folder').parentElement!;
+    expect(deletedFolder.dataset.missing).toBe('true');
+    expect(deletedFolder.querySelector('svg.lucide-folder')).not.toBeNull();
+    expect(deletedFolder.querySelector('svg.lucide-file')).toBeNull();
     expect(screen.getByText('missing.png').parentElement?.dataset.missing).toBe('true');
+    expect(screen.getByText('missing.png').parentElement?.querySelector('svg.lucide-file')).not.toBeNull();
     expect(screen.queryByText('truncated path summary')).toBeNull();
     expect(calls('clipboard_image')).toHaveLength(0);
   });
@@ -3322,7 +3339,9 @@ describe('clipboard open target', () => {
     const linkPreview = row('link-row').querySelector<HTMLElement>('.history-text-preview')!;
     expect(linkPreview.dataset.contentKind).toBe('link');
     expect(linkPreview.textContent).toBe('https://github.com/aihaipeng/nami');
-    expect(linkPreview.querySelector('.clipboard-inline-icon')?.getAttribute('aria-hidden')).toBe('true');
+    const linkIcon = linkPreview.querySelector('.clipboard-inline-icon');
+    expect(linkIcon?.getAttribute('aria-hidden')).toBe('true');
+    expect(linkIcon?.classList.contains('lucide-link')).toBe(true);
     expect(linkPreview.querySelector('.clipboard-link-muted')?.textContent).toBe('https://');
     expect(linkPreview.querySelector('.clipboard-link-host')?.textContent).toBe('github.com');
     expect(linkPreview.querySelector('.clipboard-link-rest')?.textContent).toBe('/aihaipeng/nami');
