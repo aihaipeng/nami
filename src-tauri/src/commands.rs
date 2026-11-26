@@ -1111,68 +1111,212 @@ pub async fn translation_shortcuts_restore(
     window: Webview,
     app: AppHandle,
     general: Option<bool>,
+    group: Option<nami::shortcuts::ShortcutRestoreGroup>,
 ) -> Result<(), String> {
-    use crate::shortcuts::is_general_window_action;
+    use crate::shortcuts::{
+        clipboard_binding, is_general_window_action, validate_clipboard_binding,
+        validate_quick_paste_reservation, ShortcutAction, ShortcutRestoreGroup,
+    };
     authorize(&window, &["settings"])?;
-    let general = general.unwrap_or(false);
     let state = app.state::<AppState>();
     let _write = state.shortcut_writes.lock().await;
-    let mut preferences = state.translation_preferences.lock().unwrap().clone();
+    let primary = platform::capabilities().primary_modifier;
+    let current_preferences = state.translation_preferences.lock().unwrap().clone();
     let current_records = state
         .clipboard_options
         .lock()
         .unwrap()
         .record_shortcuts
         .clone();
-    let records = general
-        .then(|| current_records.restore_general())
-        .transpose()?;
-    let clipboard = state.clipboard_shortcut.lock().unwrap().binding.clone();
-    preferences.shortcuts = preferences.shortcuts.restore_group(
-        general,
-        platform::capabilities().primary_modifier,
-        clipboard.as_ref(),
-    )?;
-    preferences
-        .disabled_shortcuts
-        .retain(|action| is_general_window_action(*action) != general);
-    if !general {
-        preferences.selection_enabled = true;
+    let current_clipboard = state.clipboard_shortcut.lock().unwrap().clone();
+
+    let mut next_preferences: Option<crate::translation::Preferences> = None;
+    let mut next_records: Option<nami::shortcuts::ClipboardRecordShortcuts> = None;
+    let mut next_clipboard: Option<crate::ClipboardShortcut> = None;
+    let mut update_selection_enabled = false;
+    let mut sync_globals = false;
+    let mut stage_bindings = Vec::new();
+
+    match group {
+        Some(ShortcutRestoreGroup::Global) => {
+            if !platform::capabilities().selection {
+                return Err("platform_unavailable".into());
+            }
+            let default_clipboard = clipboard_binding();
+            let mut preferences = current_preferences.clone();
+            preferences.shortcuts = preferences.shortcuts.restore_actions(
+                &[ShortcutAction::OpenTranslation, ShortcutAction::Selection],
+                primary,
+                Some(&default_clipboard),
+            )?;
+            validate_clipboard_binding(default_clipboard.clone(), &preferences.shortcuts)?;
+            validate_quick_paste_reservation(&default_clipboard)?;
+            preferences
+                .disabled_shortcuts
+                .retain(|action| !action.is_global_translation());
+            preferences.selection_enabled = true;
+            if preferences
+                .shortcuts
+                .conflicts_with_records(&current_records)
+                || current_records.conflicts(&default_clipboard, None)
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+            stage_bindings.push(crate::binding_shortcut(&default_clipboard)?);
+            if let Some(binding) = preferences.global_binding(ShortcutAction::Selection) {
+                stage_bindings.push(crate::binding_shortcut(binding)?);
+            }
+            next_preferences = Some(preferences);
+            next_clipboard = Some(crate::ClipboardShortcut {
+                binding: Some(default_clipboard),
+                enabled: true,
+            });
+            update_selection_enabled = true;
+            sync_globals = true;
+        }
+        Some(ShortcutRestoreGroup::Window) => {
+            let records = current_records.restore_window()?;
+            let mut preferences = current_preferences.clone();
+            let actions = [
+                ShortcutAction::FocusSearch,
+                ShortcutAction::Pin,
+                ShortcutAction::ShowShortcuts,
+                ShortcutAction::OpenSettings,
+            ];
+            preferences.shortcuts = preferences.shortcuts.restore_actions(
+                &actions,
+                primary,
+                current_clipboard.binding.as_ref(),
+            )?;
+            preferences
+                .disabled_shortcuts
+                .retain(|action| !is_general_window_action(*action));
+            if preferences.shortcuts.conflicts_with_records(&records)
+                || current_clipboard
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| records.conflicts(binding, None))
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+            next_preferences = Some(preferences);
+            next_records = Some(records);
+        }
+        Some(ShortcutRestoreGroup::Records) => {
+            let records = current_records.restore_records()?;
+            if current_preferences
+                .shortcuts
+                .conflicts_with_records(&records)
+                || current_clipboard
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| records.conflicts(binding, None))
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+            next_records = Some(records);
+        }
+        Some(ShortcutRestoreGroup::Translation) => {
+            let mut preferences = current_preferences.clone();
+            let actions = [
+                ShortcutAction::Translate,
+                ShortcutAction::CopyPrimary,
+                ShortcutAction::CopySecondary,
+            ];
+            preferences.shortcuts = preferences.shortcuts.restore_actions(
+                &actions,
+                primary,
+                current_clipboard.binding.as_ref(),
+            )?;
+            preferences
+                .disabled_shortcuts
+                .retain(|action| !actions.contains(action));
+            if preferences
+                .shortcuts
+                .conflicts_with_records(&current_records)
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+            next_preferences = Some(preferences);
+        }
+        None => {
+            let general = general.unwrap_or(false);
+            let records = general
+                .then(|| current_records.restore_general())
+                .transpose()?;
+            let mut preferences = current_preferences.clone();
+            preferences.shortcuts = preferences.shortcuts.restore_group(
+                general,
+                primary,
+                current_clipboard.binding.as_ref(),
+            )?;
+            preferences
+                .disabled_shortcuts
+                .retain(|action| is_general_window_action(*action) != general);
+            if !general {
+                preferences.selection_enabled = true;
+                update_selection_enabled = true;
+                sync_globals = true;
+            }
+            let effective_records = records.as_ref().unwrap_or(&current_records);
+            if preferences
+                .shortcuts
+                .conflicts_with_records(effective_records)
+                || current_clipboard
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| effective_records.conflicts(binding, None))
+            {
+                return Err("shortcut_clipboard_panel".into());
+            }
+            if !general && platform::capabilities().selection {
+                if let Some(binding) = preferences.global_binding(ShortcutAction::Selection) {
+                    stage_bindings.push(crate::binding_shortcut(binding)?);
+                }
+            }
+            next_preferences = Some(preferences);
+            next_records = records;
+        }
     }
-    let next_records = records.as_ref().unwrap_or(&current_records);
-    if preferences.shortcuts.conflicts_with_records(next_records)
-        || clipboard
-            .as_ref()
-            .is_some_and(|binding| next_records.conflicts(binding, None))
-    {
-        return Err("shortcut_clipboard_panel".into());
-    }
+
     let json =
         |value: Result<String, serde_json::Error>| value.map_err(|_| "storage_record".to_owned());
-    let bindings = json(serde_json::to_string(&preferences.shortcuts))?;
-    let disabled = json(serde_json::to_string(&preferences.disabled_shortcuts))?;
-    let next_records_json = records
+    let bindings_json = next_preferences
+        .as_ref()
+        .map(|value| json(serde_json::to_string(&value.shortcuts)))
+        .transpose()?;
+    let disabled_json = next_preferences
+        .as_ref()
+        .map(|value| json(serde_json::to_string(&value.disabled_shortcuts)))
+        .transpose()?;
+    let selection_enabled = update_selection_enabled
+        .then(|| {
+            next_preferences
+                .as_ref()
+                .map(|value| value.selection_enabled)
+        })
+        .flatten();
+    let records_json = next_records
         .as_ref()
         .map(|value| json(serde_json::to_string(value)))
         .transpose()?;
-    let selection_enabled = preferences.selection_enabled;
-    use crate::shortcuts::ShortcutAction::Selection;
-    let next = [Selection]
-        .into_iter()
-        .filter(|_| !general && platform::capabilities().selection)
-        .filter_map(|action| preferences.global_binding(action))
-        .map(crate::binding_shortcut)
-        .collect::<Result<Vec<_>, _>>()?;
-    let staged = stage_global_shortcuts(&app, next).await?;
+    let clipboard_json = next_clipboard
+        .as_ref()
+        .map(|value| json(serde_json::to_string(&value.binding)))
+        .transpose()?;
+
+    let staged = stage_global_shortcuts(&app, stage_bindings).await?;
     let saved = crate::clipboard_runtime::database(&app, move |db| {
         db.reset_shortcut_group(
-            &bindings,
-            &disabled,
+            bindings_json.as_deref(),
+            disabled_json.as_deref(),
             selection_enabled,
-            next_records_json.as_deref(),
+            records_json.as_deref(),
+            clipboard_json.as_deref(),
         )
     })
     .await;
+    let published_clipboard = next_clipboard.clone();
     on_main(&app, move |app| {
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let state = app.state::<AppState>();
@@ -1183,18 +1327,37 @@ pub async fn translation_shortcuts_restore(
             return Err(error);
         }
         state.registered_shortcuts.lock().unwrap().extend(staged);
-        *state.translation_preferences.lock().unwrap() = preferences.clone();
-        if let Some(records) = records {
+        if let Some(clipboard) = next_clipboard {
+            *state.clipboard_shortcut.lock().unwrap() = clipboard;
+        }
+        if let Some(records) = next_records {
             state.clipboard_options.lock().unwrap().record_shortcuts = records;
             crate::clipboard_preferences::publish_controls(&app, &state);
         }
-        if !general {
+        if let Some(preferences) = next_preferences {
+            *state.translation_preferences.lock().unwrap() = preferences.clone();
+            if sync_globals {
+                crate::sync_global_shortcuts(&app);
+            }
+            publish_preferences(&app, &preferences)?;
+        } else if sync_globals {
             crate::sync_global_shortcuts(&app);
         }
-        publish_preferences(&app, &preferences)
+        Ok(())
     })
     .await??;
-    crate::clipboard_runtime::sync_pin_paste_keys(&app).await
+    crate::clipboard_runtime::sync_pin_paste_keys(&app).await?;
+    if let Some(clipboard) = published_clipboard {
+        let _ = app.emit(
+            "clipboard_binding_changed",
+            serde_json::json!({
+                "binding": clipboard.binding,
+                "enabled": clipboard.enabled,
+                "shortcutErrors": state.shortcut_errors.lock().unwrap().clone(),
+            }),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -238,7 +238,7 @@ describe('translation engine settings', () => {
   it('shows independent open and autofill shortcuts with the same default', async () => {
     const user = userEvent.setup(); await mount('settings');
     await user.click(screen.getByRole('button', { name: 'HotKey' }));
-    const group = within(screen.getByRole('group', { name: 'Translation' }));
+    const group = within(screen.getByRole('group', { name: 'Global' }));
     const open = group.getByRole<HTMLInputElement>('checkbox', { name: 'Open Translation' });
     const autofill = group.getByRole<HTMLInputElement>('checkbox', { name: 'Autofill Input' });
     const openKey = group.getByRole('button', { name: /^Open Translation Shortcut/i });

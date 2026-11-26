@@ -2606,7 +2606,7 @@ document.querySelector('button[aria-label="HotKey"]').click();return true;
             r#"
 const groups=[...document.querySelectorAll('.hotkey-group')];
 if(!groups.length)return {ready:false};
-if(groups.map(group=>group.children.length).join()!=='10,6,5')throw Error('shortcut groups must contain the general and panel actions');
+if(groups.map(group=>group.children.length).join()!=='3,5,11,3')throw Error('shortcut groups must contain global, window, record actions, and translation');
 const allRows=[...document.querySelectorAll('.hotkey-group .settings-shortcut-row')];
 const rows=allRows.filter(row=>row.querySelector('.settings-recorder'));
 if(rows.length!==allRows.length)throw Error('every shortcut needs a recorder');
@@ -2620,7 +2620,7 @@ for(const selector of ['.settings-recorder','.keycaps kbd','input']) {
 }
 if(getComputedStyle(document.querySelector('.hotkey-group .settings-clear')).color!==window.__clipboardMutedIcon)throw Error('shortcut clear must share the muted icon color');
 const button=document.querySelector('[aria-label="Open Clipboard History shortcut"]');
-if(!groups[1].contains(button)||button.disabled||!groups[2].contains(document.querySelector('[aria-label="Open Translation shortcut"]')))throw Error('global launch shortcuts must be in their own groups');
+if(!groups[0].contains(button)||button.disabled||!groups[0].contains(document.querySelector('[aria-label="Open Translation shortcut"]'))||!groups[0].contains(document.querySelector('[aria-label="Autofill Input shortcut"]')))throw Error('global launch shortcuts must be in the Global group');
 return {ready:true};
 "#,
         )?;
@@ -2928,20 +2928,20 @@ return {ready:true,editedWhileUnchecked:true};
             app,
             "settings",
             r#"
-document.querySelector('#clipboard-shortcut-heading').parentElement.querySelector('button').click();return true;
+document.querySelector('#global-shortcuts-heading').parentElement.querySelector('button').click();return true;
 "#,
         )?;
         samples.push(wait_view_dom(
             app,
             "settings",
             r#"
-const group=document.querySelector('[role=group][aria-labelledby=clipboard-shortcut-heading]');
+const group=document.querySelector('[role=group][aria-labelledby=global-shortcuts-heading]');
 const bindings=[...group.querySelectorAll('.settings-recorder')].map(button=>button.textContent);
 const enabled=[...group.querySelectorAll('input[type=checkbox]')].every(input=>input.checked);
-const general=document.querySelector('[role=group][aria-labelledby=general-shortcut-heading]');
-const kept=[...general.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
-const preview=general.querySelector('[aria-label="Preview shortcut"]');
-return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⌘T','⌘O','⇧⌘O','⌘↵','⌘S'].join(),bindings,kept};
+const records=document.querySelector('[role=group][aria-labelledby=record-shortcuts-heading]');
+const kept=[...records.querySelectorAll('.settings-recorder')].some(button=>button.textContent==='⌥G'&&!button.closest('.settings-shortcut-row').querySelector('input').checked);
+const preview=records.querySelector('[aria-label="Preview shortcut"]');
+return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.settings-shortcut-row').querySelector('input').checked&&bindings.join()===['⌃`','⌘T','⌘T'].join(),bindings,kept};
 "#,
         )?);
         {
@@ -2958,7 +2958,7 @@ return {ready:enabled&&kept&&preview?.textContent==='⌥F6'&&!preview.closest('.
                     .preference("clipboard_record_shortcuts")?
                     .is_none_or(|stored| !stored.contains("KeyM") || !stored.contains("KeyG"))
             {
-                return Err("clipboard shortcut defaults were not saved".into());
+                return Err("global shortcut defaults were not saved".into());
             }
         }
         evaluate_view_dom(
@@ -3000,7 +3000,7 @@ window.__TAURI_INTERNALS__.invoke('translation_shortcut_set',{action:'selection'
 const invoke=window.__TAURI_INTERNALS__.invoke;
 window.__occupiedRestore=null;
 (async()=>{
-  let error;try {await invoke('translation_shortcuts_restore',{general:false});} catch(value) {error=String(value);}
+  let error;try {await invoke('translation_shortcuts_restore',{group:'global'});} catch(value) {error=String(value);}
   const preferences=(await invoke('app_snapshot')).translationPreferences;
   window.__occupiedRestore={error,selection:preferences.shortcuts.selection?.code,open:preferences.shortcuts.openTranslation?.code};
 })();return true;
@@ -3071,15 +3071,17 @@ window.__groupRestore=null;
   await set('openTranslation',{code:'F8',modifiers:[]});
   await set('openTranslation',null,false);
   await set('focusSearch',null,false);
+  await local('switchCategory',{code:'KeyV',modifiers:['alt']});
+  await local('switchCategory',null,false);
   await set('translate',{code:'KeyZ',modifiers:['alt']});
   await set('translate',null,false);
   await set('selection',null,false);
   await local('ocr',{code:'KeyF',modifiers:['meta']});
   let conflict;
-  try {await invoke('translation_shortcuts_restore',{general:true});} catch(error) {conflict=String(error);}
+  try {await invoke('translation_shortcuts_restore',{group:'window'});} catch(error) {conflict=String(error);}
   const read=()=>invoke('app_snapshot');
   let p=await read();
-  if(conflict!=='shortcut_clipboard_panel'||p.translationPreferences.shortcuts.focusSearch.code!=='KeyU'||p.clipboardControls.shortcuts.pin.binding.code!=='KeyG')throw Error('conflicting restore changed saved shortcuts');
+  if(conflict!=='shortcut_clipboard_panel'||p.translationPreferences.shortcuts.focusSearch.code!=='KeyU'||p.clipboardControls.shortcuts.pin.binding.code!=='KeyG'||p.clipboardControls.shortcuts.switchCategory.binding.code!=='KeyV')throw Error('conflicting restore changed saved shortcuts');
   await local('ocr',{code:'KeyO',modifiers:['shift','meta']});
   await local('preview',{code:'KeyY',modifiers:['alt']});
   const waitRestored=async(predicate)=>{
@@ -3091,15 +3093,23 @@ window.__groupRestore=null;
     }
     throw Error('restore did not publish new bindings');
   };
-  document.querySelector('#general-shortcut-heading').parentElement.querySelector('button').click();
+  document.querySelector('#window-shortcuts-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.focusSearch.code==='KeyF');
   let t=p.translationPreferences,c=p.clipboardControls.shortcuts;
-  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='Space'||c.preview.binding.modifiers.length!==0||!c.preview.enabled)throw Error('general defaults were not restored');
-  if(t.shortcuts.translate.code!=='KeyZ'||!t.disabledShortcuts.includes('translate')||t.selectionEnabled)throw Error('general restore changed another section');
+  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.switchCategory.binding.code!=='Tab'||!c.switchCategory.enabled)throw Error('window defaults were not restored');
+  if(c.pin.binding.code!=='KeyG'||c.preview.binding.code!=='KeyY'||t.shortcuts.translate.code!=='KeyZ'||!t.disabledShortcuts.includes('translate')||t.selectionEnabled)throw Error('window restore changed another section');
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
+  document.querySelector('#record-shortcuts-heading').parentElement.querySelector('button').click();
+  p=await waitRestored(snapshot=>snapshot.clipboardControls.shortcuts.preview.binding?.code==='Space');
+  t=p.translationPreferences;c=p.clipboardControls.shortcuts;
+  if(c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='Space'||c.preview.binding.modifiers.length!==0||!c.preview.enabled)throw Error('record action defaults were not restored');
+  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='KeyZ'||t.selectionEnabled)throw Error('record action restore changed another section');
   document.querySelector('#translation-shortcuts-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.translate.code==='Enter');t=p.translationPreferences;
-  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||!t.selectionEnabled||t.shortcuts.openTranslation?.code!=='KeyT'||t.disabledShortcuts.includes('openTranslation')||p.clipboardControls.shortcuts.preview.binding.code!=='Space'||p.clipboardControls.shortcuts.preview.binding.modifiers.length!==0)throw Error('translation restore changed another section or missed a translation default');
+  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||t.selectionEnabled||t.shortcuts.openTranslation?.code!=='F8'||!t.disabledShortcuts.includes('openTranslation'))throw Error('translation restore changed another section or missed a translation default');
+  document.querySelector('#global-shortcuts-heading').parentElement.querySelector('button').click();
+  p=await waitRestored(snapshot=>snapshot.translationPreferences.selectionEnabled&&snapshot.translationPreferences.shortcuts.openTranslation?.code==='KeyT');t=p.translationPreferences;
+  if(t.shortcuts.focusSearch.code!=='KeyU'||!t.selectionEnabled||t.shortcuts.openTranslation?.code!=='KeyT'||t.disabledShortcuts.includes('openTranslation')||p.clipboardBinding?.code!=='Backquote'||!p.clipboardShortcutEnabled)throw Error('global restore changed another section or missed a global default');
   window.__groupRestore={done:true};
 })().catch(error=>window.__groupRestore={done:true,error:String(error)});
 return true;
@@ -4679,6 +4689,7 @@ fn records_open_measurement(
     let script = format!(
         r#"
 const token={};
+const pageReady=(p,rows)=>p?.querySelector('.history-items[data-virtualized=true]')?.dataset.loadedCount==='100'&&rows.length>0&&rows.length<100;
 window.__recordsOpenVisibilityLog??=[];
 if(!window.__recordsOpenVisibilityBound){{
   window.__recordsOpenVisibilityBound=true;
@@ -4697,7 +4708,7 @@ if(window.__recordsOpenProbe?.token!==token){{
       probe.frames++;probe.staleFilteredFrames+=Number(!!query||favorite!=='false'||kind!==null);probe.loadingFrames+=Number(loading);
       probe.firstObserved??={{rows:rows.length,count,query,favorite,kind,loading}};
     }}
-    if(visible&&rows.length===100&&count==='100 records'&&query===''&&favorite==='false'&&kind===null&&input&&!input.disabled&&!input.readOnly&&{target}&&document.hasFocus()&&document.fonts.status==='loaded'){{
+    if(visible&&pageReady(p,rows)&&count==='100 records'&&query===''&&favorite==='false'&&kind===null&&input&&!input.disabled&&!input.readOnly&&{target}&&document.hasFocus()&&document.fonts.status==='loaded'){{
       requestAnimationFrame(()=>{{probe.presented=true;}});
     }}else requestAnimationFrame(sample);
   }};
@@ -4705,7 +4716,7 @@ if(window.__recordsOpenProbe?.token!==token){{
 }}
 const p=document.querySelector('.clipboard-panel'),input=p?.querySelector('.history-search input'),rows=[...p?.querySelectorAll('.history-row:not([hidden])')??[]],probe=window.__recordsOpenProbe;
 if(p&&!window.__recordsOpenPanel)window.__recordsOpenPanel=p;
-return {{ready:probe.presented&&rows.length===100&&p?.querySelector('.history-record-count')?.textContent==='100 records'&&input?.value===''&&p?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&!p?.querySelector('.history-kind[aria-pressed=true]'),rows:rows.length,total:p?.querySelector('.history-record-count')?.textContent,query:input?.value,favorite:p?.querySelector('.history-favorites')?.getAttribute('aria-pressed'),kind:p?.querySelector('.history-kind[aria-pressed=true]')?.getAttribute('aria-label')??null,samePanel:!!p&&window.__recordsOpenPanel===p,openingTargetFocused:!!input&&!input.disabled&&!input.readOnly&&{target},activeRecord:document.activeElement?.closest('[data-record-id]')?.dataset.recordId??null,openingRecord:(rows.find(row=>!row.classList.contains('pinned'))??rows[0])?.dataset.recordId??null,hoveredRows:p?.querySelectorAll('.history-row:hover').length??0,syntheticOnly:rows.every(row=>row.dataset.recordId.startsWith('open-record-')),visible:!!p?.getClientRects().length&&!p.closest('[hidden]'),documentFocused:document.hasFocus(),activeElement:document.activeElement?.className,documentVisibility:document.visibilityState,visibilityEvents:window.__recordsOpenVisibilityLog,fonts:document.fonts.status,error:p?.querySelector('[role=alert]')?.textContent,...probe}};
+return {{ready:probe.presented&&pageReady(p,rows)&&p?.querySelector('.history-record-count')?.textContent==='100 records'&&input?.value===''&&p?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&!p?.querySelector('.history-kind[aria-pressed=true]'),rows:rows.length,total:p?.querySelector('.history-record-count')?.textContent,query:input?.value,favorite:p?.querySelector('.history-favorites')?.getAttribute('aria-pressed'),kind:p?.querySelector('.history-kind[aria-pressed=true]')?.getAttribute('aria-label')??null,samePanel:!!p&&window.__recordsOpenPanel===p,openingTargetFocused:!!input&&!input.disabled&&!input.readOnly&&{target},activeRecord:document.activeElement?.closest('[data-record-id]')?.dataset.recordId??null,openingRecord:(rows.find(row=>!row.classList.contains('pinned'))??rows[0])?.dataset.recordId??null,hoveredRows:p?.querySelectorAll('.history-row:hover').length??0,syntheticOnly:rows.every(row=>row.dataset.recordId.startsWith('open-record-')),visible:!!p?.getClientRects().length&&!p.closest('[hidden]'),documentFocused:document.hasFocus(),activeElement:document.activeElement?.className,documentVisibility:document.visibilityState,visibilityEvents:window.__recordsOpenVisibilityLog,fonts:document.fonts.status,error:p?.querySelector('[role=alert]')?.textContent,...probe}};
 "#,
         serde_json::to_string(label).unwrap()
     );
@@ -6388,7 +6399,7 @@ fn run_records_open(app: &AppHandle) -> DomCase {
             })?;
             let ready = wait_records(
                 app,
-                r#"const p=document.querySelector('.clipboard-panel'),rows=[...p?.querySelectorAll('.history-row:not([hidden])')??[]];return {ready:rows.length===100&&p?.querySelector('.history-record-count')?.textContent==='100 records',rows:rows.length,error:p?.querySelector('[role=alert]')?.textContent};"#,
+                r#"const p=document.querySelector('.clipboard-panel'),rows=[...p?.querySelectorAll('.history-row:not([hidden])')??[]];const loaded=p?.querySelector('.history-items[data-virtualized=true]')?.dataset.loadedCount;return {ready:loaded==='100'&&rows.length>0&&rows.length<100&&p?.querySelector('.history-record-count')?.textContent==='100 records',loaded,rows:rows.length,error:p?.querySelector('[role=alert]')?.textContent};"#,
             )?;
             let after = records_open_runtime_state(app);
             if before != after

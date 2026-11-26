@@ -16,6 +16,15 @@ pub enum ShortcutAction {
     OpenSettings,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShortcutRestoreGroup {
+    Global,
+    Window,
+    Records,
+    Translation,
+}
+
 impl ShortcutAction {
     pub fn parse(value: &str) -> Result<Self, String> {
         Ok(match value {
@@ -179,24 +188,34 @@ impl TranslationShortcuts {
         })
     }
 
+    pub fn restore_actions(
+        &self,
+        actions: &[ShortcutAction],
+        primary: &str,
+        clipboard: Option<&KeyBinding>,
+    ) -> Result<Self, String> {
+        let defaults = Self::defaults(primary);
+        let mut next = self.clone();
+        for action in actions {
+            next.set(*action, None);
+        }
+        for action in actions {
+            next = assign_shortcut(&next, *action, defaults.get(*action).cloned(), clipboard)?;
+        }
+        Ok(next)
+    }
+
     pub fn restore_group(
         &self,
         general: bool,
         primary: &str,
         clipboard: Option<&KeyBinding>,
     ) -> Result<Self, String> {
-        let defaults = Self::defaults(primary);
-        let actions = TRANSLATION_ACTIONS
+        let actions: Vec<_> = TRANSLATION_ACTIONS
             .into_iter()
-            .filter(|action| is_general_window_action(*action) == general);
-        let mut next = self.clone();
-        for action in actions.clone() {
-            next.set(action, None);
-        }
-        for action in actions {
-            next = assign_shortcut(&next, action, defaults.get(action).cloned(), clipboard)?;
-        }
-        Ok(next)
+            .filter(|action| is_general_window_action(*action) == general)
+            .collect();
+        self.restore_actions(&actions, primary, clipboard)
     }
 
     pub fn get(&self, action: ShortcutAction) -> Option<&KeyBinding> {
@@ -412,6 +431,24 @@ impl ClipboardRecordShortcuts {
             translate: self.translate.clone(),
             paste_plain: self.paste_plain.clone(),
             save_image: self.save_image.clone(),
+            switch_category: self.switch_category.clone(),
+            ..Self::default()
+        };
+        restored.validate_unique()?;
+        Ok(restored)
+    }
+
+    pub fn restore_window(&self) -> Result<Self, String> {
+        let restored = Self {
+            switch_category: Self::default().switch_category,
+            ..self.clone()
+        };
+        restored.validate_unique()?;
+        Ok(restored)
+    }
+
+    pub fn restore_records(&self) -> Result<Self, String> {
+        let restored = Self {
             switch_category: self.switch_category.clone(),
             ..Self::default()
         };
@@ -1643,6 +1680,131 @@ mod tests {
         assert_eq!(
             rebound.selection,
             Some(KeyBinding::new("KeyJ", &["alt", "meta"]))
+        );
+    }
+
+    #[test]
+    fn restore_window_records_and_translation_subsets_are_scoped_and_validate_conflicts() {
+        use ClipboardRecordAction::{Preview, SwitchCategory};
+        use ShortcutAction::{
+            CopyPrimary, FocusSearch, OpenTranslation, Pin, Selection, Translate,
+        };
+
+        let mut records = ClipboardRecordShortcuts::default();
+        records
+            .set(
+                SwitchCategory,
+                Some(KeyBinding::new("KeyJ", &["alt"])),
+                None,
+                &[],
+            )
+            .unwrap();
+        records.set(SwitchCategory, None, Some(false), &[]).unwrap();
+        records
+            .set(Preview, Some(KeyBinding::new("KeyY", &["alt"])), None, &[])
+            .unwrap();
+        records.set(Preview, None, Some(false), &[]).unwrap();
+
+        let window_restored = records.restore_window().unwrap();
+        assert_eq!(
+            window_restored.switch_category.binding,
+            ClipboardRecordShortcuts::default().switch_category.binding
+        );
+        assert!(window_restored.switch_category.enabled);
+        assert_eq!(
+            window_restored.preview.binding,
+            Some(KeyBinding::new("KeyY", &["alt"]))
+        );
+        assert!(!window_restored.preview.enabled);
+
+        let records_restored = records.restore_records().unwrap();
+        assert_eq!(
+            records_restored.preview.binding,
+            ClipboardRecordShortcuts::default().preview.binding
+        );
+        assert!(records_restored.preview.enabled);
+        assert_eq!(
+            records_restored.switch_category.binding,
+            Some(KeyBinding::new("KeyJ", &["alt"]))
+        );
+        assert!(!records_restored.switch_category.enabled);
+
+        // Moving Preview onto Tab should make restore_window fail due to duplicate binding.
+        let mut conflicting = records.clone();
+        conflicting
+            .set(Preview, Some(KeyBinding::new("Tab", &[])), None, &[])
+            .unwrap();
+        assert_eq!(
+            conflicting.restore_window().err().as_deref(),
+            Some("shortcut_clipboard_panel")
+        );
+
+        // TranslationShortcuts::restore_actions restores only the requested subset.
+        let mut translation = TranslationShortcuts::defaults("meta");
+        translation.selection = Some(KeyBinding::new("F7", &[]));
+        translation.open_translation = Some(KeyBinding::new("F8", &[]));
+        translation.focus_search = Some(KeyBinding::new("KeyU", &["meta"]));
+        translation.translate = Some(KeyBinding::new("KeyZ", &["alt"]));
+        translation.copy_primary = None;
+
+        let only_translation = translation
+            .restore_actions(
+                &[Translate, CopyPrimary, ShortcutAction::CopySecondary],
+                "meta",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            only_translation.translate,
+            Some(KeyBinding::new("Enter", &["meta"]))
+        );
+        assert_eq!(
+            only_translation.copy_primary,
+            Some(KeyBinding::new("Digit1", &["meta"]))
+        );
+        assert_eq!(only_translation.selection, Some(KeyBinding::new("F7", &[])));
+        assert_eq!(
+            only_translation.focus_search,
+            Some(KeyBinding::new("KeyU", &["meta"]))
+        );
+
+        let only_global = translation
+            .restore_actions(&[OpenTranslation, Selection], "meta", None)
+            .unwrap();
+        assert_eq!(
+            only_global.selection,
+            Some(KeyBinding::new("KeyT", &["meta"]))
+        );
+        assert_eq!(
+            only_global.open_translation,
+            Some(KeyBinding::new("KeyT", &["meta"]))
+        );
+        assert_eq!(
+            only_global.translate,
+            Some(KeyBinding::new("KeyZ", &["alt"]))
+        );
+        assert_eq!(only_global.pin, Some(KeyBinding::new("KeyP", &["meta"])));
+
+        let only_window = translation
+            .restore_actions(
+                &[
+                    FocusSearch,
+                    Pin,
+                    ShortcutAction::ShowShortcuts,
+                    ShortcutAction::OpenSettings,
+                ],
+                "meta",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            only_window.focus_search,
+            Some(KeyBinding::new("KeyF", &["meta"]))
+        );
+        assert_eq!(only_window.selection, Some(KeyBinding::new("F7", &[])));
+        assert_eq!(
+            only_window.translate,
+            Some(KeyBinding::new("KeyZ", &["alt"]))
         );
     }
 }

@@ -1708,20 +1708,32 @@ impl HistoryDatabase {
 
     pub fn reset_shortcut_group(
         &mut self,
-        bindings: &str,
-        disabled: &str,
-        selection_enabled: bool,
+        bindings: Option<&str>,
+        disabled: Option<&str>,
+        selection_enabled: Option<bool>,
         records: Option<&str>,
+        clipboard_binding: Option<&str>,
     ) -> Result<(), String> {
+        let selection = selection_enabled.map(|value| value.to_string());
+        let clipboard_enabled = clipboard_binding.map(|_| "true");
         self.connection
             .execute(
                 "INSERT INTO preferences(key,value)
-             SELECT 'translation_shortcuts', ?1 UNION ALL
-             SELECT 'translation_disabled_shortcuts', ?2 UNION ALL
-             SELECT 'translation_selection_enabled', ?3 UNION ALL
-             SELECT 'clipboard_record_shortcuts', ?4 WHERE ?4 IS NOT NULL
+             SELECT 'translation_shortcuts', ?1 WHERE ?1 IS NOT NULL UNION ALL
+             SELECT 'translation_disabled_shortcuts', ?2 WHERE ?2 IS NOT NULL UNION ALL
+             SELECT 'translation_selection_enabled', ?3 WHERE ?3 IS NOT NULL UNION ALL
+             SELECT 'clipboard_record_shortcuts', ?4 WHERE ?4 IS NOT NULL UNION ALL
+             SELECT 'clipboard_shortcut', ?5 WHERE ?5 IS NOT NULL UNION ALL
+             SELECT 'clipboard_shortcut_enabled', ?6 WHERE ?6 IS NOT NULL
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![bindings, disabled, selection_enabled.to_string(), records],
+                params![
+                    bindings,
+                    disabled,
+                    selection,
+                    records,
+                    clipboard_binding,
+                    clipboard_enabled,
+                ],
             )
             .map_err(storage_error)?;
         Ok(())

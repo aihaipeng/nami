@@ -194,17 +194,47 @@ beforeEach(() => {
       return;
     }
     if (name === 'translation_shortcuts_restore') {
-      const general = (args as { general?: boolean } | undefined)?.general;
+      const { general, group } = (args as { general?: boolean; group?: 'global' | 'window' | 'records' | 'translation' } | undefined) ?? {};
       const preferences = bridge.snapshot.translationPreferences;
       const primary = bridge.snapshot.capabilities.primaryModifier;
       const defaults = defaultTranslationShortcuts(primary);
+      const recordDefaults = defaultClipboardShortcuts(primary);
+      if (group === 'global') {
+        bridge.snapshot.clipboardBinding = defaultClipboardBinding;
+        bridge.snapshot.clipboardShortcutEnabled = true;
+        for (const action of globalTranslationActions) preferences.shortcuts[action] = defaults[action];
+        preferences.disabledShortcuts = preferences.disabledShortcuts.filter((action) => !globalTranslationActions.some((entry) => entry === action));
+        preferences.selectionEnabled = true;
+        deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
+        deliver('clipboard_binding_changed', { binding: bridge.snapshot.clipboardBinding, enabled: bridge.snapshot.clipboardShortcutEnabled, shortcutErrors: bridge.snapshot.shortcutErrors });
+        return;
+      }
+      if (group === 'window') {
+        for (const action of recordWindowActions) preferences.shortcuts[action] = defaults[action];
+        preferences.disabledShortcuts = preferences.disabledShortcuts.filter((action) => !recordWindowActions.some((entry) => entry === action));
+        bridge.snapshot.clipboardControls.shortcuts.switchCategory = recordDefaults.switchCategory;
+        deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
+        deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
+        return;
+      }
+      if (group === 'records') {
+        const currentSwitch = bridge.snapshot.clipboardControls.shortcuts.switchCategory;
+        Object.assign(bridge.snapshot.clipboardControls.shortcuts, recordDefaults, { switchCategory: currentSwitch });
+        deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
+        return;
+      }
+      if (group === 'translation') {
+        for (const action of translationWindowActions) preferences.shortcuts[action] = defaults[action];
+        preferences.disabledShortcuts = preferences.disabledShortcuts.filter((action) => !translationWindowActions.some((entry) => entry === action));
+        deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
+        return;
+      }
       const actions: readonly ShortcutAction[] = general ? recordWindowActions : [...globalTranslationActions, ...translationWindowActions];
       for (const action of actions) preferences.shortcuts[action] = defaults[action];
       preferences.disabledShortcuts = preferences.disabledShortcuts.filter((action) => !actions.includes(action));
       if (!general) preferences.selectionEnabled = true;
       if (general) {
-        const defaults = defaultClipboardShortcuts(primary);
-        for (const action of sharedRecordActions) bridge.snapshot.clipboardControls.shortcuts[action] = defaults[action];
+        for (const action of sharedRecordActions) bridge.snapshot.clipboardControls.shortcuts[action] = recordDefaults[action];
         deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
       }
       deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
