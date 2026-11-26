@@ -214,6 +214,9 @@ describe('translation engine settings', () => {
     await mount('settings');
     await user.click(screen.getByRole('button', { name: /^Translation$/ }));
     await user.click(screen.getByRole('button', { name: 'Translation Service: Microsoft Edge Translate' }));
+    expect(screen.getByRole('option', { name: 'Apple Translate' }).querySelector('img.language-option-icon')?.getAttribute('src')).toContain('apple-translate');
+    expect(screen.getByRole('option', { name: 'Microsoft Edge Translate' }).querySelector('img.language-option-icon')).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Google Translate' }).querySelector('img.language-option-icon')).toBeTruthy();
     await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
     expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'apple' });
     expect(await screen.findByText(/does not use the HTTP proxy/)).toBeTruthy();

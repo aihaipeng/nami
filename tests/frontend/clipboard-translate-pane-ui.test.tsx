@@ -457,11 +457,14 @@ describe('clipboard attached translate pane', () => {
     fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
     await waitFor(() => expect(within(translatePane()).getByText('Synthetic translation 1')).toBeTruthy());
     await user.click(within(translatePane()).getByRole('button', { name: 'Translation Service: Google Translate' }));
+    expect(screen.getByRole('option', { name: 'Apple Translate' }).querySelector('img.language-option-icon')?.getAttribute('src')).toContain('apple-translate');
     await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
     await waitFor(() => expect(calls('translation_run').at(-1)?.[1]).toEqual({
       text: 'Hello world', source: 'auto', targets: ['en'], scope: 'clipboard', retryEngine: 'apple',
     }));
-    await waitFor(() => expect(within(translatePane().querySelector<HTMLElement>('.clipboard-detail-metadata')!).getByText('Apple Translate')).toBeTruthy());
+    const appleMetadata = translatePane().querySelector<HTMLElement>('.clipboard-detail-metadata')!;
+    await waitFor(() => expect(within(appleMetadata).getByText('Apple Translate')).toBeTruthy());
+    expect(appleMetadata.querySelector('img.history-origin')?.getAttribute('src')).toContain('apple-translate');
     await user.click(within(translatePane()).getByRole('button', { name: 'Esperanto (unavailable)' }));
     expect(within(translatePane()).getByText(/not supported/)).toBeTruthy();
     expect(calls('translation_preferences_set')).toHaveLength(0);

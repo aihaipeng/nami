@@ -1,3 +1,4 @@
+import appleIcon from '../assets/translation/apple-translate.svg?url';
 import edgeIcon from '../assets/translation/microsoft-edge-translate.svg?url';
 import googleIcon from '../assets/translation/google-translate.svg?url';
 import { supportsTranslation, type TranslationEngine } from './languages';
@@ -5,7 +6,7 @@ import { supportsTranslation, type TranslationEngine } from './languages';
 export const translationServices = {
   edge: { code: 'edge', name: 'Microsoft Edge Translate', icon: edgeIcon, retry: 'retryWithEdge' },
   google: { code: 'google', name: 'Google Translate', icon: googleIcon, retry: 'retryWithGoogle' },
-  apple: { code: 'apple', name: 'Apple Translate', icon: undefined, retry: 'retryWithApple' },
+  apple: { code: 'apple', name: 'Apple Translate', icon: appleIcon, retry: 'retryWithApple' },
 } as const;
 
 export function availableTranslationServices(appleAvailable: boolean) {
