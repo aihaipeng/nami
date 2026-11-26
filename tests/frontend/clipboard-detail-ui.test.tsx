@@ -359,7 +359,8 @@ describe('clipboard details', () => {
     direct();
     fireEvent.click(await within(pane()).findByRole('button', { name: 'Delete clipboard record' }));
     const dialog = await screen.findByRole('alertdialog', { name: 'Delete this record?' });
-    expect(dialog.textContent).toContain('This record is favorited.');
+    expect(dialog.textContent).toContain('This record is favorited and cannot be recovered.');
+    expect(document.activeElement).not.toBe(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(within(dialog).getByRole('button', { name: 'Cancel' }).querySelector('kbd')?.textContent).toBe('Esc');
     expect(within(dialog).getByRole('button', { name: 'Delete' }).querySelector('kbd')?.textContent).toBe('↵');
     fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });

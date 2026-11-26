@@ -48,10 +48,16 @@
 .clipboard-editor-layer.closing .clipboard-editor { transition-duration: 140ms; }
 @media (prefers-reduced-motion: reduce) { .clipboard-record-title, .clipboard-record-content { transition-duration: 0ms !important; } .clipboard-editor-layer, .clipboard-editor.floating-panel { transition-duration: 1ms !important; } }
 
-.clipboard-delete-confirm { width: min(320px, calc(100vw - 32px)); padding: 16px; border: 1px solid hsl(var(--foreground) / .12); border-radius: 12px; background: var(--glass-surface); color: hsl(var(--foreground)); box-shadow: 0 8px 30px rgb(0 0 0 / .25); }
+.clipboard-delete-confirm { width: min(320px, calc(100vw - 32px)); padding: 14px 10px 8px 14px; border: 1px solid hsl(var(--foreground) / .12); border-radius: 12px; background: var(--glass-surface); color: hsl(var(--foreground)); box-shadow: 0 8px 30px rgb(0 0 0 / .25); outline: none; }
+.clipboard-delete-confirm:focus, .clipboard-delete-confirm:focus-visible { outline: none; }
 .clipboard-delete-confirm::backdrop { background: rgb(0 0 0 / .32); }
 .clipboard-delete-confirm strong { display: block; font-size: 13px; font-weight: 650; }
-.clipboard-delete-confirm p { margin: 8px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.clipboard-delete-confirm p { margin: 6px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.clipboard-delete-confirm-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 12px; }
+.clipboard-delete-confirm-actions button { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; border-radius: 6px; font-size: 11px; line-height: 1; background: hsl(var(--foreground) / .07); }
+.clipboard-delete-confirm-actions button:hover:not(:disabled) { background: hsl(var(--foreground) / .13); }
+.clipboard-delete-confirm-actions .keycaps { gap: 2px; }
+.clipboard-delete-confirm-actions kbd { min-width: 14px; height: 14px; padding: 0 3px; border-radius: 3px; font-size: 10px; }
 .clipboard-delete-confirm .clipboard-delete-confirm-action { color: var(--history-red, hsl(var(--destructive))); }
 .clipboard-navigation-confirm { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 16px; border-radius: inherit; background: hsl(var(--background) / .96); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); font-size: 12px; }
 .clipboard-navigation-confirm strong { font-size: 13px; }

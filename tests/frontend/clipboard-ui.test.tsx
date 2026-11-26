@@ -1685,9 +1685,9 @@ describe('database clipboard history', () => {
   });
 
   it.each([
-    ['pinned', { isPinned: true, isFavorite: false }, 'This record is pinned.'],
-    ['favorite', { isPinned: false, isFavorite: true }, 'This record is favorited.'],
-    ['both', { isPinned: true, isFavorite: true }, 'This record is pinned and favorited.'],
+    ['pinned', { isPinned: true, isFavorite: false }, 'This record is pinned and cannot be recovered.'],
+    ['favorite', { isPinned: false, isFavorite: true }, 'This record is favorited and cannot be recovered.'],
+    ['both', { isPinned: true, isFavorite: true }, 'This record is pinned and favorited and cannot be recovered.'],
   ] as const)('asks before deleting a %s record and accepts Esc or Enter', async (id, marks, text) => {
     records = [{ ...records[0], id, ...marks }];
     await mount('clipboard');
@@ -1701,7 +1701,8 @@ describe('database clipboard history', () => {
     expect(confirm.querySelector('kbd')?.textContent).toBe('↵');
     expect(cancel.getAttribute('aria-keyshortcuts')).toBe('Escape');
     expect(confirm.getAttribute('aria-keyshortcuts')).toBe('Enter');
-    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(document.activeElement).not.toBe(cancel);
+    fireEvent.keyDown(document.body, { key: 'Escape', code: 'Escape' });
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(calls('clipboard_record_update')).toHaveLength(0);
     fireEvent.contextMenu(row(id));
