@@ -211,7 +211,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       <strong>{t('hotKey')}</strong>
       <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
       <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
-      {categoryBinding && <div><span>{t('switchCategory')}</span><span>{keyLabel(categoryBinding)}{categoryBinding.modifiers.includes('shift') ? '' : ` / ${keyLabel({ code: categoryBinding.code, modifiers: [...categoryBinding.modifiers, 'shift'] })}`}</span></div>}
+      {categoryBinding && <div><span>{t('switchCategory')}</span><span>{keyLabel(categoryBinding)}</span></div>}
       {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘ 1～5</span></div>}
       {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
