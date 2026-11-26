@@ -188,7 +188,7 @@ describe('clipboard type filters', () => {
     expect(within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('HotKey')).toBeTruthy();
     const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
       (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
-    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Group': '⇥ / ⇧ ⇥', 'Paste one of first 5 items': '⌘ 1～5', 'Open Clipboard History': '⌃ `', 'Paste as Plain Text': '⌘ ↵', 'Save Image': '⌘ S', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T' });
+    expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Group': 'Tab / ⇧ Tab', 'Paste one of first 5 items': '⌘ 1～5', 'Open Clipboard History': '⌃ `', 'Paste as Plain Text': '⌘ ↵', 'Save Image': '⌘ S', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T' });
     view.rerender(<HistoryFooter {...props} t={translator('zh-CN')} clipboard activation="paste" />);
     expect(entries()).toMatchObject({ '粘贴前5项': '⌘ 1～5' });
     view.rerender(<HistoryFooter {...props} clipboard activation="paste" />);

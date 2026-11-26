@@ -160,7 +160,7 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S'], ['Switch Group', 'switchCategory', '⇥']])(
+  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S'], ['Switch Group', 'switchCategory', 'Tab']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
