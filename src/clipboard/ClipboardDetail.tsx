@@ -34,7 +34,6 @@ import { ClipboardTextPreview } from './ClipboardTextPreview';
 import { extractImagePalette } from './imagePalette';
 import { analyzeSmartDetail, canEncodeQr } from './smartDetail';
 import { resolveLanguage } from '../shared/i18n';
-import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import type { ClipboardRecord } from './useClipboard';
 import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
 import type { ClipboardResult } from '../shared/contracts';
@@ -212,13 +211,6 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     }
     return false;
   }
-  useRecordsPreviewShortcut({
-    active: active && !snapshot.window.recordsEditorOpen,
-    excludedContainers: '.records-workspace, .translation-panel, .clipboard-translate-pane, .preview-bar',
-    snapshot,
-    native,
-    onPreview: () => { void command('records_details_toggle'); },
-  });
   useEffect(() => {
     if (!active || snapshot.window.recordsEditorOpen) return;
     const dismiss = (event: KeyboardEvent) => {

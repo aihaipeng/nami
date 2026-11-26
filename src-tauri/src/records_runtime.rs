@@ -31,7 +31,7 @@ pub(crate) fn defer_navigation_with_target(
         .ok_or("window_unavailable")?;
     view.emit("records_navigation_requested", ())
         .map_err(|_| "event_emit")?;
-    windows::focus_records_editor(app)?;
+    windows::focus_records(app)?;
     Ok(true)
 }
 

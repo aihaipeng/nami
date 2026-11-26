@@ -427,6 +427,7 @@ fn main() {
             commands::translation_cancel,
             commands::translation_copy,
             commands::translation_engine_set,
+            commands::translation_language_settings_open,
             commands::translation_preferences_set,
             commands::translation_shortcut_set,
             commands::translation_shortcuts_restore,

@@ -1,0 +1,23 @@
+[
+  {"code": "ar", "name": "Arabic", "source": true, "target": true},
+  {"code": "zh-CN", "name": "Chinese (Simplified)", "source": true, "target": true},
+  {"code": "zh-TW", "name": "Chinese (Traditional)", "source": true, "target": true},
+  {"code": "nl", "name": "Dutch", "source": true, "target": true},
+  {"code": "en", "name": "English", "source": true, "target": true},
+  {"code": "en-GB", "name": "English (UK)", "source": true, "target": true},
+  {"code": "fr", "name": "French", "source": true, "target": true},
+  {"code": "de", "name": "German", "source": true, "target": true},
+  {"code": "hi", "name": "Hindi", "source": true, "target": true},
+  {"code": "id", "name": "Indonesian", "source": true, "target": true},
+  {"code": "it", "name": "Italian", "source": true, "target": true},
+  {"code": "ja", "name": "Japanese", "source": true, "target": true},
+  {"code": "ko", "name": "Korean", "source": true, "target": true},
+  {"code": "pl", "name": "Polish", "source": true, "target": true},
+  {"code": "pt", "name": "Portuguese (Brazil)", "source": true, "target": true},
+  {"code": "ru", "name": "Russian", "source": true, "target": true},
+  {"code": "es", "name": "Spanish", "source": true, "target": true},
+  {"code": "th", "name": "Thai", "source": true, "target": true},
+  {"code": "tr", "name": "Turkish", "source": true, "target": true},
+  {"code": "uk", "name": "Ukrainian", "source": true, "target": true},
+  {"code": "vi", "name": "Vietnamese", "source": true, "target": true}
+]

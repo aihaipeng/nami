@@ -297,8 +297,8 @@ impl Default for ClipboardRecordShortcuts {
             ["control", "shift"]
         };
         Self {
-            preview: enabled("KeyY", &[primary]),
-            note: enabled("KeyN", &shifted),
+            preview: enabled("Space", &[]),
+            note: enabled("KeyN", &[primary]),
             ocr: enabled("KeyO", &shifted),
             open_target: enabled("KeyO", &[primary]),
             translate: enabled(
@@ -309,10 +309,10 @@ impl Default for ClipboardRecordShortcuts {
                     &shifted
                 },
             ),
-            favorite: enabled("KeyF", &["alt"]),
-            pin: enabled("KeyP", &["alt"]),
+            favorite: enabled("KeyD", &[primary]),
+            pin: enabled("KeyP", &[primary]),
             delete: enabled("Backspace", &[primary]),
-            copy_record: enabled("KeyC", &shifted),
+            copy_record: enabled("KeyC", &[primary]),
             paste_plain: enabled("Enter", &[primary]),
             save_image: enabled("KeyS", &[primary]),
         }
@@ -519,29 +519,14 @@ impl ClipboardRecordShortcuts {
                 for action in reserved.into_iter().flatten() {
                     let _ = shortcuts.set(action, None, None, &[]);
                 }
-                // Newly added defaults yield to existing assignments on upgrade.
-                for (key, slot) in [("note", &mut shortcuts.note), ("ocr", &mut shortcuts.ocr)] {
-                    if value.get(key).is_none()
-                        && slot.binding.as_ref().is_some_and(|binding| {
-                            [
-                                &shortcuts.preview,
-                                &shortcuts.favorite,
-                                &shortcuts.pin,
-                                &shortcuts.delete,
-                            ]
-                            .into_iter()
-                            .any(|current| {
-                                current
-                                    .binding
-                                    .as_ref()
-                                    .is_some_and(|current| same_binding(binding, current))
-                            })
-                        })
-                    {
-                        slot.binding = None;
-                    }
-                }
+                // Missing defaults must not displace any saved binding.
                 for (key, action) in [
+                    ("preview", ClipboardRecordAction::Preview),
+                    ("note", ClipboardRecordAction::Note),
+                    ("favorite", ClipboardRecordAction::Favorite),
+                    ("pin", ClipboardRecordAction::Pin),
+                    ("delete", ClipboardRecordAction::Delete),
+                    ("ocr", ClipboardRecordAction::Ocr),
                     ("openTarget", ClipboardRecordAction::OpenTarget),
                     ("translate", ClipboardRecordAction::Translate),
                     ("copyRecord", ClipboardRecordAction::CopyRecord),
@@ -549,14 +534,16 @@ impl ClipboardRecordShortcuts {
                     ("saveImage", ClipboardRecordAction::SaveImage),
                 ] {
                     if value.get(key).is_none() {
-                        let binding = shortcuts
-                            .entries()
-                            .into_iter()
-                            .find(|(candidate, _)| *candidate == action)
-                            .and_then(|(_, slot)| slot.binding.clone());
-                        if binding
-                            .as_ref()
-                            .is_some_and(|binding| shortcuts.conflicts(binding, Some(action)))
+                        let binding =
+                            shortcuts
+                                .entries()
+                                .into_iter()
+                                .find_map(|(candidate, slot)| {
+                                    (candidate == action)
+                                        .then_some(slot.binding.as_ref())
+                                        .flatten()
+                                });
+                        if binding.is_some_and(|binding| shortcuts.conflicts(binding, Some(action)))
                         {
                             let _ = shortcuts.set(action, None, None, &[]);
                         }
@@ -920,7 +907,7 @@ mod tests {
         let mut shortcuts = ClipboardRecordShortcuts::default();
         let action = ClipboardRecordAction::Pin;
         let global = KeyBinding::new("KeyJ", &["meta"]);
-        for conflict in [KeyBinding::new("KeyF", &["alt"]), global.clone()] {
+        for conflict in [shortcuts.favorite.binding.clone().unwrap(), global.clone()] {
             assert_eq!(
                 shortcuts.set(action, Some(conflict), None, &[Some(&global)]),
                 Err("shortcut_clipboard_panel".into())
@@ -960,6 +947,40 @@ mod tests {
             assert_eq!(normalize_binding(binding.clone()), Ok(binding));
             assert!(shortcut.enabled);
         }
+    }
+
+    #[test]
+    fn shared_record_defaults_match_general_and_do_not_replace_saved_bindings() {
+        let defaults = ClipboardRecordShortcuts::default();
+        let primary = if cfg!(target_os = "macos") {
+            "meta"
+        } else {
+            "control"
+        };
+        assert_eq!(
+            defaults.preview.binding,
+            Some(KeyBinding::new("Space", &[]))
+        );
+        for (slot, code) in [
+            (&defaults.note, "KeyN"),
+            (&defaults.copy_record, "KeyC"),
+            (&defaults.favorite, "KeyD"),
+            (&defaults.pin, "KeyP"),
+        ] {
+            assert_eq!(slot.binding, Some(KeyBinding::new(code, &[primary])));
+            assert!(slot.enabled);
+        }
+        let old = serde_json::json!({
+            "preview": {"binding": {"code": "KeyY", "modifiers": [primary]}, "enabled": false},
+            "pin": {"binding": {"code": "KeyD", "modifiers": [primary]}, "enabled": true},
+            "note": {"binding": null, "enabled": true},
+        });
+        let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
+        let saved = serde_json::to_value(restored).unwrap();
+        for key in ["preview", "pin", "note"] {
+            assert_eq!(saved[key], old[key]);
+        }
+        assert!(saved["favorite"]["binding"].is_null());
     }
 
     #[test]

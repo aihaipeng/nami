@@ -488,6 +488,23 @@ unsafe fn running(target: Target) -> Option<Retained<AnyObject>> {
 /// and tao keeps its event handler lock for the whole callback of a task posted
 /// with `run_on_main_thread`. A view redraw inside that nested loop re-takes
 /// the lock and would block the main thread against itself.
+pub fn open_translation_language_settings() -> Result<(), String> {
+    if !nami::translation::apple_available() {
+        return Err("platform_unavailable".into());
+    }
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let url = NSURL::URLWithString(ns_string!(
+            "x-apple.systempreferences:com.apple.Localization-Settings.extension"
+        ))
+        .ok_or("translation_settings_open_failed")?;
+        let opened: bool = msg_send![workspace, openURL: &*url];
+        opened
+            .then_some(())
+            .ok_or_else(|| "translation_settings_open_failed".into())
+    }
+}
+
 pub fn open_clipboard_target(
     target: nami::clipboard::open_target::OpenTarget,
 ) -> Result<(), String> {

@@ -148,6 +148,10 @@ pub fn file_icon_data_url(_: &str) -> Option<String> {
     None
 }
 
+pub fn open_translation_language_settings() -> Result<(), String> {
+    Err("platform_unavailable".into())
+}
+
 pub fn open_clipboard_target(_: nami::clipboard::open_target::OpenTarget) -> Result<(), String> {
     Err("platform_unavailable".into())
 }

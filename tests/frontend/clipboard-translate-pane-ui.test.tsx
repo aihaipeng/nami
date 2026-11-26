@@ -66,7 +66,7 @@ beforeEach(() => {
       return;
     }
     if (name === 'translation_run') {
-      const request = args as { text: string; source: string; targets: string[]; retryEngine?: 'edge' | 'google' };
+      const request = args as { text: string; source: string; targets: string[]; retryEngine?: string };
       const output = await original(name, args) as { translation: Record<string, unknown>; [key: string]: unknown };
       const engine = request.retryEngine ?? bridge.snapshot.translationEngine;
       return {
@@ -162,7 +162,7 @@ describe('clipboard attached translate pane', () => {
     expect(within(detailPane()).getByRole('button', { name: 'Translate' }).getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('shows full language names in top tabs, dynamic 3rd metadata row with Auto-Detect prefix, switches languages with targeted retranslation, and keeps source read-only', async () => {
+  it('shows full language names in top tabs, dynamic language metadata row with Auto-Detect prefix, switches languages with targeted retranslation, and keeps source read-only', async () => {
     const user = userEvent.setup();
     await mount('translation');
     await waitFor(() => expect(listRow('first')).toBeTruthy());
@@ -174,10 +174,10 @@ describe('clipboard attached translate pane', () => {
     expect(translatePane().querySelector('.clipboard-translate-footer')).toBeNull();
     expect(translatePane().querySelector('.clipboard-translate-tab-arrow')).toBeNull();
 
-    // Aligned metadata footer shows official Service icon + name, Characters, and active tab role/language
+    // Metadata shows Characters, active tab language, then Service with its icon
     const metadata = translatePane().querySelector<HTMLElement>('.clipboard-detail-metadata')!;
-    expect(metadata).toBeTruthy();
-    expect(within(metadata).getByText('Service')).toBeTruthy();
+    const metadataLabels = () => Array.from(metadata.children, (row) => row.firstElementChild?.textContent);
+    expect(metadataLabels()).toEqual(['Characters', 'Primary', 'Service']);
     expect(within(metadata).getByText('Microsoft Edge Translate')).toBeTruthy();
     expect(metadata.querySelector<HTMLImageElement>('img.history-origin')?.getAttribute('src')).toBeTruthy();
     expect(within(metadata).getByText('Characters')).toBeTruthy();
@@ -222,10 +222,10 @@ describe('clipboard attached translate pane', () => {
       reuseTargetIndex: 0,
     });
 
-    // Switch to Secondary -> 3rd metadata row follows Secondary, copy, then switch Secondary language (reuseTargetIndex: 1)
+    // Switch to Secondary -> language row follows Secondary, copy, then switch Secondary language (reuseTargetIndex: 1)
     await user.click(secondaryTab());
     expect(within(translatePane()).getByText('Synthetic translation 2')).toBeTruthy();
-    expect(within(metadata).getByText('Secondary')).toBeTruthy();
+    expect(metadataLabels()).toEqual(['Characters', 'Secondary', 'Service']);
     expect(within(metadata).getByText('Chinese (Simplified)')).toBeTruthy();
     await user.click(within(translatePane()).getByRole('button', { name: 'Copy Secondary Translation' }));
     await waitFor(() => expect(calls('translation_copy').at(-1)?.[1]).toEqual({ scope: 'clipboard', part: 'secondary' }));
@@ -309,6 +309,65 @@ describe('clipboard attached translate pane', () => {
     expect(calls('window_hide').at(-1)?.[1]).toEqual({ region: 'clipboard' });
   });
 
+  it('closes a focused service menu on Command-W without closing or restarting the translation', async () => {
+    const user = userEvent.setup();
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    const trigger = within(await screen.findByRole('region', { name: 'Translation pane' })).getByRole('button', { name: /translation service/i });
+    await user.click(trigger);
+    const menu = screen.getByRole('dialog', { name: 'Translation Service' });
+    fireEvent.keyDown(document.activeElement ?? menu, { key: 'w', code: 'KeyW', metaKey: true });
+    expect(screen.queryByRole('dialog', { name: 'Translation Service' })).toBeNull();
+    expect(translatePane()).toBeTruthy();
+    expect(document.activeElement).toBe(trigger);
+    expect(calls('clipboard_translation_close')).toHaveLength(0);
+    expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('uses the preview key from the attached translation without moving focus or starting another translation', async () => {
+    bridge.snapshot.clipboardControls.shortcuts.preview = { enabled: true, binding: { code: 'KeyY', modifiers: ['meta'] } };
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    const pane = await screen.findByRole('region', { name: 'Translation pane' });
+    await within(pane).findByText('Synthetic translation 1');
+    const tab = pane.querySelector<HTMLButtonElement>('[data-tab="primary"]')!;
+    act(() => tab.focus());
+    const preview = () => fireEvent.keyDown(tab, { key: 'y', code: 'KeyY', metaKey: true });
+    preview();
+    await waitFor(() => expect(within(detailPane()).getByText('Hello world')).toBeTruthy());
+    preview();
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Clipboard details' })).toBeNull());
+    expect(document.activeElement).toBe(tab);
+    expect(calls('translation_run')).toHaveLength(1);
+  });
+
+  it('returns to the list when a focused right-hand panel closes', async () => {
+    bridge.snapshot.clipboardControls.shortcuts.preview = { enabled: true, binding: { code: 'KeyY', modifiers: ['meta'] } };
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+    const detail = await screen.findByRole('region', { name: 'Clipboard details' });
+    const note = await within(detail).findByRole('button', { name: 'Note' });
+    await waitFor(() => expect((note as HTMLButtonElement).disabled).toBe(false));
+    act(() => note.focus());
+    fireEvent.keyDown(note, { key: 'y', code: 'KeyY', metaKey: true });
+    const row = listRow('first').querySelector('.history-row-select');
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    expect(screen.queryByRole('region', { name: 'Clipboard details' })).toBeNull();
+
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    const pane = await screen.findByRole('region', { name: 'Translation pane' });
+    const tab = pane.querySelector<HTMLButtonElement>('[data-tab="primary"]')!;
+    act(() => tab.focus());
+    fireEvent.keyDown(tab, { key: 'Escape' });
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    expect(screen.queryByRole('region', { name: 'Translation pane' })).toBeNull();
+    fireEvent.keyDown(row!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(listRow('second').querySelector('.history-row-select'));
+  });
+
   it('opens engine dropdown to temporarily switch translation service and retranslate both targets, and displays Edge when Google falls back', async () => {
     const user = userEvent.setup();
     bridge.snapshot.translationEngine = 'google';
@@ -384,6 +443,28 @@ describe('clipboard attached translate pane', () => {
     });
     expect(within(translatePane()).queryByRole('alert')).toBeNull();
     expect(within(metadata()).getByText('Microsoft Edge Translate')).toBeTruthy();
+  });
+
+  it('switches a clipboard session to Apple and leaves an unsupported target isolated', async () => {
+    bridge.snapshot.capabilities.appleTranslation = true;
+    bridge.snapshot.translationEngine = 'google';
+    bridge.snapshot.translationPreferences.engine = 'google';
+    bridge.snapshot.translationPreferences.sourceLanguage = 'eo';
+    bridge.snapshot.translationPreferences.secondaryLanguage = 'eo';
+    const user = userEvent.setup();
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    await waitFor(() => expect(within(translatePane()).getByText('Synthetic translation 1')).toBeTruthy());
+    await user.click(within(translatePane()).getByRole('button', { name: 'Translation Service: Google Translate' }));
+    await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
+    await waitFor(() => expect(calls('translation_run').at(-1)?.[1]).toEqual({
+      text: 'Hello world', source: 'auto', targets: ['en'], scope: 'clipboard', retryEngine: 'apple',
+    }));
+    await waitFor(() => expect(within(translatePane().querySelector<HTMLElement>('.clipboard-detail-metadata')!).getByText('Apple Translate')).toBeTruthy());
+    await user.click(within(translatePane()).getByRole('button', { name: 'Esperanto (unavailable)' }));
+    expect(within(translatePane()).getByText(/not supported/)).toBeTruthy();
+    expect(calls('translation_preferences_set')).toHaveLength(0);
   });
 
   it('keeps supported targets working when switching to Edge with a Google-only language, and retranslates on Settings engine change', async () => {

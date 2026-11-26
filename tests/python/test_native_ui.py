@@ -24,6 +24,7 @@ CASE_NAMES['clipboard-shortcuts'] = 'clipboard shortcut smoke through macOS and 
 CASE_NAMES['records-pinned'] = 'shared pinned boundary coverage'
 CASE_NAMES['records-pointer'] = 'record pointer and keyboard action strip'
 CASE_NAMES['translation-controls'] = 'real WK + native controls: anchors, long source, narrow menus and native action bridge'
+CASE_NAMES['apple-translate'] = 'Apple Translate through WKWebView IPC and the native framework'
 CASE_NAMES['translation-partial'] = 'translation partial columns and retry through WKWebView IPC'
 CASE_NAMES['clipboard-settings'] = 'clipboard settings: recording, shortcuts, storage and protected cleanup through real WebView IPC'
 CASE_NAMES['translation-settings'] = 'translation settings: proxy validation and shortcut capture in WKWebView'

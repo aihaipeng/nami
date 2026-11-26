@@ -384,9 +384,10 @@ describe('unified records workspace', () => {
     fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
     expect(targets()).toEqual([second.dataset.recordId]);
     expect(document.activeElement).toBe(openingFocus === 'list' ? button(second) : search());
-    fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
-    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: second.dataset.recordId, action: 'copy' }));
     if (openingFocus === 'search') fireEvent.keyDown(search(), { key: 'ArrowDown', code: 'ArrowDown' });
+    expect(document.activeElement).toBe(button(second));
+    fireEvent.keyDown(document.activeElement!, { key: 'c', code: 'KeyC', metaKey: true });
+    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: second.dataset.recordId, action: 'copy' }));
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
     expect(document.activeElement).toBe(button(first));
     fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });

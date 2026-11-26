@@ -25,6 +25,31 @@ function deferred() {
 }
 
 describe('live translation bridge', () => {
+  it('keeps a failed Apple request on-device until the user explicitly changes engine', async () => {
+    bridge.snapshot.capabilities.appleTranslation = true;
+    bridge.snapshot.translationEngine = 'apple';
+    bridge.snapshot.translationPreferences.engine = 'apple';
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name, args) => {
+      if (name === 'translation_run' && (args as { retryEngine?: string }).retryEngine !== 'edge') {
+        throw 'Apple Translate language pack is not downloaded.';
+      }
+      return original(name, args);
+    });
+    const user = userEvent.setup();
+    await mount(); submit('Synthetic input');
+    await screen.findByRole('alert');
+    expect(calls('translation_run')).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: 'Open Translation Languages Settings' }));
+    expect(calls('translation_language_settings_open')).toHaveLength(1);
+    expect(calls('translation_run')).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(calls('translation_run').at(-1)?.[1]).toMatchObject({ retryEngine: 'apple' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Retry with Edge' }) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole('button', { name: 'Retry with Edge' }));
+    await waitFor(() => expect(calls('translation_run').at(-1)?.[1]).toMatchObject({ retryEngine: 'edge' }));
+  });
+
   it('renders translated output and copies it through standalone scope', async () => {
     await mount(); submit('Synthetic input');
     await waitFor(() => expect(screen.getByRole('region', { name: 'Primary language' }).textContent).toBe('Synthetic translation 1'));
@@ -181,6 +206,19 @@ describe('translation engine settings', () => {
     await user.click(screen.getByRole('button', { name: 'Primary Language: Esperanto (unavailable)' }));
     expect(screen.queryByRole('option', { name: 'Esperanto' })).toBeNull();
     expect(screen.getByRole('option', { name: 'English' })).toBeTruthy();
+  });
+
+  it('offers Apple Translate and its local language settings on supported Macs', async () => {
+    bridge.snapshot.capabilities.appleTranslation = true;
+    const user = userEvent.setup();
+    await mount('settings');
+    await user.click(screen.getByRole('button', { name: /^Translation$/ }));
+    await user.click(screen.getByRole('button', { name: 'Translation Service: Microsoft Edge Translate' }));
+    await user.click(screen.getByRole('option', { name: 'Apple Translate' }));
+    expect(calls('translation_preferences_set').at(-1)?.[1]).toEqual({ engine: 'apple' });
+    expect(await screen.findByText(/does not use the HTTP proxy/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Open Translation Languages Settings' }));
+    expect(calls('translation_language_settings_open')).toHaveLength(1);
   });
 
   it('offers only Edge and Google and sends the chosen engine to the backend', async () => {

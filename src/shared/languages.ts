@@ -1,7 +1,8 @@
 import google from './languages/google.json';
 import edge from './languages/edge.json';
+import apple from './languages/apple.json';
 
-const catalog = { google, edge };
+const catalog = { google, edge, apple };
 
 export const languages = [
   ['ar', 'Arabic'], ['zh-CN', 'Chinese (Simplified)'], ['zh-TW', 'Chinese (Traditional)'],
@@ -11,13 +12,13 @@ export const languages = [
   ['es', 'Spanish'], ['tr', 'Turkish'], ['vi', 'Vietnamese'],
 ] as const;
 
-const names = new Map<string, string>([...catalog.edge.map(({ code, name }) => [code, name] as const), ...catalog.google.map(({ code, name }) => [code, name] as const), ...languages]);
+const names = new Map<string, string>([...catalog.apple.map(({ code, name }) => [code, name] as const), ...catalog.edge.map(({ code, name }) => [code, name] as const), ...catalog.google.map(({ code, name }) => [code, name] as const), ...languages]);
 
-export type TranslationEngine = 'google' | 'edge';
+export type TranslationEngine = keyof typeof catalog;
 export type LanguageSide = 'source' | 'target';
 
 export function providerLanguages(engine: TranslationEngine, side: LanguageSide) {
-  return catalog[engine].filter((language) => language[side]).map(({ code }) => ({ code, name: languageName(code) }));
+  return catalog[engine].filter((language) => language[side]).map(({ code, name }) => ({ code, name: engine === 'apple' ? name : languageName(code) }));
 }
 
 export function languageName(code: string) {

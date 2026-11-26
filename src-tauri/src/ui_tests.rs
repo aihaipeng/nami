@@ -1384,6 +1384,62 @@ fn run_native_chrome_geometry(app: &AppHandle) -> DomCase {
     }
 }
 
+fn run_apple_translate(app: &AppHandle) -> DomCase {
+    let mut samples = Vec::new();
+    let result = (|| {
+        on_main(app, |app| show(app, "translation"))?;
+        wait_dom(
+            app,
+            "return {ready:!!document.querySelector('.source-input')};",
+        )?;
+        evaluate_dom(
+            app,
+            r#"
+window.__appleResult = null;
+(async () => {
+  const invoke = window.__TAURI_INTERNALS__.invoke;
+  const text = 'This is a synthetic test. Keep `git status` unchanged.';
+  try {
+    const snapshot = await invoke('app_snapshot');
+    if (!snapshot.capabilities.appleTranslation) throw 'Apple Translate unavailable';
+    const args = { text, source: 'en', targets: ['en', 'zh-CN'], scope: 'standalone' };
+    const cloudRejected = await invoke('translation_run', {...args, retryEngine: 'edge'})
+      .then(() => false, error => error === 'translation_network_disabled_in_tests');
+    const output = await invoke('translation_run', {...args, retryEngine: 'apple'});
+    const values = (output.partial ?? output).translations;
+    window.__appleResult = {
+      cloudRejected, protectedPrimary: values[0] === text,
+      translated: output.translation?.engine === 'apple' && values[1] !== text && values[1].includes('`git status`'),
+      missingPack: output.partial?.errors[1]?.startsWith('Apple Translate language pack is not downloaded.') ?? false,
+      secondaryError: output.partial?.errors[1] ?? null,
+    };
+  } catch (error) { window.__appleResult = {error:String(error)}; }
+})();return true;
+"#,
+        )?;
+        let output = wait_dom(
+            app,
+            "return {ready:!!window.__appleResult,...window.__appleResult};",
+        )?;
+        if output["cloudRejected"] != true
+            || output["protectedPrimary"] != true
+            || (output["translated"] != true && output["missingPack"] != true)
+        {
+            return Err(format!(
+                "Apple Translate did not translate or report missing packs: {output}"
+            ));
+        }
+        samples.push(output);
+        Ok::<(), String>(())
+    })();
+    DomCase {
+        name: "Apple Translate through WKWebView IPC and the native framework",
+        passed: result.is_ok(),
+        error: result.err(),
+        samples,
+    }
+}
+
 fn run_translation_partial(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
@@ -2580,7 +2636,7 @@ window.clipboardSettingsProbe={done:false,stage:"shortcut"};
   const snapshot=await invoke('app_snapshot');
   const local=(action,binding,enabled)=>invoke('clipboard_record_shortcut_set',{action,binding,enabled});
   let localConflict;
-  try {await local('pin',{code:'KeyF',modifiers:['alt']});} catch(error) {localConflict=String(error);}
+  try {await local('pin',{code:'KeyD',modifiers:['meta']});} catch(error) {localConflict=String(error);}
   if(localConflict!=='shortcut_clipboard_panel')throw Error('local shortcut accepted a duplicate favorite binding');
   await local('pin',null,false);
   await local('pin',{code:'KeyG',modifiers:['alt']});
@@ -3018,12 +3074,12 @@ window.__groupRestore=null;
   document.querySelector('#general-shortcut-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.focusSearch.code==='KeyF');
   let t=p.translationPreferences,c=p.clipboardControls.shortcuts;
-  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='KeyY'||c.preview.binding.modifiers[0]!=='meta'||!c.preview.enabled)throw Error('general defaults were not restored');
+  if(t.shortcuts.focusSearch.code!=='KeyF'||t.disabledShortcuts.includes('focusSearch')||c.pin.binding.code!=='KeyP'||!c.pin.enabled||c.preview.binding.code!=='Space'||c.preview.binding.modifiers.length!==0||!c.preview.enabled)throw Error('general defaults were not restored');
   if(t.shortcuts.translate.code!=='KeyZ'||!t.disabledShortcuts.includes('translate')||t.selectionEnabled)throw Error('general restore changed another section');
   await set('focusSearch',{code:'KeyU',modifiers:['meta']});
   document.querySelector('#translation-shortcuts-heading').parentElement.querySelector('button').click();
   p=await waitRestored(snapshot=>snapshot.translationPreferences.shortcuts.translate.code==='Enter');t=p.translationPreferences;
-  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||!t.selectionEnabled||t.shortcuts.openTranslation?.code!=='KeyT'||t.disabledShortcuts.includes('openTranslation')||p.clipboardControls.shortcuts.preview.binding.modifiers[0]!=='meta')throw Error('translation restore changed another section or missed a translation default');
+  if(t.shortcuts.focusSearch.code!=='KeyU'||t.shortcuts.translate.code!=='Enter'||t.disabledShortcuts.includes('translate')||!t.selectionEnabled||t.shortcuts.openTranslation?.code!=='KeyT'||t.disabledShortcuts.includes('openTranslation')||p.clipboardControls.shortcuts.preview.binding.code!=='Space'||p.clipboardControls.shortcuts.preview.binding.modifiers.length!==0)throw Error('translation restore changed another section or missed a translation default');
   window.__groupRestore={done:true};
 })().catch(error=>window.__groupRestore={done:true,error:String(error)});
 return true;
@@ -5149,7 +5205,6 @@ fn run_clipboard_shortcuts_smoke(app: &AppHandle) -> DomCase {
     let mut owned_image = None;
     let result = (|| {
         const CMD: usize = 1 << 20;
-        const OPT: usize = 1 << 19;
         const SHIFT: usize = 1 << 17;
         let press = |code, flags, chars, unmodified| {
             post_records_key(app, code, flags, chars, unmodified, false)
@@ -5263,7 +5318,7 @@ return {ready:window.__focusShortcutSaved===true};
         samples.push(check("Next category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='true'&&keys.at(-1)?.trusted")?);
         press(123, 0, "\u{f702}", "\u{f702}")?;
         check("Previous category", "panel?.querySelector('.history-favorites')?.getAttribute('aria-pressed')==='false'&&keys.at(-1)?.trusted")?;
-        press(45, CMD | SHIFT, "N", "N")?;
+        press(45, CMD, "n", "n")?;
         samples.push(check("Note", "keys.at(-1)?.trusted&&document.querySelector('.clipboard-editor textarea')?.value==='Synthetic shortcut smoke second'")?);
         press(53, 0, "\u{1b}", "\u{1b}")?;
         check(
@@ -5275,10 +5330,22 @@ return {ready:window.__focusShortcutSaved===true};
             "Return to search",
             "focused&&keys.at(-1)?.code==='KeyF'&&keys.at(-1)?.trusted",
         )?;
-        press(16, CMD, "y", "y")?;
-        samples.push(check("Preview", "panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='true'&&keys.at(-1)?.trusted")?);
-        press(16, CMD, "y", "y")?;
-        check("Close Preview", "focused&&panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='false'")?;
+        press(49, 0, " ", " ")?;
+        samples.push(check("Space types in search", "focused&&search.value===' '&&panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='false'")?);
+        press(51, 0, "\u{7f}", "\u{7f}")?;
+        check(
+            "Clear search",
+            "focused&&search.value===''&&row?.dataset.recordId==='smoke-second'",
+        )?;
+        press(125, 0, "\u{f701}", "\u{f701}")?;
+        check(
+            "Focus record for Preview",
+            "document.activeElement===row?.querySelector('.history-row-select')",
+        )?;
+        press(49, 0, " ", " ")?;
+        samples.push(check("Space previews", "panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='true'&&keys.at(-1)?.trusted")?);
+        press(49, 0, " ", " ")?;
+        check("Space closes Preview", "document.activeElement===row?.querySelector('.history-row-select')&&panel?.querySelector('.records-details')?.getAttribute('aria-expanded')==='false'")?;
         let activate = |action, copy_flags: Option<usize>| -> Result<serde_json::Value, String> {
             let before = on_main(app, |_| {
                 let version = crate::platform::write_text("Synthetic smoke sentinel")
@@ -5318,11 +5385,13 @@ return {ready:window.__focusShortcutSaved===true};
             check(action, "(keys.at(-1)?.trusted||keys.at(-2)?.key==='Copy'&&keys.at(-2)?.trusted)&&panel?.getClientRects().length>0&&row?.dataset.recordId==='smoke-second'")
         };
         samples.push(activate("Return (Copy Only)", None)?);
-        samples.push(activate("Copy record", Some(CMD | SHIFT))?);
+        samples.push(activate("Command-C copies focused record", Some(CMD))?);
         check(
             "Copy feedback appears",
             "!!row?.querySelector('.record-copied')",
         )?;
+        press(3, CMD | SHIFT, "F", "F")?;
+        check("Focus search before native copy", "focused")?;
         let version = on_main(app, |_| Ok(crate::platform::clipboard_version()))?;
         press(8, CMD, "c", "c")?;
         samples.push(check(
@@ -5332,21 +5401,6 @@ return {ready:window.__focusShortcutSaved===true};
         if on_main(app, |_| Ok(crate::platform::clipboard_version()))? != version {
             return Err("system copy shortcut unexpectedly used a record".into());
         }
-        evaluate_view_dom(
-            app,
-            "settings",
-            r#"
-window.__copyShortcutSaved=false;
-window.__TAURI_INTERNALS__.invoke('clipboard_record_shortcut_set',{action:'copyRecord',binding:{code:'KeyC',modifiers:['meta']}}).then(()=>window.__copyShortcutSaved=true,error=>window.__copyShortcutSaved=String(error));return true;
-"#,
-        )?;
-        wait_view_dom(app,"settings", "if(typeof window.__copyShortcutSaved==='string')throw Error(window.__copyShortcutSaved);return {ready:window.__copyShortcutSaved===true};")?;
-        press(125, 0, "\u{f701}", "\u{f701}")?;
-        check(
-            "Enter the record list with ArrowDown for Command-C",
-            "document.activeElement===row?.querySelector('.history-row-select')&&!row?.querySelector('.record-copied')",
-        )?;
-        samples.push(activate("Command-C copies focused record", Some(CMD))?);
         evaluate_view_dom(
             app,
             "clipboard",
@@ -5396,7 +5450,7 @@ const input=document.querySelector('.clipboard-panel input[type=search]');Object
                 "Paste did not reach the expected safety boundary: {failure}"
             ));
         }
-        press(3, OPT, "ƒ", "f")?;
+        press(2, CMD, "d", "d")?;
         samples.push(check(
             "Favorite",
             "marked('favorite')&&keys.at(-1)?.trusted",
@@ -5417,7 +5471,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
             "Find record to pin",
             "focused&&row?.dataset.recordId==='smoke-first'&&count==='1 record'",
         )?;
-        press(35, OPT, "π", "p")?;
+        press(35, CMD, "p", "p")?;
         samples.push(check("Pin", "marked('pin')&&keys.at(-1)?.trusted")?);
         for (kind, label) in [
             ("normal", "regular"),
@@ -5433,7 +5487,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
                 _ => "",
             };
             let (before, after) = if kind == "second" {
-                ("4 records", "3 records")
+                ("3 records", "2 records")
             } else {
                 ("1 record", "0 records")
             };
@@ -5508,7 +5562,7 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         press(31, CMD | SHIFT, "O", "O")?;
         let ocr = check(
             "Extract Text",
-            "!focused&&document.activeElement===row?.querySelector('.history-row-select')&&count==='6 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
+            "!focused&&document.activeElement===row?.querySelector('.history-row-select')&&count==='5 records'&&keys.at(-1)?.code==='KeyO'&&keys.at(-1)?.trusted",
         )?;
         let text = on_main(app, |_| {
             let capture = crate::platform::read_clipboard(|_| false)?
@@ -5543,11 +5597,9 @@ const search=document.querySelector('.clipboard-panel input[type=search]');Objec
         )?;
         press(17, CMD, "t", "t")?;
         samples.push(wait_dom(app, r#"
-const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];
-const orig=tabs.find(b=>b.textContent==='Original');
-if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();
-const input=pane?.querySelector('textarea');
-return {ready:!!pane&&input?.value==='Synthetic shortcut smoke keep',action:'Translate'};
+const pane=document.querySelector('.clipboard-translate-pane'),source=pane?.querySelector('[data-tab=source]');
+if(source&&source.getAttribute('aria-pressed')!=='true'){source.click();return {ready:false};}
+return {ready:pane?.querySelector('.clipboard-detail-text')?.textContent==='Synthetic shortcut smoke keep',action:'Translate'};
 "#)?);
         if on_main(app, |_| {
             Ok(crate::platform::read_clipboard(|_| false)?.map(|capture| capture.payload))
@@ -8428,7 +8480,7 @@ return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.in
         wait_records(app, "return {ready:true};")?;
         let after_hover = wait_dom(
             app,
-            r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const text=pane?.querySelector('textarea')?.value;return {ready:!!text,text};"#,
+            r#"const pane=document.querySelector('.clipboard-translate-pane'),source=pane?.querySelector('[data-tab=source]');if(source&&source.getAttribute('aria-pressed')!=='true'){source.click();return {ready:false};}const text=pane?.querySelector('.clipboard-detail-text')?.textContent;return {ready:!!text,text};"#,
         )?;
         if !after_hover["text"]
             .as_str()
@@ -8453,7 +8505,7 @@ return {ready:text.includes('Favorite')&&text.includes('Translate')&&ordinary.in
         let translated = wait_dom(
             app,
             &format!(
-                r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const value=pane?.querySelector('textarea')?.value;return {{ready:value==={},length:value?.length}};"#,
+                r#"const pane=document.querySelector('.clipboard-translate-pane'),source=pane?.querySelector('[data-tab=source]');if(source&&source.getAttribute('aria-pressed')!=='true'){{source.click();return {{ready:false}};}}const value=pane?.querySelector('.clipboard-detail-text')?.textContent;return {{ready:value==={},length:value?.length}};"#,
                 serde_json::to_string(&full_text).unwrap()
             ),
         )?;
@@ -8509,7 +8561,7 @@ return {ready:image.includes('Translate')&&image.includes('Extract text')&&image
             "clipboard",
             r#"document.querySelector('.clipboard-panel [data-record-id="kind-image-file"] [aria-label="Translate"]').click();return true;"#,
         )?;
-        samples.push(wait_dom(app, r#"const pane=document.querySelector('.clipboard-translate-pane'),tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];const orig=tabs.find(b=>b.textContent==='Original');if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();const text=pane?.querySelector('textarea')?.value;return {ready:!!text&&text.includes('HELLO NAMI'),text};"#)?);
+        samples.push(wait_dom(app, r#"const pane=document.querySelector('.clipboard-translate-pane'),source=pane?.querySelector('[data-tab=source]');if(source&&source.getAttribute('aria-pressed')!=='true'){source.click();return {ready:false};}const text=pane?.querySelector('.clipboard-detail-text')?.textContent;return {ready:!!text&&text.includes('HELLO NAMI'),text};"#)?);
         records_mode(app, "clipboard")?;
         evaluate_view_dom(
             app,
@@ -8670,7 +8722,7 @@ const panel=document.querySelector('.record-context-menu');if(!panel)return {rea
 const nodes=[...panel.querySelectorAll('[role=menuitem],[role=separator]')];
 const width=panel.getBoundingClientRect().width;
 const menu=nodes.map(el=>el.getAttribute('role')==='separator'?'/':`${el.querySelector('.record-menu-label')?.textContent.trim()} ${el.querySelector('kbd')?.textContent}`);
-const expected=['Copy ⇧⌘C','Paste ↵','Save ⌘S','/','Favorite ⌥F','Pin ⌥P','Note ⇧⌘N','/','Translate ⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
+const expected=['Copy ⌘C','Paste ↵','Save ⌘S','/','Favorite ⌘D','Pin ⌘P','Note ⌘N','/','Translate ⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
 const pinned=document.querySelector('.clipboard-panel .history-pinned');
 if(!pinned)return {ready:false};
 const empty=pinned.classList.contains('empty');pinned.classList.remove('empty');
@@ -8810,10 +8862,9 @@ return {ready:dispatched,translationAttempted:dispatched};
             app,
             r#"
 const pane=document.querySelector('.clipboard-translate-pane');
-const tabs=[...pane?.querySelectorAll('.clipboard-detail-mode button')??[]];
-const orig=tabs.find(b=>b.textContent==='Original');
-if(orig&&orig.getAttribute('aria-pressed')!=='true')orig.click();
-const source=pane?.querySelector('textarea')?.value;
+const tab=pane?.querySelector('[data-tab=source]');
+if(tab&&tab.getAttribute('aria-pressed')!=='true'){tab.click();return {ready:false};}
+const source=pane?.querySelector('.clipboard-detail-text')?.textContent;
 return {ready:source==='HELLO NAMI',cachedTranslationSource:source,translationAttempted:true};
 "#,
         )?);
@@ -8915,16 +8966,22 @@ fn run_clipboard_translate(app: &AppHandle) -> DomCase {
                 ));
             }
         }
-        // 2. Expand Details -> 3-pane [List | Detail | Translate]
-        evaluate_view_dom(
+        // 2. Use Space from the attached pane to expand Details without moving its focus.
+        on_main(app, |app| {
+            app.get_webview("translation")
+                .ok_or("missing translation view")?
+                .set_focus()
+                .map_err(|error| error.to_string())
+        })?;
+        evaluate_dom(
             app,
-            "clipboard",
-            r#"document.querySelector('.clipboard-panel .records-details').click();return true;"#,
+            r#"document.querySelector('.clipboard-translate-pane [data-tab="primary"]').focus();return true;"#,
         )?;
+        post_records_key(app, 49, 0, " ", " ", false)?;
         wait_motion(app)?;
         samples.push(wait_dom(
             app,
-            r#"const detail=document.querySelector('.clipboard-detail'),divider=document.querySelector('.clipboard-pane-divider'),pane=document.querySelector('.clipboard-translate-pane'),detailBtn=detail?.querySelector('[aria-label="Translate"]');return {ready:!!detail&&!!divider&&!!pane&&detailBtn?.getAttribute('aria-pressed')==='true',detailWidth:detail?.getBoundingClientRect().width,translateWidth:pane?.getBoundingClientRect().width,mode:'three-pane'};"#,
+            r#"const detail=document.querySelector('.clipboard-detail'),divider=document.querySelector('.clipboard-pane-divider'),pane=document.querySelector('.clipboard-translate-pane'),detailBtn=detail?.querySelector('[aria-label="Translate"]');return {ready:!!detail&&!!divider&&!!pane&&detailBtn?.getAttribute('aria-pressed')==='true'&&document.activeElement===pane.querySelector('[data-tab=primary]'),detailWidth:detail?.getBoundingClientRect().width,translateWidth:pane?.getBoundingClientRect().width,mode:'three-pane'};"#,
         )?);
         let three_pane_geo = on_main(app, |app| {
             let window = app.get_window("translation").ok_or("missing window")?;
@@ -8967,17 +9024,18 @@ fn run_clipboard_translate(app: &AppHandle) -> DomCase {
                 "hover-browsing another record replaced attached translation target".into(),
             );
         }
-        // 4. Collapse Details -> returns to [List | Translate]
-        evaluate_view_dom(
+        // 4. Close focused Details with Space; the surviving translation keeps its own record.
+        evaluate_dom(
             app,
-            "clipboard",
-            r#"document.querySelector('.clipboard-panel .records-details').click();return true;"#,
+            r#"document.querySelector('.clipboard-detail [aria-label="Note"]').focus();return true;"#,
         )?;
+        post_records_key(app, 49, 0, " ", " ", false)?;
         wait_motion(app)?;
         samples.push(wait_dom(
             app,
             r#"return {ready:!!document.querySelector('.clipboard-detail')?.closest('[hidden]')&&!!document.querySelector('.clipboard-translate-pane'),mode:'collapsed-detail-translate-kept'};"#,
         )?);
+        samples.push(wait_records(app, r#"return {ready:document.hasFocus()&&document.activeElement?.closest('[data-record-id]')?.dataset.recordId==='translate-second',detailFocusRestored:true};"#)?);
         // 5. Clicking active record's Translate button again closes attached translate pane
         evaluate_view_dom(
             app,
@@ -9000,11 +9058,24 @@ fn run_clipboard_translate(app: &AppHandle) -> DomCase {
             app,
             r#"return {ready:!!document.querySelector('.clipboard-translate-pane')};"#,
         )?;
-        evaluate_view_dom(
+        on_main(app, |app| {
+            app.get_webview("translation")
+                .ok_or("missing translation view")?
+                .set_focus()
+                .map_err(|error| error.to_string())
+        })?;
+        evaluate_dom(
             app,
-            "clipboard",
-            r#"document.querySelector('.clipboard-panel .history-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;"#,
+            r#"document.querySelector('.clipboard-translate-pane [data-action=engine] button').click();return true;"#,
         )?;
+        wait_dom(
+            app,
+            r#"return {ready:!!document.activeElement?.closest('[role=dialog]')};"#,
+        )?;
+        post_records_key(app, 13, 1 << 20, "w", "w", false)?;
+        samples.push(wait_dom(app, r#"const trigger=document.querySelector('.clipboard-translate-pane [data-action=engine] button');return {ready:!!trigger&&!document.querySelector('.language-popover')&&document.activeElement===trigger,commandWClosedOnlyMenu:true};"#)?);
+        post_records_key(app, 53, 0, "\u{1b}", "\u{1b}", false)?;
+        samples.push(wait_records(app, r#"return {ready:document.hasFocus()&&document.activeElement?.closest('[data-record-id]')?.dataset.recordId==='translate-first',translateFocusRestored:true};"#)?);
         wait_motion(app)?;
         {
             let state = app.state::<AppState>();
@@ -9076,6 +9147,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             "clipboard-details",
             "translation-controls",
             "translation-partial",
+            "apple-translate",
             "translation-settings",
             "unified-records",
             "records-geometry",
@@ -9119,6 +9191,8 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
                 run_unified_records(&app)
             } else if case == "translation-controls" {
                 run_right_control_dom(&app)
+            } else if case == "apple-translate" {
+                run_apple_translate(&app)
             } else if case == "translation-partial" {
                 run_translation_partial(&app)
             } else if case == "translation-settings" {

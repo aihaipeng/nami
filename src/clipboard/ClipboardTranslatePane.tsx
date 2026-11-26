@@ -6,26 +6,21 @@ import type { ViewProps } from '../App';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryList } from '../shared/HistoryList';
 import { RecordFeedback } from '../shared/RecordFeedback';
+import { restorePanelFocus } from '../shared/FloatingPanel';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { translationShortcutEnabled, type TranslationOutput, type TranslationPreferences } from '../shared/contracts';
 import { inputWithinLimits } from '../shared/input';
-import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
+import { languageName, providerLanguages, supportsLanguage, supportsTranslation, type TranslationEngine as Engine } from '../shared/languages';
 import { editsText, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
 import { HistoryIcon } from '../translation/HistoryIcon';
-import edgeServiceIcon from '../assets/translation/microsoft-edge-translate.svg?url';
-import googleServiceIcon from '../assets/translation/google-translate.svg?url';
+import { appleLanguagePackMissing, availableTranslationServices, translationRetryServices, translationServices } from '../shared/translationServices';
 
 type Tab = 'source' | 'primary' | 'secondary';
-type Engine = 'edge' | 'google';
 type TranslationRequest = { text: string; source: string; targets: string[] };
 type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 type ClipboardTranslationContext = { recordId: string; text: string; error: string | null };
 
 const TRANSLATION_STRATEGY_VERSION = 1;
-const TRANSLATION_SERVICES: Record<Engine, { name: string; icon: string }> = {
-  edge: { name: 'Microsoft Edge Translate', icon: edgeServiceIcon },
-  google: { name: 'Google Translate', icon: googleServiceIcon },
-};
 
 export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewProps) {
   const state = snapshot.window;
@@ -374,10 +369,11 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   }
 
   const currentRetryEngine = partialEngine ?? failedRequest?.engine;
-  const otherEngine = currentRetryEngine === 'edge' ? 'google' : 'edge';
   const retryRequest = partial ? partialTicket.current?.request : failedRequest?.request;
-  const canRetryElsewhere = !!currentRetryEngine && !!retryRequest && supportsTranslation(otherEngine, retryRequest.source,
-    retryRequest.targets.filter((_, index) => !partial || !!partial.errors[index]));
+  const retryServices = currentRetryEngine && retryRequest
+    ? translationRetryServices(capabilities.appleTranslation, currentRetryEngine, retryRequest.source,
+      retryRequest.targets.filter((_, index) => !partial || !!partial.errors[index]))
+    : [];
 
   function retryTranslation(engine?: Engine) {
     const ticket = partialTicket.current;
@@ -398,9 +394,13 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     }
   }
 
-  const retryElsewhere = canRetryElsewhere && <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(otherEngine)}>
-    {t(otherEngine === 'google' ? 'retryWithGoogle' : 'retryWithEdge')}
-  </button>;
+  const languagePackAction = (error: string | null | undefined) => capabilities.appleTranslation && appleLanguagePackMissing(error) &&
+    <button type="button" onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button>;
+  const retryAfterDownload = !partial && appleLanguagePackMissing(serviceError) &&
+    <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation('apple')}>{t('retry')}</button>;
+  const retryElsewhere = retryServices.map(({ code, retry }) => <button key={code} type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(code)}>
+    {t(retry)}
+  </button>);
 
   async function copyPart(part: Tab) {
     const text = part === 'source' ? draft : cachedResults[part === 'secondary' ? 1 : 0];
@@ -429,10 +429,12 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
 
   function keydown(event: ReactKeyboardEvent) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === 'Escape' && popup) {
+    const closeWindow = matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event);
+    if ((event.key === 'Escape' || closeWindow) && popup) {
       event.preventDefault();
       event.stopPropagation();
       setPopup(null);
+      restorePanelFocus(event.currentTarget.querySelector<HTMLButtonElement>('button[aria-haspopup=dialog][aria-expanded=true]'));
       return;
     }
     if (editsText(event.nativeEvent)) return;
@@ -444,11 +446,11 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
       event.preventDefault();
       event.stopPropagation();
       void copyPart('secondary');
-    } else if (event.key === 'Escape' || matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event)) {
+    } else if (event.key === 'Escape' || closeWindow) {
       event.preventDefault();
       event.stopPropagation();
       setPopup(null);
-      void command('clipboard_translation_close');
+      void command('clipboard_translation_close', { returnFocus: true });
     }
   }
 
@@ -497,11 +499,8 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   const activeEngine: Engine = (currentTab !== 'source'
     ? (completedOutput.current?.translation.targetEngines?.[activeIndex] ?? completedOutput.current?.translation.engine ?? partialEngine)
     : (completedOutput.current?.translation.engine ?? partialEngine)) ?? effectiveEngine;
-  const serviceMeta = TRANSLATION_SERVICES[activeEngine];
-  const engineItems = [
-    { code: 'edge', name: TRANSLATION_SERVICES.edge.name, icon: TRANSLATION_SERVICES.edge.icon },
-    { code: 'google', name: TRANSLATION_SERVICES.google.name, icon: TRANSLATION_SERVICES.google.icon },
-  ];
+  const serviceMeta = translationServices[activeEngine];
+  const engineItems = availableTranslationServices(capabilities.appleTranslation);
   const displayedText = currentTab === 'source' ? draft : activeResult;
   const characterCount = Array.from(displayedText).length;
   const activeMetaRoleLabel = t(currentTab === 'source' ? 'translateTabSource' : currentTab === 'secondary' ? 'translateTabSecondary' : 'translateTabPrimary');
@@ -572,31 +571,32 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
             {activeResult && <div className="clipboard-detail-text">{activeResult}</div>}
             {activePartialError && <div className="result-error">
               <span role="alert">{activePartialError}</span>
+              {languagePackAction(activePartialError)}
               <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
               {retryElsewhere}
             </div>}
             {taskStatus && !activeResult && !activePartialError && <div className="translation-status">
               <span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>
-              {serviceError && retryElsewhere}
+              {languagePackAction(serviceError)}{retryAfterDownload}{serviceError && retryElsewhere}
             </div>}
             {taskStatus && activeResult && <div className="translation-status with-results">
               <span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>
-              {serviceError && !partial && retryElsewhere}
+              {languagePackAction(serviceError)}{retryAfterDownload}{serviceError && !partial && retryElsewhere}
             </div>}
             {!activeResult && !activePartialError && !taskStatus && !translating && <div className="clipboard-translate-empty">{t('resultEmpty')}</div>}
           </div>}
       </HistoryList>
     </div>
     <footer className="clipboard-detail-metadata">
+      <div><span>{t('translateMetaCharacters')}</span><span>{characterCount.toLocaleString('en')}</span></div>
+      <div><span>{activeMetaRoleLabel}</span><span title={activeMetaLanguageLabel}>{activeMetaLanguageLabel}</span></div>
       <div>
         <span>{t('translateMetaService')}</span>
         <span className="history-row-heading">
-          <img className="history-origin" src={serviceMeta.icon} alt="" aria-hidden="true" />
+          {serviceMeta.icon && <img className="history-origin" src={serviceMeta.icon} alt="" aria-hidden="true" />}
           <span className="history-languages" title={serviceMeta.name}>{serviceMeta.name}</span>
         </span>
       </div>
-      <div><span>{t('translateMetaCharacters')}</span><span>{characterCount.toLocaleString('en')}</span></div>
-      <div><span>{activeMetaRoleLabel}</span><span title={activeMetaLanguageLabel}>{activeMetaLanguageLabel}</span></div>
     </footer>
     <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
   </section>;

@@ -8,7 +8,7 @@ import { defaultTranslationShortcuts } from '../../src/shared/shortcuts';
 function portable(platform: 'windows' | 'linux' = 'windows') {
   bridge.snapshot.capabilities = {
     platform, nativeHistory: false, nativeChrome: false, nativeMaterial: false,
-    selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false,
+    selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false,
     primaryModifier: 'control',
   };
   bridge.snapshot.translationPreferences = { ...bridge.snapshot.translationPreferences, shortcuts: defaultTranslationShortcuts('control') };

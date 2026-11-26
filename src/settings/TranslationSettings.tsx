@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { ViewProps } from '../App';
 import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
+import { availableTranslationServices, translationServices } from '../shared/translationServices';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
 import { type Translate } from '../shared/i18n';
 import { TranslationProxySettings } from './TranslationProxySettings';
 
 export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewProps, 'activity'>) {
   const preferences = snapshot.translationPreferences;
+  const appleSelected = preferences.engine === 'apple';
+  const appleAvailable = snapshot.capabilities.appleTranslation;
   const [open, setOpen] = useState<'engine' | 'source' | 'primary' | 'secondary' | null>(null);
   const sourceItems = providerLanguages(preferences.engine, 'source');
   const targetItems = providerLanguages(preferences.engine, 'target');
@@ -21,7 +24,7 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
       </div>
       <div className="settings-group">
         <SettingsChoice label={t('settingsService')} value={preferences.engine} open={open === 'engine'} onOpenChange={(value) => setOpen(value ? 'engine' : null)} searchable={false} menuWidth={240}
-          items={[{ code: 'edge', name: 'Microsoft Edge Translate' }, { code: 'google', name: 'Google Translate' }]}
+          items={availableTranslationServices(appleAvailable)} valueLabel={appleSelected && !appleAvailable ? translationServices.apple.name : undefined}
           onChange={(engine) => void command('translation_preferences_set', { engine })} t={t} />
         <SettingsChoice label={t('settingsSource')} value={preferences.sourceLanguage} open={open === 'source'} onOpenChange={(value) => setOpen(value ? 'source' : null)}
           items={[{ code: 'auto', name: 'Auto-Detect' }, ...sourceItems]} valueLabel={selectedLabel(preferences.sourceLanguage, 'source')} onChange={(sourceLanguage) => void command('translation_preferences_set', { sourceLanguage })} t={t} />
@@ -29,6 +32,8 @@ export function TranslationSettings({ t, snapshot, command, native }: Omit<ViewP
           items={targetItems} valueLabel={selectedLabel(preferences.primaryLanguage, 'target')} onChange={(primaryLanguage) => void command('translation_preferences_set', { primaryLanguage })} t={t} />
         <SettingsChoice label={t('settingsSecondary')} value={preferences.secondaryLanguage} open={open === 'secondary'} onOpenChange={(value) => setOpen(value ? 'secondary' : null)}
           items={[{ code: 'none', name: 'None' }, ...targetItems]} valueLabel={selectedLabel(preferences.secondaryLanguage, 'target')} onChange={(secondaryLanguage) => void command('translation_preferences_set', { secondaryLanguage })} t={t} />
+        {appleSelected && <p className="settings-field-note" role="status">{t(appleAvailable ? 'appleTranslateOnDevice' : 'appleTranslateUnavailable')}</p>}
+        {appleSelected && appleAvailable && <div className="settings-field"><button type="button" className="settings-action" onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button></div>}
         {!languagesAvailable && <p className="settings-field-note" role="status">{t('languageNotSupported')}</p>}
       </div>
     </section>

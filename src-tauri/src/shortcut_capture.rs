@@ -60,6 +60,25 @@ pub(crate) fn set_active(app: &AppHandle, active: bool) {
     });
 }
 
+fn route_attached_close(app: &AppHandle) -> bool {
+    let can_route = {
+        let state = app.state::<crate::AppState>();
+        let regions = state.windows.lock().unwrap();
+        regions.clipboard_visible
+            && regions.clipboard_translation_visible
+            && !regions.records_editor_open
+    };
+    // Only the right WebView knows whether a dropdown needs to close before the pane.
+    can_route && !crate::windows::clipboard_has_focus(app) && app.get_webview("translation").is_some_and(|view| {
+        view.eval(r#"{
+            const active = document.activeElement;
+            const target = active?.closest('.clipboard-right-panes, .language-popover')
+                ? active : document.querySelector('.clipboard-translate-pane');
+            target?.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', code: 'KeyW', metaKey: true, bubbles: true, cancelable: true }));
+        }"#).is_ok()
+    })
+}
+
 // Borderless records windows do not reliably deliver these command keys to WebKit.
 pub(crate) fn install_window_shortcuts(app: &AppHandle) {
     thread_local! {
@@ -100,6 +119,8 @@ pub(crate) fn install_window_shortcuts(app: &AppHandle) {
                     return event.as_ptr();
                 }
                 crate::windows::hide(&app, "settings")
+            } else if window.label() == "translation" && route_attached_close(&app) {
+                Ok(())
             } else {
                 crate::records_runtime::dismiss_records_window(&app, window.label())
             }

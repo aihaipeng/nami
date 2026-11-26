@@ -10,7 +10,7 @@ pub(super) enum ProtectionMode {
 impl ProtectionMode {
     pub(super) fn for_engine(engine: &str) -> Self {
         match engine {
-            "edge" => Self::PlainText,
+            "edge" | "apple" => Self::PlainText,
             _ => Self::Html,
         }
     }

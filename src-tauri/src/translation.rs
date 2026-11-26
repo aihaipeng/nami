@@ -12,6 +12,7 @@ const TRANSLATION_BUDGET: Duration = Duration::from_secs(20);
 const TRANSLATION_TIMEOUT: &str = "The translation request timed out. Try again.";
 const TRANSLATION_RETRY_LIMIT: usize = 3;
 const TRANSLATION_RETRY_DELAY: Duration = Duration::from_millis(300);
+mod apple;
 mod edge;
 mod google;
 mod text;
@@ -43,6 +44,7 @@ type BatchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<BatchTranslation, BatchError>> + Send + 'a>>;
 pub fn languages(engine: &str) -> &'static [Language] {
     match engine {
+        "apple" => apple::languages(),
         "google" => google::languages(),
         "edge" => edge::languages(),
         _ => &[],
@@ -61,7 +63,7 @@ fn supports_language(engine: &str, code: &str, source: bool) -> bool {
 }
 
 fn known_language(code: &str, source: bool) -> bool {
-    ["google", "edge"]
+    ["google", "edge", "apple"]
         .iter()
         .any(|engine| supports_language(engine, code, source))
 }
@@ -155,7 +157,7 @@ impl Preferences {
     pub fn from_store(read: impl Fn(&str) -> Option<String>, primary: &str) -> Self {
         let mut preferences = Self::defaults(primary);
         if let Some(engine) = read("translation_engine") {
-            if matches!(engine.as_str(), "edge" | "google") {
+            if !languages(&engine).is_empty() {
                 preferences.engine = engine;
             }
         }
@@ -211,7 +213,7 @@ impl Preferences {
     pub fn apply(&mut self, patch: PreferencePatch) -> Result<bool, String> {
         let mut engine_changed = false;
         if let Some(engine) = patch.engine {
-            if !matches!(engine.as_str(), "edge" | "google") {
+            if !engine_available(&engine) {
                 return Err("invalid_argument".into());
             }
             engine_changed = self.engine != engine;
@@ -339,9 +341,21 @@ pub struct PreferencePatch {
     pub selection_enabled: Option<bool>,
 }
 
+pub fn apple_available() -> bool {
+    apple::is_available()
+}
+
+pub fn engine_available(engine: &str) -> bool {
+    !languages(engine).is_empty() && (engine != "apple" || apple_available())
+}
+
 pub fn validate_options(engine: &str, source: &str, targets: &[String]) -> Result<(), String> {
-    if !matches!(engine, "edge" | "google") {
-        return Err("Choose a supported translation engine.".into());
+    if !engine_available(engine) {
+        return Err(if engine == "apple" {
+            apple::UNAVAILABLE.into()
+        } else {
+            "Choose a supported translation engine.".into()
+        });
     }
     if source != "auto" && !supports_language(engine, source, true) {
         return Err("Choose a supported source language.".into());
@@ -525,13 +539,18 @@ async fn with_translation_retries<T, F: Future<Output = Result<T, BatchError>>>(
 }
 
 fn fetch_batch<'a>(
-    client: &'a Client,
+    client: Option<&'a Client>,
     engine: &'a str,
     active: &'a [&str],
     source: &'a str,
     target: &'a str,
 ) -> BatchFuture<'a> {
     Box::pin(async move {
+        if engine == "apple" {
+            return apple::translate_batch(active, source, target).await;
+        }
+        let client = client
+            .ok_or_else(|| BatchError::permanent("The translation client is unavailable."))?;
         let request = match engine {
             "google" => google::request(client, active, source, target),
             "edge" => edge::request(client, active, source, target),
@@ -693,12 +712,14 @@ pub async fn translate(
             detections: Vec::new(),
         });
     }
-    let client = translation_client(proxy_url, proxy_enabled)?;
+    let client = (engine != "apple")
+        .then(|| translation_client(proxy_url, proxy_enabled))
+        .transpose()?;
     let translate_target = |index: usize| {
         translate_target(
             input,
             source,
-            (&client, engine, targets[index].as_str()),
+            (client.as_ref(), engine, targets[index].as_str()),
             (&units, &prepared, &batch_plan),
             deadline,
             fetch_batch,
@@ -730,10 +751,16 @@ type TranslatedColumn = (String, Vec<crate::model::LanguageDetection>);
 async fn translate_target(
     input: &str,
     source: &str,
-    provider: (&Client, &str, &str),
+    provider: (Option<&Client>, &str, &str),
     plan: (&[text::Unit<'_>], &[&str], &[Vec<usize>]),
     deadline: Instant,
-    fetch: impl for<'a> Fn(&'a Client, &'a str, &'a [&'a str], &'a str, &'a str) -> BatchFuture<'a>,
+    fetch: impl for<'a> Fn(
+        Option<&'a Client>,
+        &'a str,
+        &'a [&'a str],
+        &'a str,
+        &'a str,
+    ) -> BatchFuture<'a>,
 ) -> Result<TranslatedColumn, String> {
     let (client, engine, target) = provider;
     let (units, prepared, batch_plan) = plan;
@@ -1370,6 +1397,36 @@ mod tests {
     }
 
     #[test]
+    fn stored_apple_preference_never_silently_falls_back_to_cloud() {
+        let preferences = Preferences::from_store(
+            |key| (key == "translation_engine").then(|| "apple".into()),
+            "meta",
+        );
+        assert_eq!(preferences.engine, "apple");
+        if !apple_available() {
+            assert_eq!(
+                validate_options("apple", "auto", &["en".into()]).unwrap_err(),
+                apple::UNAVAILABLE
+            );
+        }
+        assert!(validate_options("apple", "auto", &["eo".into()]).is_err());
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[tokio::test]
+    async fn native_apple_uses_shared_protection_and_ignores_the_cloud_proxy() {
+        if !apple_available() {
+            return;
+        }
+        let input = "Keep `git status` and https://example.test unchanged.\r\n  ";
+        let result = translate("apple", input, "en", &["en".into()], "invalid proxy", true)
+            .await
+            .unwrap();
+        assert_eq!(result.errors, vec![None]);
+        assert_eq!(result.translations, vec![input]);
+    }
+
+    #[test]
     fn frontend_catalog_matches_each_backend_provider() {
         for (engine, data) in [
             (
@@ -1377,6 +1434,10 @@ mod tests {
                 include_str!("../../src/shared/languages/google.json"),
             ),
             ("edge", include_str!("../../src/shared/languages/edge.json")),
+            (
+                "apple",
+                include_str!("../../src/shared/languages/apple.json"),
+            ),
         ] {
             let frontend: serde_json::Value = serde_json::from_str(data).unwrap();
             let backend = serde_json::to_value(languages(engine)).unwrap();
@@ -1620,7 +1681,7 @@ mod tests {
             let (output, detections) = translate_target(
                 input,
                 "auto",
-                (&client, "edge", "fr"),
+                (Some(&client), "edge", "fr"),
                 (&units, &prepared, &plan),
                 deadline,
                 |_, _, active, _, _| {

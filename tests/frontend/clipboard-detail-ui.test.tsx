@@ -467,17 +467,13 @@ it('renders L1 visual cues in the detail pane without altering exact textContent
   expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text);
 });
 
-it('toggles details closed with the preview shortcut when focus is inside the detail pane', async () => {
-  const { activation, shortcuts } = bridge.snapshot.clipboardControls;
-  bridge.snapshot.clipboardControls = {
-    ...bridge.snapshot.clipboardControls,
-    activation,
-    shortcuts: { ...shortcuts, preview: { enabled: true, binding: { code: 'Space', modifiers: [] } } },
-  };
-  direct();
-  await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
-  expect(fireEvent.keyDown(pane().querySelector('.clipboard-detail-text')!, { key: ' ', code: 'Space' })).toBe(false);
-  expect(calls('records_details_toggle')).toHaveLength(1);
+it('toggles details closed with the default preview key when focus is inside the detail pane', async () => {
+  await open();
+  const note = await within(pane()).findByRole('button', { name: 'Note' });
+  act(() => note.focus());
+  expect(fireEvent.keyDown(note, { key: ' ', code: 'Space' })).toBe(false);
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Clipboard details' })).toBeNull());
+  expect(document.activeElement).toBe(row('first').querySelector('.history-row-select'));
 });
 
 it('renders sanitized rich text preview by default, blocks script/external media/link navigation, and toggles to plain text', async () => {

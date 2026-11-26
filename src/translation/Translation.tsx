@@ -4,7 +4,8 @@ import { flushSync } from 'react-dom';
 import { listen } from '@tauri-apps/api/event';
 import type { ViewProps } from '../App';
 import { SearchableDropdown } from '../shared/SearchableDropdown';
-import { languageName, providerLanguages, supportsLanguage, supportsTranslation } from '../shared/languages';
+import { languageName, providerLanguages, supportsLanguage, supportsTranslation, type TranslationEngine as Engine } from '../shared/languages';
+import { appleLanguagePackMissing, translationRetryServices } from '../shared/translationServices';
 import { inputWithinLimits } from '../shared/input';
 import { displaySource, dragSourceSelection, editSource, sourceDragDelta } from '../shared/source';
 import { editsText, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
@@ -13,12 +14,12 @@ import { cn } from '../lib/utils';
 import { ClipboardDetail } from '../clipboard/ClipboardDetail';
 import { ClipboardTranslatePane } from '../clipboard/ClipboardTranslatePane';
 import { RecordsWorkspace } from '../shared/RecordsWorkspace';
+import { useRecordsPreviewShortcut } from '../shared/recordPreviewShortcut';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryDivider } from './HistoryDivider';
 import { useNativeChrome } from './useNativeChrome';
 
 type Popup = 'source' | 'primary' | 'secondary';
-type Engine = 'edge' | 'google';
 type TranslationRequest = { text: string; source: string; targets: string[] };
 type PartialTranslation = { id: string; translations: string[]; sourceLanguage: string; errors: (string | null)[] };
 
@@ -121,6 +122,23 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   const standaloneVisible = state.standaloneTranslationVisible;
   const clipboardRightVisible = state.clipboardVisible && (state.clipboardDetailVisible || state.clipboardTranslationVisible);
   const rightVisible = standaloneVisible || clipboardRightVisible;
+  useRecordsPreviewShortcut({
+    active: clipboardRightVisible,
+    blocked: state.recordsEditorOpen,
+    includedContainer: snapshot.capabilities.nativeHistory ? undefined : '.clipboard-right-panes',
+    excludedContainers: '.translation-panel, .preview-bar',
+    snapshot,
+    native,
+    onPreview: (_, target) => {
+      if (state.clipboardDetailVisible) {
+        const closingFocusedPane = !state.clipboardTranslationVisible
+          || target instanceof Element && !!target.closest('.clipboard-detail-slot, .clipboard-pane-divider');
+        void command('records_details_toggle', closingFocusedPane ? { returnFocus: true } : undefined);
+      } else {
+        void command('records_details_toggle', { recordId: state.clipboardTranslationRecordId ?? null });
+      }
+    },
+  });
   const committedClipboardWidth = useRef(state.clipboardWidth);
   const clipboardWidthChanged = committedClipboardWidth.current !== state.clipboardWidth;
   useLayoutEffect(() => { committedClipboardWidth.current = state.clipboardWidth; }, [state.clipboardWidth]);
@@ -317,10 +335,11 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
   }
 
   const currentRetryEngine = partialEngine ?? failedRequest?.engine;
-  const otherEngine = currentRetryEngine === 'edge' ? 'google' : 'edge';
   const retryRequest = partial ? partialTicket.current?.request : failedRequest?.request;
-  const canRetryElsewhere = !!currentRetryEngine && !!retryRequest && supportsTranslation(otherEngine, retryRequest.source,
-    retryRequest.targets.filter((_, index) => !partial || !!partial.errors[index]));
+  const retryServices = currentRetryEngine && retryRequest
+    ? translationRetryServices(capabilities.appleTranslation, currentRetryEngine, retryRequest.source,
+      retryRequest.targets.filter((_, index) => !partial || !!partial.errors[index]))
+    : [];
 
   function retryTranslation(engine?: Engine) {
     const ticket = partialTicket.current;
@@ -337,9 +356,13 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
       });
     }
   }
-  const retryElsewhere = canRetryElsewhere && <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(otherEngine)}>
-    {t(otherEngine === 'google' ? 'retryWithGoogle' : 'retryWithEdge')}
-  </button>;
+  const languagePackAction = (error: string | null | undefined) => capabilities.appleTranslation && appleLanguagePackMissing(error) &&
+    <button type="button" onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button>;
+  const retryAfterDownload = !partial && appleLanguagePackMissing(serviceError) &&
+    <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation('apple')}>{t('retry')}</button>;
+  const retryElsewhere = retryServices.map(({ code, retry }) => <button key={code} type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(code)}>
+    {t(retry)}
+  </button>);
 
   function submit() {
     if (!draft.trim() || composing.current || snapshot.storageError || !languagesAvailable) return;
@@ -503,14 +526,15 @@ export function Translation({ t, snapshot, command, native, activity }: ViewProp
             {!notice && cachedResults[index] && <span data-tauri-drag-region="false">{cachedResults[index]}</span>}
             {partial?.errors[index] && <div className="result-error" data-tauri-drag-region="false">
               <span role="alert">{partial.errors[index]}</span>
+              {languagePackAction(partial.errors[index])}
               <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
               {retryElsewhere}
             </div>}
           </section>)}
-          {taskStatus && !hasResults && <div className="translation-status" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && retryElsewhere}</div>}
+          {taskStatus && !hasResults && <div className="translation-status" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{languagePackAction(serviceError)}{retryAfterDownload}{serviceError && retryElsewhere}</div>}
           <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
         </div>
-        {taskStatus && hasResults && <div className="translation-status with-results" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{serviceError && !partial && retryElsewhere}</div>}
+        {taskStatus && hasResults && <div className="translation-status with-results" data-tauri-drag-region="false"><span role={serviceError ? 'alert' : 'status'}>{taskStatus}</span>{languagePackAction(serviceError)}{retryAfterDownload}{serviceError && !partial && retryElsewhere}</div>}
         <footer className={cn('translation-footer', secondary === 'none' && 'single-column')}>
           <div className="language-slot">{picker('primary', primary, (value) => changeLanguage('primary', value))}</div>
           <div className={cn('language-slot', secondary === 'none' && 'secondary-off')}>

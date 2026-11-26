@@ -12,6 +12,7 @@ export function RecordsWorkspace(props: ViewProps) {
     const copy = (event: ClipboardEvent) => {
       // WebKit can deliver the native Copy command without a keydown.
       if (snapshot.capabilities.platform !== 'macos' || event.defaultPrevented || !document.getSelection()?.isCollapsed) return;
+      if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable=true]')) return;
       const row = document.activeElement?.closest('.history-row-select');
       if (!row || !workspace.current?.contains(row) || row.closest('[hidden], [inert]')) return;
       const key = new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', metaKey: true, bubbles: true, cancelable: true });

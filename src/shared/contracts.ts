@@ -1,3 +1,4 @@
+import type { TranslationEngine } from './languages';
 import { defaultClipboardShortcuts, type ClipboardControls } from './clipboardShortcuts';
 import { defaultClipboardBinding, defaultTranslationShortcuts, type KeyBinding, type ShortcutAction, type TranslationShortcuts } from './shortcuts';
 
@@ -15,8 +16,8 @@ export interface LanguageDetection {
 
 export interface TranslationMetadata {
   requestedSource: string;
-  engine: 'edge' | 'google';
-  targetEngines?: ('edge' | 'google')[];
+  engine: TranslationEngine;
+  targetEngines?: TranslationEngine[];
   strategyVersion: number;
   detections: LanguageDetection[];
 }
@@ -59,6 +60,7 @@ export interface PlatformCapabilities {
   nativeMaterial: boolean;
   selection: boolean;
   imageOcr: boolean;
+  appleTranslation: boolean;
   clipboardWrite: boolean;
   autoPaste: boolean;
   clipboardOpenTarget: boolean;
@@ -71,7 +73,7 @@ export interface PlatformCapabilities {
 }
 
 export interface TranslationPreferences {
-  engine: 'edge' | 'google';
+  engine: TranslationEngine;
   sourceLanguage: string;
   primaryLanguage: string;
   secondaryLanguage: string;
@@ -91,7 +93,7 @@ export interface AppSnapshot {
   locale: Locale;
   windowPositionMode: WindowPositionMode;
   launchAtLogin: boolean;
-  translationEngine: 'edge' | 'google';
+  translationEngine: TranslationEngine;
   translationPreferences: TranslationPreferences;
   storageError: string | null;
   clipboardCaptureEnabled: boolean;
@@ -111,7 +113,7 @@ export interface ClipboardResult {
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   windowPositionMode: 'lastPosition',
   launchAtLogin: false,

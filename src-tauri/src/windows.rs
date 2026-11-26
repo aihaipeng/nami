@@ -1689,7 +1689,7 @@ pub fn clipboard_has_focus(app: &AppHandle) -> bool {
     }
 }
 
-pub fn focus_records_editor(app: &AppHandle) -> Result<(), String> {
+pub fn focus_records(app: &AppHandle) -> Result<(), String> {
     let view = app
         .get_webview("clipboard")
         .or_else(|| app.get_webview("translation"))

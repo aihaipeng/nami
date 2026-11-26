@@ -52,7 +52,7 @@ export default function App() {
     async function connect() {
       for (const subscribe of [
         () => getCurrentWindow().onMoved(() => window.dispatchEvent(new Event('nami:window-moved'))),
-        () => listen<'edge' | 'google'>('translation_engine_changed', ({ payload }) => {
+        () => listen<AppSnapshot['translationEngine']>('translation_engine_changed', ({ payload }) => {
           latestEngine = payload;
           if (!disposed) setSnapshot((current) => ({ ...current, translationEngine: payload, translationPreferences: { ...current.translationPreferences, engine: payload } }));
         }),

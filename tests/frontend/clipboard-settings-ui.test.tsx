@@ -40,7 +40,7 @@ describe('clipboard recording settings', () => {
     expect(screen.getByRole('checkbox', { name: 'Focus Input' })).toHaveProperty('checked', true);
     expect(screen.getByRole('checkbox', { name: 'Add/Remove Note' })).toHaveProperty('checked', true);
     expect(records.note.binding?.code).toBe('KeyN');
-    expect(records.preview).toEqual({ binding: { code: 'KeyY', modifiers: ['meta'] }, enabled: true });
+    expect(records.preview).toEqual({ binding: { code: 'Space', modifiers: [] }, enabled: true });
     expect(prefs.shortcuts.translate).toBeNull();
     expect(prefs.selectionEnabled).toBe(false);
     expect(prefs.disabledShortcuts).toEqual(['translate']);
@@ -48,7 +48,7 @@ describe('clipboard recording settings', () => {
     await waitFor(() => expect(prefs.shortcuts.translate).toEqual({ code: 'Enter', modifiers: ['meta'] }));
     expect(screen.getByRole('checkbox', { name: 'Open Translation' })).toHaveProperty('checked', true);
     expect(prefs.disabledShortcuts).toEqual([]);
-    expect(records.preview).toEqual({ binding: { code: 'KeyY', modifiers: ['meta'] }, enabled: true });
+    expect(records.preview).toEqual({ binding: { code: 'Space', modifiers: [] }, enabled: true });
   });
 
   it('shows the default Control and backquote shortcut', async () => {
@@ -73,6 +73,9 @@ describe('clipboard recording settings', () => {
     const general = within(screen.getByRole('group', { name: 'General' }));
     expect(general.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual([
       'Focus Input', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
+    ]);
+    expect(general.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
+      '⌘F', 'Space', '⌘C', '⌘D', '⌘P', '⌘N', '⌘⌫', '⇧⌘P', '⌘K', '⌘,',
     ]);
     for (const retired of ['Switch Record View', 'Open Translation History', 'Focus Record List', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Paste (Context Menu)']) {
       expect(screen.queryByRole('checkbox', { name: retired })).toBeNull();
@@ -104,10 +107,10 @@ describe('clipboard recording settings', () => {
     fireEvent.click(preview);
     fireEvent.keyDown(window, { key: 'f', code: 'KeyF', metaKey: true });
     expect((await screen.findByRole('alert')).textContent).toContain('already assigned');
-    expect(preview.textContent).toBe('⌘Y');
+    expect(preview.textContent).toBe('Space');
     expect(search.textContent).toBe('⌘F');
     fireEvent.click(search);
-    fireEvent.keyDown(window, { key: 'y', code: 'KeyY', metaKey: true });
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
     expect((await screen.findByRole('alertdialog')).textContent).toContain('already assigned');
     expect(search.textContent).toBe('⌘F');
   });
@@ -157,7 +160,7 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Preview', 'preview', '⌘Y'], ['Add/Remove Note', 'note', '⇧⌘N'], ['Copy', 'copyRecord', '⇧⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌥F'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S']])(
+  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
@@ -251,7 +254,7 @@ describe('clipboard recording settings', () => {
     const preview = group('General').getByRole('button', { name: 'Preview shortcut' });
     record(preview, { key: 'Enter', code: 'Enter', metaKey: true });
     expect(await screen.findByRole('alert')).toBeTruthy();
-    expect(preview.textContent).toBe('⌘Y');
+    expect(preview.textContent).toBe('Space');
   });
 
   it('keeps panel shortcut changes separate and rejects a collision with another panel action', async () => {
@@ -261,9 +264,9 @@ describe('clipboard recording settings', () => {
     const toggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Pin/Unpin' });
     await user.click(toggle);
     await user.click(pin);
-    fireEvent.keyDown(window, { key: 'f', code: 'KeyF', altKey: true });
+    fireEvent.keyDown(window, { key: 'd', code: 'KeyD', metaKey: true });
     expect(await screen.findByText('This key combination is already assigned to a shortcut in the same scope.')).toBeTruthy();
-    expect(pin.textContent).toBe('⌥P');
+    expect(pin.textContent).toBe('⌘P');
     await user.click(pin);
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', altKey: true });
     await waitFor(() => expect(pin.textContent).toBe('⌥J'));

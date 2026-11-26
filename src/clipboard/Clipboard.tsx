@@ -298,6 +298,17 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
     if (listHandle.current?.scrollToId(id, 'instant')) pendingFocus.current = id;
   }
+  const returnFocus = useEffectEvent((id: string | null) => {
+    if (!active || editing) return;
+    if (clipboard.displayReady && id && visibleIds.has(id)) focusRow(id);
+    else search.current?.focus({ preventScroll: true });
+  });
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const subscription = listen<string | null>('clipboard_focus_requested', ({ payload }) => { if (!disposed) returnFocus(payload); });
+    return () => { disposed = true; void subscription.then((remove) => remove()).catch(() => {}); };
+  }, [native]);
   useLayoutEffect(() => {
     const id = pendingFocus.current;
     if (!id) return;
@@ -366,7 +377,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     active,
     blocked: Boolean(editing || menu),
     canTrigger: canPreview,
-    excludedContainers: '.translation-panel, .clipboard-detail, .clipboard-translate-pane, .preview-bar',
+    excludedContainers: '.translation-panel, .clipboard-right-panes, .preview-bar',
     snapshot,
     native,
     onPreview: (rowId) => {
@@ -434,7 +445,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       if (!key.repeat) { previewRecord(record.id, true); void useRecord(record.id, alternateActivate ? 'activateAlternate' : 'activate'); }
       return;
     }
-    if (!action || action === 'preview') return;
+    if (!action || action === 'preview' || (action === 'copyRecord' && document.getSelection()?.isCollapsed === false)) return;
     if (fromSearch && key.key === 'Backspace' && input?.value && action !== 'delete') return;
     event.preventDefault();
     if (key.repeat || !usableShortcut(action)) return;

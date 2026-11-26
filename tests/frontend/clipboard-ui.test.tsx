@@ -481,7 +481,7 @@ describe('clipboard text processing', () => {
     await waitFor(() => expect(row('first')).toBeTruthy());
     const search = screen.getByRole('searchbox');
     fireEvent.mouseMove(row('pinned'));
-    fireEvent.keyDown(search, { key: 'N', code: 'KeyN', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(search, { key: 'n', code: 'KeyN', metaKey: true });
     const editor = await screen.findByRole('dialog', { name: 'Note' });
     expect(calls('clipboard_record_detail').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
     fireEvent.keyDown(within(editor).getByRole('textbox', { name: 'Title' }), { key: 't', code: 'KeyT', metaKey: true });
@@ -626,7 +626,7 @@ describe('clipboard text processing', () => {
     await emit('clipboard_text_created', 'ocr-text');
     await waitFor(() => expect(bridge.snapshot.window.clipboardDetailId).toBe('ocr-text'));
     expect(document.activeElement).toBe(row('ocr-text').querySelector('.history-row-select'));
-    fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(document.activeElement!, { key: 'c', code: 'KeyC', metaKey: true });
     expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'ocr-text', action: 'copy' });
     expect(row('ocr-text').classList.contains('selected')).toBe(true);
     expect(row('picture').classList.contains('selected')).toBe(false);
@@ -702,8 +702,8 @@ describe('database clipboard history', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⇧⌘C'], ['Copy as Plain Text', '—'], '/',
-      ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
+      ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⌘C'], ['Copy as Plain Text', '—'], '/',
+      ['Favorite', '⌘D'], ['Pin', '⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(items.every((item) => item.children.length === 3)).toBe(true);
     expect(items.at(-1)?.classList.contains('clipboard-menu-delete')).toBe(true);
@@ -774,8 +774,8 @@ describe('database clipboard history', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Copy', '⇧⌘C'], ['Paste', '↵'], ['Save', '⌘S'], '/',
-      ['Favorite', '⌥F'], ['Pin', '⌥P'], ['Note', '⇧⌘N'], '/',
+      ['Copy', '⌘C'], ['Paste', '↵'], ['Save', '⌘S'], '/',
+      ['Favorite', '⌘D'], ['Pin', '⌘P'], ['Note', '⌘N'], '/',
       ['Translate', '⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(within(menu).getByRole('menuitem', { name: 'Save' }).getAttribute('aria-keyshortcuts')).toBe('Meta+S');
@@ -783,9 +783,9 @@ describe('database clipboard history', () => {
     expect(screen.getByRole('menu')).toBe(menu);
     fireEvent.keyDown(document.activeElement!, { key: 'End', code: 'End' });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Delete' }));
-    fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true, repeat: true });
+    fireEvent.keyDown(document.activeElement!, { key: 'c', code: 'KeyC', metaKey: true, repeat: true });
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    fireEvent.keyDown(document.activeElement!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(document.activeElement!, { key: 'c', code: 'KeyC', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'copy' }));
     open();
     fireEvent.keyDown(document.activeElement!, { key: 'Enter', code: 'Enter' });
@@ -817,7 +817,7 @@ describe('database clipboard history', () => {
     expect(item('Unfavorite').querySelector('kbd')?.textContent).toBe('—');
     expect(item('Unpin').querySelector('kbd')?.textContent).toBe('⌘U');
     expect(item('Save').querySelector('kbd')?.textContent).toBe('—');
-    fireEvent.keyDown(document.activeElement!, { key: 'f', code: 'KeyF', altKey: true });
+    fireEvent.keyDown(document.activeElement!, { key: 'd', code: 'KeyD', metaKey: true });
     expect(calls('clipboard_record_update')).toHaveLength(0);
     fireEvent.keyDown(document.activeElement!, { key: 'u', code: 'KeyU', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'picture', action: 'pin' }));
@@ -1552,7 +1552,7 @@ describe('database clipboard history', () => {
     expect(calls('clipboard_query').at(-1)?.[1]).toEqual({ query: '', favoritesOnly: false, cursor: null });
   });
 
-  it('starts with a keyboard target and runs Return, preview and record actions from search without a click', async () => {
+  it('starts with a keyboard target, keeps typing Space, and runs record actions from search without a click', async () => {
     bridge.snapshot.window.clipboardDetailVisible = false;
     bridge.snapshot.clipboardControls.recordsOpenFocus = 'search';
     await mount('clipboard');
@@ -1562,15 +1562,16 @@ describe('database clipboard history', () => {
     expect(row('first').getAttribute('data-keyboard-current')).not.toBeNull();
     fireEvent.mouseMove(row('pinned'));
     fireEvent.keyDown(search, { key: 'Enter', code: 'Enter' });
-    fireEvent.keyDown(search, { key: 'y', code: 'KeyY', metaKey: true });
+    expect(fireEvent.keyDown(search, { key: ' ', code: 'Space' })).toBe(true);
+    expect(calls('records_details_toggle')).toHaveLength(0);
     fireEvent.mouseMove(row('pinned'));
     fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true });
     fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', shiftKey: true });
-    fireEvent.keyDown(search, { key: 'ƒ', code: 'KeyF', altKey: true });
+    fireEvent.keyDown(search, { key: 'd', code: 'KeyD', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'favorite' }));
-    fireEvent.keyDown(search, { key: 'π', code: 'KeyP', altKey: true });
+    fireEvent.keyDown(search, { key: 'p', code: 'KeyP', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pin' }));
-    expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'pinned' });
+    expect(calls('records_details_toggle')).toHaveLength(0);
     expect(calls('clipboard_record_use').map(([, args]) => args)).toEqual([{ recordId: 'pinned', action: 'activate' }]);
     expect(document.activeElement).toBe(search);
   });
@@ -1608,10 +1609,10 @@ describe('database clipboard history', () => {
     expect(fireEvent.keyDown(search, { key: 'c', code: 'KeyC', metaKey: true })).toBe(true);
     expect(fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', shiftKey: true })).toBe(true);
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(row('first').querySelector('.history-row-select')!, { key: 'c', code: 'KeyC', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'copy' }));
     fireEvent.contextMenu(row('first'));
-    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Copy' }).getAttribute('aria-keyshortcuts')).toBe('Meta+Shift+C');
+    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Copy' }).getAttribute('aria-keyshortcuts')).toBe('Meta+C');
   });
 
   it('deletes a searched record with Command-Delete without editing the query', async () => {
@@ -1654,14 +1655,14 @@ describe('database clipboard history', () => {
     const target = within(row('first')).getByRole('button', { name: /Clipboard: Saved text/ });
     act(() => target.focus());
     fireEvent.mouseMove(row('pinned'));
-    fireEvent.keyDown(target, { key: 'y', code: 'KeyY', metaKey: true });
+    fireEvent.keyDown(target, { key: ' ', code: 'Space' });
     expect(calls('records_details_toggle').at(-1)?.[1]).toEqual({ recordId: 'first' });
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true });
+    fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true, shiftKey: true });
     fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', shiftKey: true });
     expect(calls('clipboard_record_use')).toHaveLength(0);
-    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'p', code: 'KeyP', altKey: true });
-    fireEvent.keyDown(target, { key: 'p', code: 'KeyP', altKey: true, isComposing: true });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'p', code: 'KeyP', metaKey: true });
+    fireEvent.keyDown(target, { key: 'p', code: 'KeyP', metaKey: true, isComposing: true });
     expect(calls('clipboard_record_update')).toHaveLength(0);
   });
 
@@ -1675,7 +1676,7 @@ describe('database clipboard history', () => {
     act(() => target.focus());
     const press = (node: Element, code: string, repeat = false) => fireEvent.keyDown(node, { key: code.slice(-1).toLowerCase(), code, altKey: true, repeat });
     expect(fireEvent.keyDown(target, { key: ' ', code: 'Space' })).toBe(false);
-    fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true });
+    fireEvent.keyDown(target, { key: 'c', code: 'KeyC', metaKey: true, shiftKey: true });
     fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', shiftKey: true });
     press(target, 'KeyL');
     fireEvent.keyDown(target, { key: 'Backspace', code: 'Backspace', altKey: true });
@@ -1699,8 +1700,8 @@ describe('database clipboard history', () => {
     const shortcuts = bridge.snapshot.clipboardControls.shortcuts;
     await emit('clipboard_controls_changed', { activation: 'copy', shortcuts: { ...shortcuts, pin: { enabled: true, binding: { code: 'KeyJ', modifiers: ['alt'] } }, favorite: { ...shortcuts.favorite, enabled: false } } });
     act(() => target.focus());
-    fireEvent.keyDown(target, { key: 'p', code: 'KeyP', altKey: true });
-    fireEvent.keyDown(target, { key: 'f', code: 'KeyF', altKey: true });
+    fireEvent.keyDown(target, { key: 'p', code: 'KeyP', metaKey: true });
+    fireEvent.keyDown(target, { key: 'd', code: 'KeyD', metaKey: true });
     expect(calls('clipboard_record_update')).toHaveLength(0);
     fireEvent.keyDown(target, { key: 'j', code: 'KeyJ', altKey: true });
     await waitFor(() => expect(row('first').classList.contains('pinned')).toBe(true));
@@ -2660,8 +2661,8 @@ describe('clipboard open target', () => {
     const layout = [...menu.querySelectorAll('[role=menuitem], [role=separator]')].map((item) =>
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
-      ['Paste', '↵'], ['Paste as Path', '—'], ['Copy', '⇧⌘C'], '/', ['Show in Finder', '⌘O'], '/',
-      ['Unfavorite', '⌥F'], ['Unpin', '⌥P'], ['Note', '⇧⌘N'], '/', ['Delete', '⌘⌫'],
+      ['Paste', '↵'], ['Paste as Path', '—'], ['Copy', '⌘C'], '/', ['Show in Finder', '⌘O'], '/',
+      ['Unfavorite', '⌘D'], ['Unpin', '⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Paste as Path' }));
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pastePaths' }));

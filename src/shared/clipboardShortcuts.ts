@@ -12,14 +12,14 @@ export type RecordsOpenFocus = 'search' | 'list';
 export type ClipboardControls = { search?: ClipboardSearchOptions; recordsOpenFocus?: RecordsOpenFocus; previewLines?: { clipboard: number }; activation: 'copy' | 'paste'; shortcuts: Record<ClipboardRecordAction, RecordShortcut> };
 
 export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
-  const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = ['alt']) => ({ enabled: true, binding: { code, modifiers } });
+  const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = [primary]) => ({ enabled: true, binding: { code, modifiers } });
   return {
     openTarget: shortcut('KeyO', [primary]),
     pastePlain: shortcut('Enter', [primary]), saveImage: shortcut('KeyS', [primary]),
-    preview: shortcut('KeyY', [primary]),
-    note: shortcut('KeyN', [primary, 'shift']), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
-    copyRecord: shortcut('KeyC', [primary, 'shift']),
-    favorite: shortcut('KeyF'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
+    preview: shortcut('Space', []),
+    note: shortcut('KeyN'), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
+    copyRecord: shortcut('KeyC'),
+    favorite: shortcut('KeyD'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
   };
 }
 

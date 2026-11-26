@@ -72,7 +72,7 @@ beforeEach(() => {
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
   bridge.snapshot.clipboardControls.shortcuts = defaultClipboardShortcuts('meta');
-  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, clipboardDrag: true, localBackup: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, appleTranslation: false, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, clipboardDrag: true, localBackup: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.snapshot.translationEngine = 'edge';
   bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, selectionEnabled: true, disabledShortcuts: [], shortcuts: defaultTranslationShortcuts('meta') };
   bridge.translationOutputs = { standalone: null, clipboard: null };
@@ -133,7 +133,7 @@ beforeEach(() => {
     }
     if (name === 'clipboard_note_open') deliver('clipboard_note_requested', (args as { recordId: string }).recordId);
     if (name === 'records_details_toggle') {
-      const recordId = (args as { recordId?: string } | undefined)?.recordId;
+      const { recordId, returnFocus } = (args ?? {}) as { recordId?: string; returnFocus?: boolean };
       const state = bridge.snapshot.window;
       state.recordsBrowsing = true;
       state.clipboardVisible = true;
@@ -143,13 +143,16 @@ beforeEach(() => {
       state.clipboardExtent = state.clipboardWidth;
       state.rightExtent = rightExtentFor(state);
       deliver('window_state', structuredClone(state));
+      if (returnFocus && !state.clipboardDetailVisible) deliver('clipboard_focus_requested', state.clipboardDetailId ?? null);
     }
     if (name === 'clipboard_translation_close') {
       const state = bridge.snapshot.window;
+      const focusId = state.clipboardDetailVisible ? state.clipboardDetailId : state.clipboardTranslationRecordId;
       state.clipboardTranslationVisible = false;
       state.clipboardTranslationRecordId = null;
       state.rightExtent = rightExtentFor(state);
       deliver('window_state', structuredClone(state));
+      if ((args as { returnFocus?: boolean } | undefined)?.returnFocus) deliver('clipboard_focus_requested', focusId ?? null);
     }
     if (name === 'clipboard_translation_clear_record') {
       bridge.snapshot.window.clipboardTranslationRecordId = null;

@@ -264,11 +264,22 @@ pub fn window_pin(
     }
 }
 
+fn restore_record_focus(app: &AppHandle, record_id: Option<String>) -> Result<(), String> {
+    let view = app
+        .get_webview("clipboard")
+        .or_else(|| app.get_webview("translation"))
+        .ok_or("window_unavailable")?;
+    windows::focus_records(app)?;
+    view.emit("clipboard_focus_requested", record_id)
+        .map_err(|_| "event_emit".into())
+}
+
 #[tauri::command]
 pub fn records_details_toggle(
     window: Webview,
     app: AppHandle,
     record_id: Option<String>,
+    return_focus: Option<bool>,
 ) -> Result<(), String> {
     authorize(&window, &["translation", "clipboard"])?;
     if record_id
@@ -277,7 +288,19 @@ pub fn records_details_toggle(
     {
         return Err("invalid_argument".into());
     }
-    windows::toggle_record_details(&app, record_id)
+    windows::toggle_record_details(&app, record_id)?;
+    if return_focus == Some(true) {
+        let target = {
+            let regions = app.state::<AppState>();
+            let regions = regions.windows.lock().unwrap();
+            (regions.clipboard_visible && !regions.clipboard_detail_visible)
+                .then(|| regions.clipboard_detail_id.clone())
+        };
+        if let Some(target) = target {
+            return restore_record_focus(&app, target);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -339,7 +362,7 @@ pub fn clipboard_note_open(
         .ok_or("window_unavailable")?;
     view.emit("clipboard_note_requested", record_id)
         .map_err(|_| "event_emit")?;
-    windows::focus_records_editor(&app)
+    windows::focus_records(&app)
 }
 
 #[tauri::command]
@@ -406,13 +429,34 @@ pub fn clipboard_detail_width_set(
 }
 
 #[tauri::command]
-pub fn clipboard_translation_close(window: Webview, app: AppHandle) -> Result<(), String> {
+pub fn clipboard_translation_close(
+    window: Webview,
+    app: AppHandle,
+    return_focus: Option<bool>,
+) -> Result<(), String> {
     authorize(&window, &["translation", "clipboard"])?;
     let state = app.state::<AppState>();
+    let target = {
+        let regions = state.windows.lock().unwrap();
+        (return_focus == Some(true)
+            && regions.clipboard_visible
+            && regions.clipboard_translation_visible)
+            .then(|| {
+                if regions.clipboard_detail_visible {
+                    regions.clipboard_detail_id.clone()
+                } else {
+                    regions.clipboard_translation_record_id.clone()
+                }
+            })
+    };
     state.image_text_operation.fetch_add(1, Ordering::SeqCst);
     state.clipboard_side_translation.clear();
     state.clipboard_translation.lock().unwrap().take();
-    windows::close_clipboard_translation(&app)
+    windows::close_clipboard_translation(&app)?;
+    if let Some(target) = target {
+        restore_record_focus(&app, target)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -782,7 +826,7 @@ pub async fn clipboard_record_use(
                 && platform::target_focused(target)
                 && platform::clipboard_version() == version
             {
-                let _ = windows::focus_records_editor(&app)
+                let _ = windows::focus_records(&app)
                     .inspect_err(|error| eprintln!("Nami clipboard focus return: {error}"));
             }
         })
@@ -1170,13 +1214,19 @@ pub async fn translation_shortcut_capture(
 }
 
 #[tauri::command]
+pub fn translation_language_settings_open(window: Webview) -> Result<(), String> {
+    authorize(&window, &["translation", "clipboard", "settings"])?;
+    platform::open_translation_language_settings()
+}
+
+#[tauri::command]
 pub fn translation_engine_set(
     window: Webview,
     app: AppHandle,
     engine: String,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
-    if !["edge", "google"].contains(&engine.as_str()) {
+    if !crate::translation::engine_available(&engine) {
         return Err("invalid_argument".into());
     }
     let state = app.state::<AppState>();
@@ -1298,15 +1348,17 @@ pub(crate) async fn run_translation(
     crate::translation::validate_text(&text)?;
     #[cfg(feature = "ui-tests")]
     let local_fixture = if std::env::var_os("NAMI_UI_TEST_REPORT").is_some() {
-        if app.config().identifier != "dev.local.nami.ui-tests"
-            || !matches!(
-                std::env::var("NAMI_UI_TEST_CASE").as_deref(),
-                Ok("translation-partial" | "clipboard-translate-shortcut" | "clipboard-translate")
-            )
-        {
+        if app.config().identifier != "dev.local.nami.ui-tests" {
             return Err("translation_network_disabled_in_tests".into());
         }
-        true
+        match std::env::var("NAMI_UI_TEST_CASE").as_deref() {
+            Ok("translation-partial" | "clipboard-translate-shortcut" | "clipboard-translate") => {
+                true
+            }
+            // Only the explicit on-device engine may run outside the synthetic fixture.
+            Ok("apple-translate") if retry_engine.as_deref() == Some("apple") => false,
+            _ => return Err("translation_network_disabled_in_tests".into()),
+        }
     } else {
         false
     };
@@ -2460,6 +2512,39 @@ mod tests {
         assert_eq!(paste_release_result(true, false), Err("clipboard_changed"));
         assert_eq!(paste_release_result(false, false), Err("clipboard_changed"));
         assert_eq!(paste_release_result(false, true), Err("target_unavailable"));
+    }
+
+    #[test]
+    fn apple_failure_never_sends_text_to_a_cloud_fallback() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut called = Vec::new();
+        let batch = runtime
+            .block_on(super::translate_with_google_fallback(
+                "apple",
+                "en",
+                &["en".into(), "ja".into()],
+                |engine, _| {
+                    called.push(engine.to_owned());
+                    async {
+                        Ok(crate::translation::TranslationResult {
+                            translations: vec!["Synthetic result".into(), String::new()],
+                            errors: vec![
+                                None,
+                                Some("Apple Translate language pack is not downloaded.".into()),
+                            ],
+                            source_language: "en".into(),
+                            detections: Vec::new(),
+                        })
+                    }
+                },
+            ))
+            .unwrap();
+        assert_eq!(called, ["apple"]);
+        assert_eq!(batch.translations[0], "Synthetic result");
+        assert!(batch.errors[1].is_some());
+        assert_eq!(batch.engines, ["apple", "apple"]);
     }
 
     #[test]
