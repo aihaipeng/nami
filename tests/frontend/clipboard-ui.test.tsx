@@ -472,7 +472,7 @@ describe('clipboard text processing', () => {
     expect(calls('clipboard_record_has_text')).toHaveLength(0);
   });
 
-  it.each([['Extract Text', 'ocr'], ['Translate', 'translate']])('offers explicit %s on unknown images without probing and reports empty results', async (label, action) => {
+  it.each([['Extract Text', 'ocr'], ['Translate', 'translate']])('offers explicit %s on unknown images without probing and hides both when nothing is recognized', async (label, action) => {
     records = [{ ...records[0], id: 'picture', kind: 'image' }];
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => {
@@ -486,9 +486,24 @@ describe('clipboard text processing', () => {
     expect(calls('clipboard_record_process')).toHaveLength(0);
     fireEvent.contextMenu(row('picture'));
     fireEvent.click(screen.getByRole('menuitem', { name: label }));
-    expect(await screen.findByText('No text recognized')).toBeTruthy();
+    await waitFor(() => expect(within(row('picture')).queryByRole('button', { name: 'Extract text' })).toBeNull());
+    expect(within(row('picture')).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(screen.queryByText('No text recognized')).toBeNull();
+    expect(screen.queryByText('未识别到文字')).toBeNull();
     expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'picture', action }]);
     expect(calls('clipboard_record_use')).toHaveLength(0);
+  });
+
+  it('hides extract and translate on an image whose stored OCR text is empty', async () => {
+    records = [{ ...records[0], id: 'blank', kind: 'image', text: 'Image', imageTextEmpty: true }];
+    await mount('clipboard');
+    await waitFor(() => expect(row('blank')).toBeTruthy());
+    expect(within(row('blank')).queryByRole('button', { name: 'Extract text' })).toBeNull();
+    expect(within(row('blank')).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(screen.queryByText('No text recognized')).toBeNull();
+    fireEvent.contextMenu(row('blank'));
+    expect(screen.queryByRole('menuitem', { name: 'Extract Text' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Translate' })).toBeNull();
   });
 
   it('opens the highlighted record note from search and leaves typing in the editor alone', async () => {

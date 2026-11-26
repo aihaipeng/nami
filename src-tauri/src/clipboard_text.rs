@@ -275,6 +275,25 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     })
     .await?;
     if text.trim().is_empty() {
+        // An empty Vision result is a finished image, same as Maccy leaving the title blank.
+        // Persist it so the list can drop Extract text. Translate still does not write a projection.
+        if record.kind == "image" && action == "ocr" {
+            let id = record.id.clone();
+            let fingerprint = record.fingerprint.clone();
+            let wrote = clipboard_runtime::database(app, move |database| {
+                if database.clipboard_ocr_text(&id)?.is_some() {
+                    return Ok(false);
+                }
+                database
+                    .clipboard_index_image(&id, &fingerprint, "")
+                    .map(|_| true)
+            })
+            .await?;
+            if wrote {
+                drop(_write);
+                clipboard_runtime::changed(app)?;
+            }
+        }
         return Err("ocr_no_text".into());
     }
     if action == "translate" {

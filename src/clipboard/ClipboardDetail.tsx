@@ -75,6 +75,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const [qrCodes, setQrCodes] = useState<string[]>([]);
   const [imagePalette, setImagePalette] = useState<string[]>([]);
   const [openTargetKind, setOpenTargetKind] = useState<'file' | 'link' | 'email' | null>(null);
+  const [recognizedEmpty, setRecognizedEmpty] = useState(false);
   const operation = useRef(0);
   const feedbackOperation = useRef(0);
   const processing = useRef(false);
@@ -82,7 +83,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const list = useRef<HTMLDivElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    ++operation.current; processing.current = false; paletteRecord.current = null; setBusy(false); setFeedback(null); setFailed(null); setTextViewMode('rich'); setJsonMode('original'); setImageDataMode('preview'); setImageDataDims(null); setShowQr(false); setQrCodes([]); setImagePalette([]); setOpenTargetKind(null);
+    ++operation.current; processing.current = false; paletteRecord.current = null; setBusy(false); setFeedback(null); setFailed(null); setRecognizedEmpty(false); setTextViewMode('rich'); setJsonMode('original'); setImageDataMode('preview'); setImageDataDims(null); setShowQr(false); setQrCodes([]); setImagePalette([]); setOpenTargetKind(null);
     list.current?.scrollTo(0, 0);
     if (!active || !native || !id) { setDetail(null); setLoading(false); return; }
     let disposed = false;
@@ -109,7 +110,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const shown = active && detail && !failed ? detail : null;
   const current = shown?.id === id ? shown : null;
   const singleImage = shown?.kind === 'image' || shown?.kind === 'files' && isSingleImage(shown.files);
-  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : snapshot.capabilities.imageOcr && singleImage && shown?.imageIndexStatus !== 'empty';
+  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : snapshot.capabilities.imageOcr && singleImage && shown?.imageIndexStatus !== 'empty' && !recognizedEmpty;
   const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
   const [indexingId, setIndexingId] = useState<string | null>(null);
   const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
@@ -205,7 +206,11 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       if (process) await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type });
     } catch (error) {
-      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') setFeedback((type === 'copy' || type === 'copyPlain') ? t(clipboardUseError(error)) : process ? clipboardProcessError(t, error, type) : t('nativeError'));
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') {
+        const message = (type === 'copy' || type === 'copyPlain') ? t(clipboardUseError(error)) : process ? clipboardProcessError(error, type) : t('nativeError');
+        if (process && message === null && current.kind === 'image') setRecognizedEmpty(true);
+        else if (message) setFeedback(message);
+      }
     } finally {
       if (process && operation.current === revision) { processing.current = false; setBusy(false); }
     }

@@ -327,7 +327,7 @@ describe('clipboard details', () => {
     if (text) expect(actions.indexOf('note')).toBe(actions.indexOf('ocr') + 1);
   });
 
-  it('reports no text from an explicit detail action without copying', async () => {
+  it('hides image text actions when recognition finds nothing and shows no empty hint', async () => {
     records[1] = { ...first(), kind: 'image', imageIndexStatus: 'unindexed' };
     const invoke = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name, args) => {
@@ -336,7 +336,10 @@ describe('clipboard details', () => {
     });
     direct();
     fireEvent.click(await within(pane()).findByRole('button', { name: 'Translate' }));
-    expect(await within(pane()).findByText('No text recognized')).toBeTruthy();
+    await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull());
+    expect(within(pane()).queryByRole('button', { name: 'Translate' })).toBeNull();
+    expect(within(pane()).queryByText('No text recognized')).toBeNull();
+    expect(within(pane()).queryByText('未识别到文字')).toBeNull();
     expect(calls('clipboard_record_process').map(([, args]) => args)).toEqual([{ recordId: 'first', action: 'translate' }]);
     expect(calls('clipboard_record_use')).toHaveLength(0);
   });

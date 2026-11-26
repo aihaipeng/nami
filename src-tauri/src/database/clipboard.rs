@@ -25,6 +25,16 @@ fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
         .map_err(storage_error)
 }
 
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    connection
+        .prepare_cached(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"
+        ))
+        .map_err(storage_error)?
+        .exists([column])
+        .map_err(storage_error)
+}
+
 pub(super) fn migrate(connection: &mut rusqlite::Connection) -> Result<(), String> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -714,7 +724,12 @@ impl HistoryDatabase {
         } else {
             "0"
         };
-        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},{has_file_paths},{has_rich_text} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
+        let image_text_empty = if has_column(&self.connection, "clipboard_ocr", "original_text")? {
+            "r.kind='image' AND EXISTS (SELECT 1 FROM clipboard_ocr o WHERE o.sequence=r.sequence AND o.original_text IS NOT NULL AND trim(o.original_text)='')"
+        } else {
+            "0"
+        };
+        let sql = format!("SELECT r.sequence,r.id,r.kind,r.summary,r.date,r.is_favorite,r.is_pinned,r.source_app_id,r.created_at,r.title,{image_text_match},{has_file_paths},{has_rich_text},{image_text_empty} FROM clipboard_records r WHERE r.sequence IN (SELECT sequence FROM clipboard_records{hint} WHERE (is_pinned,created_at,sequence)<(:pinned,:created,:sequence){favorite}{kind_filter}{pin}{filter} ORDER BY is_pinned DESC,created_at DESC,sequence DESC LIMIT :limit) ORDER BY r.is_pinned DESC,r.created_at DESC,r.sequence DESC");
         let mut statement = self
             .connection
             .prepare_cached(&sql)
@@ -792,6 +807,7 @@ impl HistoryDatabase {
                 image_text_match: row.get(10).map_err(storage_error)?,
                 has_file_paths: row.get(11).map_err(storage_error)?,
                 has_rich_text: row.get(12).map_err(storage_error)?,
+                image_text_empty: row.get(13).map_err(storage_error)?,
             };
             cursor = Some(ClipboardCursor {
                 pinned: record.is_pinned,
@@ -2724,6 +2740,15 @@ mod tests {
                 db.clipboard_ocr_text(&blank.id).unwrap().as_deref(),
                 Some("")
             );
+            let listed = db.clipboard_page("", false, None, 10).unwrap();
+            assert!(listed
+                .records
+                .iter()
+                .any(|item| item.id == blank.id && item.image_text_empty));
+            assert!(listed
+                .records
+                .iter()
+                .any(|item| item.id == image.id && !item.image_text_empty));
             for term in ["E247", "海浪", "海", "école e247.png"] {
                 let page = db.clipboard_page(term, false, None, 10).unwrap();
                 assert_eq!(page.total_records, 1, "term {term}");

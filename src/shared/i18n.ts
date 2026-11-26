@@ -191,7 +191,6 @@ export const messages = {
   appleTranslateOnDevice: ['Apple Translate 在本机处理文本，不使用 HTTP 代理。', 'Apple Translate processes text on this Mac and does not use the HTTP proxy.'],
   openTranslationLanguages: ['打开翻译语言设置', 'Open Translation Languages Settings'],
   clipboardImageIndexFailed: ['图片文字索引失败', 'Could not index image text'],
-  clipboardImageIndexEmpty: ['未识别到文字', 'No text recognized'],
   clipboardIndexImage: ['索引图片文字', 'Index image text'],
   clipboardImageDescription: ['包括可识别的单张图片文件。', 'Includes supported single image files.'],
   clipboardFilesDescription: ['普通文件和文件夹只保存路径。', 'Regular files and folders are stored as paths only.'],

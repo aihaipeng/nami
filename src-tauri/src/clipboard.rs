@@ -299,6 +299,9 @@ pub struct ClipboardSummary {
     pub has_file_paths: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_rich_text: bool,
+    /// Image OCR finished and stored an empty original. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_text_empty: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

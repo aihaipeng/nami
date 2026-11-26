@@ -48,6 +48,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<MessageKey | null>(null);
+  const [textless, setTextless] = useState<ReadonlySet<string>>(() => new Set());
   const operation = useRef(0);
   const processingRevision = useRef(0);
   const reveal = useRef<string | null>(null);
@@ -78,7 +79,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     });
   }, []);
   const menuRecord = menu ? records.find((record) => record.id === menu.id) : null;
-  const canTranslateRecord = (record: ClipboardRecord) => record.kind === 'text' ? !!record.text.trim() : snapshot.capabilities.imageOcr && (record.kind === 'image' || imageFiles.has(record.id));
+  const textlessImage = (record: ClipboardRecord) => record.kind === 'image' && (record.imageTextEmpty || textless.has(record.id));
+  const canTranslateRecord = (record: ClipboardRecord) => record.kind === 'text' ? !!record.text.trim() : snapshot.capabilities.imageOcr && (record.kind === 'image' || imageFiles.has(record.id)) && !textlessImage(record);
   const canOcrRecord = (record: ClipboardRecord) => record.kind !== 'text' && canTranslateRecord(record) && snapshot.capabilities.clipboardWrite;
   const selection = snapshot.window.clipboardDetailVisible ? snapshot.window.clipboardDetailId : selected;
   const visibleIds = new Set(records.map(({ id }) => id));
@@ -269,7 +271,15 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       await invoke('clipboard_record_process', { recordId, action });
     } catch (error) {
       if (mounted.current && operation.current === current && String(error) !== 'cancelled') {
-        setProcessingError(clipboardProcessError(t, error, action));
+        const message = clipboardProcessError(error, action);
+        if (message) setProcessingError(message);
+        else setTextless((current) => {
+          const record = records.find(({ id }) => id === recordId);
+          if (record?.kind !== 'image' || current.has(recordId)) return current;
+          const next = new Set(current);
+          next.add(recordId);
+          return next;
+        });
       }
     } finally {
       if (mounted.current && processingRevision.current === revision) setProcessing(null);

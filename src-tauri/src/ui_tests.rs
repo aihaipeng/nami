@@ -8344,18 +8344,7 @@ return {ready:rows.length===5&&image.includes('ocr'),text,image,blank,files,icon
                     "delete",
                 ],
             ),
-            (
-                "blank",
-                vec![
-                    "copy",
-                    "translate",
-                    "ocr",
-                    "note",
-                    "favorite",
-                    "pin",
-                    "delete",
-                ],
-            ),
+            ("blank", vec!["copy", "note", "favorite", "pin", "delete"]),
             ("files", vec!["copy", "note", "favorite", "pin", "delete"]),
         ] {
             if actions[key] != serde_json::json!(expected) {
