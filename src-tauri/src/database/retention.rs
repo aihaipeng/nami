@@ -27,7 +27,7 @@ pub(super) fn cleanup_parameters(
     now: i64,
 ) -> (Option<u32>, u8, Option<i64>) {
     (
-        policy.map(|value| value.limit),
+        policy.and_then(|value| (value.limit > 0).then_some(value.limit)),
         categories,
         policy
             .and_then(|value| value.max_age_days)
@@ -270,6 +270,11 @@ fn cleanup_preview(
         ctx.policy
             .and_then(|value| value.max_storage_mb)
             .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    hash.update(
+        ctx.policy
+            .map_or(0, |value| value.auto_cleanup_interval_hours)
             .to_le_bytes(),
     );
     let mut counts = [0; 3];

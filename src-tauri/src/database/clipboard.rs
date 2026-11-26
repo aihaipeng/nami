@@ -414,6 +414,35 @@ fn save_ocr(
     Ok(updated != 0)
 }
 
+fn serialize_directory_paths(
+    paths: &[String],
+    directory_paths: &[String],
+) -> Result<Option<String>, String> {
+    if directory_paths.len() > MAX_FILE_COUNT {
+        return Err("invalid_argument".into());
+    }
+    let mut normalized = Vec::new();
+    for dir in directory_paths {
+        if !std::path::Path::new(dir).is_absolute()
+            || dir.contains('\0')
+            || !paths.iter().any(|path| path == dir)
+        {
+            return Err("invalid_argument".into());
+        }
+        if !normalized.iter().any(|existing| existing == dir) {
+            normalized.push(dir.clone());
+        }
+    }
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let serialized = serde_json::to_string(&normalized).map_err(|_| "invalid_argument")?;
+    if serialized.len() > MAX_TEXT_BYTES {
+        return Err("invalid_argument".into());
+    }
+    Ok(Some(serialized))
+}
+
 fn valid_file_representation(
     record: &ClipboardRecord,
     representation: &ClipboardFileRepresentation,
@@ -483,6 +512,85 @@ pub fn unlink_pending_clipboard_images(
         .collect();
     let failed = complete.len() != count;
     (complete, failed)
+}
+
+pub fn unlink_orphan_clipboard_images(
+    root: &std::path::Path,
+    referenced: &std::collections::HashSet<String>,
+    min_age: std::time::Duration,
+) -> (usize, u64, Vec<String>) {
+    use std::fs::{read_dir, remove_dir, remove_file, symlink_metadata};
+    use std::time::SystemTime;
+    let origin = root.join("origin");
+    let Ok(origin_meta) = symlink_metadata(&origin) else {
+        return (0, 0, Vec::new());
+    };
+    if !origin_meta.is_dir() {
+        return (0, 0, Vec::new());
+    }
+    let now = SystemTime::now();
+    let mut removed_files = 0usize;
+    let mut reclaimed_bytes = 0u64;
+    let mut removed_paths = Vec::new();
+    let Ok(buckets) = read_dir(&origin) else {
+        return (0, 0, Vec::new());
+    };
+    for bucket in buckets.flatten() {
+        let bucket_path = bucket.path();
+        let Ok(bucket_meta) = symlink_metadata(&bucket_path) else {
+            continue;
+        };
+        if !bucket_meta.is_dir() {
+            continue;
+        }
+        let bucket_name = bucket.file_name();
+        let Some(bucket_name) = bucket_name.to_str() else {
+            continue;
+        };
+        let Ok(entries) = read_dir(&bucket_path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            if !min_age.is_zero() {
+                let old_enough = meta
+                    .modified()
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age >= min_age);
+                if !old_enough {
+                    continue;
+                }
+            }
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let relative = format!("origin/{bucket_name}/{file_name}");
+            if referenced.contains(&relative) {
+                continue;
+            }
+            let len = meta.len();
+            if remove_file(&path).is_ok() {
+                removed_files += 1;
+                reclaimed_bytes = reclaimed_bytes.saturating_add(len);
+                removed_paths.push(relative);
+            }
+        }
+        if read_dir(&bucket_path)
+            .ok()
+            .is_some_and(|mut it| it.next().is_none())
+        {
+            let _ = remove_dir(&bucket_path);
+        }
+    }
+    (removed_files, reclaimed_bytes, removed_paths)
 }
 
 pub(super) fn ensure_filter_indexes(connection: &rusqlite::Connection) -> Result<(), String> {
@@ -558,6 +666,30 @@ impl ClipboardSearch<'_> {
             ClipboardSearchMode::Regex => format!("{ADVANCED_MATCH}({original})"),
             ClipboardSearchMode::Mixed => unreachable!(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCategoryUsage {
+    pub bytes: u64,
+    pub count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardStorageBreakdown {
+    pub text: StorageCategoryUsage,
+    pub image: StorageCategoryUsage,
+    pub files: StorageCategoryUsage,
+}
+
+impl ClipboardStorageBreakdown {
+    pub fn total_bytes(&self) -> u64 {
+        self.text
+            .bytes
+            .saturating_add(self.image.bytes)
+            .saturating_add(self.files.bytes)
     }
 }
 
@@ -1012,7 +1144,88 @@ impl HistoryDatabase {
         representation: Option<&ClipboardFileRepresentation>,
         formatting: Option<&ClipboardTextFormatting>,
     ) -> Result<ClipboardRecord, String> {
-        self.insert_clipboard_record(record, representation, formatting, true, None)
+        self.clipboard_insert_capture_with_dirs(record, representation, formatting, None)
+    }
+
+    pub fn clipboard_insert_capture_with_dirs(
+        &mut self,
+        record: &ClipboardRecord,
+        representation: Option<&ClipboardFileRepresentation>,
+        formatting: Option<&ClipboardTextFormatting>,
+        directory_paths: Option<&[String]>,
+    ) -> Result<ClipboardRecord, String> {
+        self.insert_clipboard_record(
+            record,
+            representation,
+            formatting,
+            directory_paths,
+            true,
+            None,
+        )
+    }
+
+    pub fn clipboard_directory_paths(&self, id: &str) -> Result<Vec<String>, String> {
+        if !has_column(&self.connection, "clipboard_contents", "directory_paths")? {
+            return Ok(Vec::new());
+        }
+        let stored: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT c.directory_paths FROM clipboard_contents c JOIN clipboard_records r USING(sequence) WHERE r.id=?1 AND r.kind='files'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let Some(Some(raw)) = stored else {
+            return Ok(Vec::new());
+        };
+        if raw.len() > MAX_TEXT_BYTES {
+            return Err("storage_corrupt".into());
+        }
+        let dirs: Vec<String> = serde_json::from_str(&raw).map_err(|_| "storage_corrupt")?;
+        if dirs.len() > MAX_FILE_COUNT
+            || dirs
+                .iter()
+                .any(|path| !std::path::Path::new(path).is_absolute() || path.contains('\0'))
+        {
+            return Err("storage_corrupt".into());
+        }
+        Ok(dirs)
+    }
+
+    pub fn clipboard_set_directory_paths(
+        &mut self,
+        id: &str,
+        directory_paths: &[String],
+    ) -> Result<(), String> {
+        if !has_column(&self.connection, "clipboard_contents", "directory_paths")? {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let (sequence, kind, text): (i64, String, String) = tx
+            .query_row(
+                "SELECT r.sequence, r.kind, c.text FROM clipboard_records r JOIN clipboard_contents c USING(sequence) WHERE r.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or("not_found")?;
+        if kind != "files" {
+            return Err("invalid_argument".into());
+        }
+        let paths: Vec<String> = serde_json::from_str(&text).map_err(|_| "storage_corrupt")?;
+        let serialized = serialize_directory_paths(&paths, directory_paths)?;
+        tx.execute(
+            "UPDATE clipboard_contents SET directory_paths=?1 WHERE sequence=?2 AND directory_paths IS NOT ?1",
+            params![serialized, sequence],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
     }
 
     pub fn clipboard_text_formatting(
@@ -1051,7 +1264,7 @@ impl HistoryDatabase {
         if record.kind != "text" || record.text.trim().is_empty() || record.text.contains('\0') {
             return Err("invalid_argument".into());
         }
-        self.insert_clipboard_record(record, None, None, true, Some(source_id))
+        self.insert_clipboard_record(record, None, None, None, true, Some(source_id))
     }
 
     pub fn clipboard_insert_translation_copy(&mut self, text: String) -> Result<(), String> {
@@ -1066,7 +1279,7 @@ impl HistoryDatabase {
             source_app: Some(serde_json::json!({"name":"Nami"})),
             image_path: None,
         };
-        self.insert_clipboard_record(&record, None, None, false, None)
+        self.insert_clipboard_record(&record, None, None, None, false, None)
             .map(|_| ())
     }
 
@@ -1093,6 +1306,12 @@ impl HistoryDatabase {
         } else {
             self.clipboard_text_formatting(id)?
         };
+        let directory_paths = if !plain_text && record.kind == "files" {
+            let dirs = self.clipboard_directory_paths(id)?;
+            (!dirs.is_empty()).then_some(dirs)
+        } else {
+            None
+        };
         record.id = uuid::Uuid::new_v4().to_string();
         record.date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         record.is_favorite = false;
@@ -1104,6 +1323,7 @@ impl HistoryDatabase {
             &record,
             representation.as_ref(),
             formatting.as_ref(),
+            directory_paths.as_deref(),
             false,
             None,
         )?;
@@ -1115,6 +1335,7 @@ impl HistoryDatabase {
         record: &ClipboardRecord,
         representation: Option<&ClipboardFileRepresentation>,
         formatting: Option<&ClipboardTextFormatting>,
+        directory_paths: Option<&[String]>,
         deduplicate: bool,
         ocr_source_id: Option<&str>,
     ) -> Result<ClipboardRecord, String> {
@@ -1124,6 +1345,7 @@ impl HistoryDatabase {
             || formatting.is_some_and(|value| {
                 record.kind != "text" || record.text.trim().is_empty() || !value.valid()
             })
+            || directory_paths.is_some_and(|dirs| record.kind != "files" && !dirs.is_empty())
             || record.fingerprint.is_empty()
             || chrono::DateTime::parse_from_rfc3339(&record.date).is_err()
             || (record.kind == "image") != record.image_path.is_some()
@@ -1143,7 +1365,7 @@ impl HistoryDatabase {
                 Ok(paths)
             })
             .transpose()?;
-        let (summary, search_text) = if record.kind == "files" {
+        let (summary, search_text, directory_paths_json) = if record.kind == "files" {
             let paths: Vec<String> =
                 serde_json::from_str(&record.text).map_err(|_| "invalid_argument")?;
             if paths.is_empty()
@@ -1154,12 +1376,15 @@ impl HistoryDatabase {
             {
                 return Err("invalid_argument".into());
             }
+            let dirs_json = directory_paths
+                .map(|dirs| serialize_directory_paths(&paths, dirs))
+                .transpose()?;
             let summary = paths
                 .iter()
                 .map(|path| file_search_name(path))
                 .collect::<Vec<_>>()
                 .join("\n");
-            (summary, paths.join("\n"))
+            (summary, paths.join("\n"), dirs_json)
         } else {
             let search = representation
                 .filter(|_| record.kind == "image")
@@ -1167,7 +1392,7 @@ impl HistoryDatabase {
                     || record.text.clone(),
                     |file| file_search_name(&file.paths[0]).to_owned(),
                 );
-            (record.text.clone(), search)
+            (record.text.clone(), search, None)
         };
         let summary: String = summary.chars().take(256).collect();
         let source = record
@@ -1214,6 +1439,7 @@ impl HistoryDatabase {
         } else {
             None
         };
+        let has_dir_paths = has_column(&transaction, "clipboard_contents", "directory_paths")?;
         let inserted = duplicate.is_none();
         let id = if let Some(id) = duplicate {
             transaction
@@ -1224,20 +1450,38 @@ impl HistoryDatabase {
                 .map_err(storage_error)?;
             if record.kind == "image" {
                 transaction.execute("UPDATE clipboard_contents SET search_folded=?2 WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1) AND search_folded<>?2", params![id,search_text.to_lowercase()]).map_err(storage_error)?;
+            } else if record.kind == "files" && has_dir_paths {
+                if let Some(dirs_json) = &directory_paths_json {
+                    transaction
+                        .execute(
+                            "UPDATE clipboard_contents SET directory_paths=?2 WHERE sequence=(SELECT sequence FROM clipboard_records WHERE id=?1) AND directory_paths IS NOT ?2",
+                            params![id, dirs_json],
+                        )
+                        .map_err(storage_error)?;
+                }
             }
             id
         } else {
             transaction.execute("INSERT INTO clipboard_records(id,kind,summary,date,created_at,is_favorite,is_pinned,source_app_id,image_path,fingerprint) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![record.id,record.kind,summary,record.date,created,record.is_favorite,record.is_pinned,source_id,record.image_path,record.fingerprint]).map_err(storage_error)?;
-            transaction
-                .execute(
-                    "INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?3)",
-                    params![
-                        transaction.last_insert_rowid(),
-                        record.text,
-                        search_text.to_lowercase()
-                    ],
-                )
-                .map_err(storage_error)?;
+            let sequence = transaction.last_insert_rowid();
+            if has_dir_paths {
+                let dirs_json = directory_paths_json
+                    .as_ref()
+                    .and_then(|value| value.as_deref());
+                transaction
+                    .execute(
+                        "INSERT INTO clipboard_contents(sequence,text,search_folded,directory_paths) VALUES(?1,?2,?3,?4)",
+                        params![sequence, record.text, search_text.to_lowercase(), dirs_json],
+                    )
+                    .map_err(storage_error)?;
+            } else {
+                transaction
+                    .execute(
+                        "INSERT INTO clipboard_contents(sequence,text,search_folded) VALUES(?1,?2,?3)",
+                        params![sequence, record.text, search_text.to_lowercase()],
+                    )
+                    .map_err(storage_error)?;
+            }
             record.id.clone()
         };
         if let (Some(representation), Some(paths)) = (representation, paths) {
@@ -1329,6 +1573,65 @@ impl HistoryDatabase {
             }
         }
         tx.commit().map_err(storage_error)
+    }
+
+    pub fn referenced_clipboard_images(&self) -> Result<std::collections::HashSet<String>, String> {
+        let has_files = has_table(&self.connection, "clipboard_file_representations")?;
+        let sql = if has_files {
+            "SELECT DISTINCT image_path FROM clipboard_records WHERE image_path IS NOT NULL
+             UNION
+             SELECT DISTINCT image_path FROM clipboard_file_representations WHERE image_path IS NOT NULL"
+        } else {
+            "SELECT DISTINCT image_path FROM clipboard_records WHERE image_path IS NOT NULL"
+        };
+        let mut stmt = self.connection.prepare(sql).map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage_error)?;
+        let mut paths = std::collections::HashSet::new();
+        for row in rows {
+            paths.insert(row.map_err(storage_error)?);
+        }
+        Ok(paths)
+    }
+
+    pub fn reclaim_unreferenced_source_apps(&mut self) -> Result<(usize, u64), String> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let (count, bytes): (i64, i64) = tx
+            .query_row(
+                "SELECT count(*), COALESCE(SUM(octet_length(payload)), 0)
+                 FROM source_apps
+                 WHERE id NOT IN (
+                     SELECT DISTINCT source_app_id
+                     FROM clipboard_records
+                     WHERE source_app_id IS NOT NULL
+                 )",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(storage_error)?;
+        let removed = if count > 0 {
+            tx.execute(
+                "DELETE FROM source_apps
+                 WHERE id NOT IN (
+                     SELECT DISTINCT source_app_id
+                     FROM clipboard_records
+                     WHERE source_app_id IS NOT NULL
+                 )",
+                [],
+            )
+            .map_err(storage_error)?
+        } else {
+            0
+        };
+        tx.commit().map_err(storage_error)?;
+        let _ = self
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok((removed, u64::try_from(bytes).unwrap_or(0)))
     }
 
     pub fn clipboard_detail(&self, id: &str) -> Result<crate::clipboard::ClipboardDetail, String> {
@@ -1658,17 +1961,86 @@ impl HistoryDatabase {
             .and_then(|count| usize::try_from(count).map_err(|_| "storage_corrupt".into()))
     }
 
-    pub fn clipboard_storage_bytes(&self) -> Result<u64, String> {
-        self.connection.query_row(
+    pub fn clipboard_storage_breakdown(&self) -> Result<ClipboardStorageBreakdown, String> {
+        let has_files = has_table(&self.connection, "clipboard_file_representations")?;
+        let has_formatting = has_table(&self.connection, "clipboard_text_formatting")?;
+        let has_ocr_original = has_column(&self.connection, "clipboard_ocr", "original_text")?;
+        let has_dir_paths = has_column(&self.connection, "clipboard_contents", "directory_paths")?;
+        let dir_paths_expr = if has_dir_paths {
+            "COALESCE(octet_length(c.directory_paths), 0)"
+        } else {
+            "0"
+        };
+        let ocr_expr = if has_ocr_original {
+            "COALESCE(octet_length(o.search_folded) + COALESCE(octet_length(o.original_text), 0), 0)"
+        } else {
+            "COALESCE(octet_length(o.search_folded), 0)"
+        };
+        let files_expr = if has_files {
+            "COALESCE(octet_length(f.paths) + octet_length(f.image_path), 0)"
+        } else {
+            "0"
+        };
+        let fmt_expr = if has_formatting {
+            "COALESCE(COALESCE(length(fmt.html), 0) + COALESCE(length(fmt.rtf), 0), 0)"
+        } else {
+            "0"
+        };
+        let files_join = if has_files {
+            "LEFT JOIN clipboard_file_representations f ON f.sequence = r.sequence"
+        } else {
+            ""
+        };
+        let fmt_join = if has_formatting {
+            "LEFT JOIN clipboard_text_formatting fmt ON fmt.sequence = r.sequence"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT
-                COALESCE((SELECT sum(octet_length(id)+octet_length(kind)+octet_length(summary)+octet_length(date)+octet_length(title)+octet_length(fingerprint)+COALESCE(octet_length(image_path),0)) FROM clipboard_records),0)
-                + COALESCE((SELECT sum(octet_length(text)+octet_length(search_folded)) FROM clipboard_contents),0)
-                + COALESCE((SELECT sum(octet_length(search_folded)) FROM clipboard_titles),0)
-                + COALESCE((SELECT sum(octet_length(search_folded)+COALESCE(octet_length(original_text),0)) FROM clipboard_ocr),0)
-                + COALESCE((SELECT sum(octet_length(paths)+octet_length(image_path)) FROM clipboard_file_representations),0)
-                + COALESCE((SELECT sum(COALESCE(length(html),0)+COALESCE(length(rtf),0)) FROM clipboard_text_formatting),0)",
-            [], |row| row.get::<_, i64>(0),
-        ).map_err(storage_error).and_then(|bytes| u64::try_from(bytes).map_err(|_| "storage_corrupt".into()))
+                r.kind,
+                COUNT(*),
+                COALESCE(SUM(
+                    octet_length(r.id) + octet_length(r.kind) + octet_length(r.summary)
+                    + octet_length(r.date) + octet_length(r.title) + octet_length(r.fingerprint)
+                    + COALESCE(octet_length(r.image_path), 0)
+                    + COALESCE(octet_length(c.text) + octet_length(c.search_folded), 0)
+                    + {dir_paths_expr}
+                    + COALESCE(octet_length(t.search_folded), 0)
+                    + {ocr_expr}
+                    + {files_expr}
+                    + {fmt_expr}
+                ), 0)
+            FROM clipboard_records r
+            LEFT JOIN clipboard_contents c ON c.sequence = r.sequence
+            LEFT JOIN clipboard_titles t ON t.sequence = r.sequence
+            LEFT JOIN clipboard_ocr o ON o.sequence = r.sequence
+            {files_join}
+            {fmt_join}
+            GROUP BY r.kind"
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(storage_error)?;
+        let mut rows = statement.query([]).map_err(storage_error)?;
+        let mut breakdown = ClipboardStorageBreakdown::default();
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            let kind: String = row.get(0).map_err(storage_error)?;
+            let count = u64::try_from(row.get::<_, i64>(1).map_err(storage_error)?)
+                .map_err(|_| "storage_corrupt")?;
+            let bytes = u64::try_from(row.get::<_, i64>(2).map_err(storage_error)?)
+                .map_err(|_| "storage_corrupt")?;
+            let usage = StorageCategoryUsage { bytes, count };
+            match kind.as_str() {
+                "text" => breakdown.text = usage,
+                "image" => breakdown.image = usage,
+                "files" => breakdown.files = usage,
+                _ => (),
+            }
+        }
+        Ok(breakdown)
+    }
+
+    pub fn clipboard_storage_bytes(&self) -> Result<u64, String> {
+        Ok(self.clipboard_storage_breakdown()?.total_bytes())
     }
 
     pub fn clipboard_capture_enabled(&self) -> Result<bool, String> {
@@ -2053,6 +2425,7 @@ mod tests {
             limit: 500,
             max_age_days: Some(7),
             max_storage_mb: None,
+            ..Default::default()
         });
         let mut expired = record("expired", "synthetic expired searchable body");
         expired.date = "2001-01-01T00:00:00.000Z".into();
@@ -4790,6 +5163,7 @@ mod tests {
             limit: 500,
             max_age_days: None,
             max_storage_mb: Some(500),
+            ..Default::default()
         };
 
         // Budget fits shared image (4096) + remaining DB rows (~600B), but NOT solo image (6144).
@@ -4820,6 +5194,279 @@ mod tests {
         assert_eq!(reopened.clipboard_history_policy().unwrap(), policy);
         drop(reopened);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clipboard_storage_breakdown_aggregates_by_kind_and_matches_total() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        assert_eq!(
+            db.clipboard_storage_breakdown().unwrap(),
+            ClipboardStorageBreakdown::default()
+        );
+
+        let plain_text = record("bd-text-1", "Hello breakdown");
+        db.clipboard_insert(&plain_text).unwrap();
+
+        let rich_text = record("bd-text-2", "Formatted body");
+        let formatting = ClipboardTextFormatting {
+            html: Some(b"<b>Formatted body</b>".to_vec()),
+            rtf: Some(br#"{\rtf1\ansi Formatted body}"#.to_vec()),
+        };
+        db.clipboard_insert_capture(&rich_text, None, Some(&formatting))
+            .unwrap();
+        db.clipboard_edit("bd-text-2", "Custom note", None).unwrap();
+
+        let image = image_record("bd-image-1");
+        let file_rep = representation(&image, "synthetic.png");
+        db.clipboard_insert_with_file_representation(&image, Some(&file_rep))
+            .unwrap();
+        db.clipboard_index_image(&image.id, &image.fingerprint, "OCR text")
+            .unwrap();
+
+        let sample_files = serde_json::to_string(&vec![
+            std::env::temp_dir()
+                .join("report.pdf")
+                .to_string_lossy()
+                .into_owned(),
+            std::env::temp_dir()
+                .join("notes.txt")
+                .to_string_lossy()
+                .into_owned(),
+        ])
+        .unwrap();
+        let mut files = record("bd-files-1", &sample_files);
+        files.kind = "files".into();
+        files.fingerprint = "fp-bd-files-1".into();
+        db.clipboard_insert(&files).unwrap();
+
+        let breakdown = db.clipboard_storage_breakdown().unwrap();
+        assert_eq!(breakdown.text.count, 2);
+        assert_eq!(breakdown.image.count, 1);
+        assert_eq!(breakdown.files.count, 1);
+        assert!(breakdown.text.bytes > 0);
+        assert!(breakdown.image.bytes > 0);
+        assert!(breakdown.files.bytes > 0);
+        assert_eq!(
+            breakdown.total_bytes(),
+            db.clipboard_storage_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn clipboard_retention_supports_unlimited_zero_limit_custom_days_and_cleanup_interval() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let now = chrono::Utc::now();
+        let mut recent = record("recent-1", "recent item");
+        recent.date = (now - chrono::Duration::days(5)).to_rfc3339();
+        db.clipboard_insert(&recent).unwrap();
+        let mut old = record("old-1", "old item");
+        old.date = (now - chrono::Duration::days(20)).to_rfc3339();
+        db.clipboard_insert(&old).unwrap();
+        let mut pinned_old = record("pinned-old", "pinned old item");
+        pinned_old.date = (now - chrono::Duration::days(40)).to_rfc3339();
+        pinned_old.is_pinned = true;
+        db.clipboard_insert(&pinned_old).unwrap();
+
+        // limit: 0 means unlimited count and must NOT delete ordinary records.
+        let unlimited = HistoryPolicy {
+            limit: 0,
+            max_age_days: None,
+            max_storage_mb: None,
+            auto_cleanup_interval_hours: 0,
+        };
+        assert!(unlimited.valid());
+        let preview = db.records_cleanup_preview(Some(unlimited)).unwrap();
+        assert_eq!(preview.count, 0);
+        assert_eq!(
+            db.clipboard_cleanup(Some(unlimited), 0, Some(&preview.token))
+                .unwrap()
+                .0,
+            0
+        );
+        assert_eq!(db.clipboard_history_policy().unwrap(), unlimited);
+        assert_eq!(
+            db.clipboard_page("", false, None, 100)
+                .unwrap()
+                .total_records,
+            3
+        );
+
+        // Custom 14-day retention with unlimited count removes only the 20-day-old ordinary item.
+        let custom_days = HistoryPolicy {
+            limit: 0,
+            max_age_days: Some(14),
+            max_storage_mb: None,
+            auto_cleanup_interval_hours: 6,
+        };
+        assert!(custom_days.valid());
+        let preview = db.records_cleanup_preview(Some(custom_days)).unwrap();
+        assert_eq!(preview.count, 1);
+        assert_eq!(
+            db.clipboard_cleanup(Some(custom_days), 0, Some(&preview.token))
+                .unwrap()
+                .0,
+            1
+        );
+        assert!(db.clipboard_record("old-1").is_err());
+        assert!(db.clipboard_record("recent-1").is_ok());
+        assert!(db.clipboard_record("pinned-old").is_ok());
+        assert_eq!(db.clipboard_history_policy().unwrap(), custom_days);
+
+        // Legacy stored JSON without autoCleanupIntervalHours defaults to 1 hour.
+        let legacy = HistoryPolicy::from_store(Some(r#"{"limit":250,"maxAgeDays":7}"#.into()));
+        assert_eq!(legacy.limit, 250);
+        assert_eq!(legacy.max_age_days, Some(7));
+        assert_eq!(legacy.auto_cleanup_interval_hours, 1);
+
+        // Custom MB storage limit (1..=100_000) is accepted; 0 and out-of-range are rejected.
+        let custom_mb = HistoryPolicy {
+            limit: 500,
+            max_age_days: None,
+            max_storage_mb: Some(256),
+            auto_cleanup_interval_hours: 1,
+        };
+        assert!(custom_mb.valid());
+        assert_eq!(custom_mb.max_storage_bytes(), Some(256 * 1024 * 1024));
+        assert!(!HistoryPolicy {
+            max_storage_mb: Some(0),
+            ..custom_mb
+        }
+        .valid());
+        assert!(!HistoryPolicy {
+            max_storage_mb: Some(100_001),
+            ..custom_mb
+        }
+        .valid());
+        let restored_mb =
+            HistoryPolicy::from_store(Some(r#"{"limit":500,"maxStorageMb":256}"#.into()));
+        assert_eq!(restored_mb.max_storage_mb, Some(256));
+    }
+
+    #[test]
+    fn orphan_images_and_unreferenced_source_apps_are_reclaimed_without_touching_active_records() {
+        let root = std::env::temp_dir().join(format!("nami-cache-clean-{}", uuid::Uuid::new_v4()));
+        let image_root = root.join("images");
+        std::fs::create_dir_all(&image_root).unwrap();
+        let mut db = HistoryDatabase::open(&root.join("nami.sqlite3")).unwrap();
+
+        let kept_bytes = b"\x89PNG\r\n\x1a\nkept-image-bytes";
+        let orphan_bytes = b"\x89PNG\r\n\x1a\norphan-image-bytes-longer";
+        let kept_rel = crate::clipboard::store_image(&image_root, kept_bytes, "png").unwrap();
+        let orphan_rel = crate::clipboard::store_image(&image_root, orphan_bytes, "png").unwrap();
+
+        let mut kept = record("kept-img", "");
+        kept.kind = "image".into();
+        kept.image_path = Some(kept_rel.clone());
+        kept.fingerprint = crate::clipboard::fingerprint("image", kept_bytes);
+        kept.source_app = Some(serde_json::json!({"name": "KeptApp", "bundleId": "com.test.kept"}));
+        db.clipboard_insert(&kept).unwrap();
+
+        let mut deleted = record("deleted-txt", "ephemeral");
+        deleted.source_app =
+            Some(serde_json::json!({"name": "OrphanApp", "bundleId": "com.test.orphan"}));
+        db.clipboard_insert(&deleted).unwrap();
+        db.clipboard_update("deleted-txt", "delete").unwrap();
+
+        let referenced = db.referenced_clipboard_images().unwrap();
+        assert!(referenced.contains(&kept_rel));
+        assert!(!referenced.contains(&orphan_rel));
+
+        let (removed_files, reclaimed_img_bytes, removed_paths) =
+            unlink_orphan_clipboard_images(&image_root, &referenced, std::time::Duration::ZERO);
+        assert_eq!(removed_files, 1);
+        assert_eq!(reclaimed_img_bytes, orphan_bytes.len() as u64);
+        assert_eq!(removed_paths, vec![orphan_rel.clone()]);
+        assert!(image_root.join(&kept_rel).exists());
+        assert!(!image_root.join(&orphan_rel).exists());
+
+        let (removed_sources, reclaimed_source_bytes) =
+            db.reclaim_unreferenced_source_apps().unwrap();
+        assert_eq!(removed_sources, 1);
+        assert!(reclaimed_source_bytes > 0);
+        // Active record and its source_app remain intact.
+        let reloaded = db.clipboard_record("kept-img").unwrap();
+        assert_eq!(
+            reloaded
+                .source_app
+                .as_ref()
+                .and_then(|v| v["name"].as_str()),
+            Some("KeptApp")
+        );
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_paths_persist_across_insert_dedup_duplicate_and_backfill() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let folder = "/synthetic/projects".to_owned();
+        let file = "/synthetic/readme.md".to_owned();
+        let text = serde_json::to_string(&vec![folder.clone(), file.clone()]).unwrap();
+        let mut rec = record("dir-rec", &text);
+        rec.kind = "files".into();
+        rec.fingerprint = fingerprint("files", text.as_bytes());
+
+        // Insert without directory metadata (e.g., pre-v13 legacy record).
+        db.clipboard_insert(&rec).unwrap();
+        assert!(db.clipboard_directory_paths("dir-rec").unwrap().is_empty());
+
+        // Backfill via set_directory_paths and reject paths not belonging to the record.
+        assert_eq!(
+            db.clipboard_set_directory_paths("dir-rec", &["/synthetic/unrelated".into()])
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        db.clipboard_set_directory_paths("dir-rec", std::slice::from_ref(&folder))
+            .unwrap();
+        assert_eq!(
+            db.clipboard_directory_paths("dir-rec").unwrap(),
+            vec![folder.clone()]
+        );
+
+        // Duplicate preserves directory_paths.
+        db.clipboard_duplicate("dir-rec").unwrap();
+        let page = db.clipboard_page("", false, None, 10).unwrap();
+        assert_eq!(page.records.len(), 2);
+        let copy_id = page
+            .records
+            .iter()
+            .find(|item| item.id != "dir-rec")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            db.clipboard_directory_paths(&copy_id).unwrap(),
+            vec![folder.clone()]
+        );
+
+        // Deduplicated re-capture updates directory_paths when capture observes live FS.
+        let mut recopy = rec.clone();
+        recopy.id = "dir-rec-2".into();
+        recopy.date = "2026-11-27T01:00:00Z".into();
+        let persisted = db
+            .clipboard_insert_capture_with_dirs(&recopy, None, None, Some(&[]))
+            .unwrap();
+        assert!(db
+            .clipboard_directory_paths(&persisted.id)
+            .unwrap()
+            .is_empty());
+
+        let mut recopy2 = rec;
+        recopy2.id = "dir-rec-3".into();
+        recopy2.date = "2026-11-27T02:00:00Z".into();
+        let persisted2 = db
+            .clipboard_insert_capture_with_dirs(
+                &recopy2,
+                None,
+                None,
+                Some(std::slice::from_ref(&folder)),
+            )
+            .unwrap();
+        assert_eq!(
+            db.clipboard_directory_paths(&persisted2.id).unwrap(),
+            vec![folder]
+        );
     }
 
     use std::path::Path;

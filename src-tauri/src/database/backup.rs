@@ -498,13 +498,8 @@ fn validate_and_restore_images(backup: &Connection, image_root: &Path) -> Result
         if data.len() > clipboard::MAX_IMAGE_BYTES {
             return Err("backup_invalid".into());
         }
-        let extension = if image_path.ends_with(".png") {
-            "png"
-        } else if image_path.ends_with(".tiff") {
-            "tiff"
-        } else {
-            return Err("backup_invalid".into());
-        };
+        let extension =
+            clipboard::image_extension_from_path(&image_path).ok_or("backup_invalid")?;
         if clipboard::fingerprint("image", &data) != sha256 {
             return Err("backup_invalid".into());
         }
@@ -677,25 +672,31 @@ impl HistoryDatabase {
         }
 
         let mut imported_clipboard = 0usize;
+        let has_dir_paths =
+            super::clipboard::has_column(&backup, "clipboard_contents", "directory_paths")?;
+        let dir_paths_col = if has_dir_paths {
+            "c.directory_paths"
+        } else {
+            "NULL"
+        };
         let mut skipped_clipboard = 0usize;
         {
-            let mut stmt = backup
-                .prepare(
-                    "SELECT r.sequence, r.id, r.kind, r.summary, r.title, r.date, r.created_at, r.is_favorite, r.is_pinned, r.source_app_id, r.image_path, r.fingerprint,
-                            c.text, c.search_folded,
-                            f.paths, f.image_path,
-                            t.search_folded,
-                            o.original_text, o.search_folded,
-                            fmt.html, fmt.rtf
-                     FROM clipboard_records r
-                     JOIN clipboard_contents c ON c.sequence = r.sequence
-                     LEFT JOIN clipboard_file_representations f ON f.sequence = r.sequence
-                     LEFT JOIN clipboard_titles t ON t.sequence = r.sequence
-                     LEFT JOIN clipboard_ocr o ON o.sequence = r.sequence
-                     LEFT JOIN clipboard_text_formatting fmt ON fmt.sequence = r.sequence
-                     ORDER BY r.sequence ASC",
-                )
-                .map_err(backup_error)?;
+            let sql = format!(
+                "SELECT r.sequence, r.id, r.kind, r.summary, r.title, r.date, r.created_at, r.is_favorite, r.is_pinned, r.source_app_id, r.image_path, r.fingerprint,
+                        c.text, c.search_folded, {dir_paths_col},
+                        f.paths, f.image_path,
+                        t.search_folded,
+                        o.original_text, o.search_folded,
+                        fmt.html, fmt.rtf
+                 FROM clipboard_records r
+                 JOIN clipboard_contents c ON c.sequence = r.sequence
+                 LEFT JOIN clipboard_file_representations f ON f.sequence = r.sequence
+                 LEFT JOIN clipboard_titles t ON t.sequence = r.sequence
+                 LEFT JOIN clipboard_ocr o ON o.sequence = r.sequence
+                 LEFT JOIN clipboard_text_formatting fmt ON fmt.sequence = r.sequence
+                 ORDER BY r.sequence ASC"
+            );
+            let mut stmt = backup.prepare(&sql).map_err(backup_error)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok((
@@ -717,8 +718,9 @@ impl HistoryDatabase {
                         row.get::<_, Option<String>>(16)?,
                         row.get::<_, Option<String>>(17)?,
                         row.get::<_, Option<String>>(18)?,
-                        row.get::<_, Option<Vec<u8>>>(19)?,
+                        row.get::<_, Option<String>>(19)?,
                         row.get::<_, Option<Vec<u8>>>(20)?,
+                        row.get::<_, Option<Vec<u8>>>(21)?,
                     ))
                 })
                 .map_err(backup_error)?;
@@ -737,6 +739,7 @@ impl HistoryDatabase {
                     fingerprint,
                     text,
                     search_folded,
+                    directory_paths,
                     rep_paths,
                     rep_image_path,
                     title_folded,
@@ -799,8 +802,8 @@ impl HistoryDatabase {
                 .map_err(storage_error)?;
                 let sequence = tx.last_insert_rowid();
                 tx.execute(
-                    "INSERT INTO clipboard_contents(sequence, text, search_folded) VALUES(?1, ?2, ?3)",
-                    params![sequence, text, search_folded],
+                    "INSERT INTO clipboard_contents(sequence, text, search_folded, directory_paths) VALUES(?1, ?2, ?3, ?4)",
+                    params![sequence, text, search_folded, directory_paths],
                 )
                 .map_err(storage_error)?;
                 if let (Some(paths), Some(rep_img)) = (rep_paths, rep_image_path) {
@@ -1219,6 +1222,59 @@ mod tests {
             .import_backup_with_password(&plain_path, &dst_images, BackupImportMode::Merge, None)
             .unwrap();
         assert_eq!(plain_report.skipped_clipboard, 2);
+
+        // Backup export and import preserve directory_paths for file records and verbatim JPEG images.
+        let jpeg = include_bytes!("../../../tests/fixtures/clipboard-wide.jpg");
+        let rel_jpg = clipboard::store_image(&src_images, jpeg, "jpg").unwrap();
+        assert!(rel_jpg.ends_with(".jpg"));
+        let jpg_record = clipboard::ClipboardRecord {
+            id: "jpg-backup".into(),
+            kind: "image".into(),
+            fingerprint: clipboard::fingerprint("image", jpeg),
+            text: String::new(),
+            date: "2026-11-27T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: Some(rel_jpg.clone()),
+        };
+        src.clipboard_insert_capture(&jpg_record, None, None)
+            .unwrap();
+        let folder_text = serde_json::to_string(&vec!["/synthetic/deleted-folder"]).unwrap();
+        let folder_record = clipboard::ClipboardRecord {
+            id: "dir-backup".into(),
+            kind: "files".into(),
+            fingerprint: clipboard::fingerprint("files", folder_text.as_bytes()),
+            text: folder_text,
+            date: "2026-11-27T00:00:00Z".into(),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: None,
+            image_path: None,
+        };
+        src.clipboard_insert_capture_with_dirs(
+            &folder_record,
+            None,
+            None,
+            Some(&["/synthetic/deleted-folder".into()]),
+        )
+        .unwrap();
+        let dir_backup_path = root.join("dir.namibak");
+        src.export_backup(&src_images, &dir_backup_path).unwrap();
+        let mut dir_dst = HistoryDatabase::open(&root.join("dir-dst.sqlite3")).unwrap();
+        let dir_dst_images = root.join("dir-dst-images");
+        std::fs::create_dir_all(&dir_dst_images).unwrap();
+        dir_dst
+            .import_backup(&dir_backup_path, &dir_dst_images, BackupImportMode::Replace)
+            .unwrap();
+        assert_eq!(
+            dir_dst.clipboard_directory_paths("dir-backup").unwrap(),
+            vec!["/synthetic/deleted-folder"]
+        );
+        assert_eq!(
+            clipboard::read_image(&dir_dst_images, &rel_jpg).unwrap(),
+            jpeg
+        );
 
         drop(src);
         drop(dst);

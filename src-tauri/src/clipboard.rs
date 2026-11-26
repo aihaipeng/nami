@@ -120,6 +120,15 @@ impl RecordingTypes {
     }
 }
 
+pub const DEFAULT_AUTO_CLEANUP_INTERVAL_HOURS: u32 = 1;
+pub const MAX_AUTO_CLEANUP_INTERVAL_HOURS: u32 = 720;
+pub const MAX_HISTORY_AGE_DAYS: u32 = 3650;
+pub const MAX_HISTORY_STORAGE_MB: u32 = 100_000;
+
+fn default_auto_cleanup_interval_hours() -> u32 {
+    DEFAULT_AUTO_CLEANUP_INTERVAL_HOURS
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HistoryPolicy {
@@ -128,6 +137,8 @@ pub struct HistoryPolicy {
     pub max_age_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_storage_mb: Option<u32>,
+    #[serde(default = "default_auto_cleanup_interval_hours")]
+    pub auto_cleanup_interval_hours: u32,
 }
 
 impl Default for HistoryPolicy {
@@ -136,6 +147,7 @@ impl Default for HistoryPolicy {
             limit: 500,
             max_age_days: None,
             max_storage_mb: None,
+            auto_cleanup_interval_hours: DEFAULT_AUTO_CLEANUP_INTERVAL_HOURS,
         }
     }
 }
@@ -150,13 +162,14 @@ pub struct CleanupPreview {
 
 impl HistoryPolicy {
     pub fn valid(self) -> bool {
-        (1..=1_000_000).contains(&self.limit)
+        self.limit <= 1_000_000
             && self
                 .max_age_days
-                .is_none_or(|days| [1, 7, 30].contains(&days))
+                .is_none_or(|days| (1..=MAX_HISTORY_AGE_DAYS).contains(&days))
             && self
                 .max_storage_mb
-                .is_none_or(|mb| [500, 1024, 2048].contains(&mb))
+                .is_none_or(|mb| (1..=MAX_HISTORY_STORAGE_MB).contains(&mb))
+            && self.auto_cleanup_interval_hours <= MAX_AUTO_CLEANUP_INTERVAL_HOURS
     }
 
     pub fn max_storage_bytes(self) -> Option<u64> {
@@ -170,16 +183,23 @@ impl HistoryPolicy {
             limit: Option<u32>,
             max_age_days: Option<u32>,
             max_storage_mb: Option<u32>,
+            auto_cleanup_interval_hours: Option<u32>,
         }
         value
             .and_then(|value| serde_json::from_str::<Saved>(&value).ok())
             .and_then(|value| {
                 value.limit.map(|limit| Self {
                     limit,
-                    max_age_days: value.max_age_days.filter(|days| [1, 7, 30].contains(days)),
+                    max_age_days: value
+                        .max_age_days
+                        .filter(|days| (1..=MAX_HISTORY_AGE_DAYS).contains(days)),
                     max_storage_mb: value
                         .max_storage_mb
-                        .filter(|mb| [500, 1024, 2048].contains(mb)),
+                        .filter(|mb| (1..=MAX_HISTORY_STORAGE_MB).contains(mb)),
+                    auto_cleanup_interval_hours: value
+                        .auto_cleanup_interval_hours
+                        .filter(|hours| *hours <= MAX_AUTO_CLEANUP_INTERVAL_HOURS)
+                        .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_HOURS),
                 })
             })
             .filter(|policy| policy.valid())
@@ -371,26 +391,82 @@ pub struct FileEntry {
     pub icon_data_url: Option<String>,
 }
 
+pub fn detect_directory_paths(paths: &[String]) -> Vec<String> {
+    let mut dirs = Vec::new();
+    for path in paths {
+        let file = Path::new(path);
+        if file.is_absolute()
+            && !path.contains('\0')
+            && std::fs::metadata(file).is_ok_and(|meta| meta.is_dir())
+            && !dirs.iter().any(|existing| existing == path)
+        {
+            dirs.push(path.clone());
+        }
+    }
+    dirs
+}
+
+pub fn merge_observed_directory_paths(
+    saved: &[String],
+    entries: &[FileEntry],
+) -> Option<Vec<String>> {
+    let mut updated = Vec::with_capacity(saved.len());
+    for path in saved {
+        if !updated.iter().any(|existing| existing == path) {
+            updated.push(path.clone());
+        }
+    }
+    for entry in entries {
+        if !entry.exists {
+            continue;
+        }
+        if entry.is_dir {
+            if !updated.iter().any(|existing| existing == &entry.path) {
+                updated.push(entry.path.clone());
+            }
+        } else {
+            updated.retain(|existing| existing != &entry.path);
+        }
+    }
+    (updated != saved).then_some(updated)
+}
+
 pub fn file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
-    file_entries_with_limit(text, 3)
+    file_entries_with_dirs(text, &[])
+}
+
+pub fn file_entries_with_dirs(text: &str, known_dirs: &[String]) -> Result<Vec<FileEntry>, String> {
+    file_entries_with_limit(text, 3, known_dirs)
 }
 
 pub fn all_file_entries(text: &str) -> Result<Vec<FileEntry>, String> {
-    file_entries_with_limit(text, MAX_FILE_COUNT)
+    all_file_entries_with_dirs(text, &[])
+}
+
+pub fn all_file_entries_with_dirs(
+    text: &str,
+    known_dirs: &[String],
+) -> Result<Vec<FileEntry>, String> {
+    file_entries_with_limit(text, MAX_FILE_COUNT, known_dirs)
 }
 
 pub fn file_entries_from_paths(paths: Vec<String>) -> Result<Vec<FileEntry>, String> {
-    file_entries_from_paths_with_limit(paths, MAX_FILE_COUNT)
+    file_entries_from_paths_with_limit(paths, MAX_FILE_COUNT, &[])
 }
 
-fn file_entries_with_limit(text: &str, limit: usize) -> Result<Vec<FileEntry>, String> {
+fn file_entries_with_limit(
+    text: &str,
+    limit: usize,
+    known_dirs: &[String],
+) -> Result<Vec<FileEntry>, String> {
     let paths: Vec<String> = serde_json::from_str(text).map_err(|_| "storage_corrupt")?;
-    file_entries_from_paths_with_limit(paths, limit)
+    file_entries_from_paths_with_limit(paths, limit, known_dirs)
 }
 
 fn file_entries_from_paths_with_limit(
     paths: Vec<String>,
     limit: usize,
+    known_dirs: &[String],
 ) -> Result<Vec<FileEntry>, String> {
     if paths.is_empty() || paths.len() > MAX_FILE_COUNT {
         return Err("storage_corrupt".into());
@@ -404,7 +480,10 @@ fn file_entries_from_paths_with_limit(
                 return Err("storage_corrupt".into());
             }
             let metadata = std::fs::metadata(file).ok();
-            let is_dir = metadata.as_ref().is_some_and(|value| value.is_dir());
+            let is_dir = match &metadata {
+                Some(value) => value.is_dir(),
+                None => known_dirs.iter().any(|dir| dir == &path),
+            };
             let is_image = !is_dir
                 && file
                     .extension()
@@ -464,6 +543,51 @@ pub fn fingerprint(kind: &str, bytes: &[u8]) -> String {
     format!("{:x}", hash.finalize())
 }
 
+pub const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "tiff", "jpg", "webp", "gif", "bmp", "ico", "heic", "avif",
+];
+
+pub fn is_supported_image_extension(extension: &str) -> bool {
+    SUPPORTED_IMAGE_EXTENSIONS.contains(&extension)
+}
+
+pub fn detect_raster_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some("tiff")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.starts_with(b"BM") {
+        Some("bmp")
+    } else if bytes.starts_with(b"\0\0\x01\0") {
+        Some("ico")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        match &bytes[8..12] {
+            b"avif" | b"avis" => Some("avif"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some("heic"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+pub fn image_extension_from_path(relative: &str) -> Option<&'static str> {
+    if !valid_image_name(relative) {
+        return None;
+    }
+    let (_, extension) = relative.rsplit_once('.')?;
+    SUPPORTED_IMAGE_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == extension)
+}
+
 pub(crate) fn valid_image_name(relative: &str) -> bool {
     let parts: Vec<_> = relative.split('/').collect();
     if parts.len() != 3 || parts[0] != "origin" || parts[1].len() != 2 {
@@ -477,7 +601,7 @@ pub(crate) fn valid_image_name(relative: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         && &hash[..2] == parts[1]
-        && ["png", "tiff"].contains(&extension)
+        && is_supported_image_extension(extension)
 }
 
 fn reject_symlinks(root: &Path, relative: &str) -> Result<(), String> {
@@ -505,9 +629,8 @@ pub fn store_image_with_status(
     bytes: &[u8],
     extension: &str,
 ) -> Result<(String, bool), String> {
-    let format = match extension {
-        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => "png",
-        "tiff" if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") => "tiff",
+    let format = match detect_raster_image_extension(bytes) {
+        Some(detected) if detected == extension => detected,
         _ => return Err("clipboard_image_format".into()),
     };
     if bytes.len() > MAX_IMAGE_BYTES {
@@ -699,6 +822,39 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn raster_image_storage_preserves_original_formats_and_rejects_mismatched_headers() {
+        let directory =
+            std::env::temp_dir().join(format!("nami-raster-formats-{}", uuid::Uuid::new_v4()));
+        let cases: &[(&str, &[u8])] = &[
+            ("jpg", b"\xff\xd8\xff\xe0synthetic-jpeg"),
+            ("webp", b"RIFF\x18\0\0\0WEBPVP8 synthetic"),
+            ("gif", b"GIF89a\x01\0\x01\0synthetic"),
+            ("bmp", b"BM\x1e\0\0\0synthetic"),
+            ("ico", b"\0\0\x01\0\x01\0synthetic"),
+            ("heic", b"\0\0\0\x18ftypheic\0\0\0\0synthetic"),
+            ("avif", b"\0\0\0\x18ftypavif\0\0\0\0synthetic"),
+        ];
+        for (ext, bytes) in cases {
+            assert_eq!(detect_raster_image_extension(bytes), Some(*ext));
+            let relative = store_image(&directory, bytes, ext).unwrap();
+            assert!(relative.ends_with(&format!(".{ext}")));
+            assert_eq!(image_extension_from_path(&relative), Some(*ext));
+            assert_eq!(read_image(&directory, &relative).unwrap(), *bytes);
+        }
+        // Reject mismatched extension and magic header.
+        assert_eq!(
+            store_image(&directory, b"\xff\xd8\xff\xe0synthetic", "png").unwrap_err(),
+            "clipboard_image_format"
+        );
+        assert_eq!(
+            store_image(&directory, b"plain text", "jpg").unwrap_err(),
+            "clipboard_image_format"
+        );
+        assert_eq!(image_extension_from_path("origin/00/not-a-hash.jpg"), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn image_storage_rejects_symlinked_resources() {
@@ -731,6 +887,56 @@ mod file_display_tests {
         assert!(entries[1].is_dir && !entries[1].is_image);
         assert!(!entries[2].exists);
         assert_eq!(entries[2].path, paths[2].to_string_lossy());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleted_directories_keep_is_dir_and_merge_observed_changes_cleanly() {
+        let root = std::env::temp_dir().join(format!("nami-deleted-dir-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("album.png");
+        let file = root.join("notes.txt");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&file, b"synthetic").unwrap();
+        let folder_path = folder.to_string_lossy().into_owned();
+        let file_path = file.to_string_lossy().into_owned();
+        let paths = vec![folder_path.clone(), file_path.clone()];
+        let text = serde_json::to_string(&paths).unwrap();
+
+        let detected = detect_directory_paths(&paths);
+        assert_eq!(detected, vec![folder_path.clone()]);
+
+        // Simulate backfilling a legacy record that had no saved directory_paths yet.
+        let live_entries = file_entries_with_dirs(&text, &[]).unwrap();
+        assert!(live_entries[0].exists && live_entries[0].is_dir && !live_entries[0].is_image);
+        assert_eq!(
+            merge_observed_directory_paths(&[], &live_entries),
+            Some(vec![folder_path.clone()])
+        );
+        assert_eq!(
+            merge_observed_directory_paths(&detected, &live_entries),
+            None
+        );
+
+        // Delete the directory and ensure saved metadata preserves is_dir = true and is_image = false.
+        std::fs::remove_dir_all(&folder).unwrap();
+        let after_delete = all_file_entries_with_dirs(&text, &detected).unwrap();
+        assert!(!after_delete[0].exists);
+        assert!(after_delete[0].is_dir);
+        assert!(!after_delete[0].is_image);
+        assert_eq!(
+            merge_observed_directory_paths(&detected, &after_delete),
+            None
+        );
+
+        // If a regular file later replaces the deleted directory at the same path, live FS wins.
+        std::fs::write(&folder, b"now a file").unwrap();
+        let replaced = file_entries_with_dirs(&text, &detected).unwrap();
+        assert!(replaced[0].exists && !replaced[0].is_dir && replaced[0].is_image);
+        assert_eq!(
+            merge_observed_directory_paths(&detected, &replaced),
+            Some(Vec::new())
+        );
+
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

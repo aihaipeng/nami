@@ -7,13 +7,16 @@ pub use backup::{
     is_encrypted_backup, BackupImportMode, BackupImportReport, BackupSummary, TempFileGuard,
     MAX_BACKUP_PASSWORD_BYTES,
 };
-pub use clipboard::unlink_pending_clipboard_images;
+pub use clipboard::{
+    unlink_orphan_clipboard_images, unlink_pending_clipboard_images, ClipboardStorageBreakdown,
+    StorageCategoryUsage,
+};
 
 use rusqlite::{Connection, ErrorCode, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
 const APPLICATION_ID: i64 = 0x4E414D49;
-const VERSION: i64 = 12;
+const VERSION: i64 = 13;
 pub const PAGE_SIZE: usize = 100;
 
 pub struct HistoryDatabase {
@@ -70,6 +73,22 @@ fn migrate_v12(connection: &mut Connection) -> Result<(), String> {
     )
     .map_err(storage_error)?;
     tx.pragma_update(None, "user_version", 12)
+        .map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
+}
+
+fn migrate_v13(connection: &mut Connection) -> Result<(), String> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    if !clipboard::has_column(&tx, "clipboard_contents", "directory_paths")? {
+        tx.execute(
+            "ALTER TABLE clipboard_contents ADD COLUMN directory_paths TEXT",
+            [],
+        )
+        .map_err(storage_error)?;
+    }
+    tx.pragma_update(None, "user_version", 13)
         .map_err(storage_error)?;
     tx.commit().map_err(storage_error)
 }
@@ -167,6 +186,9 @@ impl HistoryDatabase {
         if version < 12 {
             migrate_v12(&mut connection)?;
         }
+        if version < 13 {
+            migrate_v13(&mut connection)?;
+        }
         clipboard::ensure_filter_indexes(&connection)?;
         clipboard::ensure_translation_preferences(&connection)?;
         clipboard::sync_pin_paste_keys(&connection)?;
@@ -188,6 +210,14 @@ impl HistoryDatabase {
             connection,
             clipboard_total_records,
         })
+    }
+
+    pub fn vacuum_into(&self, target: &Path) -> Result<(), String> {
+        let target_str = target.to_str().ok_or("storage_path")?;
+        self.connection
+            .execute("VACUUM INTO ?1", [target_str])
+            .map_err(storage_error)?;
+        Ok(())
     }
 }
 
@@ -255,7 +285,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         for dropped in ["translation_records", "translation_search"] {
             let exists: bool = db
                 .connection
@@ -290,6 +320,49 @@ mod tests {
         assert_eq!(
             HistoryDatabase::open(&fixture.0).err().as_deref(),
             Some("storage_version")
+        );
+    }
+
+    #[test]
+    fn migration_v12_to_v13_adds_directory_paths_column_and_preserves_records() {
+        let fixture = Fixture::new();
+        {
+            let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+            let text = serde_json::to_string(&vec!["/synthetic/folder"]).unwrap();
+            db.clipboard_insert(&crate::clipboard::ClipboardRecord {
+                id: "legacy-dir".into(),
+                kind: "files".into(),
+                fingerprint: crate::clipboard::fingerprint("files", text.as_bytes()),
+                text,
+                date: "2026-11-27T00:00:00Z".into(),
+                is_favorite: false,
+                is_pinned: false,
+                source_app: None,
+                image_path: None,
+            })
+            .unwrap();
+            db.connection
+                .execute_batch(
+                    "ALTER TABLE clipboard_contents DROP COLUMN directory_paths;
+                     PRAGMA user_version = 12;",
+                )
+                .unwrap();
+        }
+        let mut db = HistoryDatabase::open(&fixture.0).unwrap();
+        let version: i64 = db
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
+        assert!(db
+            .clipboard_directory_paths("legacy-dir")
+            .unwrap()
+            .is_empty());
+        db.clipboard_set_directory_paths("legacy-dir", &["/synthetic/folder".into()])
+            .unwrap();
+        assert_eq!(
+            db.clipboard_directory_paths("legacy-dir").unwrap(),
+            vec!["/synthetic/folder"]
         );
     }
 }
