@@ -581,21 +581,6 @@ describe('clipboard privacy, retention and behavior', () => {
     await waitFor(() => expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({ policy: { limit: 500, maxAgeDays: 7 }, token: 'preview-token' }));
   });
 
-  it('requires confirmation for recent cleanup and sends only the previewed cutoff', async () => {
-    await openSettings();
-    const invoke = bridge.invoke.getMockImplementation()!;
-    const recentSince = Date.now() - 900_000;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'records_cleanup_preview' ? { count: 2, token: 'recent-token', recentSince } : invoke(name, args));
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Clear the last 15 minutes?' });
-    expect(dialog.textContent).toContain('2 unprotected items');
-    expect(within(dialog).queryByRole('checkbox')).toBeNull();
-    expect(calls('records_cleanup_preview').at(-1)?.[1]).toEqual({ policy: null, recent: true });
-    expect(calls('records_cleanup_apply')).toHaveLength(0);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear Records' }));
-    await waitFor(() => expect(calls('records_cleanup_apply').at(-1)?.[1]).toEqual({ policy: null, token: 'recent-token', recentSince }));
-  });
-
   it('clears only the selected clipboard categories by keyboard and refreshes its size', async () => {
     await openSettings();
     const invoke = bridge.invoke.getMockImplementation()!;
@@ -603,6 +588,7 @@ describe('clipboard privacy, retention and behavior', () => {
       if (name === 'records_storage_info') return { bytes: 2000, limit: 500 };
       return invoke(name, args);
     });
+    expect(screen.queryByText('Clear Last 15 Minutes')).toBeNull();
     const trigger = screen.getByRole('button', { name: 'Clear Records' });
     expect(trigger.parentElement?.contains(screen.getByRole('heading', { name: 'History & Storage' }))).toBe(true);
     fireEvent.click(trigger);

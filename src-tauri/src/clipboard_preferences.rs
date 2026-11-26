@@ -805,14 +805,11 @@ pub async fn records_cleanup_preview(
     window: Webview,
     app: AppHandle,
     policy: Option<HistoryPolicy>,
-    recent: Option<bool>,
 ) -> Result<CleanupPreview, String> {
     authorize(&window, &["settings"])?;
-    let recent_since =
-        (recent == Some(true)).then(|| chrono::Utc::now().timestamp_millis() - 15 * 60_000);
     let root = image_root(&app).ok();
     database(&app, move |db| {
-        db.records_cleanup_preview_with_media(policy, recent_since, root.as_deref())
+        db.records_cleanup_preview_with_media(policy, root.as_deref())
     })
     .await
 }
@@ -824,7 +821,6 @@ pub async fn records_cleanup_apply(
     policy: Option<HistoryPolicy>,
     categories: Option<u8>,
     token: String,
-    recent_since: Option<i64>,
 ) -> Result<CleanupResult, String> {
     authorize(&window, &["settings"])?;
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -833,7 +829,7 @@ pub async fn records_cleanup_apply(
     let categories = categories.unwrap_or(0);
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
-    let result = cleanup_locked(&app, policy, categories, Some(token), recent_since, true).await?;
+    let result = cleanup_locked(&app, policy, categories, Some(token), true).await?;
     if let Some(policy) = policy {
         state.clipboard_options.lock().unwrap().history_policy = policy;
     }
@@ -845,19 +841,12 @@ async fn cleanup_locked(
     policy: Option<HistoryPolicy>,
     categories: u8,
     token: Option<String>,
-    recent_since: Option<i64>,
     notify: bool,
 ) -> Result<CleanupResult, String> {
     let root = image_root(app)?;
     let root_for_db = root.clone();
     let (removed, images) = database(app, move |db| {
-        db.clipboard_cleanup_with_media(
-            policy,
-            categories,
-            token.as_deref(),
-            recent_since,
-            Some(&root_for_db),
-        )
+        db.clipboard_cleanup_with_media(policy, categories, token.as_deref(), Some(&root_for_db))
     })
     .await?;
     // The transaction is committed. Notify records even if the filesystem is temporarily inaccessible.
@@ -914,7 +903,7 @@ pub(crate) async fn enforce_history(app: &AppHandle, notify: bool) {
     if notify && policy.max_age_days.is_none() && policy.max_storage_mb.is_none() {
         return;
     }
-    match cleanup_locked(app, Some(policy), 0, None, None, notify).await {
+    match cleanup_locked(app, Some(policy), 0, None, notify).await {
         Ok(result) if result.media_cleanup_failed => {
             eprintln!("Nami clipboard maintenance: clipboard_cleanup_failed")
         }

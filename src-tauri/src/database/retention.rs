@@ -17,23 +17,21 @@ pub(super) fn candidates() -> &'static str {
         SELECT sequence FROM (SELECT sequence FROM clipboard_records WHERE ?1 IS NOT NULL AND is_favorite=0 AND is_pinned=0
             ORDER BY created_at DESC,sequence DESC LIMIT -1 OFFSET COALESCE(?1,0))
         UNION
-        SELECT sequence FROM clipboard_records WHERE (?3 IS NOT NULL OR ?4 IS NOT NULL) AND is_favorite=0 AND is_pinned=0 AND (unixepoch(date,'subsec') < ?3/1000.0 OR unixepoch(date,'subsec') >= ?4/1000.0)
+        SELECT sequence FROM clipboard_records WHERE ?3 IS NOT NULL AND is_favorite=0 AND is_pinned=0 AND unixepoch(date,'subsec') < ?3/1000.0
     )"
 }
 
 pub(super) fn cleanup_parameters(
     policy: Option<HistoryPolicy>,
     categories: u8,
-    recent_since: Option<i64>,
     now: i64,
-) -> (Option<u32>, u8, Option<i64>, Option<i64>) {
+) -> (Option<u32>, u8, Option<i64>) {
     (
         policy.map(|value| value.limit),
         categories,
         policy
             .and_then(|value| value.max_age_days)
             .map(|days| now - i64::from(days) * 86_400_000),
-        recent_since,
     )
 }
 
@@ -41,7 +39,6 @@ pub(super) fn cleanup_parameters(
 pub(super) struct CleanupContext<'a> {
     pub policy: Option<HistoryPolicy>,
     pub categories: u8,
-    pub recent_since: Option<i64>,
     pub now: i64,
     pub image_root: Option<&'a Path>,
     pub storage_budget_override: Option<u64>,
@@ -52,12 +49,9 @@ pub(super) fn check_cleanup(
     ctx: CleanupContext<'_>,
     expected: Option<&str>,
 ) -> Result<(), String> {
-    validate_scope(ctx.policy, ctx.recent_since)?;
-    if ((ctx.policy.is_some() || ctx.recent_since.is_some()) && ctx.categories != 0)
-        || (ctx.policy.is_none() && expected.is_none())
-        || (ctx.policy.is_none()
-            && ctx.recent_since.is_none()
-            && !(1..=7).contains(&ctx.categories))
+    validate_scope(ctx.policy)?;
+    if (ctx.policy.is_some() && ctx.categories != 0)
+        || (ctx.policy.is_none() && (expected.is_none() || !(1..=7).contains(&ctx.categories)))
     {
         return Err("invalid_argument".into());
     }
@@ -86,15 +80,9 @@ pub(super) fn persist_limit(
     Ok(())
 }
 
-fn validate_scope(policy: Option<HistoryPolicy>, recent_since: Option<i64>) -> Result<(), String> {
-    if policy.is_some_and(|value| !value.valid()) || (recent_since.is_some() && policy.is_some()) {
+fn validate_scope(policy: Option<HistoryPolicy>) -> Result<(), String> {
+    if policy.is_some_and(|value| !value.valid()) {
         return Err("invalid_argument".into());
-    }
-    if let Some(since) = recent_since {
-        let now = chrono::Utc::now().timestamp_millis();
-        if !(now - 20 * 60_000..=now - 15 * 60_000).contains(&since) {
-            return Err("clipboard_cleanup_changed".into());
-        }
     }
     Ok(())
 }
@@ -237,12 +225,7 @@ pub(super) fn clipboard_cleanup_sequences(
         ))
         .map_err(storage_error)?;
     let mut rows = query
-        .query(cleanup_parameters(
-            ctx.policy,
-            ctx.categories,
-            ctx.recent_since,
-            ctx.now,
-        ))
+        .query(cleanup_parameters(ctx.policy, ctx.categories, ctx.now))
         .map_err(storage_error)?;
     let mut sequences = Vec::new();
     let mut seen = HashSet::new();
@@ -272,7 +255,7 @@ fn cleanup_preview(
     connection: &Connection,
     ctx: CleanupContext<'_>,
 ) -> Result<CleanupPreview, String> {
-    let scoped = ctx.policy.is_some() || ctx.recent_since.is_some();
+    let scoped = ctx.policy.is_some();
     let mut hash = Sha256::new();
     hash.update([u8::from(ctx.policy.is_none())]);
     hash.update(CLIPBOARD_TABLE);
@@ -289,7 +272,6 @@ fn cleanup_preview(
             .unwrap_or(0)
             .to_le_bytes(),
     );
-    hash.update(ctx.recent_since.unwrap_or(0).to_le_bytes());
     let mut counts = [0; 3];
     let mut count = 0;
 
@@ -333,7 +315,6 @@ fn cleanup_preview(
         count,
         token: format!("{:x}", hash.finalize()),
         categories: (!scoped).then_some(counts),
-        recent_since: ctx.recent_since,
     })
 }
 
@@ -348,30 +329,20 @@ impl HistoryDatabase {
         &self,
         policy: Option<HistoryPolicy>,
     ) -> Result<CleanupPreview, String> {
-        self.records_cleanup_preview_scoped(policy, None)
-    }
-
-    pub fn records_cleanup_preview_scoped(
-        &self,
-        policy: Option<HistoryPolicy>,
-        recent_since: Option<i64>,
-    ) -> Result<CleanupPreview, String> {
-        self.records_cleanup_preview_with_media(policy, recent_since, None)
+        self.records_cleanup_preview_with_media(policy, None)
     }
 
     pub fn records_cleanup_preview_with_media(
         &self,
         policy: Option<HistoryPolicy>,
-        recent_since: Option<i64>,
         image_root: Option<&Path>,
     ) -> Result<CleanupPreview, String> {
-        validate_scope(policy, recent_since)?;
+        validate_scope(policy)?;
         cleanup_preview(
             &self.connection,
             CleanupContext {
                 policy,
                 categories: 0,
-                recent_since,
                 now: chrono::Utc::now().timestamp_millis(),
                 image_root,
                 storage_budget_override: None,
@@ -386,13 +357,12 @@ impl HistoryDatabase {
         image_root: Option<&Path>,
         budget_bytes: u64,
     ) -> Result<CleanupPreview, String> {
-        validate_scope(Some(policy), None)?;
+        validate_scope(Some(policy))?;
         cleanup_preview(
             &self.connection,
             CleanupContext {
                 policy: Some(policy),
                 categories: 0,
-                recent_since: None,
                 now: chrono::Utc::now().timestamp_millis(),
                 image_root,
                 storage_budget_override: Some(budget_bytes),

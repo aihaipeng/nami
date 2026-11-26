@@ -1366,17 +1366,7 @@ impl HistoryDatabase {
         categories: u8,
         expected: Option<&str>,
     ) -> Result<(usize, Vec<String>), String> {
-        self.clipboard_cleanup_scoped(policy, categories, expected, None)
-    }
-
-    pub fn clipboard_cleanup_scoped(
-        &mut self,
-        policy: Option<HistoryPolicy>,
-        categories: u8,
-        expected: Option<&str>,
-        recent_since: Option<i64>,
-    ) -> Result<(usize, Vec<String>), String> {
-        self.clipboard_cleanup_with_media(policy, categories, expected, recent_since, None)
+        self.clipboard_cleanup_with_media(policy, categories, expected, None)
     }
 
     pub fn clipboard_cleanup_with_media(
@@ -1384,17 +1374,9 @@ impl HistoryDatabase {
         policy: Option<HistoryPolicy>,
         categories: u8,
         expected: Option<&str>,
-        recent_since: Option<i64>,
         image_root: Option<&std::path::Path>,
     ) -> Result<(usize, Vec<String>), String> {
-        self.clipboard_cleanup_internal(
-            policy,
-            categories,
-            expected,
-            recent_since,
-            image_root,
-            None,
-        )
+        self.clipboard_cleanup_internal(policy, categories, expected, image_root, None)
     }
 
     #[cfg(test)]
@@ -1405,14 +1387,7 @@ impl HistoryDatabase {
         image_root: Option<&std::path::Path>,
         storage_budget_override: Option<u64>,
     ) -> Result<(usize, Vec<String>), String> {
-        self.clipboard_cleanup_internal(
-            policy,
-            0,
-            expected,
-            None,
-            image_root,
-            storage_budget_override,
-        )
+        self.clipboard_cleanup_internal(policy, 0, expected, image_root, storage_budget_override)
     }
 
     fn clipboard_cleanup_internal(
@@ -1420,7 +1395,6 @@ impl HistoryDatabase {
         policy: Option<HistoryPolicy>,
         categories: u8,
         expected: Option<&str>,
-        recent_since: Option<i64>,
         image_root: Option<&std::path::Path>,
         storage_budget_override: Option<u64>,
     ) -> Result<(usize, Vec<String>), String> {
@@ -1429,7 +1403,6 @@ impl HistoryDatabase {
                 && policy.max_age_days.is_none()
                 && policy.max_storage_mb.is_none()
                 && storage_budget_override.is_none()
-                && recent_since.is_none()
                 && self.clipboard_total_records <= policy.limit as usize
             {
                 return Ok((0, vec![]));
@@ -1443,7 +1416,6 @@ impl HistoryDatabase {
         let ctx = CleanupContext {
             policy,
             categories,
-            recent_since,
             now: chrono::Utc::now().timestamp_millis(),
             image_root,
             storage_budget_override,
@@ -1940,58 +1912,6 @@ mod tests {
         );
         drop(db);
         std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn clipboard_recent_cleanup_protects_flags_and_rechecks_confirmation() {
-        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
-        let now = chrono::Utc::now();
-        let since = now.timestamp_millis() - 15 * 60_000;
-        for (id, time, pinned, favorite) in [
-            ("before", since - 1, false, false),
-            ("boundary", since, false, false),
-            ("pinned", since, true, false),
-            ("favorite", since, false, true),
-        ] {
-            let mut item = record(id, id);
-            item.date = chrono::DateTime::from_timestamp_millis(time)
-                .unwrap()
-                .to_rfc3339();
-            item.is_pinned = pinned;
-            item.is_favorite = favorite;
-            db.clipboard_insert(&item).unwrap();
-        }
-        let preview = db
-            .records_cleanup_preview_scoped(None, Some(since))
-            .unwrap();
-        assert_eq!(preview.count, 1);
-        assert_eq!(preview.recent_since, Some(since));
-        let mut new = record("new", "synthetic added during confirmation");
-        new.date = now.to_rfc3339();
-        db.clipboard_insert(&new).unwrap();
-        assert_eq!(
-            db.clipboard_cleanup_scoped(None, 0, Some(&preview.token), Some(since)),
-            Err("clipboard_cleanup_changed".into())
-        );
-        let current = db
-            .records_cleanup_preview_scoped(None, Some(since))
-            .unwrap();
-        assert_eq!(current.count, 2);
-        assert!(db
-            .clipboard_cleanup_scoped(None, 7, Some(&current.token), Some(since))
-            .is_err());
-        assert_eq!(
-            db.clipboard_cleanup_scoped(None, 0, Some(&current.token), Some(since))
-                .unwrap()
-                .0,
-            2
-        );
-        let remaining = db.clipboard_page("", false, None, 100).unwrap();
-        assert_eq!(remaining.total_records, 3);
-        assert!(remaining
-            .records
-            .iter()
-            .all(|row| ["before", "pinned", "favorite"].contains(&row.id.as_str())));
     }
 
     #[test]

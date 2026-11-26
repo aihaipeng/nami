@@ -146,8 +146,6 @@ pub struct CleanupPreview {
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub categories: Option<[usize; 3]>,
-    #[serde(rename = "recentSince", skip_serializing_if = "Option::is_none")]
-    pub recent_since: Option<i64>,
 }
 
 impl HistoryPolicy {

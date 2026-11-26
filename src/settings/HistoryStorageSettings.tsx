@@ -8,7 +8,7 @@ import { errorCode } from './ShortcutCapture';
 
 type Policy = { limit: number; maxAgeDays?: number; maxStorageMb?: number };
 type Storage = Policy & { bytes: number };
-type Preview = { count: number; token: string; categories?: [number, number, number]; recentSince?: number };
+type Preview = { count: number; token: string; categories?: [number, number, number] };
 const categories = ['clipboardCleanupOrdinary', 'clipboardCleanupFavorites', 'clipboardCleanupPinned'] as const;
 const storageLimitOptions = [
   { code: '0', label: null },
@@ -66,8 +66,8 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
     } finally { pending.current = false; setBusy(false); }
   }
 
-  async function apply({ policy, token, recentSince }: Preview & { policy: Policy | null }, selected?: number) {
-    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { policy, token, ...(selected === undefined ? {} : { categories: selected }), ...(recentSince === undefined ? {} : { recentSince }) });
+  async function apply({ policy, token }: Preview & { policy: Policy | null }, selected?: number) {
+    const result = await invoke<{ mediaCleanupFailed: boolean }>('records_cleanup_apply', { policy, token, ...(selected === undefined ? {} : { categories: selected }) });
     if (policy) {
       setStorage((previous) => previous && { bytes: previous.bytes, ...policy });
       setDraft(null);
@@ -76,13 +76,12 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
     reload();
   }
 
-  function preview(policy: Policy | null, recent = false) {
+  function preview(policy: Policy | null) {
     if (!available || cleanup) return;
     void perform(async () => {
-      const result = await invoke<Preview>('records_cleanup_preview', { policy, ...(recent ? { recent: true } : {}) });
+      const result = await invoke<Preview>('records_cleanup_preview', { policy });
       if (!mounted.current) return;
       const candidate = { ...result, policy };
-      if (recent && result.recentSince === undefined) throw new Error();
       if (!policy || candidate.count) { setMask(0); setCleanup(candidate); }
       else await apply(candidate);
     });
@@ -95,9 +94,9 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
   }
 
   function confirm() {
-    if (!cleanup || (cleanup.recentSince !== undefined ? !cleanup.count : !cleanup.policy && !mask)) return;
+    if (!cleanup || (!cleanup.policy && !mask)) return;
     void perform(async () => {
-      try { await apply(cleanup, cleanup.policy || cleanup.recentSince !== undefined ? undefined : mask); }
+      try { await apply(cleanup, cleanup.policy ? undefined : mask); }
       finally { setCleanup(undefined); }
     });
   }
@@ -160,10 +159,6 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
           t={t} searchable={false} side="bottom" settings menuWidth={140} /> : <span className="settings-badge">—</span>}
       </div>
       <div className="settings-field">
-        <span className="settings-field-content">{t('clipboardCleanupRecentScope')}</span>
-        <button type="button" className="settings-action" aria-haspopup="dialog" disabled={!available} aria-disabled={busy || undefined} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); preview(null, true); }}>{t('clipboardCleanupReview')}</button>
-      </div>
-      <div className="settings-field">
         <span className="settings-field-content">{t('clipboardStorageUsed')}</span>
         <div className="clipboard-storage-value">
           <span aria-live="polite" title={storageHelp}>{storageError ? t('clipboardStorageUnavailable') : storage ? storageSize(storage.bytes, locale) : '—'}</span>
@@ -173,8 +168,8 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
       </div>
       {feedback && <p className="settings-field-note" role={feedback.error ? 'alert' : 'status'}>{t(feedback.message)}</p>}
     </div>
-    {cleanup && <SettingsDialog className="settings-cleanup-dialog" title={t(cleanup.recentSince !== undefined ? 'clipboardCleanupRecentHeading' : cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardCleanupClear')}
-      description={cleanup.recentSince !== undefined && !cleanup.count ? t('clipboardCleanupRecentEmpty') : cleanup.policy || cleanup.recentSince !== undefined ? t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count)) : undefined} onClose={close} onKeyDown={(event) => {
+    {cleanup && <SettingsDialog className="settings-cleanup-dialog" title={t(cleanup.policy ? 'clipboardHistoryPolicyHeading' : 'clipboardCleanupClear')}
+      description={cleanup.policy ? t(cleanup.count === 1 ? 'clipboardCleanupMessageOne' : 'clipboardCleanupMessage').replace('{count}', number.format(cleanup.count)) : undefined} onClose={close} onKeyDown={(event) => {
         if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'Escape' || event.key === 'Enter') {
           event.preventDefault();
@@ -193,7 +188,7 @@ export function HistoryStorageSettings({ t, available, locale }: { t: Translate;
           <button type="button" data-initial-focus className="settings-action" aria-keyshortcuts="Escape" aria-disabled={busy || undefined} onClick={close}>
             {t('clipboardCancel')}<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span>
           </button>
-          <button type="submit" className="settings-action clipboard-confirm-action" aria-keyshortcuts="Enter" disabled={cleanup.recentSince !== undefined ? !cleanup.count : !cleanup.policy && !mask} aria-disabled={busy || undefined}>
+          <button type="submit" className="settings-action clipboard-confirm-action" aria-keyshortcuts="Enter" disabled={!cleanup.policy && !mask} aria-disabled={busy || undefined}>
             {t(cleanup.policy ? 'clipboardCleanupApply' : 'clipboardCleanupClear')}<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span>
           </button>
         </div>
