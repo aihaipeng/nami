@@ -337,9 +337,12 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(input);
     const favorite = within(panel()).getByRole('button', { name: 'Favorite clipboard records' });
     expect(favorite.getAttribute('aria-pressed')).toBe('false');
-    expect(key(input, 'ArrowRight')).toBe(false);
+    expect(key(input, 'ArrowRight')).toBe(true);
+    expect(favorite.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.change(input, { target: { value: 'a' } });
+    expect(key(input, 'Tab')).toBe(false);
     expect(favorite.getAttribute('aria-pressed')).toBe('true');
-    expect(key(input, 'ArrowLeft')).toBe(false);
+    expect(fireEvent.keyDown(input, { key: 'Tab', code: 'Tab', shiftKey: true })).toBe(false);
     expect(favorite.getAttribute('aria-pressed')).toBe('false');
   });
 
@@ -534,20 +537,20 @@ describe('unified records workspace', () => {
     } finally { clipboardRecords.forEach((record) => { record.isPinned = false; }); }
   });
 
-  it('cycles clipboard categories with left/right arrows', async () => {
+  it('cycles clipboard categories with tab and shift tab', async () => {
     await mount('clipboard');
-    const arrow = (key: string) => fireEvent.keyDown(search(), { key });
+    const tab = (shiftKey = false) => fireEvent.keyDown(search(), { key: 'Tab', code: 'Tab', shiftKey });
     const pressed = (label: string) => screen.getByRole('button', { name: label }).getAttribute('aria-pressed');
     expect(pressed('All clipboard records')).toBe('true');
     for (const label of ['Favorite clipboard records', 'Text clipboard records', 'Image clipboard records', 'File clipboard records']) {
-      arrow('ArrowRight');
+      tab();
       expect(pressed(label)).toBe('true');
       expect(pressed('All clipboard records')).toBe('false');
     }
-    arrow('ArrowRight');
+    tab();
     expect(pressed('File clipboard records')).toBe('false');
     expect(pressed('All clipboard records')).toBe('true');
-    arrow('ArrowLeft');
+    tab(true);
     expect(pressed('File clipboard records')).toBe('true');
     expect(pressed('All clipboard records')).toBe('false');
   });

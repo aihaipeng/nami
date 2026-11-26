@@ -80,7 +80,7 @@ export function keycapLabels(binding: KeyBinding, macos: boolean, t: Translate) 
   const symbols = macos
     ? { control: '⌃', alt: '⌥', shift: '⇧', meta: '⌘' }
     : { control: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Ctrl' };
-  const names: Record<string, string> = { Enter: '↵', Backspace: macos ? '⌫' : 'Backspace', Space: 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: '\'', Comma: ',', Period: '.', Slash: '/' };
+  const names: Record<string, string> = { Enter: '↵', Tab: '⇥', Backspace: macos ? '⌫' : 'Backspace', Space: 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: '\'', Comma: ',', Period: '.', Slash: '/' };
   const modifier = modifierKey(binding.code);
   const key = (modifier ? `${t(binding.code.endsWith('Left') ? 'shortcutLeft' : 'shortcutRight')} ${symbols[modifier]}` : names[binding.code]) ?? (binding.code.startsWith('Key') ? binding.code.slice(3) : binding.code.startsWith('Digit') ? binding.code.slice(5) : binding.code);
   return [...normalizeModifiers(binding.modifiers).map((modifier) => symbols[modifier]), key];

@@ -243,13 +243,19 @@ pub enum ClipboardRecordAction {
     CopyRecord,
     PastePlain,
     SaveImage,
+    SwitchCategory,
 }
 
 impl ClipboardRecordAction {
     pub fn shared_with_translation(self) -> bool {
         !matches!(
             self,
-            Self::Ocr | Self::OpenTarget | Self::Translate | Self::PastePlain | Self::SaveImage
+            Self::Ocr
+                | Self::OpenTarget
+                | Self::Translate
+                | Self::PastePlain
+                | Self::SaveImage
+                | Self::SwitchCategory
         )
     }
 
@@ -278,6 +284,7 @@ pub struct ClipboardRecordShortcuts {
     copy_record: RecordShortcut,
     paste_plain: RecordShortcut,
     save_image: RecordShortcut,
+    switch_category: RecordShortcut,
 }
 
 impl Default for ClipboardRecordShortcuts {
@@ -315,12 +322,13 @@ impl Default for ClipboardRecordShortcuts {
             copy_record: enabled("KeyC", &[primary]),
             paste_plain: enabled("Enter", &[primary]),
             save_image: enabled("KeyS", &[primary]),
+            switch_category: enabled("Tab", &[]),
         }
     }
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 11] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 12] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -334,6 +342,7 @@ impl ClipboardRecordShortcuts {
             (CopyRecord, &self.copy_record),
             (PastePlain, &self.paste_plain),
             (SaveImage, &self.save_image),
+            (SwitchCategory, &self.switch_category),
         ]
     }
 
@@ -382,6 +391,7 @@ impl ClipboardRecordShortcuts {
             translate: defaults.translate,
             paste_plain: defaults.paste_plain,
             save_image: defaults.save_image,
+            switch_category: defaults.switch_category,
             ..self.clone()
         };
         restored.validate_unique()?;
@@ -395,6 +405,7 @@ impl ClipboardRecordShortcuts {
             translate: self.translate.clone(),
             paste_plain: self.paste_plain.clone(),
             save_image: self.save_image.clone(),
+            switch_category: self.switch_category.clone(),
             ..Self::default()
         };
         restored.validate_unique()?;
@@ -496,6 +507,7 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::CopyRecord => &mut self.copy_record,
             ClipboardRecordAction::PastePlain => &mut self.paste_plain,
             ClipboardRecordAction::SaveImage => &mut self.save_image,
+            ClipboardRecordAction::SwitchCategory => &mut self.switch_category,
         };
         if let Some(enabled) = enabled {
             current.enabled = enabled;
@@ -532,6 +544,7 @@ impl ClipboardRecordShortcuts {
                     ("copyRecord", ClipboardRecordAction::CopyRecord),
                     ("pastePlain", ClipboardRecordAction::PastePlain),
                     ("saveImage", ClipboardRecordAction::SaveImage),
+                    ("switchCategory", ClipboardRecordAction::SwitchCategory),
                 ] {
                     if value.get(key).is_none() {
                         let binding =
@@ -790,6 +803,37 @@ mod tests {
             assert!(records.conflicts_with_translation(action, &key));
             assert!(translation.conflicts_with_records(&records));
         }
+    }
+
+    #[test]
+    fn switch_category_defaults_to_tab_unless_that_binding_is_taken() {
+        use ClipboardRecordAction::SwitchCategory;
+        let tab = KeyBinding::new("Tab", &[]);
+        assert_eq!(
+            ClipboardRecordShortcuts::default().switch_category.binding,
+            Some(tab.clone())
+        );
+        let mut stored = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
+        stored.as_object_mut().unwrap().remove("switchCategory");
+        let loaded = ClipboardRecordShortcuts::from_store(Some(stored.to_string()));
+        assert_eq!(loaded.switch_category.binding, Some(tab.clone()));
+        let custom = KeyBinding::new("KeyJ", &[]);
+        let mut changed = loaded;
+        changed
+            .set(SwitchCategory, Some(custom.clone()), None, &[])
+            .unwrap();
+        assert_eq!(
+            changed.restore_general().unwrap().switch_category.binding,
+            Some(custom)
+        );
+        assert_eq!(
+            changed.restore_clipboard().unwrap().switch_category.binding,
+            Some(tab.clone())
+        );
+        stored["preview"]["binding"] = serde_json::to_value(&tab).unwrap();
+        let yielded = ClipboardRecordShortcuts::from_store(Some(stored.to_string()));
+        assert_eq!(yielded.preview.binding, Some(tab));
+        assert!(yielded.switch_category.binding.is_none());
     }
 
     #[test]

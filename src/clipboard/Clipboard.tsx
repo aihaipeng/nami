@@ -17,7 +17,7 @@ import { RecordActions } from '../shared/RecordActions';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { useClipboard, type ClipboardKind, type ClipboardRecord } from './useClipboard';
 import { HistoryList, type HistoryListHandle } from '../shared/HistoryList';
-import { clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
+import { clipboardCategoryDirection, clipboardKeyAction, clipboardPanelShortcuts, clipboardShortcutAvailable, isClipboardTranslateLaunchKey } from '../shared/clipboardShortcuts';
 import { matchesBinding } from '../shared/shortcuts';
 import { HistoryFooter } from '../shared/HistoryFooter';
 import { ClipboardMedia } from './ClipboardMedia';
@@ -408,11 +408,10 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     const rowButton = id ? rowRefs.current.get(id) : undefined;
     const action = clipboardKeyAction(shortcuts, key);
     const plain = !key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey;
-    const categoryDirection = plain && !action && (key.key === 'ArrowLeft' || key.key === 'ArrowRight') && (!fromSearch || !input?.value)
-      ? (key.key === 'ArrowRight' ? 1 : -1) : 0;
+    const categoryDirection = clipboardCategoryDirection(shortcuts, key);
     if ((fromRecord || fromSearch || control?.matches('.history-toolbar, .history-footer')) && categoryDirection) {
-      if (key.repeat || control?.closest('.history-footer')?.querySelector('[role=dialog]')) return;
       event.preventDefault();
+      if (key.repeat || control?.closest('.history-footer')?.querySelector('[role=dialog]')) return;
       const categories = [null, 'favorites', 'text', 'image', 'files'] as const;
       const index = categories.indexOf(favoritesOnly ? 'favorites' : kindFilter);
       const next = categories[(index + (categoryDirection > 0 ? 1 : categories.length - 1)) % categories.length];

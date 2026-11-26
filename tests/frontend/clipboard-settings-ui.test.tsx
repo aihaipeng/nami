@@ -81,7 +81,7 @@ describe('clipboard recording settings', () => {
       expect(screen.queryByRole('checkbox', { name: retired })).toBeNull();
     }
     const clipboard = within(screen.getByRole('group', { name: 'Clipboard' }));
-    const clipboardOrder = ['Open Clipboard History', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste as Plain Text', 'Save Image'];
+    const clipboardOrder = ['Open Clipboard History', 'Switch Group', 'Translate', 'Open Link, Email or Locate File', 'Extract Text', 'Paste as Plain Text', 'Save Image'];
     expect(clipboard.getAllByRole<HTMLInputElement>('checkbox').map((toggle) => toggle.labels?.[0].textContent)).toEqual(clipboardOrder);
     for (const name of clipboardOrder) {
       expect(clipboard.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
@@ -160,11 +160,11 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S']])(
+  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S'], ['Switch Group', 'switchCategory', '⇥']])(
     'edits %s while unchecked and scopes Clipboard restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
-      const local = ['ocr', 'translate', 'pastePlain', 'saveImage'].includes(action);
+      const local = ['ocr', 'translate', 'pastePlain', 'saveImage', 'switchCategory'].includes(action);
       const group = within(screen.getByRole('group', { name: local ? 'Clipboard' : 'General' }));
       const recorder = group.getByRole('button', { name: `${title} shortcut` });
       const toggle = group.getByRole<HTMLInputElement>('checkbox', { name: title });

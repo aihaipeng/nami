@@ -152,8 +152,11 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     return () => { document.removeEventListener('pointerdown', outside, true); window.removeEventListener('blur', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('nami:window-moved', dismiss); };
   }, [open]);
   const { capabilities, translationPreferences: preferences, window: state } = snapshot;
-  const localShortcuts = clipboardPanelShortcuts(snapshot).filter(({ action, enabled, globalConflict, binding }) =>
-    binding && enabled && !globalConflict && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
+  const panelShortcuts = clipboardPanelShortcuts(snapshot);
+  const category = panelShortcuts.find(({ action }) => action === 'switchCategory');
+  const categoryBinding = clipboard && category?.enabled && !category.globalConflict ? category.binding : null;
+  const localShortcuts = panelShortcuts.filter(({ action, enabled, globalConflict, binding }) =>
+    action !== 'switchCategory' && binding && enabled && !globalConflict && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
   const shortcuts = recordWindowActions.flatMap((action) => {
     const binding = preferences.shortcuts[action];
     // Older clipboard bindings could overlap the translation window's pin shortcut.
@@ -208,7 +211,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       <strong>{t('hotKey')}</strong>
       <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
       <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
-      <div><span>{t('switchCategory')}</span><span>← / →</span></div>
+      {categoryBinding && <div><span>{t('switchCategory')}</span><span>{keyLabel(categoryBinding)}{categoryBinding.modifiers.includes('shift') ? '' : ` / ${keyLabel({ code: categoryBinding.code, modifiers: [...categoryBinding.modifiers, 'shift'] })}`}</span></div>}
       {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘ 1～5</span></div>}
       {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}

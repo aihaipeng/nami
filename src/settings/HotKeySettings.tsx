@@ -129,6 +129,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
       <div className="settings-group hotkey-group" role="group" aria-labelledby="clipboard-shortcut-heading">
         {clipboardRow('global', t('clipboardOpenHistory'), snapshot.clipboardBinding, snapshot.clipboardShortcutEnabled,
           canRecordClipboard ? undefined : t(snapshot.storageError ? 'clipboardSettingsSaveFailed' : 'platformUnavailable'))}
+        {localRow('switchCategory')}
         {localRow('translate')}
         {localRow('openTarget')}
         {localRow('ocr')}

@@ -4,7 +4,7 @@ import type { MessageKey } from './i18n';
 import { bindingFromEvent, editsText, globalTranslationActions, recordWindowActions, sameBinding, type KeyBinding } from './shortcuts';
 
 export const sharedRecordActions = ['preview', 'note', 'favorite', 'pin', 'copyRecord', 'delete'] as const;
-export const clipboardOnlyActions = ['openTarget', 'ocr', 'translate', 'pastePlain', 'saveImage'] as const;
+export const clipboardOnlyActions = ['switchCategory', 'openTarget', 'ocr', 'translate', 'pastePlain', 'saveImage'] as const;
 export const clipboardRecordActions = [...sharedRecordActions, ...clipboardOnlyActions] as const;
 export type ClipboardRecordAction = typeof clipboardRecordActions[number];
 type RecordShortcut = { binding: KeyBinding | null; enabled: boolean };
@@ -14,6 +14,7 @@ export type ClipboardControls = { search?: ClipboardSearchOptions; recordsOpenFo
 export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
   const shortcut = (code: string, modifiers: KeyBinding['modifiers'] = [primary]) => ({ enabled: true, binding: { code, modifiers } });
   return {
+    switchCategory: shortcut('Tab', []),
     openTarget: shortcut('KeyO', [primary]),
     pastePlain: shortcut('Enter', [primary]), saveImage: shortcut('KeyS', [primary]),
     preview: shortcut('Space', []),
@@ -28,7 +29,7 @@ export function sameClipboardBinding(left: KeyBinding, right: KeyBinding) {
 }
 
 export const clipboardShortcutLabels = {
-  pastePlain: 'clipboardShortcutPastePlain', saveImage: 'clipboardShortcutSaveImage',
+  switchCategory: 'switchCategory', pastePlain: 'clipboardShortcutPastePlain', saveImage: 'clipboardShortcutSaveImage',
   openTarget: 'clipboardShortcutOpenTarget', preview: 'clipboardShortcutPreview', note: 'toggleRecordNote', ocr: 'clipboardShortcutOcr', translate: 'translation',
   copyRecord: 'copy',
   favorite: 'clipboardShortcutFavorite', pin: 'clipboardShortcutPin', delete: 'clipboardShortcutDelete',
@@ -59,8 +60,18 @@ export function clipboardPanelShortcuts(snapshot: AppSnapshot, actions: readonly
   });
 }
 
+export function clipboardCategoryDirection(shortcuts: ReturnType<typeof clipboardPanelShortcuts>, event: KeyboardEvent) {
+  const shortcut = shortcuts.find(({ action }) => action === 'switchCategory');
+  const binding = shortcut?.enabled && !shortcut.globalConflict ? shortcut.binding : null;
+  const pressed = binding && bindingFromEvent(event);
+  if (!binding || !pressed || editsText(event)) return 0;
+  if (shortcuts.some((other) => other.action !== 'switchCategory' && other.enabled && !other.globalConflict && other.binding && sameClipboardBinding(other.binding, pressed))) return 0;
+  if (sameClipboardBinding(pressed, binding)) return 1;
+  return !binding.modifiers.includes('shift') && sameClipboardBinding(pressed, { code: binding.code, modifiers: [...binding.modifiers, 'shift'] }) ? -1 : 0;
+}
+
 export function clipboardShortcutAvailable(snapshot: AppSnapshot, native: boolean, action: ClipboardRecordAction) {
-  return action === 'preview' || (native && !snapshot.storageError
+  return action === 'preview' || action === 'switchCategory' || (native && !snapshot.storageError
     && (action !== 'ocr' || snapshot.capabilities.imageOcr && snapshot.capabilities.clipboardWrite)
     && (action !== 'openTarget' || snapshot.capabilities.clipboardOpenTarget)
     && (action !== 'copyRecord' || snapshot.capabilities.clipboardWrite)
@@ -71,6 +82,7 @@ export function clipboardShortcutAvailable(snapshot: AppSnapshot, native: boolea
 export function clipboardKeyAction(shortcuts: ReturnType<typeof clipboardPanelShortcuts>, event: KeyboardEvent) {
   const key = bindingFromEvent(event);
   const action = key && shortcuts.find(({ binding, enabled, globalConflict }) => enabled && !globalConflict && binding && sameClipboardBinding(binding, key))?.action;
+  if (action === 'switchCategory') return;
   if (!editsText(event)) return action;
   const search = event.target instanceof HTMLInputElement && event.target.type === 'search' ? event.target : null;
   if (!search) return;

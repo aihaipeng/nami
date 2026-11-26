@@ -100,7 +100,7 @@ export const messages = {
   pinWindow: ['固定/取消固定窗口', 'Pin / Unpin Window'],
   showShortcuts: ['显示快捷键', 'Show Shortcuts'],
   navigateRecords: ['上下移动', 'Navigate Records'],
-  switchCategory: ['切换分类', 'Switch Category'],
+  switchCategory: ['切换分组', 'Switch Group'],
   switchRecordView: ['切换目录', 'Switch Record View'],
   toggleRecordNote: ['备注/取消备注', 'Add/Remove Note'],
   recordsOpenFocus: ['打开记录时聚焦', 'Focus When Opening Records'],
