@@ -514,6 +514,26 @@ fn record_case(
     });
 }
 
+fn anchor_right_on_screen(app: &AppHandle) -> Result<(), String> {
+    let window = app.get_window("translation").ok_or("window")?;
+    let scale = window.scale_factor().map_err(|_| "scale")?;
+    if let Some(monitor) = window.current_monitor().map_err(|_| "monitor")? {
+        let area = monitor.work_area();
+        let mut frame = native_translation_frame(&window)?;
+        // Keep fixed-right sweeps inside the work area, outside AppKit's off-screen constraints.
+        frame.origin.x =
+            (area.position.x as f64 + area.size.width as f64) / scale - 20.0 - frame.size.width;
+        unsafe {
+            let native = window
+                .ns_window()
+                .map_err(|_| "native window")?
+                .cast::<AnyObject>();
+            let _: () = objc2::msg_send![native, setFrame: frame, display: false];
+        }
+    }
+    Ok(())
+}
+
 fn run(app: &AppHandle) -> Vec<Case> {
     let mut cases = Vec::new();
     record_case(
@@ -522,25 +542,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
         |samples| {
             let baseline = on_main(app, |app| {
                 reset(app, 360.0, 700.0)?;
-                if std::env::var("NAMI_UI_TEST_VISIBLE").as_deref() == Ok("1") {
-                    let window = app.get_window("translation").ok_or("window")?;
-                    let scale = window.scale_factor().map_err(|_| "scale")?;
-                    if let Some(monitor) = window.current_monitor().map_err(|_| "monitor")? {
-                        let area = monitor.work_area();
-                        let mut frame = native_translation_frame(&window)?;
-                        // Keep the sweep on screen, outside AppKit's off-screen placement constraints.
-                        frame.origin.x = (area.position.x as f64 + area.size.width as f64) / scale
-                            - 20.0
-                            - frame.size.width;
-                        unsafe {
-                            let native = window
-                                .ns_window()
-                                .map_err(|_| "native window")?
-                                .cast::<AnyObject>();
-                            let _: () = objc2::msg_send![native,setFrame:frame,display:false];
-                        }
-                    }
-                }
+                anchor_right_on_screen(app)?;
                 owner(app, true)?;
                 geometry(app)
             })?;
@@ -609,7 +611,10 @@ fn run(app: &AppHandle) -> Vec<Case> {
         &mut cases,
         "alternate left edge and divider without width accumulation",
         |samples| {
-            on_main(app, |app| reset(app, 360.0, 700.0))?;
+            on_main(app, |app| {
+                reset(app, 360.0, 700.0)?;
+                anchor_right_on_screen(app)
+            })?;
             for index in 0..40 {
                 let t = [740.0, 800.0, 920.0, 700.0][index % 4];
                 let (baseline, current) = on_main(app, move |app| {
@@ -905,6 +910,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
                     .unwrap()
                     .clipboard_detail_visible = false;
                 layout_translation(app, false)?;
+                anchor_right_on_screen(app)?;
                 owner(app, true)
             })?;
             let h_only = on_main(app, |app| {
@@ -950,6 +956,7 @@ fn run(app: &AppHandle) -> Vec<Case> {
                             .clipboard_detail_visible = false;
                         layout_translation(app, false)?;
                     }
+                    anchor_right_on_screen(app)?;
                     owner(app, true)?;
                     geometry(app)
                 })?;
@@ -1012,6 +1019,7 @@ fn run_visible_paced(app: &AppHandle) -> Vec<Case> {
                             .clipboard_detail_visible = false;
                         layout_translation(app, false)?;
                     }
+                    anchor_right_on_screen(app)?;
                     owner(app, true)?;
                     geometry(app)
                 })?;
@@ -2141,7 +2149,7 @@ clear.focus({preventScroll:true});
 const clearFocus=getComputedStyle(clear);
 const focusVisible=clear.matches(':focus-visible');
 if(document.activeElement!==clear||clearFocus.backgroundColor!==transparent||clearFocus.borderTopColor!==transparent||(focusVisible&&(clearFocus.opacity!=='1'||clearFocus.outlineStyle==='none')))throw Error('clear action must keep a keyboard focus indicator without a button surface');
-const long=document.querySelector('[aria-label="Pin / Unpin Window shortcut"]');
+const long=document.querySelector('[aria-label="Pin/Unpin shortcut"]');
 const bounds=button=>button.getBoundingClientRect(), keyWidth=button=>bounds(button.querySelector('.keycaps')).width;
 const shortWidth=bounds(recorder).width, longWidth=bounds(long).width;
 if(shortWidth-keyWidth(recorder)>34||Math.abs((longWidth-shortWidth)-(keyWidth(long)-keyWidth(recorder)))>.1||longWidth<=shortWidth)throw Error('shortcut controls do not fit their keycaps');
