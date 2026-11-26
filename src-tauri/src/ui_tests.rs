@@ -7400,7 +7400,7 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
         let mut last_version = 0;
         let inputs = (0..8)
             .map(|index| {
-                let label = format!("Nami Error E247 海浪 Capture {index}");
+                let label = format!("Error E247: 海浪剪贴板自动索引测试 {index}");
                 fixture(label, format!("{nonce} {index}")).map(|bytes| {
                     crate::platform::ClipboardPayload::Image {
                         bytes,
@@ -7453,7 +7453,7 @@ fn run_clipboard_image_index(app: &AppHandle) -> DomCase {
             ));
         }
         let photo = directory.join("Fixture E247 海浪.png");
-        let photo_bytes = fixture("Nami Error E247 海浪 Image File".into(), nonce.clone())?;
+        let photo_bytes = fixture("Error E247: 海浪图片文件自动索引测试".into(), nonce.clone())?;
         let dimensions = crate::platform::image_dimensions(&photo_bytes)?;
         std::fs::write(&photo, &photo_bytes).map_err(|error| error.to_string())?;
         let (file, _, _) = capture(crate::platform::ClipboardPayload::Files(vec![photo

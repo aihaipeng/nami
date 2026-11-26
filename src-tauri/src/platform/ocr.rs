@@ -79,19 +79,7 @@ fn recognize_image_text_in_process(bytes: &[u8]) -> Result<String, String> {
         let handler = prepare_vision_handler(bytes)?;
         let request = VNRecognizeTextRequest::new();
         request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-        // Prefer CJK-aware recognition for mixed short text without dropping supported scripts.
-        if let Ok(languages) = unsafe { request.supportedRecognitionLanguagesAndReturnError() } {
-            let mut languages: Vec<_> = languages.iter().collect();
-            languages.sort_by_key(|language| match language.to_string().as_str() {
-                "zh-Hans" => 0,
-                "en-US" => 1,
-                _ => 2,
-            });
-            request.setRecognitionLanguages(&NSArray::from_retained_slice(&languages));
-            request.setAutomaticallyDetectsLanguage(false);
-        } else {
-            request.setAutomaticallyDetectsLanguage(true);
-        }
+        request.setAutomaticallyDetectsLanguage(true);
         request.setMinimumTextHeight(0.0);
         let requests = NSArray::from_slice(&[request.as_ref() as &VNRequest]);
         handler
@@ -555,6 +543,30 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     #[test]
+    fn vision_auto_detects_multilingual_synthetic_text() {
+        let mixed_zh =
+            recognize_image_text(&bitmap_with_text("Error E247: 海浪剪贴板自动索引测试"))
+                .expect("synthetic mixed Chinese OCR succeeds");
+        assert!(
+            mixed_zh.contains("E247") && mixed_zh.contains("海浪"),
+            "{mixed_zh:?}"
+        );
+        let ja = recognize_image_text(&bitmap_with_text("こんにちは世界"))
+            .expect("synthetic Japanese OCR succeeds");
+        assert!(ja.contains("こんにちは"), "{ja:?}");
+        let ko = recognize_image_text(&bitmap_with_text("안녕하세요 세계 테스트"))
+            .expect("synthetic Korean OCR succeeds");
+        assert!(ko.contains("안녕하세요"), "{ko:?}");
+        let fr = recognize_image_text(&bitmap_with_text("Café résumé naïve"))
+            .expect("synthetic French OCR succeeds");
+        assert!(fr.contains("Café") && fr.contains("résumé"), "{fr:?}");
+        let ru = recognize_image_text(&bitmap_with_text("Привет мир тест"))
+            .expect("synthetic Russian OCR succeeds");
+        assert!(ru.contains("Привет"), "{ru:?}");
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
     fn vision_detects_qr_code_and_handles_blank_and_corrupt_images() {
         let blank = bitmap(false);
         assert_eq!(detect_image_qr_codes(&blank), Ok(Vec::new()));
@@ -684,7 +696,15 @@ mod tests {
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
     fn bitmap(text: bool) -> Vec<u8> {
-        let (width, height) = (640usize, 160usize);
+        if text {
+            bitmap_with_text("HELLO NAMI")
+        } else {
+            blank_bitmap(640, 160)
+        }
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    fn blank_bitmap(width: usize, height: usize) -> Vec<u8> {
         let pixel_bytes = width * height * 3;
         let mut bytes = vec![255; 54 + pixel_bytes];
         bytes[..54].fill(0);
@@ -697,34 +717,35 @@ mod tests {
         bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
         bytes[28..30].copy_from_slice(&24u16.to_le_bytes());
         bytes[34..38].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
-        if text {
-            use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-            use objc2_foundation::{ns_string, NSData, NSPoint, NSString};
-            unsafe {
-                let data = NSData::with_bytes(&bytes);
-                let bitmap: Retained<AnyObject> =
-                    msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
-                let context: Retained<AnyObject> = msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: &*bitmap];
-                let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
-                let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: &*context];
-                let attributes: Retained<AnyObject> =
-                    msg_send![class!(NSMutableDictionary), dictionary];
-                let font: Retained<AnyObject> =
-                    msg_send![class!(NSFont), boldSystemFontOfSize: 48f64];
-                let color: Retained<AnyObject> = msg_send![class!(NSColor), blackColor];
-                let _: () =
-                    msg_send![&*attributes, setObject: &*font, forKey: ns_string!("NSFont")];
-                let _: () =
-                    msg_send![&*attributes, setObject: &*color, forKey: ns_string!("NSColor")];
-                let label = NSString::from_str("HELLO NAMI");
-                let _: () = msg_send![&*label, drawAtPoint: NSPoint::new(48.0, 48.0), withAttributes: &*attributes];
-                let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
-                let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
-                let png: Retained<NSData> =
-                    msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
-                return png.to_vec();
-            }
-        }
         bytes
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    fn bitmap_with_text(text: &str) -> Vec<u8> {
+        use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+        use objc2_foundation::{ns_string, NSData, NSPoint, NSString};
+        let bytes = blank_bitmap(1200, 300);
+        unsafe {
+            let data = NSData::with_bytes(&bytes);
+            let bitmap: Retained<AnyObject> =
+                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
+            let context: Retained<AnyObject> =
+                msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: &*bitmap];
+            let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+            let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: &*context];
+            let attributes: Retained<AnyObject> =
+                msg_send![class!(NSMutableDictionary), dictionary];
+            let font: Retained<AnyObject> = msg_send![class!(NSFont), boldSystemFontOfSize: 48f64];
+            let color: Retained<AnyObject> = msg_send![class!(NSColor), blackColor];
+            let _: () = msg_send![&*attributes, setObject: &*font, forKey: ns_string!("NSFont")];
+            let _: () = msg_send![&*attributes, setObject: &*color, forKey: ns_string!("NSColor")];
+            let label = NSString::from_str(text);
+            let _: () = msg_send![&*label, drawAtPoint: NSPoint::new(48.0, 120.0), withAttributes: &*attributes];
+            let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+            let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+            let png: Retained<NSData> =
+                msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
+            png.to_vec()
+        }
     }
 }
