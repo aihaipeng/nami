@@ -48,8 +48,12 @@ mod selection_copy;
 pub use selection_copy::*;
 mod image_metadata;
 pub use image_metadata::image_dimensions;
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub use image_metadata::image_dimensions_from_path;
 mod ocr;
-pub use ocr::{detect_image_qr_codes, recognize_image_text};
+pub use ocr::{
+    detect_image_qr_codes, maybe_run_vision_worker, recognize_image_text, shutdown_vision_worker,
+};
 
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
 mod unsupported;

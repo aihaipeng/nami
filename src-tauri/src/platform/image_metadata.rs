@@ -1,16 +1,10 @@
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-pub fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
-    use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+fn source_dimensions(source: &objc2_image_io::CGImageSource) -> Result<(u32, u32), String> {
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_image_io::{
         kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
-        CGImageSource, CGImageSourceStatus,
+        CGImageSourceStatus,
     };
-    if bytes.is_empty() || bytes.len() > nami::clipboard::MAX_IMAGE_BYTES {
-        return Err("clipboard_image_invalid".into());
-    }
-    let data = CFData::from_bytes(bytes);
-    let source =
-        unsafe { CGImageSource::with_data(&data, None) }.ok_or("clipboard_image_invalid")?;
     if unsafe { source.status() } != CGImageSourceStatus::StatusComplete {
         return Err("clipboard_image_invalid".into());
     }
@@ -27,6 +21,28 @@ pub fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     let height = number(unsafe { kCGImagePropertyPixelHeight }).ok_or("clipboard_image_invalid")?;
     let orientation = number(unsafe { kCGImagePropertyOrientation }).unwrap_or(1);
     oriented_dimensions(width, height, orientation)
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    use objc2_core_foundation::CFData;
+    use objc2_image_io::CGImageSource;
+    if bytes.is_empty() || bytes.len() > nami::clipboard::MAX_IMAGE_BYTES {
+        return Err("clipboard_image_invalid".into());
+    }
+    let data = CFData::from_bytes(bytes);
+    let source =
+        unsafe { CGImageSource::with_data(&data, None) }.ok_or("clipboard_image_invalid")?;
+    source_dimensions(&source)
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn image_dimensions_from_path(path: &std::path::Path) -> Result<(u32, u32), String> {
+    use objc2_core_foundation::CFURL;
+    use objc2_image_io::CGImageSource;
+    let url = CFURL::from_file_path(path).ok_or("clipboard_image_invalid")?;
+    let source = unsafe { CGImageSource::with_url(&url, None) }.ok_or("clipboard_image_invalid")?;
+    source_dimensions(&source)
 }
 
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
@@ -73,13 +89,15 @@ mod tests {
     #[test]
     fn imageio_reads_original_dimensions_without_rendering_and_rejects_bad_data() {
         let png = include_bytes!("../../../tests/fixtures/clipboard-wide.png");
-        assert_eq!(
-            image_dimensions(png).unwrap(),
-            (
-                u32::from_be_bytes(png[16..20].try_into().unwrap()),
-                u32::from_be_bytes(png[20..24].try_into().unwrap())
-            )
+        let expected = (
+            u32::from_be_bytes(png[16..20].try_into().unwrap()),
+            u32::from_be_bytes(png[20..24].try_into().unwrap()),
         );
+        assert_eq!(image_dimensions(png).unwrap(), expected);
+        let temp = std::env::temp_dir().join(format!("nami-dim-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&temp, png).unwrap();
+        assert_eq!(image_dimensions_from_path(&temp).unwrap(), expected);
+        let _ = std::fs::remove_file(&temp);
         assert!(image_dimensions(b"invalid image").is_err());
         assert!(image_dimensions(&[]).is_err());
     }

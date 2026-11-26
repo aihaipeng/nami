@@ -4,6 +4,7 @@ mod clipboard_preferences;
 mod clipboard_runtime;
 mod clipboard_text;
 mod commands;
+mod media;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
 #[cfg(target_os = "macos")]
@@ -329,7 +330,15 @@ pub(crate) fn sync_global_shortcuts(app: &tauri::AppHandle) {
 }
 
 fn main() {
-    let builder = tauri::Builder::default().manage(AppState::default());
+    if let Some(code) = platform::maybe_run_vision_worker() {
+        std::process::exit(code);
+    }
+    let builder = tauri::Builder::default()
+        .manage(AppState::default())
+        .register_asynchronous_uri_scheme_protocol(
+            media::MEDIA_SCHEME,
+            media::handle_uri_scheme_request,
+        );
     let builder = if platform::capabilities().selection {
         builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -714,10 +723,17 @@ fn main() {
         .expect("failed to build Nami")
         .run(|app, event| match &event {
             tauri::RunEvent::Ready => record_lifecycle(app, "ready", None),
-            tauri::RunEvent::ExitRequested { code, .. } => {
-                record_lifecycle(app, "exit_requested", *code)
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                if code.is_none() {
+                    api.prevent_exit();
+                } else {
+                    record_lifecycle(app, "exit_requested", *code);
+                }
             }
-            tauri::RunEvent::Exit => record_lifecycle(app, "exit", None),
+            tauri::RunEvent::Exit => {
+                platform::shutdown_vision_worker();
+                record_lifecycle(app, "exit", None);
+            }
             _ => {}
         });
 }

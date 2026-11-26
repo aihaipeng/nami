@@ -239,22 +239,24 @@ unsafe fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() || bytes.len() > LIMIT || png_bytes(bytes) {
         return None;
     }
-    let data: Retained<AnyObject> =
-        msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
-    let bitmap: Option<Retained<AnyObject>> =
-        msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
-    let bitmap = bitmap?;
-    let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
-    let png: Option<Retained<AnyObject>> =
-        msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
-    let png = png?;
-    let length: usize = msg_send![&*png, length];
-    let pointer: *const u8 = msg_send![&*png, bytes];
-    if length == 0 || length > LIMIT || pointer.is_null() {
-        return None;
-    }
-    let encoded = std::slice::from_raw_parts(pointer, length).to_vec();
-    png_bytes(&encoded).then_some(encoded)
+    objc2::rc::autoreleasepool(|_| {
+        let data: Retained<AnyObject> =
+            msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+        let bitmap: Option<Retained<AnyObject>> =
+            msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
+        let bitmap = bitmap?;
+        let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+        let png: Option<Retained<AnyObject>> =
+            msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
+        let png = png?;
+        let length: usize = msg_send![&*png, length];
+        let pointer: *const u8 = msg_send![&*png, bytes];
+        if length == 0 || length > LIMIT || pointer.is_null() {
+            return None;
+        }
+        let encoded = std::slice::from_raw_parts(pointer, length).to_vec();
+        png_bytes(&encoded).then_some(encoded)
+    })
 }
 
 // TIFF conversion happens before the main-thread pasteboard write. PNG bytes stay untouched.
@@ -474,6 +476,10 @@ unsafe extern "C" {
         data: *const std::ffi::c_void,
         options: *const std::ffi::c_void,
     ) -> *const std::ffi::c_void;
+    fn CGImageSourceCreateWithURL(
+        url: *const std::ffi::c_void,
+        options: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
     fn CGImageSourceCreateThumbnailAtIndex(
         source: *const std::ffi::c_void,
         index: usize,
@@ -482,11 +488,24 @@ unsafe extern "C" {
     static kCGImageSourceCreateThumbnailFromImageAlways: *const AnyObject;
     static kCGImageSourceThumbnailMaxPixelSize: *const AnyObject;
     static kCGImageSourceCreateThumbnailWithTransform: *const AnyObject;
+    static kCGImageSourceShouldCache: *const AnyObject;
+    static kCGImageSourceShouldCacheImmediately: *const AnyObject;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(value: *const std::ffi::c_void);
+}
+
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+/// Ask macOS libmalloc to release empty large/small cache pages back to the OS.
+pub fn release_allocator_memory() {
+    unsafe {
+        let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
 }
 
 struct ImageHandle(*const std::ffi::c_void);
@@ -496,50 +515,94 @@ impl Drop for ImageHandle {
     }
 }
 
+unsafe fn render_thumbnail_from_source(
+    source: *const std::ffi::c_void,
+    max_pixels: u32,
+) -> Result<Vec<u8>, &'static str> {
+    if source.is_null() {
+        return Err("clipboard_image_invalid");
+    }
+    let source = ImageHandle(source);
+    let options: Retained<AnyObject> = msg_send![class!(NSMutableDictionary), dictionary];
+    let yes: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: true];
+    let no: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: false];
+    let maximum: Retained<AnyObject> =
+        msg_send![class!(NSNumber), numberWithUnsignedInt: max_pixels];
+    let _: () = msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailFromImageAlways];
+    let _: () =
+        msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailWithTransform];
+    let _: () =
+        msg_send![&*options, setObject: &*maximum, forKey: kCGImageSourceThumbnailMaxPixelSize];
+    let _: () = msg_send![&*options, setObject: &*no, forKey: kCGImageSourceShouldCache];
+    let _: () = msg_send![&*options, setObject: &*no, forKey: kCGImageSourceShouldCacheImmediately];
+    let image =
+        CGImageSourceCreateThumbnailAtIndex(source.0, 0, (&*options as *const AnyObject).cast());
+    if image.is_null() {
+        return Err("clipboard_image_invalid");
+    }
+    let image = ImageHandle(image);
+    let bitmap: Allocated<AnyObject> = msg_send![class!(NSBitmapImageRep), alloc];
+    let bitmap: Option<Retained<AnyObject>> = msg_send![bitmap, initWithCGImage: image.0];
+    let bitmap = bitmap.ok_or("clipboard_image_invalid")?;
+    let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+    let png: Option<Retained<AnyObject>> =
+        msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
+    let png = png.ok_or("clipboard_image_invalid")?;
+    let length: usize = msg_send![&*png, length];
+    let pointer: *const u8 = msg_send![&*png, bytes];
+    if length == 0 || pointer.is_null() {
+        return Err("clipboard_image_invalid");
+    }
+    Ok(std::slice::from_raw_parts(pointer, length).to_vec())
+}
+
 pub fn clipboard_image_preview(bytes: &[u8], max_pixels: u32) -> Result<Vec<u8>, &'static str> {
     if bytes.is_empty() || bytes.len() > LIMIT {
         return Err("clipboard_capture_limit");
     }
-    unsafe {
+    let result = objc2::rc::autoreleasepool(|_| unsafe {
         let data: Retained<AnyObject> =
             msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
-        let source =
-            CGImageSourceCreateWithData((&*data as *const AnyObject).cast(), std::ptr::null());
-        if source.is_null() {
-            return Err("clipboard_image_invalid");
-        }
-        let source = ImageHandle(source);
-        let options: Retained<AnyObject> = msg_send![class!(NSMutableDictionary), dictionary];
-        let yes: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: true];
-        let maximum: Retained<AnyObject> =
-            msg_send![class!(NSNumber), numberWithUnsignedInt: max_pixels];
-        let _: () = msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailFromImageAlways];
-        let _: () = msg_send![&*options, setObject: &*yes, forKey: kCGImageSourceCreateThumbnailWithTransform];
-        let _: () =
-            msg_send![&*options, setObject: &*maximum, forKey: kCGImageSourceThumbnailMaxPixelSize];
-        let image = CGImageSourceCreateThumbnailAtIndex(
-            source.0,
-            0,
-            (&*options as *const AnyObject).cast(),
+        let source_options: Retained<AnyObject> =
+            msg_send![class!(NSMutableDictionary), dictionary];
+        let no: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: false];
+        let _: () = msg_send![&*source_options, setObject: &*no, forKey: kCGImageSourceShouldCache];
+        let source = CGImageSourceCreateWithData(
+            (&*data as *const AnyObject).cast(),
+            (&*source_options as *const AnyObject).cast(),
         );
-        if image.is_null() {
-            return Err("clipboard_image_invalid");
-        }
-        let image = ImageHandle(image);
-        let bitmap: Allocated<AnyObject> = msg_send![class!(NSBitmapImageRep), alloc];
-        let bitmap: Option<Retained<AnyObject>> = msg_send![bitmap, initWithCGImage: image.0];
-        let bitmap = bitmap.ok_or("clipboard_image_invalid")?;
-        let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
-        let png: Option<Retained<AnyObject>> =
-            msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
-        let png = png.ok_or("clipboard_image_invalid")?;
-        let length: usize = msg_send![&*png, length];
-        let pointer: *const u8 = msg_send![&*png, bytes];
-        if length == 0 || pointer.is_null() {
-            return Err("clipboard_image_invalid");
-        }
-        Ok(std::slice::from_raw_parts(pointer, length).to_vec())
-    }
+        render_thumbnail_from_source(source, max_pixels)
+    });
+    release_allocator_memory();
+    result
+}
+
+/// Generate a thumbnail directly from a validated disk image path without loading the whole file
+/// into a Rust heap buffer.
+pub fn clipboard_image_preview_from_path(
+    path: &std::path::Path,
+    max_pixels: u32,
+) -> Result<Vec<u8>, &'static str> {
+    let Some(path_str) = path.to_str() else {
+        return Err("clipboard_image_invalid");
+    };
+    let result = objc2::rc::autoreleasepool(|_| unsafe {
+        let ns_path = NSString::from_str(path_str);
+        let url: Option<Retained<AnyObject>> =
+            msg_send![class!(NSURL), fileURLWithPath: &*ns_path, isDirectory: false];
+        let url = url.ok_or("clipboard_image_invalid")?;
+        let source_options: Retained<AnyObject> =
+            msg_send![class!(NSMutableDictionary), dictionary];
+        let no: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithBool: false];
+        let _: () = msg_send![&*source_options, setObject: &*no, forKey: kCGImageSourceShouldCache];
+        let source = CGImageSourceCreateWithURL(
+            (&*url as *const AnyObject).cast(),
+            (&*source_options as *const AnyObject).cast(),
+        );
+        render_thumbnail_from_source(source, max_pixels)
+    });
+    release_allocator_memory();
+    result
 }
 
 #[cfg(feature = "ui-tests")]

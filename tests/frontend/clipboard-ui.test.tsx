@@ -2508,12 +2508,14 @@ describe('database clipboard history', () => {
     const original = bridge.invoke.getMockImplementation()!;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'clipboard_files') return [{ path: '/synthetic/image.png', name: 'image.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }];
-      if (name === 'clipboard_image') throw new Error('invalid image');
       return original(name, args);
     });
     await mount('clipboard');
+    const image = await screen.findByRole('img', { name: 'Image' });
+    expect(image.getAttribute('src')).toBe('nami-media://localhost/image/first?w=1024&h=64');
+    expect(calls('clipboard_image')).toHaveLength(0);
+    fireEvent.error(image);
     await screen.findByText('image.png');
-    expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'first', maxPixels: 1024 });
     expect(row('first').querySelector('.clipboard-file')?.getAttribute('title')).toBe('/synthetic/image.png');
   });
 
@@ -2554,49 +2556,34 @@ describe('database clipboard history', () => {
     } finally { vi.stubGlobal('IntersectionObserver', previousObserver); }
   });
 
-  it('requests Retina-sized previews, keeps the old bitmap while resizing, and caps pixel work', async () => {
+  it('streams Retina-sized previews over nami-media without JSON IPC and caps pixel work', async () => {
     const previousWidth = window.innerWidth, previousScale = window.devicePixelRatio;
     records = [{ ...records[0], id: 'retina-image', kind: 'image', text: '' }];
-    const original = bridge.invoke.getMockImplementation()!;
-    let finish!: (image: { bytes: number[]; mime: string }) => void;
-    let pending = false;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name !== 'clipboard_image') return original(name, args);
-      if (pending) return new Promise((resolve) => { finish = resolve; });
-      return { bytes: [137, 80, 78, 71], mime: 'image/png' };
-    });
-    const create = vi.fn().mockReturnValueOnce('blob:retina-first').mockReturnValue('blob:retina-upgraded');
-    const revoke = vi.fn();
-    Object.defineProperties(URL, { createObjectURL: { configurable: true, value: create }, revokeObjectURL: { configurable: true, value: revoke } });
     Object.defineProperties(window, { innerWidth: { configurable: true, value: 420 }, devicePixelRatio: { configurable: true, value: 2 } });
     try {
       const view = await mount('clipboard');
       const image = await screen.findByRole('img', { name: 'Image' });
-      expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 1024 });
-      pending = true;
+      expect(image.getAttribute('src')).toBe('nami-media://localhost/image/retina-image?w=1024&h=128');
+      expect(image.getAttribute('decoding')).toBe('async');
+      expect(calls('clipboard_image')).toHaveLength(0);
+
       Object.defineProperty(window, 'innerWidth', { value: 600 });
       fireEvent(window, new Event('resize'));
-      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 1280 }));
-      expect(image.getAttribute('src')).toBe('blob:retina-first');
-      expect(revoke).not.toHaveBeenCalled();
-      await act(async () => finish({ bytes: [137, 80, 78, 71], mime: 'image/png' }));
-      expect(image.getAttribute('src')).toBe('blob:retina-upgraded');
-      expect(revoke).toHaveBeenCalledWith('blob:retina-first');
+      await waitFor(() => expect(image.getAttribute('src')).toBe('nami-media://localhost/image/retina-image?w=1280&h=128'));
+
       Object.defineProperty(window, 'innerWidth', { value: 10000 });
       fireEvent(window, new Event('resize'));
-      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'retina-image', maxPixels: 2048 }));
-      const count = calls('clipboard_image').length;
+      await waitFor(() => expect(image.getAttribute('src')).toBe('nami-media://localhost/image/retina-image?w=2048&h=128'));
+
       view.unmount();
       fireEvent(window, new Event('resize'));
-      expect(calls('clipboard_image')).toHaveLength(count);
-      await act(async () => finish({ bytes: [137, 80, 78, 71], mime: 'image/png' }));
-      expect(create).toHaveBeenCalledTimes(2);
+      expect(calls('clipboard_image')).toHaveLength(0);
     } finally {
       Object.defineProperties(window, { innerWidth: { configurable: true, value: previousWidth }, devicePixelRatio: { configurable: true, value: previousScale } });
     }
   });
 
-  it('upgrades only intersecting images and reuses the cached bitmap when reentering at the same size', async () => {
+  it('upgrades only intersecting images and keeps the existing image URL when reentering at the same size', async () => {
     records = [{ ...records[0], id: 'visible-image', kind: 'image', text: '' }];
     const previousObserver = globalThis.IntersectionObserver, previousWidth = window.innerWidth;
     let intersect!: IntersectionObserverCallback;
@@ -2605,28 +2592,23 @@ describe('database clipboard history', () => {
       constructor(callback: IntersectionObserverCallback) { intersect = callback; }
       observe() {} disconnect = disconnect;
     });
-    const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_image' ? { bytes: [137, 80, 78, 71], mime: 'image/png' } : original(name, args));
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:visible') });
     const enter = (value: boolean) => act(() => intersect([{ isIntersecting: value }] as IntersectionObserverEntry[], {} as IntersectionObserver));
     try {
       const view = await mount('clipboard');
       await waitFor(() => expect(listRows()).toHaveLength(1));
+      expect(screen.queryByRole('img', { name: 'Image' })).toBeNull();
       enter(true);
-      await screen.findByRole('img', { name: 'Image' });
-      expect(calls('clipboard_image')).toHaveLength(1);
+      const img = await screen.findByRole('img', { name: 'Image' });
+      expect(img.getAttribute('src')).toBe('nami-media://localhost/image/visible-image?w=1024&h=64');
       enter(false);
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1500 });
       fireEvent(window, new Event('resize'));
-      expect(calls('clipboard_image')).toHaveLength(1);
-      expect(screen.getByRole('img', { name: 'Image' }).getAttribute('src')).toBe('blob:visible');
+      expect(img.getAttribute('src')).toBe('nami-media://localhost/image/visible-image?w=1024&h=64');
       enter(true);
-      await waitFor(() => expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'visible-image', maxPixels: 1536 }));
-      await act(async () => {});
-      const count = calls('clipboard_image').length;
+      await waitFor(() => expect(img.getAttribute('src')).toBe('nami-media://localhost/image/visible-image?w=1536&h=64'));
       enter(false); enter(true);
       await act(async () => {});
-      expect(calls('clipboard_image')).toHaveLength(count);
+      expect(img.getAttribute('src')).toBe('nami-media://localhost/image/visible-image?w=1536&h=64');
       view.unmount();
       expect(disconnect).toHaveBeenCalled();
     } finally {
@@ -2635,19 +2617,96 @@ describe('database clipboard history', () => {
     }
   });
 
-  it('loads saved image previews by record ID and releases their URLs on unmount', async () => {
-    records = [{ ...records[0], id: 'image', kind: 'image', text: '' }];
+  it('does not load image previews while hidden and hibernates image DOM after prolonged hiding', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      records = [{ ...records[0], id: 'hidden-image', kind: 'image', text: '' }];
+      const original = bridge.invoke.getMockImplementation()!;
+      bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+        if (name === 'app_snapshot') {
+          const snap = await original(name, args) as typeof bridge.snapshot;
+          return { ...snap, window: { ...snap.window, clipboardVisible: false, clipboardExtent: 0 } };
+        }
+        return original(name, args);
+      });
+      await mount('clipboard');
+      await waitFor(() => expect(listRows()).toHaveLength(1));
+      expect(screen.queryByRole('img', { name: 'Image' })).toBeNull();
+      expect(document.querySelector('.clipboard-image-preview .activity-beam')).toBeNull();
+
+      await windowState({ clipboardVisible: true });
+      const image = await screen.findByRole('img', { name: 'Image' });
+      expect(image.getAttribute('src')).toBe('nami-media://localhost/image/hidden-image?w=1024&h=64');
+
+      // Hiding briefly keeps the decoded image mounted for instant reopen.
+      await windowState({ clipboardVisible: false });
+      act(() => { vi.advanceTimersByTime(10_000); });
+      expect(screen.queryByRole('img', { name: 'Image' })).not.toBeNull();
+
+      // Prolonged idle hiding releases the image node without mounting an animated placeholder.
+      act(() => { vi.advanceTimersByTime(15_000); });
+      await waitFor(() => expect(screen.queryByRole('img', { name: 'Image' })).toBeNull());
+      expect(document.querySelector('.clipboard-image-preview .activity-beam')).toBeNull();
+
+      // Reopening restores the preview immediately.
+      await windowState({ clipboardVisible: true });
+      await screen.findByRole('img', { name: 'Image' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fall back to mounting all hidden cached rows when filtered results shrink below the virtualize threshold', async () => {
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(520);
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(2880);
+    try {
+      records = Array.from({ length: 40 }, (_, index) => ({
+        ...records[0],
+        id: `bulk-${index}`,
+        text: `Bulk record ${index}`,
+        date: new Date(Date.UTC(2026, 3, 10, 12, 0, 40 - index)).toISOString(),
+        isFavorite: index < 2,
+        isPinned: false,
+      }));
+      await mount('clipboard');
+      await waitFor(() => {
+        const items = document.querySelector('.clipboard-panel .history-items');
+        expect(items?.getAttribute('data-virtualized')).toBe('true');
+      });
+
+      // Switch to Favorites (2 matching records <= 24) while 40 records remain cached in retainedRecords.
+      fireEvent.click(screen.getByRole('button', { name: 'Favorite clipboard records' }));
+      await waitFor(() => {
+        const mountedRows = document.querySelectorAll('.clipboard-panel .history-row');
+        expect(mountedRows).toHaveLength(2);
+      });
+    } finally {
+      clientHeight.mockRestore();
+      scrollHeight.mockRestore();
+    }
+  });
+
+  it('defers clipboard_changed requeries while hidden and refreshes immediately on reopen', async () => {
     const original = bridge.invoke.getMockImplementation()!;
-    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => name === 'clipboard_image' ? { bytes: [137, 80, 78, 71], mime: 'image/png' } : original(name, args));
-    const create = vi.fn(() => 'blob:synthetic-image');
-    const revoke = vi.fn();
-    Object.defineProperties(URL, { createObjectURL: { configurable: true, value: create }, revokeObjectURL: { configurable: true, value: revoke } });
-    const result = await mount('clipboard');
-    await screen.findByRole('img', { name: 'Image' });
-    expect(calls('clipboard_image').at(-1)?.[1]).toEqual({ recordId: 'image', maxPixels: 1024 });
-    expect(create).toHaveBeenCalledTimes(1);
-    result.unmount();
-    expect(revoke).toHaveBeenCalledWith('blob:synthetic-image');
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name === 'app_snapshot') {
+        const snap = await original(name, args) as typeof bridge.snapshot;
+        return { ...snap, window: { ...snap.window, clipboardVisible: false, clipboardExtent: 0 } };
+      }
+      return original(name, args);
+    });
+    await mount('clipboard');
+    await waitFor(() => expect(calls('clipboard_query')).toHaveLength(1));
+
+    records = [{ ...records[0], id: 'bg-new', text: 'Copied in background' }, ...records];
+    await emit('clipboard_changed', 2);
+    await emit('clipboard_changed', 3);
+    await act(async () => {});
+    expect(calls('clipboard_query')).toHaveLength(1);
+
+    await windowState({ clipboardVisible: true });
+    await waitFor(() => expect(calls('clipboard_query')).toHaveLength(2));
+    await screen.findByText('Copied in background');
   });
 
   it('uses shared nonblocking feedback for a rejected activation without adding a global error', async () => {

@@ -2189,6 +2189,10 @@ return {ready:true,anchored,idleWidth:before.width,recordingWidth:after.width};
 "#)?);
         if visible {
             on_main(app, |app| hide(app, "settings"))?;
+            let destroyed = on_main(app, |app| Ok(app.get_window("settings").is_none()))?;
+            if !destroyed {
+                return Err("closing settings did not destroy its window".into());
+            }
         } else {
             evaluate_view_dom(
                 app,
@@ -2207,7 +2211,15 @@ return {ready:true,anchored,idleWidth:before.width,recordingWidth:after.width};
         }
         samples.push(serde_json::json!({"nativeWindowDeactivation": visible, "recordingEnded": !suspended()}));
         on_main(app, |app| show(app, "settings"))?;
-        wait_view_dom(app, "settings", "return {ready:document.hasFocus()};")?;
+        wait_view_dom(
+            app,
+            "settings",
+            r#"
+const nav=document.querySelector('button[aria-label="HotKey"]');if(!nav)return {ready:false};
+if(!nav.hasAttribute('aria-current'))nav.click();
+return {ready:document.hasFocus()&&!!document.querySelector('[aria-label="Copy shortcut"]')};
+"#,
+        )?;
         evaluate_view_dom(
             app,
             "settings",
@@ -3462,7 +3474,7 @@ return {ready:true,budgetRejected:window.__namiPreviewBudgetCheck.rejected,wide:
                 if sample["image"]["maxHeight"] != "64px"
                     || sample["image"]["height"].as_f64().unwrap_or(100.) > 64.1
                     || sample["gap"] != "4px"
-                    || sample["sourceScheme"] != "blob"
+                    || sample["sourceScheme"] != "nami-media"
                     || sample["image"]["ratio"] != 2
                     || sample["budgetRejected"] != true
                 {

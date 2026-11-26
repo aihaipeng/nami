@@ -65,7 +65,7 @@ function insertByLastCopy(records: ClipboardRecord[], record: ClipboardRecord) {
   records.splice(index, 0, record);
 }
 
-export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean, kind: ClipboardKind | null = null, rulesKey = '') {
+export function useClipboard(native: boolean, query: string, favoritesOnly: boolean, deferRefresh?: () => boolean, kind: ClipboardKind | null = null, rulesKey = '', panelActive = true) {
   const searchKey = query.trim() ? rulesKey : '';
   const [page, setPage] = useState(emptyPage);
   const [loading, setLoading] = useState(native);
@@ -87,12 +87,15 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const defaultPage = useRef<{ page: ClipboardPage; revision: number } | null>(null);
   const defaultRevision = useRef(0);
   const deferred = useRef<'local' | 'external' | null>(null);
+  const hiddenDirty = useRef(false);
   const localWrites = useRef(0);
   const writeQueue = useRef(Promise.resolve());
   const copiedMark = useRef<{ id: string; date: string; previousDate: string | undefined } | null>(null);
   const copyEpoch = useRef(0);
   const shouldDefer = useRef(deferRefresh);
   shouldDefer.current = deferRefresh;
+  const panelActiveRef = useRef(panelActive);
+  panelActiveRef.current = panelActive;
 
   const fetchPage = useCallback(async (append = false, animate = true) => {
     if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.searchKey !== filters.current.searchKey || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || loadedFilters.current.kind !== filters.current.kind || !latest.current.hasMore))) return;
@@ -178,7 +181,28 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     const removers: (() => void)[] = [];
     if (native) void (async () => {
       for (const subscribe of [
-        () => listen<number>('clipboard_changed', () => { if (!disposed) { ++defaultRevision.current; setCaptureError(false); if (localWrites.current) deferred.current ??= 'local'; else if (shouldDefer.current?.()) deferred.current = 'external'; else { pages.current.clear(); invalidPages.current.clear(); deferred.current = null; void fetchPage(false, false); } } }),
+        () => listen<number>('clipboard_changed', () => {
+          if (disposed) return;
+          ++defaultRevision.current;
+          setCaptureError(false);
+          if (localWrites.current) {
+            deferred.current ??= 'local';
+          } else if (!panelActiveRef.current) {
+            hiddenDirty.current = true;
+            deferred.current = 'external';
+            pages.current.clear();
+            invalidPages.current.clear();
+            defaultPage.current = null;
+          } else if (shouldDefer.current?.()) {
+            deferred.current = 'external';
+          } else {
+            hiddenDirty.current = false;
+            pages.current.clear();
+            invalidPages.current.clear();
+            deferred.current = null;
+            void fetchPage(false, false);
+          }
+        }),
         () => listen<string>('clipboard_capture_error', () => { if (!disposed) setCaptureError(true); }),
       ]) {
         const remove = await subscribe();
@@ -190,6 +214,45 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     })().catch(() => { if (!disposed) { setError('load'); setLoading(false); setShowActivity(false); } });
     return () => { disposed = true; active.current = false; ready.current = false; pages.current.clear(); invalidPages.current.clear(); defaultPage.current = null; ++defaultRevision.current; ++request.current; removers.forEach((remove) => remove()); };
   }, [native, fetchPage, connection]);
+
+  useEffect(() => {
+    panelActiveRef.current = panelActive;
+    if (panelActive && ready.current && hiddenDirty.current && !localWrites.current) {
+      hiddenDirty.current = false;
+      deferred.current = null;
+      pages.current.clear();
+      invalidPages.current.clear();
+      void fetchPage(false, false);
+      return;
+    }
+    if (!panelActive) {
+      const timer = window.setTimeout(() => {
+        if (panelActiveRef.current) return;
+        const activeKey = cacheKey(filters.current.kind, filters.current.favoritesOnly);
+        if (latest.current.records.length > 100) {
+          const trimmed: ClipboardPage = {
+            ...latest.current,
+            records: latest.current.records.slice(0, 100),
+            cursor: null,
+            hasMore: true,
+          };
+          pages.current.clear();
+          invalidPages.current.clear();
+          hiddenDirty.current = true;
+          latest.current = trimmed;
+          setPage(trimmed);
+          return;
+        }
+        if (pages.current.size > 1) {
+          const current = pages.current.get(activeKey);
+          pages.current.clear();
+          invalidPages.current.clear();
+          if (current) pages.current.set(activeKey, current);
+        }
+      }, 20_000);
+      return () => window.clearTimeout(timer);
+    }
+  }, [panelActive, fetchPage]);
 
   useEffect(() => {
     const favoritesChanged = filters.current.favoritesOnly !== favoritesOnly;
@@ -339,5 +402,6 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     morePending.current = false;
     if (ready.current) void fetchPage(false, false);
   }, [fetchPage, rulesKey]);
-  return { applyEdit, noteCopied, page: displayedPage, displayReady: Boolean(restoringDefault && home) || !searchChanged && loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly))), retainedRecords, loading: restoringDefault && home ? false : loading, showActivity: restoringDefault ? false : showActivity, error: error !== null || captureError, searchError: error === 'load' ? null : error, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
+  const refreshPending = panelActive && hiddenDirty.current && !localWrites.current;
+  return { applyEdit, noteCopied, page: displayedPage, displayReady: !refreshPending && (Boolean(restoringDefault && home) || !searchChanged && loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly)))), retainedRecords, loading: (restoringDefault && home ? false : loading) || refreshPending, showActivity: restoringDefault ? false : showActivity, error: error !== null || captureError, searchError: error === 'load' ? null : error, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }

@@ -15,7 +15,7 @@ export function RecordHeading({ date: value, label, sourceApp, quickPasteHint }:
     {quickPasteHint !== undefined
       ? <span className="history-origin clipboard-quick-paste-hint" role="img" aria-label={name} title={name}><span aria-hidden="true">{quickPasteHint}</span></span>
       : sourceApp?.iconDataUrl
-      ? <img className="history-origin" src={sourceApp.iconDataUrl} alt={name} title={name} />
+      ? <img className="history-origin" src={sourceApp.iconDataUrl} decoding="async" alt={name} title={name} />
       : <span className="history-origin history-symbol" role="img" aria-label={name} title={name} style={{ '--symbol-url': `url("${fallbackIcon}")`, borderRadius: 0 } as CSSProperties} />}
     <span className="history-languages" title={label}>{label}</span>
     <time dateTime={value}>{time}</time>

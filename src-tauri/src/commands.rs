@@ -1744,7 +1744,7 @@ pub async fn clipboard_query(
         .unwrap()
         .search;
     crate::clipboard_runtime::database(&app, move |database| {
-        let page = database.clipboard_page_with_search(
+        let mut page = database.clipboard_page_with_search(
             &query,
             favorites_only,
             kind.as_deref(),
@@ -1752,18 +1752,21 @@ pub async fn clipboard_query(
             crate::database::PAGE_SIZE,
             search,
         )?;
+        crate::media::rewrite_page_source_icons(&mut page);
         let alternate = if cursor.is_none()
             && (query.trim().is_empty()
                 || search.mode == nami::clipboard::ClipboardSearchMode::Exact)
         {
-            Some(database.clipboard_page_with_search(
+            let mut alternate = database.clipboard_page_with_search(
                 &query,
                 !favorites_only,
                 kind.as_deref(),
                 None,
                 crate::database::PAGE_SIZE,
                 search,
-            )?)
+            )?;
+            crate::media::rewrite_page_source_icons(&mut alternate);
+            Some(alternate)
         } else {
             None
         };
@@ -2121,8 +2124,11 @@ pub async fn clipboard_record_update(
         }
     }
     crate::clipboard_runtime::changed(&app)?;
-    if deleting && crate::clipboard_preferences::retry_image_deletions_locked(&app, root).await? {
-        return Err("clipboard_cleanup_failed".into());
+    if deleting {
+        crate::media::remove_file_thumbs(&app);
+        if crate::clipboard_preferences::retry_image_deletions_locked(&app, root).await? {
+            return Err("clipboard_cleanup_failed".into());
+        }
     }
     Ok(())
 }
@@ -2298,12 +2304,6 @@ pub async fn clipboard_shortcut_set(
     Ok(())
 }
 
-#[derive(Serialize)]
-pub struct ClipboardImage {
-    bytes: Vec<u8>,
-    mime: &'static str,
-}
-
 #[tauri::command]
 pub async fn clipboard_files(
     window: Webview,
@@ -2335,46 +2335,11 @@ pub async fn clipboard_image(
     app: AppHandle,
     record_id: String,
     max_pixels: Option<u32>,
-) -> Result<ClipboardImage, String> {
+) -> Result<tauri::ipc::Response, String> {
     authorize(&window, &["clipboard", "translation"])?;
     let max_pixels = max_pixels.unwrap_or(1024);
-    if !(128..=2048).contains(&max_pixels) {
-        return Err("invalid_argument".into());
-    }
-    let payload = {
-        let state = app.state::<AppState>();
-        let _write = state.clipboard_writes.lock().await;
-        crate::clipboard_runtime::payload(
-            &app,
-            record_id,
-            crate::clipboard_runtime::PayloadMode::Stored,
-        )
-        .await?
-    };
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let bytes = match payload {
-            platform::ClipboardPayload::Image { bytes, .. }
-            | platform::ClipboardPayload::FilesImage {
-                bytes,
-                image_fallback: true,
-                ..
-            } => bytes,
-            platform::ClipboardPayload::Files(paths)
-            | platform::ClipboardPayload::FilesImage { paths, .. }
-                if paths.len() == 1 =>
-            {
-                nami::clipboard::read_file_preview(std::path::Path::new(&paths[0]))?
-            }
-            _ => return Err("invalid_argument".into()),
-        };
-        platform::clipboard_image_preview(&bytes, max_pixels).map_err(str::to_owned)
-    })
-    .await
-    .map_err(|_| "storage_worker")??;
-    Ok(ClipboardImage {
-        bytes,
-        mime: "image/png",
-    })
+    let bytes = crate::media::load_image_preview(&app, record_id, max_pixels, None).await?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[cfg(test)]

@@ -529,6 +529,11 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
             let worker = app.clone();
             let auto_index = platform::capabilities().image_ocr;
             let result = tauri::async_runtime::spawn_blocking(move || {
+                let had_image = matches!(
+                    capture.payload,
+                    platform::ClipboardPayload::Image { .. }
+                        | platform::ClipboardPayload::FilesImage { .. }
+                );
                 let mut index_job = Ok(None);
                 let saved = persist_capture_with(
                     &root,
@@ -548,6 +553,9 @@ pub(crate) fn start_with_poll_interval(app: &AppHandle, interval: std::time::Dur
                         Ok(())
                     },
                 )?;
+                if had_image {
+                    platform::release_allocator_memory();
+                }
                 index_job.map(|job| (saved, job))
             })
             .await

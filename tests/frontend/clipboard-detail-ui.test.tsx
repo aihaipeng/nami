@@ -1008,14 +1008,11 @@ it('copies plain text from the detail toolbar after switching a rich-text record
 it('extracts a 48x48 offscreen image palette below single images alongside QR and path cards and copies HEX on click', async () => {
   const baseInvoke = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-    if (name === 'clipboard_image') return { bytes: [137, 80, 78, 71], mime: 'image/png' };
     if (name === 'clipboard_image_qr_codes') return ['https://example.test/img-qr'];
     if (name === 'clipboard_text_copy') return true;
     return baseInvoke(name, args);
   });
 
-  const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:nami-test-image');
-  const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
   let sampledCanvasSize: [number, number] | null = null;
   const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
     sampledCanvasSize = [this.width, this.height];
@@ -1058,6 +1055,9 @@ it('extracts a 48x48 offscreen image palette below single images alongside QR an
       expect(node).toBeTruthy();
       return node!;
     });
+    expect(img.getAttribute('src')).toMatch(/^nami-media:\/\/localhost\/image\/first\?w=\d+$/);
+    expect(img.getAttribute('crossorigin')).toBe('anonymous');
+    expect(calls('clipboard_image')).toHaveLength(0);
     Object.defineProperties(img, {
       naturalWidth: { value: 1920, configurable: true },
       naturalHeight: { value: 1080, configurable: true },
@@ -1088,7 +1088,5 @@ it('extracts a 48x48 offscreen image palette below single images alongside QR an
     await waitFor(() => expect(pane().querySelector('.clipboard-smart-palette')).toBeNull());
   } finally {
     getContext.mockRestore();
-    createObjectURL.mockRestore();
-    revokeObjectURL.mockRestore();
   }
 });

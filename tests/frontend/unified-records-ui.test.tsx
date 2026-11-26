@@ -516,8 +516,10 @@ describe('unified records workspace', () => {
     clipboardRecords.unshift({ id: 'clip-newest', kind: 'text', title: '', text: 'Newest text', date: '2026-11-16T12:00:00Z', isFavorite: false, isPinned: false, sourceAppId: null });
     try {
       await emit('clipboard_changed', 1);
-      await waitFor(() => expect(calls('clipboard_query').length).toBeGreaterThan(before));
+      await act(async () => {});
+      expect(calls('clipboard_query')).toHaveLength(before);
       await windowState({ clipboardVisible: true, recordsFocus: 1 });
+      await waitFor(() => expect(calls('clipboard_query').length).toBeGreaterThan(before));
       expect(document.activeElement).not.toBe(focused('clip-first'));
       const page = { records: [...clipboardRecords], sources: {}, totalRecords: clipboardRecords.length, hasMore: false, cursor: null };
       complete({ page, alternate: page });

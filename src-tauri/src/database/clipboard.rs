@@ -1284,6 +1284,15 @@ impl HistoryDatabase {
         image_referenced(&self.connection, path)
     }
 
+    pub fn source_app_payload(&self, id: i64) -> Result<Option<String>, String> {
+        self.connection
+            .query_row("SELECT payload FROM source_apps WHERE id=?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(storage_error)
+    }
+
     pub fn pending_clipboard_image_deletions(&self) -> Result<Vec<(String, bool)>, String> {
         let mut query = self
             .connection

@@ -49,8 +49,29 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
     window.on_window_event(move |event| {
         let result = match event {
             WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                hide(&handle, &label)
+                if label != "settings" {
+                    api.prevent_close();
+                    hide(&handle, &label)
+                } else {
+                    if handle
+                        .state::<AppState>()
+                        .shortcuts_suspended
+                        .swap(false, Ordering::SeqCst)
+                    {
+                        crate::sync_global_shortcuts(&handle);
+                    }
+                    Ok(())
+                }
+            }
+            WindowEvent::Destroyed if label == "settings" => {
+                if handle
+                    .state::<AppState>()
+                    .shortcuts_suspended
+                    .swap(false, Ordering::SeqCst)
+                {
+                    crate::sync_global_shortcuts(&handle);
+                }
+                Ok(())
             }
             WindowEvent::Resized(size) if label == "translation" => {
                 if let Some(window) = handle.get_window("translation") {
@@ -368,8 +389,15 @@ pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
             apply_translation(app)
         }
         "settings" => {
+            if app
+                .state::<AppState>()
+                .shortcuts_suspended
+                .swap(false, Ordering::SeqCst)
+            {
+                crate::sync_global_shortcuts(app);
+            }
             if let Some(window) = app.get_window("settings") {
-                window.hide().map_err(|_| "window_hide")?;
+                window.destroy().map_err(|_| "window_hide")?;
             }
             Ok(())
         }

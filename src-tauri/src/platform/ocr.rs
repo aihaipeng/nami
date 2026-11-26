@@ -70,7 +70,7 @@ fn prepare_vision_handler(
 
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
 // Vision performs synchronously; callers must use their bounded background worker.
-pub fn recognize_image_text(bytes: &[u8]) -> Result<String, String> {
+fn recognize_image_text_in_process(bytes: &[u8]) -> Result<String, String> {
     use objc2::rc::autoreleasepool;
     use objc2_foundation::NSArray;
     use objc2_vision::{VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel};
@@ -109,7 +109,7 @@ pub fn recognize_image_text(bytes: &[u8]) -> Result<String, String> {
 }
 
 #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-pub fn detect_image_qr_codes(bytes: &[u8]) -> Result<Vec<String>, String> {
+fn detect_image_qr_codes_in_process(bytes: &[u8]) -> Result<Vec<String>, String> {
     use objc2::rc::autoreleasepool;
     use objc2_foundation::NSArray;
     use objc2_vision::{VNBarcodeSymbologyQR, VNDetectBarcodesRequest, VNRequest};
@@ -144,6 +144,337 @@ pub fn detect_image_qr_codes(bytes: &[u8]) -> Result<Vec<String>, String> {
         Ok(results)
     })
 }
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+mod worker {
+    use super::{
+        detect_image_qr_codes_in_process, recognize_image_text_in_process, MAX_ENCODED_BYTES,
+    };
+    use std::io::{self, Read, Write};
+    #[cfg(not(test))]
+    use std::{
+        process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+        sync::{Arc, Condvar, Mutex, OnceLock},
+        time::Duration,
+    };
+
+    pub(super) const WORKER_ARG: &str = "--nami-vision-worker";
+    pub(super) const OP_OCR: u8 = 1;
+    pub(super) const OP_QR: u8 = 2;
+    const STATUS_OK: u8 = 0;
+    const STATUS_ERR: u8 = 1;
+    #[cfg(not(test))]
+    const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+    #[cfg(not(test))]
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[cfg(not(test))]
+    struct WorkerProcess {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        stdout: ChildStdout,
+    }
+
+    #[cfg(not(test))]
+    impl WorkerProcess {
+        fn spawn() -> Result<Self, String> {
+            let exe = std::env::current_exe().map_err(|_| "ocr_recognition_failed")?;
+            let mut child = Command::new(exe)
+                .arg(WORKER_ARG)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| "ocr_recognition_failed")?;
+            let stdin = child.stdin.take().ok_or("ocr_recognition_failed")?;
+            let stdout = child.stdout.take().ok_or("ocr_recognition_failed")?;
+            Ok(Self {
+                child,
+                stdin: Some(stdin),
+                stdout,
+            })
+        }
+
+        fn call(&mut self, op: u8, bytes: &[u8]) -> Result<Result<Vec<u8>, String>, io::Error> {
+            let stdin = self
+                .stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "closed"))?;
+            write_frame(stdin, op, bytes)?;
+            stdin.flush()?;
+            let Some((status, body)) = read_frame(&mut self.stdout, MAX_RESPONSE_BYTES)? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "worker exited",
+                ));
+            };
+            if status == STATUS_OK {
+                Ok(Ok(body))
+            } else {
+                let code =
+                    String::from_utf8(body).unwrap_or_else(|_| "ocr_recognition_failed".into());
+                Ok(Err(code))
+            }
+        }
+
+        fn shutdown(mut self) {
+            self.stdin.take();
+            for _ in 0..20 {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(15)),
+                    Err(_) => break,
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(not(test))]
+    impl Drop for WorkerProcess {
+        fn drop(&mut self) {
+            self.stdin.take();
+            if matches!(self.child.try_wait(), Ok(None)) {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    pub(super) fn write_frame(writer: &mut impl Write, tag: u8, body: &[u8]) -> io::Result<()> {
+        let len = u32::try_from(body.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+        let mut header = [0u8; 5];
+        header[0] = tag;
+        header[1..5].copy_from_slice(&len.to_be_bytes());
+        writer.write_all(&header)?;
+        writer.write_all(body)
+    }
+
+    pub(super) fn read_frame(
+        reader: &mut impl Read,
+        limit: usize,
+    ) -> io::Result<Option<(u8, Vec<u8>)>> {
+        let mut first = [0u8; 1];
+        match reader.read_exact(&mut first) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf)?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame exceeds limit",
+            ));
+        }
+        let mut body = vec![0u8; len];
+        reader.read_exact(&mut body)?;
+        Ok(Some((first[0], body)))
+    }
+
+    #[cfg(not(test))]
+    #[derive(Default)]
+    struct PoolState {
+        worker: Option<WorkerProcess>,
+        generation: u64,
+        busy: bool,
+    }
+
+    #[cfg(not(test))]
+    struct WorkerPool {
+        call_lock: Mutex<()>,
+        state: Arc<(Mutex<PoolState>, Condvar)>,
+    }
+
+    #[cfg(not(test))]
+    impl WorkerPool {
+        fn new() -> Self {
+            let state = Arc::new((Mutex::new(PoolState::default()), Condvar::new()));
+            let reaper = Arc::clone(&state);
+            let _ = std::thread::Builder::new()
+                .name("nami-vision-reaper".into())
+                .spawn(move || {
+                    let (lock, condvar) = &*reaper;
+                    let mut guard = lock.lock().unwrap();
+                    loop {
+                        while guard.worker.is_none() || guard.busy {
+                            guard = condvar.wait(guard).unwrap();
+                        }
+                        let seen = guard.generation;
+                        let (next, _) = condvar.wait_timeout(guard, IDLE_TIMEOUT).unwrap();
+                        guard = next;
+                        if !guard.busy && guard.generation == seen {
+                            if let Some(worker) = guard.worker.take() {
+                                drop(guard);
+                                worker.shutdown();
+                                guard = lock.lock().unwrap();
+                            }
+                        }
+                    }
+                });
+            Self {
+                call_lock: Mutex::new(()),
+                state,
+            }
+        }
+
+        fn execute(&self, op: u8, bytes: &[u8]) -> Result<Vec<u8>, String> {
+            let _serial = self.call_lock.lock().unwrap();
+            let (lock, condvar) = &*self.state;
+            let mut active = {
+                let mut guard = lock.lock().unwrap();
+                guard.busy = true;
+                guard.worker.take()
+            };
+            let mut result = None;
+            for attempt in 0..2 {
+                let mut process = match active.take() {
+                    Some(existing) => existing,
+                    None => WorkerProcess::spawn()?,
+                };
+                match process.call(op, bytes) {
+                    Ok(response) => {
+                        active = Some(process);
+                        result = Some(response);
+                        break;
+                    }
+                    Err(_) => {
+                        process.shutdown();
+                        if attempt == 1 {
+                            result = Some(Err("ocr_recognition_failed".into()));
+                        }
+                    }
+                }
+            }
+            {
+                let mut guard = lock.lock().unwrap();
+                guard.worker = active;
+                guard.busy = false;
+                guard.generation = guard.generation.wrapping_add(1);
+                condvar.notify_all();
+            }
+            result.unwrap_or_else(|| Err("ocr_recognition_failed".into()))
+        }
+
+        fn shutdown(&self) {
+            let (lock, condvar) = &*self.state;
+            let worker = {
+                let mut guard = lock.lock().unwrap();
+                guard.generation = guard.generation.wrapping_add(1);
+                condvar.notify_all();
+                guard.worker.take()
+            };
+            if let Some(worker) = worker {
+                worker.shutdown();
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    fn pool() -> &'static WorkerPool {
+        static POOL: OnceLock<WorkerPool> = OnceLock::new();
+        POOL.get_or_init(WorkerPool::new)
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn call_worker(op: u8, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        if bytes.is_empty() {
+            return Err("ocr_invalid_image".into());
+        }
+        if bytes.len() > MAX_ENCODED_BYTES {
+            return Err("ocr_image_limit".into());
+        }
+        pool().execute(op, bytes)
+    }
+
+    pub(super) fn shutdown() {
+        #[cfg(not(test))]
+        pool().shutdown();
+    }
+
+    pub(super) fn run_stdio_loop(
+        reader: &mut impl Read,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        while let Some((op, bytes)) = read_frame(reader, MAX_ENCODED_BYTES)? {
+            let outcome: Result<Vec<u8>, String> = match op {
+                OP_OCR => recognize_image_text_in_process(&bytes).and_then(|text| {
+                    serde_json::to_vec(&text).map_err(|_| "ocr_recognition_failed".into())
+                }),
+                OP_QR => detect_image_qr_codes_in_process(&bytes).and_then(|codes| {
+                    serde_json::to_vec(&codes).map_err(|_| "ocr_recognition_failed".into())
+                }),
+                _ => Err("ocr_recognition_failed".into()),
+            };
+            match outcome {
+                Ok(body) => write_frame(writer, STATUS_OK, &body)?,
+                Err(code) => write_frame(writer, STATUS_ERR, code.as_bytes())?,
+            }
+            writer.flush()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn maybe_run_vision_worker() -> Option<i32> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == worker::WORKER_ARG)
+    {
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout().lock();
+        let status = match worker::run_stdio_loop(&mut stdin, &mut stdout) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        };
+        return Some(status);
+    }
+    None
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn shutdown_vision_worker() {
+    worker::shutdown();
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn recognize_image_text(bytes: &[u8]) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        recognize_image_text_in_process(bytes)
+    }
+    #[cfg(not(test))]
+    {
+        let body = worker::call_worker(worker::OP_OCR, bytes)?;
+        serde_json::from_slice(&body).map_err(|_| "ocr_recognition_failed".into())
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+pub fn detect_image_qr_codes(bytes: &[u8]) -> Result<Vec<String>, String> {
+    #[cfg(test)]
+    {
+        detect_image_qr_codes_in_process(bytes)
+    }
+    #[cfg(not(test))]
+    {
+        let body = worker::call_worker(worker::OP_QR, bytes)?;
+        serde_json::from_slice(&body).map_err(|_| "ocr_recognition_failed".into())
+    }
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
+pub fn maybe_run_vision_worker() -> Option<i32> {
+    None
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
+pub fn shutdown_vision_worker() {}
 
 #[cfg(any(not(target_os = "macos"), feature = "portable-ui"))]
 pub fn recognize_image_text(_bytes: &[u8]) -> Result<String, String> {
@@ -247,6 +578,40 @@ mod tests {
             detect_image_qr_codes(b"image"),
             Err("platform_unavailable".into())
         );
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
+    #[test]
+    fn vision_worker_stdio_protocol_roundtrips_ocr_qr_and_errors() {
+        let mut request = Vec::new();
+        worker::write_frame(&mut request, worker::OP_OCR, &bitmap(true)).unwrap();
+        worker::write_frame(
+            &mut request,
+            worker::OP_QR,
+            &synthetic_qr_png("https://example.test/worker-qr"),
+        )
+        .unwrap();
+        worker::write_frame(&mut request, worker::OP_OCR, b"corrupt").unwrap();
+
+        let mut reader = std::io::Cursor::new(request);
+        let mut response = Vec::new();
+        worker::run_stdio_loop(&mut reader, &mut response).unwrap();
+
+        let mut out = std::io::Cursor::new(response);
+        let (status, body) = worker::read_frame(&mut out, 1024 * 1024).unwrap().unwrap();
+        assert_eq!(status, 0);
+        let text: String = serde_json::from_slice(&body).unwrap();
+        assert!(text.contains("HELLO") && text.contains("NAMI"), "{text:?}");
+
+        let (status, body) = worker::read_frame(&mut out, 1024 * 1024).unwrap().unwrap();
+        assert_eq!(status, 0);
+        let codes: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(codes, vec!["https://example.test/worker-qr"]);
+
+        let (status, body) = worker::read_frame(&mut out, 1024 * 1024).unwrap().unwrap();
+        assert_eq!(status, 1);
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "ocr_invalid_image");
+        assert!(worker::read_frame(&mut out, 1024).unwrap().is_none());
     }
 
     #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]

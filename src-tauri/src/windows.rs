@@ -818,8 +818,25 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
     let owned_label = label.to_string();
     window.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            let _ = hide(&handle, &owned_label);
+            if owned_label != "settings" {
+                api.prevent_close();
+                let _ = hide(&handle, &owned_label);
+            } else if handle
+                .state::<AppState>()
+                .shortcuts_suspended
+                .swap(false, Ordering::SeqCst)
+            {
+                crate::sync_global_shortcuts(&handle);
+            }
+        }
+        WindowEvent::Destroyed if owned_label == "settings" => {
+            if handle
+                .state::<AppState>()
+                .shortcuts_suspended
+                .swap(false, Ordering::SeqCst)
+            {
+                crate::sync_global_shortcuts(&handle);
+            }
         }
         WindowEvent::Resized(_) if owned_label == "translation" => {
             // Native live resize is laid out by the stage's own layout pass.
@@ -895,7 +912,15 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         crate::clipboard_runtime::visibility(app, false)?;
     }
     if let Some(view) = app.get_webview("clipboard") {
-        let hidden = !state.clipboard_visible && state.clipboard_extent <= 0.0;
+        let hidden =
+            !state.any_visible() || (!state.clipboard_visible && state.clipboard_extent <= 0.0);
+        view.with_webview(move |webview| unsafe {
+            let _: () = objc2::msg_send![webview.inner().cast::<AnyObject>(), setHidden: hidden];
+        })
+        .map_err(|_| "window_geometry")?;
+    }
+    if let Some(view) = app.get_webview("translation") {
+        let hidden = !state.any_visible() || (!state.right_visible() && state.right_extent <= 0.0);
         view.with_webview(move |webview| unsafe {
             let _: () = objc2::msg_send![webview.inner().cast::<AnyObject>(), setHidden: hidden];
         })
@@ -1315,6 +1340,7 @@ fn layout_translation(app: &AppHandle, animated: bool) -> Result<(), String> {
             state.motion_velocity = PanelFrame::default();
             drop(state);
             window.hide().map_err(|_| "window_hide")?;
+            platform::release_allocator_memory();
             return emit_state(app);
         }
         if let Some((_, available)) = monitor_work {
@@ -1747,8 +1773,15 @@ pub fn hide(app: &AppHandle, region: &str) -> Result<(), String> {
             apply_translation(app)
         }
         "settings" => {
+            if app
+                .state::<AppState>()
+                .shortcuts_suspended
+                .swap(false, Ordering::SeqCst)
+            {
+                crate::sync_global_shortcuts(app);
+            }
             if let Some(window) = app.get_window("settings") {
-                window.hide().map_err(|_| "window_hide")?;
+                window.destroy().map_err(|_| "window_hide")?;
             }
             Ok(())
         }

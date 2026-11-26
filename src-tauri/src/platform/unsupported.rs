@@ -140,6 +140,8 @@ pub fn clipboard_image_preview(_: &[u8], _: u32) -> Result<Vec<u8>, &'static str
     Err(UNAVAILABLE)
 }
 
+pub fn release_allocator_memory() {}
+
 pub(crate) fn application_presentation(_: &str) -> Option<(Option<String>, Option<String>)> {
     None
 }

@@ -71,7 +71,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const searchOptions = snapshot.clipboardControls.search;
   const searchKey = searchOptions && (searchOptions.mode !== 'exact' || !searchOptions.body || !searchOptions.note || !searchOptions.imageText)
     ? `${searchOptions.mode}:${+searchOptions.body}${+searchOptions.note}${+searchOptions.imageText}` : '';
-  const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0, kindFilter, searchKey);
+  const clipboard = useClipboard(native, query, favoritesOnly, () => (list.current?.scrollTop ?? 0) > 0, kindFilter, searchKey, active);
   const records = clipboard.page.records;
   const [imageFiles, setImageFiles] = useState(new Set<string>());
   const onImageFile = useCallback((id: string, eligible: boolean) => {

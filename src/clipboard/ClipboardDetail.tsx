@@ -294,7 +294,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
               </>)
           : singleImage
             ? <>
-              <ImagePreview key={current.id} recordId={current.id} native={native} onImageLoad={(img) => {
+              <ImagePreview key={current.id} recordId={current.id} native={native} active={active} onImageLoad={(img) => {
                 if (paletteRecord.current === current.id) return;
                 paletteRecord.current = current.id;
                 setImagePalette(extractImagePalette(img));

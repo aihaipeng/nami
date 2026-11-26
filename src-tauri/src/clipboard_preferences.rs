@@ -854,6 +854,9 @@ async fn cleanup_locked(
     })
     .await?;
     // The transaction is committed. Notify records even if the filesystem is temporarily inaccessible.
+    if removed > 0 {
+        crate::media::remove_file_thumbs(app);
+    }
     if notify && removed > 0 {
         let _ = changed(app);
     }
@@ -885,6 +888,7 @@ pub(crate) async fn retry_image_deletions_locked(
     .await
     .map_err(|_| "storage_worker")?;
     if !complete.is_empty() {
+        crate::media::remove_thumbs_for_image_paths(app, &complete);
         database(app, move |db| {
             db.acknowledge_clipboard_image_deletions(&complete)
         })

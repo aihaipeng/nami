@@ -1,4 +1,4 @@
-export const VIRTUALIZE_THRESHOLD = 100;
+export const VIRTUALIZE_THRESHOLD = 24;
 export const DEFAULT_ROW_HEIGHT = 72;
 export const VIRTUAL_OVERSCAN_PX = 480;
 export const VIRTUAL_OVERSCAN_ROWS = 6;

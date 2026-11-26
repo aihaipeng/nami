@@ -242,10 +242,15 @@ export function HistoryList<T = never>({
     measure(); if (active) { onScroll?.(); onNearEnd(event.currentTarget); }
   }
 
+  const virtualThreshold = virtualItems?.threshold ?? VIRTUALIZE_THRESHOLD;
+  // When a real viewport is active and the retained pool exceeds the virtualization threshold,
+  // avoid materializing hundreds of hidden rows when a filter or search shrinks visible results.
+  const retainAllItems = virtualItems?.allItems !== undefined
+    && (scroll.height <= 0 || virtualItems.allItems.length <= virtualThreshold);
   const renderedItems = virtualItems
     ? (virtual.virtualized
       ? virtualItems.items.slice(virtual.start, virtual.end)
-      : (virtualItems.allItems ?? virtualItems.items)
+      : (retainAllItems ? virtualItems.allItems! : virtualItems.items)
     ).map(virtualItems.renderItem)
     : null;
 

@@ -546,6 +546,42 @@ pub fn store_image_with_status(
     Ok((relative, created))
 }
 
+pub fn verified_image_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
+    use std::io::Read;
+    if !valid_image_name(relative) {
+        return Err("storage_path".into());
+    }
+    reject_symlinks(root, relative)?;
+    let path = root.join(relative);
+    let metadata = std::fs::metadata(&path).map_err(|_| "clipboard_image_missing")?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err("clipboard_image_limit".into());
+    }
+    let filename = relative.rsplit('/').next().ok_or("storage_path")?;
+    let expected = filename.split('.').next().ok_or("storage_path")?;
+    let mut file = std::fs::File::open(&path).map_err(|_| "storage_unavailable")?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"image");
+    hasher.update([0]);
+    let mut total = 0usize;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|_| "storage_unavailable")?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count);
+        if total > MAX_IMAGE_BYTES {
+            return Err("clipboard_image_limit".into());
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected {
+        return Err("storage_corrupt".into());
+    }
+    Ok(path)
+}
+
 pub fn read_image(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
     if !valid_image_name(relative) {
         return Err("storage_path".into());
@@ -587,10 +623,19 @@ mod tests {
         let bytes = b"\x89PNG\r\n\x1a\nsynthetic";
         let relative = store_image(&directory, bytes, "png").unwrap();
         assert_eq!(store_image(&directory, bytes, "png").unwrap(), relative);
+        assert_eq!(
+            verified_image_path(&directory, &relative).unwrap(),
+            directory.join(&relative)
+        );
         assert_eq!(read_image(&directory, &relative).unwrap(), bytes);
         assert!(read_image(&directory, "../private.png").is_err());
+        assert!(verified_image_path(&directory, "../private.png").is_err());
         assert!(store_image(&directory, b"invalid", "png").is_err());
         std::fs::write(directory.join(&relative), b"corrupt").unwrap();
+        assert_eq!(
+            verified_image_path(&directory, &relative).unwrap_err(),
+            "storage_corrupt"
+        );
         assert_eq!(
             read_image(&directory, &relative).unwrap_err(),
             "storage_corrupt"
