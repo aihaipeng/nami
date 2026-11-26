@@ -685,8 +685,9 @@ describe('unified records workspace', () => {
     );
     const scroller = view.container.querySelector<HTMLElement>('.history-list')!;
     const itemsBox = view.container.querySelector<HTMLElement>('.history-items')!;
-    expect(itemsBox.dataset.virtualized).toBeUndefined();
-    expect(itemsBox.querySelectorAll('.history-row')).toHaveLength(240);
+    expect(itemsBox.dataset.virtualized).toBe('true');
+    expect(itemsBox.querySelector('[data-record-id="row-0"]')).not.toBeNull();
+    expect(itemsBox.querySelectorAll('.history-row').length).toBeLessThan(24);
 
     Object.defineProperties(scroller, {
       clientHeight: { configurable: true, value: 400 },
@@ -711,11 +712,47 @@ describe('unified records workspace', () => {
     expect(view.container.querySelector('[data-record-id="row-0"]')).toBeNull();
     expect(parseFloat(itemsBox.style.paddingTop)).toBeGreaterThan(10000);
 
+    const deepRows = [...itemsBox.querySelectorAll('.history-row')];
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 0 }, scrollHeight: { configurable: true, value: 0 } });
+    fireEvent.scroll(scroller);
+    const hiddenRows = [...itemsBox.querySelectorAll('.history-row')];
+    expect(hiddenRows).toHaveLength(deepRows.length);
+    expect(hiddenRows.every((row, index) => row === deepRows[index])).toBe(true);
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 240 * 72 } });
+    fireEvent.scroll(scroller);
+    expect(scroller.scrollTop).toBe(180 * 72);
+    expect(view.container.querySelector('[data-record-id="row-180"]')).toBe(deepRows.find((row) => row.getAttribute('data-record-id') === 'row-180'));
+
     act(() => {
       expect(handleRef.current?.scrollToId('row-20')).toBe(true);
     });
     expect(view.container.querySelector('[data-record-id="row-20"]')).not.toBeNull();
     expect(view.container.querySelector('[data-record-id="row-180"]')).toBeNull();
+  });
+
+  it('does not mount a large retained pool of hidden pins or ordinary rows when filtering before measurement', async () => {
+    const records = Array.from({ length: 80 }, (_, i) => ({ ...clipboardRecords[0], id: `filtered-${i}`, isPinned: i < 40, isFavorite: i === 1 || i === 39 || i === 79 }));
+    const original = bridge.invoke.getMockImplementation()!;
+    bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+      if (name !== 'clipboard_query') return original(name, args);
+      const page = (rows: typeof records) => ({ records: rows, sources: {}, totalRecords: rows.length, hasMore: false, cursor: null });
+      return { page: page(records), alternate: page(records.filter((record) => record.isFavorite)) };
+    });
+    await mount('clipboard');
+    const pins = () => panel().querySelectorAll('.history-pinned .history-row');
+    await waitFor(() => expect(pins()).toHaveLength(40));
+    const firstFavorite = pins()[1];
+    const favorites = screen.getByRole('button', { name: 'Favorite clipboard records' });
+    const queries = calls('clipboard_query').length;
+    fireEvent.click(favorites);
+    expect([...pins()].map((row) => row.getAttribute('data-record-id'))).toEqual(['filtered-1', 'filtered-39']);
+    expect(pins()[0]).toBe(firstFavorite);
+    expect(panel().querySelectorAll('.history-items .history-row')).toHaveLength(1);
+    expect(panel().querySelector('.history-items [data-record-id="filtered-79"]')).not.toBeNull();
+    fireEvent.click(favorites);
+    expect(pins()).toHaveLength(40);
+    expect(pins()[1]).toBe(firstFavorite);
+    expect(calls('clipboard_query')).toHaveLength(queries);
   });
 
   it('virtualizes deep pages in Clipboard view', async () => {

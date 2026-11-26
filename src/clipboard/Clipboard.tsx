@@ -9,6 +9,7 @@ import type { ClipboardResult } from '../shared/contracts';
 import type { MessageKey } from '../shared/i18n';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordToolbar } from '../shared/RecordToolbar';
+import { VIRTUALIZE_THRESHOLD } from '../shared/virtualList';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
 import { historyPreview, historyScrollTarget } from '../shared/recordPreview';
 import { cn } from '../lib/utils';
@@ -90,7 +91,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   const visibleIds = new Set(records.map(({ id }) => id));
   const ordinary = useMemo(() => records.filter((record) => !record.isPinned), [records]);
   const allUnpinned = useMemo(() => clipboard.retainedRecords.filter((record) => !record.isPinned), [clipboard.retainedRecords]);
-  const ordered = [...records.filter((record) => record.isPinned), ...ordinary];
+  const pinned = records.filter((record) => record.isPinned);
+  const retainedPins = clipboard.retainedRecords.filter((record) => record.isPinned);
+  const ordered = [...pinned, ...ordinary];
   const quickPasteCandidates = ordinary.slice(0, 5);
   const quickPaste = native && snapshot.capabilities.platform === 'macos' && snapshot.capabilities.autoPaste && !snapshot.storageError;
   const showQuickPasteHints = commandHeld && quickPaste;
@@ -610,8 +613,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       list={list}
       pinnedList={pinnedList}
       handleRef={listHandle}
-      pinnedCount={records.filter((record) => record.isPinned).length}
-      pinned={clipboard.retainedRecords.filter((record) => record.isPinned).map(row)}
+      pinnedCount={pinned.length}
+      pinned={(retainedPins.length <= VIRTUALIZE_THRESHOLD ? retainedPins : pinned).map(row)}
       virtualItems={{
         items: ordinary,
         allItems: allUnpinned,

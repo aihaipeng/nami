@@ -10,7 +10,7 @@ import {
 } from './virtualList';
 
 describe('virtualList', () => {
-  it('stays non-virtualized at or below the threshold or when viewport height is zero', () => {
+  it('retains small lists and bounds the first slice of an unmeasured deep list', () => {
     const ids = Array.from({ length: VIRTUALIZE_THRESHOLD }, (_, i) => `row-${i}`);
     const heights = new Map<string, number>();
     expect(computeVirtualWindow({ ids, heights, scrollTop: 0, viewportHeight: 400 })).toEqual({
@@ -23,14 +23,12 @@ describe('virtualList', () => {
     });
 
     const deepIds = Array.from({ length: VIRTUALIZE_THRESHOLD + 50 }, (_, i) => `row-${i}`);
-    expect(computeVirtualWindow({ ids: deepIds, heights, scrollTop: 0, viewportHeight: 0 })).toEqual({
-      virtualized: false,
-      start: 0,
-      end: deepIds.length,
-      paddingTop: 0,
-      paddingBottom: 0,
-      totalHeight: 0,
-    });
+    const first = computeVirtualWindow({ ids: deepIds, heights, scrollTop: 0, viewportHeight: 0 });
+    expect(first.virtualized).toBe(true);
+    expect(first.start).toBe(0);
+    expect(first.end).toBeGreaterThan(0);
+    expect(first.end).toBeLessThan(VIRTUALIZE_THRESHOLD);
+    expect(first.paddingBottom).toBe((deepIds.length - first.end) * DEFAULT_ROW_HEIGHT);
   });
 
   it('windows deep variable-height lists accurately with bounded DOM slice and exact total height', () => {

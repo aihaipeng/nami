@@ -79,7 +79,7 @@ export function computeVirtualWindow({
   overscanPx = VIRTUAL_OVERSCAN_PX,
   overscanRows = VIRTUAL_OVERSCAN_ROWS,
 }: VirtualWindowParams): VirtualWindow {
-  if (ids.length <= threshold || viewportHeight <= 0) {
+  if (ids.length <= threshold) {
     return { virtualized: false, start: 0, end: ids.length, paddingTop: 0, paddingBottom: 0, totalHeight: 0 };
   }
   const offsets = buildOffsets(ids, heights, fallbackHeight);

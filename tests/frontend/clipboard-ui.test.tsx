@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bridge, calls, emit, mount, windowState } from './harness';
 import { ClipboardNotePreview } from '../../src/clipboard/ClipboardNotePreview';
 import { useClipboard } from '../../src/clipboard/useClipboard';
@@ -1318,9 +1318,10 @@ describe('database clipboard history', () => {
     const sample = records[0];
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `deep-${index}`, text: `Deep text ${index}`, isFavorite: index === 101 }));
     queryHandler = async ({ cursor: next }) => ({ records: next ? records.slice(100) : records.slice(0, 100), cursor: next ? null : cursor, hasMore: !next, totalRecords: records.length });
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    await mount('clipboard');
     const list = document.querySelector<HTMLElement>('.history-list')!;
     const items = document.querySelector<HTMLElement>('.history-items')!;
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('100'));
     scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
     expect(items.dataset.virtualized).toBe('true');
     expect(listRows().length).toBeLessThan(60);
@@ -1338,9 +1339,10 @@ describe('database clipboard history', () => {
     const sample = records[0];
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `note-${index}`, text: `Deep note ${index}`, isFavorite: index === 101 }));
     queryHandler = async ({ cursor: next, favoritesOnly }) => ({ records: favoritesOnly ? records.filter((record) => record.isFavorite) : next ? records.slice(100) : records.slice(0, 100), cursor: favoritesOnly || next ? null : cursor, hasMore: !favoritesOnly && !next, totalRecords: favoritesOnly ? 1 : records.length });
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    await mount('clipboard');
     const list = document.querySelector<HTMLElement>('.history-list')!;
     const items = document.querySelector<HTMLElement>('.history-items')!;
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('100'));
     scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
     Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 102 * 72 } });
     list.scrollTop = 101 * 72; fireEvent.scroll(list);
@@ -1415,9 +1417,10 @@ describe('database clipboard history', () => {
         ? { page: wire(records.filter((record) => record.isFavorite), false), alternate: { ...wire(records.slice(0, 100), true), totalRecords: records.length } }
         : { page: wire(request.cursor ? records.slice(100) : records.slice(0, 100), !request.cursor), alternate: null };
     });
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    await mount('clipboard');
     const list = document.querySelector<HTMLElement>('.history-list')!;
     const items = document.querySelector<HTMLElement>('.history-items')!;
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('100'));
     scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
     let physicalTop = 400;
     Object.defineProperties(list, {
@@ -1455,9 +1458,10 @@ describe('database clipboard history', () => {
     const sample = records[0];
     records = Array.from({ length: 102 }, (_, index) => ({ ...sample, id: `deep-${index}`, text: `Deep text ${index}` }));
     queryHandler = async ({ cursor: next }) => ({ records: next ? records.slice(100) : records.slice(0, 100), cursor: next ? null : cursor, hasMore: !next, totalRecords: records.length });
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
+    await mount('clipboard');
     const list = document.querySelector<HTMLElement>('.history-list')!;
     const items = document.querySelector<HTMLElement>('.history-items')!;
+    await waitFor(() => expect(items.dataset.loadedCount).toBe('100'));
     scrollNearEnd(); await waitFor(() => expect(items.dataset.loadedCount).toBe('102'));
     Object.defineProperties(list, { clientHeight: { configurable: true, value: 100 }, scrollHeight: { configurable: true, value: 102 * 72 } });
     list.scrollTop = 101 * 72; fireEvent.scroll(list);
@@ -2294,21 +2298,21 @@ describe('database clipboard history', () => {
     await waitFor(() => expect(row('first')).toBeNull());
   });
 
-  it('retains default first-page row instances through search and restores them immediately without another query', async () => {
+  it('retains small default-page row instances through search and restores them immediately without another query', async () => {
     const sample = records[0];
-    records = Array.from({ length: 100 }, (_, index) => ({ ...sample, id: `home-${index}`, text: `Home text ${index}` }));
-    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(100));
-    const first = row('home-0'); const last = row('home-99');
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Home text 99' } });
+    records = Array.from({ length: 20 }, (_, index) => ({ ...sample, id: `home-${index}`, text: `Home text ${index}` }));
+    await mount('clipboard'); await waitFor(() => expect(listRows()).toHaveLength(20));
+    const first = row('home-0'); const last = row('home-19');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Home text 19' } });
     await waitFor(() => expect(listRows()).toHaveLength(1));
     expect(row('home-0')).toBe(first);
     expect(first.hidden).toBe(true);
-    expect(row('home-99')).toBe(last);
+    expect(row('home-19')).toBe(last);
     const queries = calls('clipboard_query').length;
     fireEvent.click(screen.getByRole('button', { name: 'Clear clipboard search' }));
-    expect(listRows()).toHaveLength(100);
+    expect(listRows()).toHaveLength(20);
     expect(row('home-0')).toBe(first);
-    expect(row('home-99')).toBe(last);
+    expect(row('home-19')).toBe(last);
     expect(calls('clipboard_query')).toHaveLength(queries);
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
@@ -2684,6 +2688,168 @@ describe('database clipboard history', () => {
       clientHeight.mockRestore();
       scrollHeight.mockRestore();
     }
+  });
+
+  describe('hidden page reclamation', () => {
+    const open = (kind: ClipboardKind | null = null) => renderHook(
+      ({ active, kind }) => useClipboard(true, '', false, undefined, kind, '', active),
+      { initialProps: { active: true, kind } },
+    );
+    const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+    const batch = (offset: number): ClipboardPage => ({
+      records: records.slice(offset, offset + 100), cursor: offset ? null : cursor,
+      hasMore: !offset, totalRecords: records.length,
+    });
+    beforeEach(() => {
+      vi.useFakeTimers();
+      records = Array.from({ length: 200 }, (_, i) => ({ ...records[0], id: `synthetic-${i}` }));
+      queryHandler = async (request) => batch(request.cursor ? 100 : 0);
+    });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('ignores a late append after 20 seconds hidden and releases the cursor for reuse', async () => {
+      const hook = open();
+      await act(async () => {});
+      expect(hook.result.current.page.records).toHaveLength(100);
+      let finish!: (page: ClipboardPage) => void;
+      queryHandler = () => new Promise((resolve) => { finish = resolve; });
+      act(() => { void hook.result.current.loadMore(); });
+      hook.rerender({ active: false, kind: null });
+      advance(20_000);
+      await act(async () => finish(batch(100)));
+      expect(hook.result.current.page.records).toHaveLength(100);
+      expect(hook.result.current.retainedRecords).toHaveLength(100);
+      queryHandler = async (request) => batch(request.cursor ? 100 : 0);
+      await act(async () => hook.result.current.loadMore());
+      expect(calls('clipboard_query')).toHaveLength(2);
+      hook.rerender({ active: true, kind: null });
+      await act(async () => hook.result.current.loadMore());
+      expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ cursor });
+      expect(hook.result.current.page.records).toHaveLength(200);
+    });
+
+    it('publishes cache-only eviction to React while still hidden', async () => {
+      records[0].kind = 'image';
+      queryHandler = async ({ kind }) => kind ? page('', false, kind) : batch(0);
+      const hook = open();
+      await act(async () => {});
+      hook.rerender({ active: true, kind: 'image' });
+      await act(async () => {});
+      expect(hook.result.current.page.records).toHaveLength(1);
+      hook.rerender({ active: false, kind: 'image' });
+      advance(19_999);
+      expect(hook.result.current.retainedRecords).toHaveLength(100);
+      advance(1);
+      expect(hook.result.current.retainedRecords.map(({ id }) => id)).toEqual(['synthetic-0']);
+      expect(calls('clipboard_query')).toHaveLength(2);
+    });
+
+    it('keeps a deep page on quick reopen but requires a valid first-page cursor after trimming', async () => {
+      const hook = open();
+      await act(async () => {});
+      await act(async () => hook.result.current.loadMore());
+      const deep = hook.result.current.page;
+      hook.rerender({ active: false, kind: null });
+      advance(19_999);
+      hook.rerender({ active: true, kind: null });
+      advance(1);
+      expect(hook.result.current.page).toBe(deep);
+      expect(deep.records).toHaveLength(200);
+      expect(calls('clipboard_query')).toHaveLength(2);
+      hook.rerender({ active: false, kind: null });
+      advance(20_000);
+      expect(hook.result.current.page.records).toHaveLength(100);
+      queryHandler = async () => { throw new Error('storage_unavailable'); };
+      hook.rerender({ active: true, kind: null });
+      await act(async () => {});
+      expect(hook.result.current.error).toBe(true);
+      await act(async () => hook.result.current.loadMore());
+      expect(calls('clipboard_query')).toHaveLength(3);
+      const freshCursor = { ...cursor, sequence: 300 };
+      queryHandler = async (request) => request.cursor ? batch(100) : { ...batch(0), cursor: freshCursor };
+      await act(async () => hook.result.current.refresh());
+      await act(async () => hook.result.current.loadMore());
+      expect(calls('clipboard_query').at(-1)?.[1]).toMatchObject({ cursor: freshCursor });
+      expect(hook.result.current.page.records).toHaveLength(200);
+      expect(hook.result.current.error).toBe(false);
+    });
+
+    it('consumes hidden changes when the initial subscription becomes ready after reopen', async () => {
+      const listen = bridge.listen.getMockImplementation()!;
+      let subscribed!: () => void;
+      bridge.listen.mockImplementation(async (name, callback) => {
+        if (name === 'clipboard_capture_error') await new Promise<void>((resolve) => { subscribed = resolve; });
+        return listen(name, callback);
+      });
+      const hook = open();
+      await act(async () => {});
+      hook.rerender({ active: false, kind: null });
+      advance(20_000);
+      await emit('clipboard_changed', 1);
+      hook.rerender({ active: true, kind: null });
+      await act(async () => subscribed());
+      expect(calls('clipboard_query')).toHaveLength(1);
+      expect(hook.result.current.page.records).toHaveLength(100);
+      expect(hook.result.current.loading).toBe(false);
+      expect(hook.result.current.displayReady).toBe(true);
+    });
+
+    it('coalesces hidden changes across a local write that finishes after reopen', async () => {
+      const invoke = bridge.invoke.getMockImplementation()!;
+      let finishWrite!: () => void;
+      bridge.invoke.mockImplementation(async (name, args) => {
+        if (name === 'clipboard_record_update') await new Promise<void>((resolve) => { finishWrite = resolve; });
+        return invoke(name, args);
+      });
+      const hook = open();
+      await act(async () => {});
+      act(() => { void hook.result.current.update('synthetic-0', 'favorite'); });
+      hook.rerender({ active: false, kind: null });
+      advance(20_000);
+      await emit('clipboard_changed', 1);
+      hook.rerender({ active: true, kind: null });
+      expect(hook.result.current.displayReady).toBe(false);
+      expect(calls('clipboard_query')).toHaveLength(1);
+      await act(async () => finishWrite());
+      expect(calls('clipboard_query')).toHaveLength(2);
+      expect(hook.result.current.page.records[0].isFavorite).toBe(true);
+      expect(hook.result.current.displayReady).toBe(true);
+    });
+
+    it.each(['initial', 'refresh'])('restarts an unfinished %s query once on reopen', async (phase) => {
+      let finish!: (page: ClipboardPage) => void;
+      let fail!: (error: Error) => void;
+      const pending = () => new Promise<ClipboardPage>((resolve, reject) => { finish = resolve; fail = reject; });
+      if (phase === 'initial') queryHandler = pending;
+      const hook = open();
+      await act(async () => {});
+      if (phase === 'refresh') {
+        queryHandler = pending;
+        act(() => hook.result.current.refresh());
+      }
+      const queried = calls('clipboard_query').length;
+      hook.rerender({ active: false, kind: null });
+      if (phase === 'refresh') await emit('clipboard_changed', 1);
+      advance(20_000);
+      expect(hook.result.current.loading).toBe(false);
+      if (phase === 'refresh') {
+        await emit('clipboard_changed', 2);
+        await act(async () => hook.result.current.refreshDeferred());
+      }
+      expect(calls('clipboard_query')).toHaveLength(queried);
+      const late = phase === 'initial' ? () => finish(batch(0)) : () => fail(new Error('stale'));
+      let finishNew!: (page: ClipboardPage) => void;
+      queryHandler = () => new Promise((resolve) => { finishNew = resolve; });
+      hook.rerender({ active: true, kind: null });
+      expect(calls('clipboard_query')).toHaveLength(queried + 1);
+      await act(async () => late());
+      expect(hook.result.current.loading).toBe(true);
+      expect(hook.result.current.error).toBe(false);
+      if (phase === 'initial') expect(hook.result.current.page.records).toHaveLength(0);
+      await act(async () => finishNew({ ...batch(0), records: [records[199]] }));
+      expect(hook.result.current.page.records.map(({ id }) => id)).toEqual(['synthetic-199']);
+      expect(hook.result.current.loading).toBe(false);
+    });
   });
 
   it('defers clipboard_changed requeries while hidden and refreshes immediately on reopen', async () => {

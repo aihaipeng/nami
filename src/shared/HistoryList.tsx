@@ -78,7 +78,7 @@ export function HistoryList<T = never>({
   const frame = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
-  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0, overflow: false });
+  const [scroll, setScroll] = useState({ top: 0, height: 0, content: 0, track: 0, pinnedOffset: 0, overflow: false });
   const heightsRef = useRef(new Map<string, number>());
   const [, setHeightRevision] = useState(0);
   const resetKey = virtualItems?.resetKey;
@@ -101,7 +101,7 @@ export function HistoryList<T = never>({
   }, [ids]);
 
   const fallbackHeight = averageRowHeight(heightsRef.current);
-  const itemsOffsetTop = scroll.overflow ? (pinnedList.current?.offsetHeight ?? 0) : 0;
+  const itemsOffsetTop = scroll.pinnedOffset;
   const relativeScrollTop = Math.max(0, scroll.top - itemsOffsetTop);
   const virtual = virtualItems
     ? computeVirtualWindow({
@@ -119,6 +119,8 @@ export function HistoryList<T = never>({
     list.current = element;
     if (!element) return;
     const height = viewport.current?.clientHeight ?? 0;
+    // A hidden WebView can report zero geometry; keep its last measured row window.
+    if (!height && !element.clientHeight) return;
     const pinnedHeight = pinnedList.current?.offsetHeight ?? 0;
     let overflow = scroll.overflow;
     if (height > 0) {
@@ -134,6 +136,7 @@ export function HistoryList<T = never>({
       height: element.clientHeight,
       content: element.scrollHeight,
       track: height || element.clientHeight,
+      pinnedOffset: overflow ? pinnedHeight : 0,
       overflow,
     };
     setScroll((old) => Object.keys(next).every((key) => old[key as keyof typeof old] === next[key as keyof typeof next]) ? old : next);
@@ -243,10 +246,8 @@ export function HistoryList<T = never>({
   }
 
   const virtualThreshold = virtualItems?.threshold ?? VIRTUALIZE_THRESHOLD;
-  // When a real viewport is active and the retained pool exceeds the virtualization threshold,
-  // avoid materializing hundreds of hidden rows when a filter or search shrinks visible results.
   const retainAllItems = virtualItems?.allItems !== undefined
-    && (scroll.height <= 0 || virtualItems.allItems.length <= virtualThreshold);
+    && virtualItems.allItems.length <= virtualThreshold;
   const renderedItems = virtualItems
     ? (virtual.virtualized
       ? virtualItems.items.slice(virtual.start, virtual.end)

@@ -88,6 +88,7 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   const defaultRevision = useRef(0);
   const deferred = useRef<'local' | 'external' | null>(null);
   const hiddenDirty = useRef(false);
+  const hibernating = useRef(false);
   const localWrites = useRef(0);
   const writeQueue = useRef(Promise.resolve());
   const copiedMark = useRef<{ id: string; date: string; previousDate: string | undefined } | null>(null);
@@ -98,7 +99,19 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   panelActiveRef.current = panelActive;
 
   const fetchPage = useCallback(async (append = false, animate = true) => {
-    if (!native || !active.current || !ready.current || (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.searchKey !== filters.current.searchKey || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || loadedFilters.current.kind !== filters.current.kind || !latest.current.hasMore))) return;
+    if (!native || !active.current || !ready.current) return;
+    if (hibernating.current) {
+      if (!append) hiddenDirty.current = true;
+      return;
+    }
+    if (hiddenDirty.current) {
+      if (!panelActiveRef.current || localWrites.current || append) return;
+      hiddenDirty.current = false;
+      deferred.current = null;
+      pages.current.clear();
+      invalidPages.current.clear();
+    }
+    if (append && (morePending.current || resetPending.current || loadedFilters.current.query !== filters.current.query || loadedFilters.current.searchKey !== filters.current.searchKey || loadedFilters.current.favoritesOnly !== filters.current.favoritesOnly || loadedFilters.current.kind !== filters.current.kind || !latest.current.hasMore)) return;
     const current = append ? request.current : ++request.current;
     const epochAtStart = copyEpoch.current;
     const cursor = append ? latest.current.cursor : null;
@@ -109,15 +122,15 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     setLoading(true); setShowActivity(animate); setError(null);
     try {
       const result = await invoke<{ page: ClipboardWirePage; alternate: ClipboardWirePage | null }>('clipboard_query', { query: queryFilters.query, favoritesOnly: queryFilters.favoritesOnly, ...(queryFilters.kind ? { kind: queryFilters.kind } : {}), cursor });
+      if (!active.current || current !== request.current) return;
       let next = hydrate(result.page);
       const reloadCount = append ? 0 : invalidPages.current.get(cacheKey(queryFilters.kind, queryFilters.favoritesOnly)) ?? 0;
       while (next.hasMore && next.records.length < reloadCount) {
-        if (!active.current || current !== request.current) return;
         const continuation = await invoke<{ page: ClipboardWirePage }>('clipboard_query', { query: queryFilters.query, favoritesOnly: queryFilters.favoritesOnly, ...(queryFilters.kind ? { kind: queryFilters.kind } : {}), cursor: next.cursor });
+        if (!active.current || current !== request.current) return;
         const page = hydrate(continuation.page);
         next = { ...page, records: [...next.records, ...page.records] };
       }
-      if (!active.current || current !== request.current) return;
       const merged = { ...next };
       if (append) {
         const records = [...latest.current.records];
@@ -185,14 +198,14 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
           if (disposed) return;
           ++defaultRevision.current;
           setCaptureError(false);
-          if (localWrites.current) {
-            deferred.current ??= 'local';
-          } else if (!panelActiveRef.current) {
+          if (!panelActiveRef.current) {
             hiddenDirty.current = true;
             deferred.current = 'external';
             pages.current.clear();
             invalidPages.current.clear();
             defaultPage.current = null;
+          } else if (localWrites.current) {
+            deferred.current ??= 'local';
           } else if (shouldDefer.current?.()) {
             deferred.current = 'external';
           } else {
@@ -216,42 +229,33 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
   }, [native, fetchPage, connection]);
 
   useEffect(() => {
-    panelActiveRef.current = panelActive;
-    if (panelActive && ready.current && hiddenDirty.current && !localWrites.current) {
-      hiddenDirty.current = false;
-      deferred.current = null;
-      pages.current.clear();
-      invalidPages.current.clear();
-      void fetchPage(false, false);
+    if (panelActive) {
+      if (hiddenDirty.current) void fetchPage(false, false);
       return;
     }
-    if (!panelActive) {
-      const timer = window.setTimeout(() => {
-        if (panelActiveRef.current) return;
-        const activeKey = cacheKey(filters.current.kind, filters.current.favoritesOnly);
-        if (latest.current.records.length > 100) {
-          const trimmed: ClipboardPage = {
-            ...latest.current,
-            records: latest.current.records.slice(0, 100),
-            cursor: null,
-            hasMore: true,
-          };
-          pages.current.clear();
-          invalidPages.current.clear();
-          hiddenDirty.current = true;
-          latest.current = trimmed;
-          setPage(trimmed);
-          return;
-        }
-        if (pages.current.size > 1) {
-          const current = pages.current.get(activeKey);
-          pages.current.clear();
-          invalidPages.current.clear();
-          if (current) pages.current.set(activeKey, current);
-        }
-      }, 20_000);
-      return () => window.clearTimeout(timer);
-    }
+    const timer = window.setTimeout(() => {
+      if (panelActiveRef.current) return;
+      hibernating.current = true;
+      ++request.current;
+      const key = cacheKey(filters.current.kind, filters.current.favoritesOnly);
+      const current = latest.current;
+      const trim = current.records.length > 100;
+      hiddenDirty.current ||= trim || resetPending.current || invalidPages.current.has(key) || deferred.current === 'external';
+      morePending.current = false;
+      resetPending.current = false;
+      setLoading(false); setShowActivity(false);
+
+      // A sliced prefix has no authoritative continuation cursor until the first page is fetched again.
+      const retained = trim ? { ...current, records: current.records.slice(0, 100), cursor: null, hasMore: false } : { ...current };
+      const keepCurrent = !hiddenDirty.current && pages.current.has(key);
+      pages.current.clear();
+      invalidPages.current.clear();
+      if (keepCurrent) pages.current.set(key, retained);
+      if (!keepCurrent || defaultPage.current?.page.records !== retained.records) defaultPage.current = null;
+      latest.current = retained;
+      setPage(retained); // Publish cache eviction even when the displayed rows did not change.
+    }, 20_000);
+    return () => { window.clearTimeout(timer); hibernating.current = false; };
   }, [panelActive, fetchPage]);
 
   useEffect(() => {
@@ -345,7 +349,10 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         if (next) { latest.current = next; setPage(next); }
       }
     } catch { if (active.current && session === lifecycle.current) setError('load'); }
-    finally { --localWrites.current; release(); }
+    finally {
+      --localWrites.current; release();
+      if (panelActiveRef.current && hiddenDirty.current) void fetchPage(false, false);
+    }
   }, [native, fetchPage]);
 
   const noteCopied = useCallback((recordId: string) => {
@@ -402,6 +409,6 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     morePending.current = false;
     if (ready.current) void fetchPage(false, false);
   }, [fetchPage, rulesKey]);
-  const refreshPending = panelActive && hiddenDirty.current && !localWrites.current;
+  const refreshPending = panelActive && hiddenDirty.current;
   return { applyEdit, noteCopied, page: displayedPage, displayReady: !refreshPending && (Boolean(restoringDefault && home) || !searchChanged && loadedFilters.current.query === query && ((loadedFilters.current.favoritesOnly === favoritesOnly && loadedFilters.current.kind === kind) || !invalidPages.current.has(cacheKey(kind, favoritesOnly)) && pages.current.has(cacheKey(kind, favoritesOnly)))), retainedRecords, loading: (restoringDefault && home ? false : loading) || refreshPending, showActivity: restoringDefault ? false : showActivity, error: error !== null || captureError, searchError: error === 'load' ? null : error, update, resetFilters, refreshDeferred: () => { if (deferred.current && !shouldDefer.current?.()) { deferred.current = null; pages.current.clear(); invalidPages.current.clear(); void fetchPage(false, false); } }, loadMore: () => fetchPage(true), refresh: () => { ++defaultRevision.current; if (ready.current) void fetchPage(); else setConnection((value) => value + 1); } };
 }
