@@ -548,7 +548,7 @@ fn main() {
                     database.preference("window_position_mode")?.as_deref(),
                 );
                 let capture = database.clipboard_capture_enabled()?;
-                let preferences = translation::Preferences::from_store(
+                let mut preferences = translation::Preferences::from_store(
                     |key| database.preference(key).ok().flatten(),
                     platform::capabilities().primary_modifier,
                 );
@@ -584,6 +584,11 @@ fn main() {
                         &preferences.shortcuts,
                         clipboard_shortcut.binding.as_ref(),
                     );
+                shortcuts::upgrade_legacy_pin_defaults(
+                    &mut clipboard_options.record_shortcuts,
+                    &mut preferences.shortcuts,
+                    clipboard_shortcut.binding.as_ref(),
+                );
                 Ok((
                     database,
                     ui_locale,

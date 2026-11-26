@@ -114,7 +114,7 @@ impl TranslationShortcuts {
             translate: Some(KeyBinding::new("Enter", &[primary])),
             copy_primary: Some(KeyBinding::new("Digit1", &[primary])),
             copy_secondary: Some(KeyBinding::new("Digit2", &[primary])),
-            pin: Some(KeyBinding::new("KeyP", &[primary, "shift"])),
+            pin: Some(KeyBinding::new("KeyP", &[primary])),
             show_shortcuts: Some(KeyBinding::new("KeyK", &[primary])),
             focus_search: Some(KeyBinding::new("KeyF", &[primary])),
             open_settings: Some(KeyBinding::new("Comma", &[primary])),
@@ -317,7 +317,14 @@ impl Default for ClipboardRecordShortcuts {
                 },
             ),
             favorite: enabled("KeyD", &[primary]),
-            pin: enabled("KeyP", &[primary]),
+            pin: enabled(
+                "KeyP",
+                if primary == "meta" {
+                    &["alt", "meta"]
+                } else {
+                    &["control", "alt"]
+                },
+            ),
             delete: enabled("Backspace", &[primary]),
             copy_record: enabled("KeyC", &[primary]),
             paste_plain: enabled("Enter", &[primary]),
@@ -573,6 +580,59 @@ impl ClipboardRecordShortcuts {
                 })
             })
             .unwrap_or_default()
+    }
+}
+
+pub fn upgrade_legacy_pin_defaults(
+    records: &mut ClipboardRecordShortcuts,
+    translation: &mut TranslationShortcuts,
+    clipboard: Option<&KeyBinding>,
+) {
+    let primary = if cfg!(target_os = "macos") {
+        "meta"
+    } else {
+        "control"
+    };
+    let old_record = KeyBinding::new("KeyP", &[primary]);
+    if records
+        .pin
+        .binding
+        .as_ref()
+        .is_some_and(|key| same_binding(key, &old_record))
+    {
+        let next = KeyBinding::new(
+            "KeyP",
+            if primary == "meta" {
+                &["alt", "meta"]
+            } else {
+                &["control", "alt"]
+            },
+        );
+        let reserved = std::iter::once(clipboard)
+            .chain(
+                translation
+                    .bindings_for_record(ClipboardRecordAction::Pin)
+                    .map(Some),
+            )
+            .collect::<Vec<_>>();
+        let _ = records.set(ClipboardRecordAction::Pin, Some(next), None, &reserved);
+    }
+    let old_window = KeyBinding::new("KeyP", &[primary, "shift"]);
+    let next_window = KeyBinding::new("KeyP", &[primary]);
+    if translation
+        .pin
+        .as_ref()
+        .is_some_and(|key| same_binding(key, &old_window))
+        && !records.conflicts_with_translation(ShortcutAction::Pin, &next_window)
+    {
+        if let Ok(next) = assign_shortcut(
+            translation,
+            ShortcutAction::Pin,
+            Some(next_window),
+            clipboard,
+        ) {
+            *translation = next;
+        }
     }
 }
 
@@ -1009,11 +1069,22 @@ mod tests {
             (&defaults.note, "KeyN"),
             (&defaults.copy_record, "KeyC"),
             (&defaults.favorite, "KeyD"),
-            (&defaults.pin, "KeyP"),
         ] {
             assert_eq!(slot.binding, Some(KeyBinding::new(code, &[primary])));
             assert!(slot.enabled);
         }
+        assert_eq!(
+            defaults.pin.binding,
+            Some(KeyBinding::new(
+                "KeyP",
+                if primary == "meta" {
+                    &["alt", "meta"]
+                } else {
+                    &["control", "alt"]
+                },
+            ))
+        );
+        assert!(defaults.pin.enabled);
         let old = serde_json::json!({
             "preview": {"binding": {"code": "KeyY", "modifiers": [primary]}, "enabled": false},
             "pin": {"binding": {"code": "KeyD", "modifiers": [primary]}, "enabled": true},
@@ -1189,14 +1260,61 @@ mod tests {
             shortcuts.translate,
             Some(KeyBinding::new("Enter", &["meta"]))
         );
-        assert_eq!(
-            shortcuts.pin,
-            Some(KeyBinding::new("KeyP", &["meta", "shift"]))
-        );
+        assert_eq!(shortcuts.pin, Some(KeyBinding::new("KeyP", &["meta"])));
         assert_eq!(
             TranslationShortcuts::defaults("control").show_shortcuts,
             Some(KeyBinding::new("KeyK", &["control"]))
         );
+    }
+
+    #[test]
+    fn legacy_pin_defaults_move_without_replacing_custom_bindings() {
+        let primary = if cfg!(target_os = "macos") {
+            "meta"
+        } else {
+            "control"
+        };
+        let old_record = KeyBinding::new("KeyP", &[primary]);
+        let old_window = KeyBinding::new("KeyP", &[primary, "shift"]);
+        let record_pin = ClipboardRecordShortcuts::default().pin.binding.unwrap();
+        let window_pin = TranslationShortcuts::defaults(primary).pin.unwrap();
+        let mut records = ClipboardRecordShortcuts::default();
+        records.pin.binding = Some(old_record.clone());
+        records.pin.enabled = false;
+        let mut translation = TranslationShortcuts::defaults(primary);
+        translation.pin = Some(old_window.clone());
+        upgrade_legacy_pin_defaults(&mut records, &mut translation, None);
+        assert_eq!(records.pin.binding, Some(record_pin.clone()));
+        assert!(!records.pin.enabled);
+        assert_eq!(translation.pin, Some(window_pin.clone()));
+
+        records.pin.binding = Some(KeyBinding::new("KeyJ", &["alt"]));
+        translation.pin = Some(old_window.clone());
+        upgrade_legacy_pin_defaults(&mut records, &mut translation, None);
+        assert_eq!(records.pin.binding, Some(KeyBinding::new("KeyJ", &["alt"])));
+        assert_eq!(translation.pin, Some(window_pin.clone()));
+
+        records.pin.binding = Some(old_record.clone());
+        translation.pin = Some(KeyBinding::new("KeyJ", &["alt", primary]));
+        upgrade_legacy_pin_defaults(&mut records, &mut translation, None);
+        assert_eq!(records.pin.binding, Some(record_pin.clone()));
+        assert_eq!(
+            translation.pin,
+            Some(KeyBinding::new("KeyJ", &["alt", primary]))
+        );
+
+        records.pin.binding = None;
+        translation.pin = Some(old_window.clone());
+        upgrade_legacy_pin_defaults(&mut records, &mut translation, None);
+        assert!(records.pin.binding.is_none());
+        assert_eq!(translation.pin, Some(window_pin));
+
+        records.pin.binding = Some(old_record.clone());
+        records.note.binding = Some(record_pin);
+        translation.pin = Some(old_window.clone());
+        upgrade_legacy_pin_defaults(&mut records, &mut translation, None);
+        assert_eq!(records.pin.binding, Some(old_record));
+        assert_eq!(translation.pin, Some(old_window));
     }
 
     #[test]

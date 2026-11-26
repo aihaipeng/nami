@@ -733,7 +733,7 @@ describe('database clipboard history', () => {
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
       ['Paste', '↵'], ['Paste as Plain Text', '⌘↵'], ['Copy', '⌘C'], ['Copy as Plain Text', '—'], '/',
-      ['Favorite', '⌘D'], ['Pin', '⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
+      ['Favorite', '⌘D'], ['Pin', '⌥⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(items.every((item) => item.children.length === 3)).toBe(true);
     expect(items.at(-1)?.classList.contains('clipboard-menu-delete')).toBe(true);
@@ -808,7 +808,7 @@ describe('database clipboard history', () => {
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
       ['Copy', '⌘C'], ['Paste', '↵'], ['Save', '⌘S'], '/',
-      ['Favorite', '⌘D'], ['Pin', '⌘P'], ['Note', '⌘N'], '/',
+      ['Favorite', '⌘D'], ['Pin', '⌥⌘P'], ['Note', '⌘N'], '/',
       ['Translate', '⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
     ]);
     expect(within(menu).getByRole('menuitem', { name: 'Save' }).getAttribute('aria-keyshortcuts')).toBe('Meta+S');
@@ -1602,7 +1602,7 @@ describe('database clipboard history', () => {
     fireEvent.keyDown(search, { key: 'Enter', code: 'Enter', shiftKey: true });
     fireEvent.keyDown(search, { key: 'd', code: 'KeyD', metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'favorite' }));
-    fireEvent.keyDown(search, { key: 'p', code: 'KeyP', metaKey: true });
+    fireEvent.keyDown(search, { key: 'p', code: 'KeyP', altKey: true, metaKey: true });
     await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pin' }));
     expect(calls('records_details_toggle')).toHaveLength(0);
     expect(calls('clipboard_record_use').map(([, args]) => args)).toEqual([{ recordId: 'pinned', action: 'activate' }]);
@@ -2728,7 +2728,7 @@ describe('clipboard open target', () => {
       item.getAttribute('role') === 'separator' ? '/' : [item.querySelector('.record-menu-label')?.textContent, item.querySelector('kbd')?.textContent]);
     expect(layout).toEqual([
       ['Paste', '↵'], ['Paste as Path', '—'], ['Copy', '⌘C'], '/', ['Show in Finder', '⌘O'], '/',
-      ['Unfavorite', '⌘D'], ['Unpin', '⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
+      ['Unfavorite', '⌘D'], ['Unpin', '⌥⌘P'], ['Note', '⌘N'], '/', ['Delete', '⌘⌫'],
     ]);
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Paste as Path' }));
     await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: 'pinned', action: 'pastePaths' }));

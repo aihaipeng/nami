@@ -31,7 +31,7 @@ export function defaultTranslationShortcuts(primary: 'meta' | 'control'): Transl
     translate: key('Enter'),
     copyPrimary: key('Digit1'),
     copySecondary: key('Digit2'),
-    pin: key('KeyP', 'shift'),
+    pin: key('KeyP'),
     showShortcuts: key('KeyK'),
     focusSearch: key('KeyF'),
     openSettings: key('Comma'),

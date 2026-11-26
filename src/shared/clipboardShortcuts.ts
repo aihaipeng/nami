@@ -20,7 +20,7 @@ export function defaultClipboardShortcuts(primary: 'meta' | 'control') {
     preview: shortcut('Space', []),
     note: shortcut('KeyN'), ocr: shortcut('KeyO', [primary, 'shift']), translate: shortcut('KeyT', primary === 'meta' ? [primary] : [primary, 'shift']),
     copyRecord: shortcut('KeyC'),
-    favorite: shortcut('KeyD'), pin: shortcut('KeyP'), delete: shortcut('Backspace', [primary]),
+    favorite: shortcut('KeyD'), pin: shortcut('KeyP', primary === 'meta' ? ['alt', 'meta'] : ['control', 'alt']), delete: shortcut('Backspace', [primary]),
   };
 }
 

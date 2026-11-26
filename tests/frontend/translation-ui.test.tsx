@@ -243,10 +243,10 @@ describe('translation input and shortcuts', () => {
 
   it('supports Command-W dismissal and the translation pin shortcut', async () => {
     await mount();
-    fireEvent.keyDown(source(), { key: 'p', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(source(), { key: 'p', metaKey: true });
     expect(calls('window_pin').at(-1)).toEqual(['window_pin', { region: 'translation', pinned: true }]);
     await windowState({ translationPinned: true });
-    fireEvent.keyDown(source(), { key: 'p', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(source(), { key: 'p', metaKey: true });
     expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'translation', pinned: false });
     fireEvent.keyDown(source(), { key: 'w', metaKey: true });
     expect(calls('window_hide').at(-1)).toEqual(['window_hide', { region: 'translation' }]);

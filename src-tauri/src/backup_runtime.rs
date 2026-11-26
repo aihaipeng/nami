@@ -350,7 +350,7 @@ pub async fn backup_import_apply(
             let window_position_mode =
                 WindowPositionMode::parse(db.preference("window_position_mode")?.as_deref());
             let capture = db.clipboard_capture_enabled()?;
-            let preferences = translation::Preferences::from_store(
+            let mut preferences = translation::Preferences::from_store(
                 |key| db.preference(key).ok().flatten(),
                 primary_modifier,
             );
@@ -372,6 +372,11 @@ pub async fn backup_import_apply(
                     &preferences.shortcuts,
                     clipboard_shortcut.binding.as_ref(),
                 );
+            nami::shortcuts::upgrade_legacy_pin_defaults(
+                &mut clipboard_options.record_shortcuts,
+                &mut preferences.shortcuts,
+                clipboard_shortcut.binding.as_ref(),
+            );
             Some((
                 ui_locale,
                 window_position_mode,

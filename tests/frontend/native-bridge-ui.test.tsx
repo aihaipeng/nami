@@ -21,11 +21,11 @@ describe('native view connection and feedback', () => {
       if (name === 'window_pin') throw new Error('window_geometry');
       return invoke(name, args);
     });
-    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true });
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The native operation did not complete'));
     expect((source() as HTMLTextAreaElement).value).toBe('Keep my draft after an error');
     bridge.invoke.mockImplementation(invoke);
-    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true });
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   });
 
@@ -101,7 +101,7 @@ describe('native view connection and feedback', () => {
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     bridge.invoke.mockImplementation((name: string, args?: unknown) => name === 'window_pin' ? pending : original(name, args));
-    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(source(), { key: 'p', code: 'KeyP', metaKey: true });
     expect(screen.queryByRole('progressbar')).toBeNull();
     await act(async () => { finish(); });
   });

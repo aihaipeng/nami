@@ -75,7 +75,7 @@ describe('clipboard recording settings', () => {
       'Focus Input', 'Preview', 'Copy', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note', 'Delete', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
     expect(general.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
-      '⌘F', 'Space', '⌘C', '⌘D', '⌘P', '⌘N', '⌘⌫', '⇧⌘P', '⌘K', '⌘,',
+      '⌘F', 'Space', '⌘C', '⌘D', '⌥⌘P', '⌘N', '⌘⌫', '⌘P', '⌘K', '⌘,',
     ]);
     for (const retired of ['Switch Record View', 'Open Translation History', 'Focus Record List', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Paste (Context Menu)']) {
       expect(screen.queryByRole('checkbox', { name: retired })).toBeNull();
@@ -266,7 +266,7 @@ describe('clipboard recording settings', () => {
     await user.click(pin);
     fireEvent.keyDown(window, { key: 'd', code: 'KeyD', metaKey: true });
     expect(await screen.findByText('This key combination is already assigned to a shortcut in the same scope.')).toBeTruthy();
-    expect(pin.textContent).toBe('⌘P');
+    expect(pin.textContent).toBe('⌥⌘P');
     await user.click(pin);
     fireEvent.keyDown(window, { key: 'j', code: 'KeyJ', altKey: true });
     await waitFor(() => expect(pin.textContent).toBe('⌥J'));

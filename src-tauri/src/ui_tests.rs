@@ -8711,7 +8711,7 @@ const panel=document.querySelector('.record-context-menu');if(!panel)return {rea
 const nodes=[...panel.querySelectorAll('[role=menuitem],[role=separator]')];
 const width=panel.getBoundingClientRect().width;
 const menu=nodes.map(el=>el.getAttribute('role')==='separator'?'/':`${el.querySelector('.record-menu-label')?.textContent.trim()} ${el.querySelector('kbd')?.textContent}`);
-const expected=['Copy ⌘C','Paste ↵','Save ⌘S','/','Favorite ⌘D','Pin ⌘P','Note ⌘N','/','Translate ⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
+const expected=['Copy ⌘C','Paste ↵','Save ⌘S','/','Favorite ⌘D','Pin ⌥⌘P','Note ⌘N','/','Translate ⌘T','Extract Text ⇧⌘O','/','Delete ⌘⌫'];
 const pinned=document.querySelector('.clipboard-panel .history-pinned');
 if(!pinned)return {ready:false};
 const empty=pinned.classList.contains('empty');pinned.classList.remove('empty');

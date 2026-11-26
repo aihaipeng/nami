@@ -54,10 +54,10 @@ describe('unified records workspace', () => {
     const help = () => within(panel()).queryByRole('dialog', { name: 'HotKey' });
     const key = (code: string, key: string, shiftKey = false, repeat = false) => fireEvent.keyDown(document.activeElement!, { code, key, metaKey: true, shiftKey, repeat });
     toolbar.getByRole('button', { name: 'Pin records' }).focus();
-    key('KeyP', 'P', true);
+    key('KeyP', 'P');
     expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'clipboard', pinned: true });
     await windowState({ clipboardPinned: true });
-    key('KeyP', 'P', true);
+    key('KeyP', 'P');
     expect(calls('window_pin').at(-1)?.[1]).toEqual({ region: 'clipboard', pinned: false });
     await windowState({ clipboardPinned: false });
     key('KeyK', 'k');
