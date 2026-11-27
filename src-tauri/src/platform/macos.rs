@@ -963,67 +963,6 @@ pub(super) fn target_bundle_id(target: Target) -> Option<String> {
     unsafe { bundle_identifier(&*running(target)?) }
 }
 
-pub(crate) fn pick_image_save_path(
-    window: &tauri::Window,
-    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
-) -> Result<(), String> {
-    use std::cell::Cell;
-    unsafe {
-        let parent = window.ns_window().map_err(|_| "clipboard_save_dialog")?;
-        let parent = parent.cast::<AnyObject>();
-        let visible: bool = msg_send![parent, isVisible];
-        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
-        if !visible || !sheet.is_null() {
-            return Err("clipboard_save_dialog".into());
-        }
-        let panel: Retained<AnyObject> = msg_send![class!(NSSavePanel), savePanel];
-        let png: Retained<AnyObject> =
-            msg_send![class!(UTType), typeWithIdentifier: ns_string!("public.png")];
-        let types = NSArray::from_retained_slice(&[png]);
-        let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
-        let _: () = msg_send![&*panel, setAllowsOtherFileTypes: false];
-        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
-        let name = chrono::Local::now()
-            .format("Nami_%Y-%m-%d_%H-%M-%S.png")
-            .to_string();
-        let _: () = msg_send![&*panel, setNameFieldStringValue: &*NSString::from_str(&name)];
-        let result_panel = panel.clone();
-        let complete = Cell::new(Some(complete));
-        let finish = RcBlock::new(move |response: isize| {
-            let Some(complete) = complete.take() else {
-                return;
-            };
-            complete(match response {
-                1 => {
-                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
-                    url.and_then(|url| url.path())
-                        .map(|path| Some(path.to_string().into()))
-                        .ok_or_else(|| "clipboard_save_dialog".into())
-                }
-                0 => Ok(None),
-                _ => Err("clipboard_save_dialog".into()),
-            });
-        });
-        let _: () =
-            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
-    }
-    Ok(())
-}
-
-pub(crate) fn write_image_export(
-    destination: &std::path::Path,
-    png: Vec<u8>,
-) -> Result<(), String> {
-    let filename = destination.to_str().ok_or("clipboard_save_failed")?;
-    let url = NSURL::fileURLWithPath(&NSString::from_str(filename));
-    // The save panel confirms replacement. Foundation commits atomically so a failed write
-    // cannot leave a partly written destination or truncate the prior file.
-    NSData::from_vec(png)
-        .writeToURL_atomically(&url, true)
-        .then_some(())
-        .ok_or_else(|| "clipboard_save_failed".into())
-}
-
 pub(crate) fn pick_backup_save_path(
     window: &tauri::Window,
     complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,

@@ -611,14 +611,6 @@ pub struct OperationResult {
 }
 
 impl OperationResult {
-    pub fn copied() -> Self {
-        Self {
-            status: "copied",
-            copy_status: "current",
-            code: None,
-        }
-    }
-
     pub fn failed(code: &'static str, version: Option<i64>, current: i64) -> Self {
         Self {
             status: "failed",

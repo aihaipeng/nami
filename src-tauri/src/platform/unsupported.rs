@@ -198,17 +198,6 @@ pub fn open_clipboard_target(_: nami::clipboard::open_target::OpenTarget) -> Res
     Err("platform_unavailable".into())
 }
 
-pub(crate) fn pick_image_save_path(
-    _: &tauri::Window,
-    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
-) -> Result<(), String> {
-    Err(UNAVAILABLE.into())
-}
-
-pub(crate) fn write_image_export(_: &std::path::Path, _: Vec<u8>) -> Result<(), String> {
-    Err(UNAVAILABLE.into())
-}
-
 pub(crate) fn pick_backup_save_path(
     _: &tauri::Window,
     _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,

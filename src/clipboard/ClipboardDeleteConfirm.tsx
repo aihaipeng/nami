@@ -28,9 +28,11 @@ export function ClipboardDeleteConfirm({ t, description, onCancel, onConfirm }: 
     const onKey = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229) return;
       if (event.key !== 'Escape' && event.key !== 'Enter') return;
+      const modified = event.metaKey || event.ctrlKey || event.altKey || event.shiftKey;
+      if (event.key === 'Enter' && !modified && !event.repeat && event.target instanceof HTMLButtonElement && element.contains(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (event.repeat) return;
+      if (event.repeat || modified) return;
       if (event.key === 'Escape') cancelRef.current();
       else confirmRef.current();
     };

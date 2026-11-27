@@ -141,17 +141,6 @@ pub(crate) async fn payload(
         .map_err(|_| "storage_worker")?
 }
 
-pub(crate) async fn image_export_png(app: &AppHandle, id: String) -> Result<Vec<u8>, String> {
-    let payload = {
-        let state = app.state::<AppState>();
-        let _write = state.clipboard_writes.lock().await;
-        payload(app, id, PayloadMode::Stored).await?
-    };
-    tauri::async_runtime::spawn_blocking(move || export_png(payload))
-        .await
-        .map_err(|_| "storage_worker")?
-}
-
 fn export_png(payload: platform::ClipboardPayload) -> Result<Vec<u8>, String> {
     let (bytes, extension) = match platform::prepare_image_paste(payload) {
         platform::ClipboardPayload::Image { bytes, extension }
@@ -167,26 +156,6 @@ fn export_png(payload: platform::ClipboardPayload) -> Result<Vec<u8>, String> {
         return Err("clipboard_image_format".into());
     }
     Ok(bytes)
-}
-
-pub(crate) fn save_image_export(
-    app_data: &Path,
-    destination: &Path,
-    png: Vec<u8>,
-) -> Result<(), String> {
-    let app_data = app_data.canonicalize().map_err(|_| "storage_unavailable")?;
-    let parent = destination.parent().ok_or("clipboard_save_failed")?;
-    let parent = parent.canonicalize().map_err(|_| "clipboard_save_failed")?;
-    if parent.starts_with(app_data) {
-        return Err("clipboard_save_failed".into());
-    }
-    let destination = parent.join(destination.file_name().ok_or("clipboard_save_failed")?);
-    match destination.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() => (),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        _ => return Err("clipboard_save_failed".into()),
-    }
-    platform::write_image_export(&destination, png)
 }
 
 const DRAG_EXPORT_TTL_SECS: u64 = 600;
@@ -781,43 +750,6 @@ fn persist_capture_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(all(target_os = "macos", not(feature = "portable-ui")))]
-    #[test]
-    fn image_export_writes_the_full_verified_png_and_protects_private_storage() {
-        let root = std::env::temp_dir().join(format!("nami-image-export-{}", uuid::Uuid::new_v4()));
-        let private = root.join("private");
-        let bytes = include_bytes!("../icons/icon.png").to_vec();
-        let image = clipboard::store_image(&private, &bytes, "png").unwrap();
-        let record = ClipboardRecord {
-            id: "save-image".into(),
-            kind: "image".into(),
-            text: String::new(),
-            date: "2026-11-23T00:00:00Z".into(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-            image_path: Some(image.clone()),
-            fingerprint: clipboard::fingerprint("image", &bytes),
-        };
-        let png = export_png(record_payload(&private, record.clone(), None).unwrap()).unwrap();
-        assert_eq!(png, bytes);
-        let destination = root.join("output.png");
-        save_image_export(&private, &destination, png.clone()).unwrap();
-        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
-        assert!(save_image_export(&private, &private.join(&image), png.clone()).is_err());
-        let link = root.join("link.png");
-        std::os::unix::fs::symlink(&destination, &link).unwrap();
-        assert!(save_image_export(&private, &link, png).is_err());
-        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
-        std::fs::remove_file(private.join(image)).unwrap();
-        assert_eq!(
-            record_payload(&private, record, None).unwrap_err(),
-            "clipboard_image_missing"
-        );
-        assert!(export_png(platform::ClipboardPayload::Text("not an image".into())).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn recopy_queues_only_unindexed_images() {

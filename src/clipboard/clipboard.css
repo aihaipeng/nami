@@ -142,19 +142,10 @@
 .clipboard-smart-image-error { padding: 16px 8px; text-align: center; font-size: 12px; color: var(--history-secondary); }
 .clipboard-smart-palette { padding: 8px; gap: 0; }
 .clipboard-palette-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(52px, 1fr)); gap: 6px; min-width: 0; }
-.clipboard-palette-swatch { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; padding: 3px; border-radius: 8px; background: transparent; color: var(--history-secondary); transition: background-color 120ms ease-out, color 120ms ease-out; }
-.clipboard-palette-swatch:is(:hover, :focus-visible):not(:disabled) { background: hsl(var(--foreground) / .07); color: var(--history-label); }
-.clipboard-palette-swatch:disabled { opacity: .45; }
-.clipboard-palette-swatch.record-copied { color: var(--record-success-color); }
-.clipboard-palette-chip { position: relative; display: flex; align-items: center; justify-content: center; height: 24px; border-radius: 6px; background: var(--swatch-color); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .16); transition: transform 120ms ease-out, box-shadow 120ms ease-out; }
-.clipboard-palette-swatch:is(:hover, :focus-visible):not(:disabled) .clipboard-palette-chip { transform: translateY(-0.5px); }
-.clipboard-palette-swatch.record-copied .clipboard-palette-chip { box-shadow: inset 0 0 0 1.5px var(--record-success-color); }
-.clipboard-palette-check { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; background: hsl(var(--background) / .9); color: var(--record-success-color); box-shadow: 0 1px 4px rgb(0 0 0 / .2); }
-.clipboard-palette-check > svg { width: 13px; height: 13px; stroke-width: 1.8; }
-.clipboard-palette-hex { display: block; text-align: center; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 10.5px; line-height: 14px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (prefers-reduced-motion: reduce) { .clipboard-palette-swatch, .clipboard-palette-chip { transition: none; transform: none !important; } }
+.clipboard-palette-swatch { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 3px; color: var(--history-secondary); }
+.clipboard-palette-chip { height: 24px; border-radius: 6px; background: var(--swatch-color); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .16); }
+.clipboard-palette-hex { text-align: center; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 10.5px; line-height: 14px; letter-spacing: -0.01em; white-space: nowrap; user-select: text; -webkit-user-select: text; }
 .clipboard-smart-files-list { display: flex; flex-direction: column; gap: 10px; }
-.clipboard-smart-actions { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .clipboard-smart-file-head { justify-content: space-between; }
 .clipboard-smart-file-head .clipboard-file { flex: 1; min-width: 0; gap: 6px; }
 .clipboard-smart-file-path { gap: 6px; }
@@ -180,13 +171,11 @@
 .clipboard-smart-value { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: var(--history-label); user-select: text; -webkit-user-select: text; }
 .clipboard-smart-rows .clipboard-smart-value { margin: 3px 0; line-height: 18px; white-space: normal; overflow-wrap: anywhere; overflow: visible; text-overflow: clip; }
 .clipboard-smart-rows .clipboard-smart-value:last-child { grid-column: 2 / -1; }
-.clipboard-smart-params .clipboard-smart-value { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
 .clipboard-smart-value-plain { font-family: inherit; }
 .clipboard-smart-value-missing { color: var(--history-secondary); user-select: none; -webkit-user-select: none; }
 .clipboard-smart-value-wrap { white-space: normal; overflow-wrap: anywhere; }
 .clipboard-smart-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .clipboard-smart-header .clipboard-detail-mode { margin-right: 0; }
-.clipboard-smart-header > :last-child { margin-left: auto; }
 .clipboard-smart-heading { font-size: 11px; font-weight: 500; color: var(--history-secondary); white-space: nowrap; }
 .clipboard-smart-divider { padding-top: 8px; border-top: 1px solid hsl(var(--foreground) / .08); }
 .clipboard-smart-more { grid-column: 1 / -1; font-size: 11px; color: var(--history-secondary); padding-top: 2px; }

@@ -122,13 +122,13 @@ export function FileList({ entries, onReveal, revealLabel }: { entries: FileEntr
   })}</span>;
 }
 
-type MediaProps = { record: ClipboardRecord; native: boolean; active: boolean; onImageFile: (id: string, eligible: boolean) => void };
+type MediaProps = { record: ClipboardRecord; native: boolean; active: boolean };
 
 export function isSingleImage(entries: FileEntry[]) {
   return entries.length === 1 && entries[0].exists && !entries[0].isDir && entries[0].isImage;
 }
 
-function FilesPreview({ record, native, active, onImageFile }: MediaProps) {
+function FilesPreview({ record, native, active }: MediaProps) {
   const { element, visible } = useVisible(native && active);
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -139,10 +139,9 @@ function FilesPreview({ record, native, active, onImageFile }: MediaProps) {
     void invoke<FileEntry[]>('clipboard_files', { recordId: record.id }).then((files) => {
       if (disposed) return;
       setEntries(files);
-      onImageFile(record.id, isSingleImage(files));
     }).catch(() => { if (!disposed) setFailed(true); });
-    return () => { disposed = true; onImageFile(record.id, false); };
-  }, [native, visible, active, record.id, onImageFile]);
+    return () => { disposed = true; };
+  }, [native, visible, active, record.id]);
   const files = entries && <FileList entries={entries} />;
   return <span ref={element} className="clipboard-media">{failed ? <span className="clipboard-media-placeholder" role="img" aria-label="Files unavailable"><File /></span> : !entries ? <span className="clipboard-media-placeholder">{active && visible ? <ActivityBeam label="Working" /> : null}</span> : isSingleImage(entries) ? <ImagePreview recordId={record.id} native={native} active={active} maxDisplayHeight={64} fallback={files} /> : files}</span>;
 }

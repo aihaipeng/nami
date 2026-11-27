@@ -42,7 +42,7 @@ pub(crate) static VISION_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 fn eligible(record: &ClipboardRecord) -> Result<(), String> {
-    if !["text", "image", "files"].contains(&record.kind.as_str()) {
+    if !["text", "image"].contains(&record.kind.as_str()) {
         return Err("invalid_argument".into());
     }
     Ok(())
@@ -56,27 +56,11 @@ fn revalidate(record: &ClipboardRecord, kind: &str, fingerprint: &str) -> Result
     Ok(())
 }
 
-fn image_bytes(
-    record: &ClipboardRecord,
-    root: &std::path::Path,
-) -> Result<Option<Vec<u8>>, String> {
-    if record.kind == "image" {
-        return nami::clipboard::read_image(
-            root,
-            record.image_path.as_deref().ok_or("storage_corrupt")?,
-        )
-        .map(Some);
+fn image_bytes(record: &ClipboardRecord, root: &std::path::Path) -> Result<Vec<u8>, String> {
+    if record.kind != "image" {
+        return Err("invalid_argument".into());
     }
-    let paths: Vec<String> = serde_json::from_str(&record.text).map_err(|_| "storage_corrupt")?;
-    if paths.len() != 1 {
-        return Ok(None);
-    }
-    let entries = nami::clipboard::file_entries(&record.text)?;
-    let entry = &entries[0];
-    if !entry.exists || entry.is_dir || !entry.is_image {
-        return Ok(None);
-    }
-    nami::clipboard::read_file_preview(std::path::Path::new(&entry.path)).map(Some)
+    nami::clipboard::read_image(root, record.image_path.as_deref().ok_or("storage_corrupt")?)
 }
 
 struct PreviewQr {
@@ -136,15 +120,10 @@ pub(crate) async fn detail_qr_codes(app: &AppHandle, id: String) -> Result<Vec<S
         if !request.is_current(&state) {
             return Ok(Vec::new());
         }
-        let bytes = match record.kind.as_str() {
-            "image" => image_bytes(&record, &root).ok().flatten(),
-            "files" => match nami::clipboard::all_file_entries(&record.text)?.as_slice() {
-                [entry] if entry.exists && !entry.is_dir && entry.is_image => {
-                    nami::clipboard::read_file_preview(std::path::Path::new(&entry.path)).ok()
-                }
-                _ => None,
-            },
-            _ => None,
+        let bytes = if record.kind == "image" {
+            image_bytes(&record, &root).ok()
+        } else {
+            None
         };
         Ok(match bytes {
             Some(bytes) if request.is_current(&state) => {
@@ -240,20 +219,14 @@ async fn text(
     }
     let root = clipboard_runtime::image_root(app)?;
     let source = record.clone();
-    // File records reference mutable paths; cache by the bytes actually recognized.
-    let image = tauri::async_runtime::spawn_blocking(move || {
+    let (bytes, fingerprint) = tauri::async_runtime::spawn_blocking(move || {
         image_bytes(&source, &root).map(|bytes| {
-            bytes.map(|bytes| {
-                let fingerprint = nami::clipboard::fingerprint("image", &bytes);
-                (bytes, fingerprint)
-            })
+            let fingerprint = nami::clipboard::fingerprint("image", &bytes);
+            (bytes, fingerprint)
         })
     })
     .await
     .map_err(|_| "storage_worker")??;
-    let Some((bytes, fingerprint)) = image else {
-        return Ok((record, String::new()));
-    };
     let result = if let Some(text) = cache.get(&fingerprint) {
         text
     } else {
@@ -377,10 +350,13 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
     if action == "translate" {
         nami::translation::validate_text(&text)?;
     }
-    let copied = text.clone();
-    let source = record.source_app.clone();
-    let translated_record_id = record.id.clone();
     let is_ocr = action == "ocr";
+    let translation = (!is_ocr).then(|| crate::ClipboardTranslationContext {
+        record_id: record.id.clone(),
+        text: text.clone(),
+        source_app: record.source_app.clone(),
+        error: None,
+    });
     on_main(app, move |app| {
         let state = app.state::<AppState>();
         {
@@ -394,20 +370,9 @@ pub(crate) async fn process(app: &AppHandle, id: String, action: String) -> Resu
                 return Err("cancelled".into());
             }
         }
-        if action == "ocr" {
-            if state.operation.load(Ordering::SeqCst) == clipboard_operation {
-                let version =
-                    platform::write_text(&copied).map_err(|(code, _)| code.to_string())?;
-                state.clipboard_version.store(version, Ordering::SeqCst);
-            }
-        } else {
-            *state.clipboard_translation.lock().unwrap() =
-                Some(crate::ClipboardTranslationContext {
-                    record_id: translated_record_id.clone(),
-                    text: copied,
-                    source_app: source,
-                    error: None,
-                });
+        if let Some(translation) = translation {
+            let translated_record_id = translation.record_id.clone();
+            *state.clipboard_translation.lock().unwrap() = Some(translation);
             let delivery = windows::open_clipboard_translation(&app, translated_record_id)
                 .and_then(|_| {
                     let view = app.get_webview("translation").ok_or("window_unavailable")?;
@@ -615,51 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn file_ocr_reads_only_one_existing_image_and_tracks_changed_bytes() {
-        let root = std::env::temp_dir().join(format!("nami-ocr-files-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let image = root.join("image.png");
-        let document = root.join("document.txt");
-        std::fs::write(&image, b"first image bytes").unwrap();
-        std::fs::write(&document, b"ordinary file text").unwrap();
-        let mut record = ClipboardRecord {
-            id: "synthetic".into(),
-            kind: "files".into(),
-            text: serde_json::to_string(&[&image]).unwrap(),
-            date: String::new(),
-            is_favorite: false,
-            is_pinned: false,
-            source_app: None,
-            image_path: None,
-            fingerprint: "path-fingerprint".into(),
-        };
-        assert_eq!(
-            image_bytes(&record, &root).unwrap(),
-            Some(b"first image bytes".to_vec())
-        );
-        std::fs::write(&image, b"changed image bytes").unwrap();
-        assert_eq!(
-            image_bytes(&record, &root).unwrap(),
-            Some(b"changed image bytes".to_vec())
-        );
-        for paths in [
-            vec![&document],
-            vec![&root],
-            vec![&image, &document],
-            vec![],
-        ] {
-            record.text = serde_json::to_string(&paths).unwrap();
-            assert_eq!(image_bytes(&record, &root).unwrap(), None);
-        }
-        record.text = serde_json::to_string(&[&image]).unwrap();
-        std::fs::remove_file(&image).unwrap();
-        assert_eq!(image_bytes(&record, &root).unwrap(), None);
-        record.text = "not a file list".into();
-        assert_eq!(image_bytes(&record, &root), Err("storage_corrupt".into()));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn actions_accept_supported_record_kinds_regardless_of_favorite() {
         let mut record = ClipboardRecord {
             id: "synthetic".into(),
@@ -689,7 +609,11 @@ mod tests {
             Err("cancelled".into())
         );
         record.kind = "files".into();
-        assert!(eligible(&record).is_ok());
+        assert_eq!(eligible(&record), Err("invalid_argument".into()));
+        assert_eq!(
+            image_bytes(&record, std::path::Path::new("/tmp")),
+            Err("invalid_argument".into())
+        );
         record.kind = "unknown".into();
         assert_eq!(eligible(&record), Err("invalid_argument".into()));
     }

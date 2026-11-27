@@ -17,6 +17,7 @@ describe('virtualList', () => {
       virtualized: false,
       start: 0,
       end: VIRTUALIZE_THRESHOLD,
+      visibleStart: 0,
       paddingTop: 0,
       paddingBottom: 0,
       totalHeight: 0,
@@ -51,6 +52,7 @@ describe('virtualList', () => {
     const midWindow = computeVirtualWindow({ ids, heights, scrollTop: midScroll, viewportHeight: 400 });
     expect(midWindow.virtualized).toBe(true);
     expect(midWindow.start).toBeLessThan(250);
+    expect(midWindow.visibleStart).toBe(250);
     expect(midWindow.end).toBeGreaterThan(255);
     expect(midWindow.end - midWindow.start).toBeLessThan(40);
     expect(midWindow.paddingTop).toBe(offsets[midWindow.start]);

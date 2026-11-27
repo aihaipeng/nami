@@ -122,9 +122,9 @@ function ShortcutsPopover({ label, children }: { label: string; children: ReactN
   </div>;
 }
 
-export function HistoryFooter({ t, snapshot, command, native, active, search, total, clipboard = false, favoritesOnly = false, onFavorites, kind = null, onKindChange, activation, shortcutsHint }: Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> & {
+export function HistoryFooter({ t, snapshot, command, native, active, search, total, clipboard = false, favoritesOnly = false, onFavorites, kind = null, onKindChange, shortcutsHint }: Pick<ViewProps, 't' | 'snapshot' | 'command' | 'native'> & {
   active: boolean; search: RefObject<HTMLInputElement | null>; total: number; clipboard?: boolean; favoritesOnly?: boolean; onFavorites?: () => void;
-  kind?: ClipboardKind | null; onKindChange?: (kind: ClipboardKind | null) => void; activation?: 'copy' | 'paste'; shortcutsHint?: string;
+  kind?: ClipboardKind | null; onKindChange?: (kind: ClipboardKind | null) => void; shortcutsHint?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
@@ -144,19 +144,25 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => { if (!footer.current?.contains(event.target as Node)) setOpen(false); };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      if (event.target instanceof Node && footer.current?.contains(event.target)) button.current?.focus();
+    };
     const dismiss = () => setOpen(false);
     document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('keydown', escape, true);
     window.addEventListener('blur', dismiss);
     window.addEventListener('resize', dismiss);
     window.addEventListener('nami:window-moved', dismiss);
-    return () => { document.removeEventListener('pointerdown', outside, true); window.removeEventListener('blur', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('nami:window-moved', dismiss); };
+    return () => { document.removeEventListener('pointerdown', outside, true); window.removeEventListener('keydown', escape, true); window.removeEventListener('blur', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('nami:window-moved', dismiss); };
   }, [open]);
   const { capabilities, translationPreferences: preferences, window: state } = snapshot;
   const panelShortcuts = clipboardPanelShortcuts(snapshot);
-  const category = panelShortcuts.find(({ action }) => action === 'switchCategory');
-  const categoryBinding = clipboard && category?.enabled && !category.globalConflict ? category.binding : null;
   const localShortcuts = panelShortcuts.filter(({ action, enabled, globalConflict, binding }) =>
-    action !== 'switchCategory' && binding && enabled && !globalConflict && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
+    binding && enabled && !globalConflict && (clipboard || sharedRecordActions.some((shared) => shared === action)) && clipboardShortcutAvailable(snapshot, native, action));
   const shortcuts = recordWindowActions.flatMap((action) => {
     const binding = preferences.shortcuts[action];
     // Older clipboard bindings could overlap the translation window's pin shortcut.
@@ -196,7 +202,9 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     return () => window.removeEventListener('keydown', keydown, true);
   }, [active]);
 
-  return <footer ref={footer} className="history-footer" onKeyDown={(event) => {
+  return <footer ref={footer} className="history-footer" onMouseDown={(event) => {
+    if ((event.target as HTMLElement).closest('button')) event.preventDefault();
+  }} onKeyDown={(event) => {
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }
   }}>
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
@@ -209,14 +217,14 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} title={t('hotKey')} aria-expanded={open} aria-keyshortcuts={shortcutsHint ? `Meta+${shortcutsHint}` : undefined} onClick={() => setOpen(!open)}>{shortcutsHint ? <span className="history-command-hint" aria-hidden="true">{shortcutsHint}</span> : <HistoryIcon name="keyboard" />}</button>
     {open && <ShortcutsPopover label={t('hotKey')}>
       <strong>{t('hotKey')}</strong>
-      <div><span>{clipboard ? activation === 'copy' ? 'Copy selection' : 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
+      <div><span>{clipboard ? 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
       <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
-      {categoryBinding && <div><span>{t('switchCategory')}</span><span>{keyLabel(categoryBinding)}</span></div>}
+      {clipboard && <div><span>{t('switchCategory')}</span><span>← / →</span></div>}
       {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘ 1～5</span></div>}
       {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
       {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><span>{keyLabel(binding)}</span></div>)}
-      <div><span>Hide window</span><span>Esc / {capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W</span></div>
+      <div><span>Hide window</span><span>{clipboard ? 'Esc' : `Esc / ${capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W`}</span></div>
     </ShortcutsPopover>}
   </footer>;
 }

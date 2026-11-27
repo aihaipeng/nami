@@ -64,7 +64,6 @@ export interface PlatformCapabilities {
   clipboardWrite: boolean;
   autoPaste: boolean;
   clipboardOpenTarget: boolean;
-  clipboardImageSave: boolean;
   clipboardDrag: boolean;
   localBackup: boolean;
   storageLocations: boolean;
@@ -109,13 +108,13 @@ export interface AppSnapshot {
 }
 
 export interface ClipboardResult {
-  status: 'copied' | 'dispatched' | 'failed';
+  status: 'dispatched' | 'failed';
   copyStatus: 'not_written' | 'current' | 'superseded';
   code: string | null;
 }
 
 export const initialSnapshot: AppSnapshot = {
-  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardImageSave: false, clipboardDrag: false, localBackup: false, storageLocations: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
+  capabilities: { platform: 'other', nativeHistory: false, nativeChrome: false, nativeMaterial: false, selection: false, imageOcr: false, appleTranslation: false, clipboardWrite: false, autoPaste: false, clipboardOpenTarget: false, clipboardDrag: false, localBackup: false, storageLocations: false, launchAtLogin: false, accessibilityPermission: false, primaryModifier: 'control' },
   locale: 'en',
   windowPositionMode: 'lastPosition',
   launchAtLogin: false,
@@ -136,7 +135,7 @@ export const initialSnapshot: AppSnapshot = {
   clipboardRecordingTypes: { text: true, image: true, files: true },
   clipboardBinding: defaultClipboardBinding,
   clipboardShortcutEnabled: true,
-  clipboardControls: { recordsOpenFocus: 'list', previewLines: { clipboard: 3 }, hoverPreviewEnabled: false, hoverPreviewDelayMs: 1000, activation: 'paste', shortcuts: defaultClipboardShortcuts('control') },
+  clipboardControls: { recordsOpenFocus: 'list', previewLines: { clipboard: 3 }, hoverPreviewEnabled: false, hoverPreviewDelayMs: 1000, shortcuts: defaultClipboardShortcuts('control') },
   accessibility: false,
   shortcutErrors: [],
   window: {

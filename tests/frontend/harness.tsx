@@ -72,7 +72,7 @@ beforeEach(() => {
   bridge.label = 'translation';
   bridge.snapshot = structuredClone(initialSnapshot);
   bridge.snapshot.clipboardControls.shortcuts = defaultClipboardShortcuts('meta');
-  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, appleTranslation: false, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardImageSave: true, clipboardDrag: true, localBackup: true, storageLocations: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
+  bridge.snapshot.capabilities = { platform: 'macos', nativeHistory: true, nativeChrome: true, nativeMaterial: true, selection: true, imageOcr: true, appleTranslation: false, clipboardWrite: true, autoPaste: true, clipboardOpenTarget: true, clipboardDrag: true, localBackup: true, storageLocations: true, launchAtLogin: true, accessibilityPermission: true, primaryModifier: 'meta' };
   bridge.snapshot.translationEngine = 'edge';
   bridge.snapshot.translationPreferences = { engine: 'edge', sourceLanguage: 'auto', primaryLanguage: 'en', secondaryLanguage: 'zh-CN', proxyUrl: '', proxyEnabled: false, selectionEnabled: true, disabledShortcuts: [], shortcuts: defaultTranslationShortcuts('meta') };
   bridge.translationOutputs = { standalone: null, clipboard: null };
@@ -212,14 +212,11 @@ beforeEach(() => {
       if (group === 'window') {
         for (const action of recordWindowActions) preferences.shortcuts[action] = defaults[action];
         preferences.disabledShortcuts = preferences.disabledShortcuts.filter((action) => !recordWindowActions.some((entry) => entry === action));
-        bridge.snapshot.clipboardControls.shortcuts.switchCategory = recordDefaults.switchCategory;
-        deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
         deliver('translation_preferences_changed', structuredClone(bridge.snapshot.translationPreferences));
         return;
       }
       if (group === 'records') {
-        const currentSwitch = bridge.snapshot.clipboardControls.shortcuts.switchCategory;
-        Object.assign(bridge.snapshot.clipboardControls.shortcuts, recordDefaults, { switchCategory: currentSwitch });
+        Object.assign(bridge.snapshot.clipboardControls.shortcuts, recordDefaults);
         deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
         return;
       }
@@ -276,11 +273,10 @@ beforeEach(() => {
       return;
     }
     if (name === 'clipboard_behavior_set') {
-      const { activation, hoverPreviewEnabled, hoverPreviewDelayMs } = args as { activation?: 'copy' | 'paste'; hoverPreviewEnabled?: boolean; hoverPreviewDelayMs?: number };
-      if (activation !== undefined) bridge.snapshot.clipboardControls.activation = activation;
+      const { hoverPreviewEnabled, hoverPreviewDelayMs } = args as { hoverPreviewEnabled?: boolean; hoverPreviewDelayMs?: number };
       if (hoverPreviewEnabled !== undefined) bridge.snapshot.clipboardControls.hoverPreviewEnabled = hoverPreviewEnabled;
       if (hoverPreviewDelayMs !== undefined) bridge.snapshot.clipboardControls.hoverPreviewDelayMs = hoverPreviewDelayMs;
-      if (activation !== undefined || hoverPreviewEnabled !== undefined || hoverPreviewDelayMs !== undefined) {
+      if (hoverPreviewEnabled !== undefined || hoverPreviewDelayMs !== undefined) {
         deliver('clipboard_controls_changed', structuredClone(bridge.snapshot.clipboardControls));
       }
       return;

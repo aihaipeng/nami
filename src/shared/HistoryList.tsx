@@ -16,7 +16,8 @@ export interface VirtualItemsConfig<T> {
   items: readonly T[];
   allItems?: readonly T[];
   itemKey: (item: T) => string;
-  renderItem: (item: T) => ReactNode;
+  renderItem: (item: T, tabbable: boolean) => ReactNode;
+  tabStopId?: string;
   resetKey?: unknown;
   threshold?: number;
 }
@@ -112,7 +113,7 @@ export function HistoryList<T = never>({
       viewportHeight: scroll.height,
       threshold: virtualItems.threshold ?? VIRTUALIZE_THRESHOLD,
     })
-    : { virtualized: false, start: 0, end: 0, paddingTop: 0, paddingBottom: 0, totalHeight: 0 };
+    : { virtualized: false, start: 0, end: 0, visibleStart: 0, paddingTop: 0, paddingBottom: 0, totalHeight: 0 };
 
   function measure() {
     const element = scroll.overflow ? frame.current : content.current;
@@ -248,12 +249,14 @@ export function HistoryList<T = never>({
   const virtualThreshold = virtualItems?.threshold ?? VIRTUALIZE_THRESHOLD;
   const retainAllItems = virtualItems?.allItems !== undefined
     && virtualItems.allItems.length <= virtualThreshold;
-  const renderedItems = virtualItems
-    ? (virtual.virtualized
-      ? virtualItems.items.slice(virtual.start, virtual.end)
-      : (retainAllItems ? virtualItems.allItems! : virtualItems.items)
-    ).map(virtualItems.renderItem)
-    : null;
+  const visibleItems = virtual.virtualized ? virtualItems?.items.slice(virtual.start, virtual.end) : virtualItems?.items;
+  let tabStopId = virtualItems?.tabStopId;
+  if (tabStopId && virtualItems && virtual.virtualized && visibleItems?.length
+    && !visibleItems.some((item) => virtualItems.itemKey(item) === tabStopId)) {
+    tabStopId = ids[virtual.visibleStart];
+  }
+  const renderedItems = virtualItems && (virtual.virtualized || !retainAllItems ? visibleItems : virtualItems.allItems)
+    ?.map((item) => virtualItems.renderItem(item, virtualItems.itemKey(item) === tabStopId));
 
   return <div ref={viewport} className="history-viewport" onWheel={(event) => {
     showScrollbar();
@@ -278,8 +281,9 @@ export function HistoryList<T = never>({
         </div>
       </div>
     </div>
-    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={0}
+    {maximum > 0 && <div className={`history-scrollbar${scrollbarVisible ? ' visible' : ''}`} onPointerMove={() => { if (!scrollOnly || scrollbarVisible) showScrollbar(); }} onFocus={() => { focused.current = true; showScrollbar(); }} onBlur={() => { focused.current = false; if (!scrollOnly || scrollbarVisible) showScrollbar(); }} role="scrollbar" aria-label="Scroll records" aria-controls={listId} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={maximum} aria-valuenow={Math.round(scroll.top)} tabIndex={virtualItems ? -1 : 0}
       onKeyDown={(event) => {
+        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
         const delta = event.key === 'ArrowDown' ? 40 : event.key === 'ArrowUp' ? -40 : event.key === 'PageDown' ? scroll.height : event.key === 'PageUp' ? -scroll.height : 0;
         if (delta || event.key === 'Home' || event.key === 'End') { showScrollbar(); event.preventDefault(); event.stopPropagation(); move(event.key === 'Home' ? 0 : event.key === 'End' ? maximum : scroll.top + delta); }
       }} onPointerDown={(event) => {

@@ -6,6 +6,7 @@ const unpinnedRowSelector = `.history-unpinned ${rowSelector}`;
 
 export function focusRecordList(panel: HTMLElement | null | undefined) {
   const button = panel?.querySelector<HTMLButtonElement>('.history-row[data-keyboard-current]:not([hidden]) .history-row-select')
+    ?? panel?.querySelector<HTMLButtonElement>(`${rowSelector}[tabindex="0"]`)
     ?? panel?.querySelector<HTMLButtonElement>(rowSelector);
   button?.focus();
   return Boolean(button);

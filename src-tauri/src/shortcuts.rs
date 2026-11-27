@@ -259,27 +259,15 @@ pub enum ClipboardRecordAction {
     Favorite,
     Pin,
     Delete,
-    CopyRecord,
     PastePlain,
-    SaveImage,
-    SwitchCategory,
 }
 
 impl ClipboardRecordAction {
     pub fn shared_with_translation(self) -> bool {
         !matches!(
             self,
-            Self::Ocr
-                | Self::OpenTarget
-                | Self::Translate
-                | Self::PastePlain
-                | Self::SaveImage
-                | Self::SwitchCategory
+            Self::Ocr | Self::OpenTarget | Self::Translate | Self::PastePlain
         )
-    }
-
-    fn requires_safe_menu_key(self) -> bool {
-        matches!(self, Self::PastePlain | Self::SaveImage)
     }
 }
 
@@ -300,10 +288,7 @@ pub struct ClipboardRecordShortcuts {
     favorite: RecordShortcut,
     pin: RecordShortcut,
     delete: RecordShortcut,
-    copy_record: RecordShortcut,
     paste_plain: RecordShortcut,
-    save_image: RecordShortcut,
-    switch_category: RecordShortcut,
 }
 
 impl Default for ClipboardRecordShortcuts {
@@ -345,16 +330,13 @@ impl Default for ClipboardRecordShortcuts {
                 },
             ),
             delete: enabled("Backspace", &[primary]),
-            copy_record: enabled("KeyC", &[primary]),
             paste_plain: enabled("Enter", &[primary]),
-            save_image: enabled("KeyS", &[primary]),
-            switch_category: enabled("Tab", &[]),
         }
     }
 }
 
 impl ClipboardRecordShortcuts {
-    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 12] {
+    fn entries(&self) -> [(ClipboardRecordAction, &RecordShortcut); 9] {
         use ClipboardRecordAction::*;
         [
             (Preview, &self.preview),
@@ -365,10 +347,7 @@ impl ClipboardRecordShortcuts {
             (Favorite, &self.favorite),
             (Pin, &self.pin),
             (Delete, &self.delete),
-            (CopyRecord, &self.copy_record),
             (PastePlain, &self.paste_plain),
-            (SaveImage, &self.save_image),
-            (SwitchCategory, &self.switch_category),
         ]
     }
 
@@ -416,8 +395,6 @@ impl ClipboardRecordShortcuts {
             open_target: defaults.open_target,
             translate: defaults.translate,
             paste_plain: defaults.paste_plain,
-            save_image: defaults.save_image,
-            switch_category: defaults.switch_category,
             ..self.clone()
         };
         restored.validate_unique()?;
@@ -430,28 +407,14 @@ impl ClipboardRecordShortcuts {
             open_target: self.open_target.clone(),
             translate: self.translate.clone(),
             paste_plain: self.paste_plain.clone(),
-            save_image: self.save_image.clone(),
-            switch_category: self.switch_category.clone(),
             ..Self::default()
-        };
-        restored.validate_unique()?;
-        Ok(restored)
-    }
-
-    pub fn restore_window(&self) -> Result<Self, String> {
-        let restored = Self {
-            switch_category: Self::default().switch_category,
-            ..self.clone()
         };
         restored.validate_unique()?;
         Ok(restored)
     }
 
     pub fn restore_records(&self) -> Result<Self, String> {
-        let restored = Self {
-            switch_category: self.switch_category.clone(),
-            ..Self::default()
-        };
+        let restored = Self::default();
         restored.validate_unique()?;
         Ok(restored)
     }
@@ -517,7 +480,7 @@ impl ClipboardRecordShortcuts {
         {
             validate_window_reservation(value)?;
             validate_quick_paste_reservation(value)?;
-            if action.requires_safe_menu_key()
+            if action == ClipboardRecordAction::PastePlain
                 && (matches!(value.code.as_str(), "Escape" | "Tab")
                     || value.modifiers.is_empty()
                         && matches!(
@@ -548,10 +511,7 @@ impl ClipboardRecordShortcuts {
             ClipboardRecordAction::Favorite => &mut self.favorite,
             ClipboardRecordAction::Pin => &mut self.pin,
             ClipboardRecordAction::Delete => &mut self.delete,
-            ClipboardRecordAction::CopyRecord => &mut self.copy_record,
             ClipboardRecordAction::PastePlain => &mut self.paste_plain,
-            ClipboardRecordAction::SaveImage => &mut self.save_image,
-            ClipboardRecordAction::SwitchCategory => &mut self.switch_category,
         };
         if let Some(enabled) = enabled {
             current.enabled = enabled;
@@ -585,10 +545,7 @@ impl ClipboardRecordShortcuts {
                     ("ocr", ClipboardRecordAction::Ocr),
                     ("openTarget", ClipboardRecordAction::OpenTarget),
                     ("translate", ClipboardRecordAction::Translate),
-                    ("copyRecord", ClipboardRecordAction::CopyRecord),
                     ("pastePlain", ClipboardRecordAction::PastePlain),
-                    ("saveImage", ClipboardRecordAction::SaveImage),
-                    ("switchCategory", ClipboardRecordAction::SwitchCategory),
                 ] {
                     if value.get(key).is_none() {
                         let binding =
@@ -902,44 +859,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_and_plain_paste_shortcuts_persist_and_yield_to_existing_bindings() {
-        use ClipboardRecordAction::*;
-        let defaults = ClipboardRecordShortcuts::default();
-        let mut legacy = serde_json::to_value(&defaults).unwrap();
-        let legacy = legacy.as_object_mut().unwrap();
-        legacy.remove("saveImage");
-        legacy.insert(
-            "pin".into(),
-            serde_json::to_value(&defaults.save_image).unwrap(),
-        );
-        let loaded =
-            ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(legacy).unwrap()));
-        assert_eq!(loaded.pin.binding, defaults.save_image.binding);
-        assert_eq!(loaded.save_image.binding, None);
+    fn legacy_save_image_binding_does_not_reserve_a_key() {
+        let key = KeyBinding::new("KeyS", &["alt"]);
+        let stored = serde_json::json!({
+            "saveImage": { "binding": key, "enabled": true },
+            "pin": { "binding": key, "enabled": true }
+        });
+        let loaded = ClipboardRecordShortcuts::from_store(Some(stored.to_string()));
+        assert_eq!(loaded.pin.binding, Some(key.clone()));
+        assert!(loaded.pin.enabled);
+        assert!(!loaded.conflicts(&key, Some(ClipboardRecordAction::Pin)));
+        assert!(serde_json::to_value(&loaded)
+            .unwrap()
+            .get("saveImage")
+            .is_none());
+    }
 
+    #[test]
+    fn plain_paste_shortcut_persists_and_reserves_its_binding() {
+        use ClipboardRecordAction::{Ocr, PastePlain};
+        let defaults = ClipboardRecordShortcuts::default();
         let mut custom = ClipboardRecordShortcuts::default();
         let key = KeyBinding::new("KeyJ", &["alt"]);
         custom
             .set(PastePlain, Some(key.clone()), None, &[])
             .unwrap();
-        custom.set(SaveImage, None, None, &[]).unwrap();
         custom.set(PastePlain, None, Some(false), &[]).unwrap();
-        assert!(custom.set(SaveImage, Some(key.clone()), None, &[]).is_err());
-        assert!(custom
-            .set(SaveImage, Some(KeyBinding::new("Escape", &[])), None, &[])
-            .is_err());
-        assert!(custom
-            .set(PastePlain, Some(KeyBinding::new("Enter", &[])), None, &[])
-            .is_err());
+        assert!(custom.set(Ocr, Some(key.clone()), None, &[]).is_err());
+        for code in ["Escape", "Enter"] {
+            assert!(custom
+                .set(PastePlain, Some(KeyBinding::new(code, &[])), None, &[])
+                .is_err());
+        }
         let reopened =
             ClipboardRecordShortcuts::from_store(Some(serde_json::to_string(&custom).unwrap()));
         assert_eq!(reopened.paste_plain.binding, Some(key));
         assert!(!reopened.paste_plain.enabled);
-        assert!(reopened.save_image.binding.is_none());
-        assert_eq!(reopened.restore_general().unwrap().save_image.binding, None);
         assert_eq!(
-            reopened.restore_clipboard().unwrap().save_image.binding,
-            defaults.save_image.binding
+            reopened.restore_general().unwrap().paste_plain.binding,
+            reopened.paste_plain.binding
+        );
+        assert_eq!(
+            reopened.restore_clipboard().unwrap().paste_plain.binding,
+            defaults.paste_plain.binding
         );
     }
 
@@ -985,34 +947,22 @@ mod tests {
     }
 
     #[test]
-    fn switch_category_defaults_to_tab_unless_that_binding_is_taken() {
-        use ClipboardRecordAction::SwitchCategory;
-        let tab = KeyBinding::new("Tab", &[]);
-        assert_eq!(
-            ClipboardRecordShortcuts::default().switch_category.binding,
-            Some(tab.clone())
-        );
+    fn ignores_retired_switch_category_without_displacing_other_bindings() {
         let mut stored = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
-        stored.as_object_mut().unwrap().remove("switchCategory");
+        stored["switchCategory"] = serde_json::json!({
+            "binding": {"code": "Tab", "modifiers": []},
+            "enabled": true
+        });
+        stored["preview"] = serde_json::json!({
+            "binding": {"code": "KeyJ", "modifiers": []},
+            "enabled": false
+        });
+        assert!(serde_json::from_value::<ClipboardRecordAction>("switchCategory".into()).is_err());
         let loaded = ClipboardRecordShortcuts::from_store(Some(stored.to_string()));
-        assert_eq!(loaded.switch_category.binding, Some(tab.clone()));
-        let custom = KeyBinding::new("KeyJ", &[]);
-        let mut changed = loaded;
-        changed
-            .set(SwitchCategory, Some(custom.clone()), None, &[])
-            .unwrap();
-        assert_eq!(
-            changed.restore_general().unwrap().switch_category.binding,
-            Some(custom)
-        );
-        assert_eq!(
-            changed.restore_clipboard().unwrap().switch_category.binding,
-            Some(tab.clone())
-        );
-        stored["preview"]["binding"] = serde_json::to_value(&tab).unwrap();
-        let yielded = ClipboardRecordShortcuts::from_store(Some(stored.to_string()));
-        assert_eq!(yielded.preview.binding, Some(tab));
-        assert!(yielded.switch_category.binding.is_none());
+        assert_eq!(loaded.preview.binding, Some(KeyBinding::new("KeyJ", &[])));
+        assert!(!loaded.preview.enabled);
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert!(saved.get("switchCategory").is_none());
     }
 
     #[test]
@@ -1184,14 +1134,14 @@ mod tests {
             defaults.preview.binding,
             Some(KeyBinding::new("Space", &[]))
         );
-        for (slot, code) in [
-            (&defaults.note, "KeyN"),
-            (&defaults.copy_record, "KeyC"),
-            (&defaults.favorite, "KeyD"),
-        ] {
+        for (slot, code) in [(&defaults.note, "KeyN"), (&defaults.favorite, "KeyD")] {
             assert_eq!(slot.binding, Some(KeyBinding::new(code, &[primary])));
             assert!(slot.enabled);
         }
+        assert!(defaults.entries().into_iter().all(|(_, slot)| slot
+            .binding
+            .as_ref()
+            .is_none_or(|binding| binding.code != "KeyC")));
         assert_eq!(
             defaults.pin.binding,
             Some(KeyBinding::new(
@@ -1249,6 +1199,7 @@ mod tests {
             "navigateDown",
             "previousCategory",
             "nextCategory",
+            "switchCategory",
         ] {
             old[retired] = serde_json::json!({
                 "binding":{"code":"F8","modifiers":[]},"enabled":true
@@ -1268,27 +1219,34 @@ mod tests {
             "navigateDown",
             "previousCategory",
             "nextCategory",
+            "switchCategory",
         ] {
             assert!(saved.get(retired).is_none());
         }
     }
 
     #[test]
-    fn shared_shortcuts_preserve_existing_bindings_and_ignore_removed_switch_view() {
+    fn shared_shortcuts_preserve_custom_bindings_and_ignore_retired_copy_record_and_switch_view() {
         let mut old = serde_json::to_value(ClipboardRecordShortcuts::default()).unwrap();
-        old.as_object_mut().unwrap().remove("copyRecord");
         old["switchView"] =
             serde_json::json!({"binding":{"code":"Tab","modifiers":[]},"enabled":true});
-        old["note"] =
-            serde_json::to_value(ClipboardRecordShortcuts::default().copy_record).unwrap();
+        old["note"] = serde_json::json!({
+            "binding":{"code":"KeyC","modifiers":["alt"]},"enabled":false
+        });
+        old["copyRecord"] = old["note"].clone();
+        old["copyRecord"]["enabled"] = true.into();
+        assert!(serde_json::from_value::<ClipboardRecordAction>("copyRecord".into()).is_err());
         let restored = ClipboardRecordShortcuts::from_store(Some(old.to_string()));
-        assert!(restored.copy_record.binding.is_none());
         assert_eq!(serde_json::to_value(&restored.note).unwrap(), old["note"]);
+        assert!(serde_json::to_value(&restored)
+            .unwrap()
+            .get("copyRecord")
+            .is_none());
         let reset = restored.restore_clipboard().unwrap();
         let saved = serde_json::to_value(&reset).unwrap();
         assert!(saved.get("switchView").is_none());
-        assert!(saved["copyRecord"]["binding"].is_null());
-        assert_eq!(reset.note.binding, restored.note.binding);
+        assert!(saved.get("copyRecord").is_none());
+        assert_eq!(saved["note"], old["note"]);
     }
 
     #[test]
@@ -1324,9 +1282,9 @@ mod tests {
             .unwrap()
         };
         assert_eq!(restore(&stored)["openTarget"], open);
-        stored["copyRecord"] = open.clone();
+        stored["favorite"] = open.clone();
         let restored = restore(&stored);
-        assert_eq!(restored["copyRecord"], open);
+        assert_eq!(restored["favorite"], open);
         assert!(restored["openTarget"]["binding"].is_null());
     }
 
@@ -1685,37 +1643,16 @@ mod tests {
 
     #[test]
     fn restore_window_records_and_translation_subsets_are_scoped_and_validate_conflicts() {
-        use ClipboardRecordAction::{Preview, SwitchCategory};
+        use ClipboardRecordAction::Preview;
         use ShortcutAction::{
             CopyPrimary, FocusSearch, OpenTranslation, Pin, Selection, Translate,
         };
 
         let mut records = ClipboardRecordShortcuts::default();
         records
-            .set(
-                SwitchCategory,
-                Some(KeyBinding::new("KeyJ", &["alt"])),
-                None,
-                &[],
-            )
-            .unwrap();
-        records.set(SwitchCategory, None, Some(false), &[]).unwrap();
-        records
             .set(Preview, Some(KeyBinding::new("KeyY", &["alt"])), None, &[])
             .unwrap();
         records.set(Preview, None, Some(false), &[]).unwrap();
-
-        let window_restored = records.restore_window().unwrap();
-        assert_eq!(
-            window_restored.switch_category.binding,
-            ClipboardRecordShortcuts::default().switch_category.binding
-        );
-        assert!(window_restored.switch_category.enabled);
-        assert_eq!(
-            window_restored.preview.binding,
-            Some(KeyBinding::new("KeyY", &["alt"]))
-        );
-        assert!(!window_restored.preview.enabled);
 
         let records_restored = records.restore_records().unwrap();
         assert_eq!(
@@ -1723,21 +1660,6 @@ mod tests {
             ClipboardRecordShortcuts::default().preview.binding
         );
         assert!(records_restored.preview.enabled);
-        assert_eq!(
-            records_restored.switch_category.binding,
-            Some(KeyBinding::new("KeyJ", &["alt"]))
-        );
-        assert!(!records_restored.switch_category.enabled);
-
-        // Moving Preview onto Tab should make restore_window fail due to duplicate binding.
-        let mut conflicting = records.clone();
-        conflicting
-            .set(Preview, Some(KeyBinding::new("Tab", &[])), None, &[])
-            .unwrap();
-        assert_eq!(
-            conflicting.restore_window().err().as_deref(),
-            Some("shortcut_clipboard_panel")
-        );
 
         // TranslationShortcuts::restore_actions restores only the requested subset.
         let mut translation = TranslationShortcuts::defaults("meta");

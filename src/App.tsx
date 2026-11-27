@@ -194,7 +194,12 @@ export default function App() {
     }
   }
 
-  const settingsKeyDown = useEffectEvent((event: KeyboardEvent) => {
+  const windowKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (snapshot.window.clipboardVisible && matchesBinding({ code: 'KeyW', modifiers: ['meta'] }, event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const preferences = snapshot.translationPreferences;
     if (!translationShortcutEnabled(preferences, 'openSettings') || event.defaultPrevented || event.isComposing || event.keyCode === 229 || editsText(event)
       || !matchesBinding(preferences.shortcuts.openSettings, event)) return;
@@ -203,7 +208,7 @@ export default function App() {
   });
   useEffect(() => {
     if (!connected || target === 'settings') return;
-    const keydown = (event: KeyboardEvent) => settingsKeyDown(event);
+    const keydown = (event: KeyboardEvent) => windowKeyDown(event);
     window.addEventListener('keydown', keydown, true);
     return () => window.removeEventListener('keydown', keydown, true);
   }, [connected, target]);

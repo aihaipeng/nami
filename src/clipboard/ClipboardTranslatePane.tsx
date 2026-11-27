@@ -1,18 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ArrowLeftRight, CircleCheck, Globe } from 'lucide-react';
+import { ArrowLeftRight, Globe } from 'lucide-react';
 import type { ViewProps } from '../App';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { HistoryList } from '../shared/HistoryList';
-import { RecordFeedback } from '../shared/RecordFeedback';
 import { restorePanelFocus } from '../shared/FloatingPanel';
 import { SearchableDropdown, ServiceMark } from '../shared/SearchableDropdown';
-import { translationShortcutEnabled, type TranslationOutput, type TranslationPreferences } from '../shared/contracts';
+import type { TranslationOutput, TranslationPreferences } from '../shared/contracts';
 import { inputWithinLimits } from '../shared/input';
 import { languageName, providerLanguages, supportsLanguage, supportsTranslation, type TranslationEngine as Engine } from '../shared/languages';
-import { editsText, matchesBinding, type ShortcutAction } from '../shared/shortcuts';
-import { HistoryIcon } from '../translation/HistoryIcon';
+import { matchesBinding } from '../shared/shortcuts';
 import { appleLanguagePackMissing, availableTranslationServices, translationRetryServices, translationServices } from '../shared/translationServices';
 
 type Tab = 'source' | 'primary' | 'secondary';
@@ -42,16 +40,11 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [popup, setPopup] = useState<'language' | 'engine' | null>(null);
   const [sessionEngine, setSessionEngine] = useState<Engine | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
 
   const requestRevision = useRef(0);
   const completedOutput = useRef<TranslationOutput | null>(null);
   const partialTicket = useRef<{ id: string; request: TranslationRequest; pending: boolean } | null>(null);
   const cancellation = useRef<Promise<unknown>>(Promise.resolve());
-  const copyOperation = useRef(0);
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const copying = useRef(false);
   const resultList = useRef<HTMLDivElement>(null);
   const resultPinned = useRef<HTMLDivElement>(null);
   const sourceRef = useRef(source);
@@ -81,10 +74,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     : currentTab === 'secondary'
       ? sourceSupported && secondarySupported
       : sourceSupported && primarySupported;
-  const shortcutBinding = (action: ShortcutAction) => {
-    const preferences = preferencesRef.current;
-    return translationShortcutEnabled(preferences, action) ? preferences.shortcuts[action] : null;
-  };
   const sourceLabel = `${languageName(source === 'auto' && detectedSource ? detectedSource : source)}${supportsLanguage(effectiveEngine, 'source', source) ? '' : ` (${t('languageUnavailable')})`}`;
   const primaryLabel = `${languageName(primary)}${supportsLanguage(effectiveEngine, 'target', primary) ? '' : ` (${t('languageUnavailable')})`}`;
   const secondaryLabel = `${languageName(secondary)}${secondary === 'none' || supportsLanguage(effectiveEngine, 'target', secondary) ? '' : ` (${t('languageUnavailable')})`}`;
@@ -92,14 +81,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   function selectTab(next: Tab) {
     setPopup(null);
     setActiveTab(next);
-  }
-
-  function clearCopyState() {
-    ++copyOperation.current;
-    copying.current = false;
-    clearTimeout(copyTimer.current);
-    setCopied(false);
-    setCopyFailed(false);
   }
 
   function discardRequestView() {
@@ -120,7 +101,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   function resetPane() {
     completedOutput.current = null;
     cancelRequest();
-    clearCopyState();
     sessionEngineRef.current = null;
     setSessionEngine(null);
     setDraft('');
@@ -133,15 +113,9 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   }
 
   useEffect(() => () => {
-    ++copyOperation.current;
-    clearTimeout(copyTimer.current);
     ++requestRevision.current;
     if (native) void invoke('translation_cancel', { scope: 'clipboard' }).catch(() => {});
   }, [native]);
-
-  useEffect(() => {
-    clearCopyState();
-  }, [currentTab, draft, cachedResults, partial?.id, state.recordsSession]);
 
   useEffect(() => {
     resultList.current?.scrollTo(0, 0);
@@ -295,7 +269,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   receiveContext.current = (context) => {
     completedOutput.current = null;
     cancelRequest();
-    clearCopyState();
     const preferred = preferencesRef.current;
     sessionEngineRef.current = null;
     setSessionEngine(null);
@@ -402,54 +375,17 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     {t(retry)}
   </button>);
 
-  async function copyPart(part: Tab) {
-    const text = part === 'source' ? draft : cachedResults[part === 'secondary' ? 1 : 0];
-    if (!native || !capabilities.clipboardWrite || !text || copying.current) return;
-    setPopup(null);
-    setCopyFailed(false);
-    copying.current = true;
-    const operation = ++copyOperation.current;
-    try {
-      await invoke('translation_copy', {
-        scope: 'clipboard',
-        part,
-        ...(part === 'source' ? { sourceText: draft } : {}),
-      });
-      if (operation === copyOperation.current) {
-        setCopied(true);
-        clearTimeout(copyTimer.current);
-        copyTimer.current = setTimeout(() => setCopied(false), 1000);
-      }
-    } catch {
-      if (operation === copyOperation.current) setCopyFailed(true);
-    } finally {
-      if (operation === copyOperation.current) copying.current = false;
-    }
-  }
-
   function keydown(event: ReactKeyboardEvent) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    const closeWindow = matchesBinding({ code: 'KeyW', modifiers: [capabilities.primaryModifier] }, event);
-    if ((event.key === 'Escape' || closeWindow) && popup) {
-      event.preventDefault();
-      event.stopPropagation();
-      setPopup(null);
+    const closeWindow = matchesBinding({ code: 'Escape', modifiers: [] }, event);
+    if (!closeWindow) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return;
+    setPopup(null);
+    if (popup) {
       restorePanelFocus(event.currentTarget.querySelector<HTMLButtonElement>('button[aria-haspopup=dialog][aria-expanded=true]'));
-      return;
-    }
-    if (editsText(event.nativeEvent)) return;
-    if (matchesBinding(shortcutBinding('copyPrimary'), event)) {
-      event.preventDefault();
-      event.stopPropagation();
-      void copyPart('primary');
-    } else if (matchesBinding(shortcutBinding('copySecondary'), event) && secondary !== 'none') {
-      event.preventDefault();
-      event.stopPropagation();
-      void copyPart('secondary');
-    } else if (event.key === 'Escape' || closeWindow) {
-      event.preventDefault();
-      event.stopPropagation();
-      setPopup(null);
+    } else {
       void command('clipboard_translation_close', { returnFocus: true });
     }
   }
@@ -488,11 +424,9 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     : undefined;
 
   const activeIndex = currentTab === 'secondary' ? 1 : 0;
-  const activeCopyText = currentTab === 'source' ? draft : cachedResults[activeIndex] ?? '';
   const activeResult = currentTab === 'source' ? '' : (notice ? '' : cachedResults[activeIndex] ?? '');
   const activePartialError = currentTab === 'source' ? null : partial?.errors[activeIndex] ?? null;
   const taskStatus = serviceError ?? (notice ? t(notice) : !activeTabSupported ? t('languageNotSupported') : null);
-  const copyLabel = currentTab === 'source' ? t('copySource') : currentTab === 'secondary' ? t('copySecondary') : t('copyPrimary');
   const sourceTabTitle = activePickerDescription && currentTab === 'source'
     ? `${t('sourceLanguage')}: ${sourceLabel} (${activePickerDescription})`
     : `${t('sourceLanguage')}: ${sourceLabel}`;
@@ -553,12 +487,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
             onOpenChange={(open) => setPopup(open ? 'engine' : null)}
           />
         </span>
-        <span className="history-action" data-action="copy">
-          <button type="button" className={`icon-button${copied ? ' record-copied' : ''}`} title={copyLabel} aria-label={copyLabel}
-            disabled={!native || !capabilities.clipboardWrite || !activeCopyText} onClick={() => { void copyPart(currentTab); }}>
-            {copied ? <CircleCheck className="copy-success" aria-hidden="true" /> : <HistoryIcon name="doc.on.doc" />}
-          </button>
-        </span>
       </div>
     </header>
     <div className="clipboard-translate-body" data-tauri-drag-region="false">
@@ -598,6 +526,5 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
         </span>
       </div>
     </footer>
-    <RecordFeedback message={copyFailed ? t('copyFailed') : null} />
   </section>;
 }

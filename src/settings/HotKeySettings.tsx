@@ -10,12 +10,12 @@ import { ShortcutCapture, ShortcutRow, errorCode, shortcutMessage } from './Shor
 
 type ClipboardAction = 'global' | ClipboardRecordAction;
 type ShortcutRestoreGroup = 'global' | 'window' | 'records' | 'translation';
-type ClipboardErrorGroup = 'global' | 'window' | 'records';
+type ClipboardErrorGroup = 'global' | 'records';
 type Recorder = { domain: 'clipboard'; action: ClipboardAction } | { domain: 'translation'; action: ShortcutAction };
 
 const recordActionOrder: readonly ClipboardRecordAction[] = [
-  'preview', 'copyRecord', 'pastePlain', 'favorite', 'pin', 'note',
-  'translate', 'ocr', 'openTarget', 'saveImage', 'delete',
+  'preview', 'pastePlain', 'favorite', 'pin', 'note',
+  'translate', 'ocr', 'openTarget', 'delete',
 ];
 
 const translationHints: Partial<Record<ShortcutAction, MessageKey>> = {
@@ -24,7 +24,6 @@ const translationHints: Partial<Record<ShortcutAction, MessageKey>> = {
 };
 
 const recordHints: Partial<Record<ClipboardRecordAction, MessageKey>> = {
-  switchCategory: 'switchCategoryHint',
   pastePlain: 'pastePlainHint',
   translate: 'translateRecordHint',
   ocr: 'ocrRecordHint',
@@ -54,7 +53,7 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
     try {
       await (action === 'global' ? invoke('clipboard_shortcut_set', change) : invoke('clipboard_record_shortcut_set', { action, ...change }));
     } catch (error) {
-      const group: ClipboardErrorGroup = action === 'global' ? 'global' : action === 'switchCategory' ? 'window' : 'records';
+      const group: ClipboardErrorGroup = action === 'global' ? 'global' : 'records';
       setClipboardError({ group, message: shortcutMessage(errorCode(error), t) });
     } finally {
       pendingClipboard.current = false;
@@ -142,12 +141,10 @@ export function HotKeySettings({ t, snapshot, native }: Pick<ViewProps, 't' | 's
       </div>
       <div className="settings-group hotkey-group" role="group" aria-labelledby="window-shortcuts-heading">
         {translationRow('focusSearch')}
-        {localRow('switchCategory')}
         {translationRow('pin')}
         {translationRow('showShortcuts')}
         {translationRow('openSettings')}
       </div>
-      {clipboardError?.group === 'window' && <p className="settings-field-note" role="alert">{clipboardError.message}</p>}
     </section>
     <section aria-labelledby="record-shortcuts-heading">
       <div className="settings-section-heading">

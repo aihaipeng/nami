@@ -31,14 +31,12 @@
     --ring: 0 0% 35%;
     --radius: 0.625rem;
     --record-favorite-color: #956000;
-    --record-success-color: #287d16;
     --glass-surface: hsl(var(--background) / .88);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       color-scheme: dark;
       --record-favorite-color: #d89614;
-      --record-success-color: #49aa19;
       --background: 330 5% 7.5%;
       --foreground: 0 0% 100%;
       --card: 330 4% 10%;
@@ -209,6 +207,11 @@
   .history-footer .history-filters .icon-button { color: var(--history-secondary); background: transparent; }
   .history-footer .history-filters .icon-button[aria-pressed=true] { color: var(--history-label); }
   .history-footer .history-favorites:hover, .history-footer .history-favorites:active { background: transparent; }
+  .history-panel .history-toolbar > .icon-button:focus-visible,
+  .history-panel .history-search button:focus-visible,
+  .history-footer .icon-button:focus-visible,
+  .history-footer .history-filters .icon-button:focus-visible,
+  .history-row-actions .icon-button:focus-visible { outline: none; background: hsl(var(--foreground) / .08); }
   .history-panel .history-toolbar > .records-details[aria-expanded=true] { color: var(--history-label); }
   .records-details:disabled { opacity: .35; }
   .record-view { position: absolute; inset: 0; }
@@ -348,7 +351,6 @@ html[data-native-material=true] .app-surface.clipboard { box-shadow: none; }
 
 :is(.history-row-actions, .history-footer) .icon-button.record-favorite, .record-context-menu button.record-favorite .history-symbol { color: var(--record-favorite-color); }
 .history-row-actions .icon-button.record-active { background: hsl(var(--foreground) / .1); }
-.history-row-actions .icon-button.record-copied, .clipboard-smart-icon-button.record-copied { color: var(--record-success-color); }
 .history-row-actions .icon-button, .clipboard-smart-icon-button, .history-footer .history-favorites, .record-context-menu button .history-symbol { transition: color 150ms; }
-.history-row-actions .icon-button > svg, .clipboard-smart-icon-button > svg, .history-row-actions .copy-success { width: 14px; height: 14px; stroke-width: 1.5; }
+.history-row-actions .icon-button > svg, .clipboard-smart-icon-button > svg { width: 14px; height: 14px; stroke-width: 1.5; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

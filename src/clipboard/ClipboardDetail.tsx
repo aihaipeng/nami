@@ -8,6 +8,7 @@ import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
+import { matchesBinding } from '../shared/shortcuts';
 import { ClipboardDeleteConfirm, markedDeleteDescription } from './ClipboardDeleteConfirm';
 import { ImagePreview, isSingleImage, type FileEntry } from './ClipboardMedia';
 import { ClipboardRichText } from './ClipboardRichText';
@@ -36,8 +37,7 @@ import { extractImagePalette } from './imagePalette';
 import { analyzeSmartDetail, canEncodeQr } from './smartDetail';
 import { resolveLanguage } from '../shared/i18n';
 import type { ClipboardRecord } from './useClipboard';
-import { clipboardProcessError, clipboardUseError, clipboardUseFeedback } from './feedback';
-import type { ClipboardResult } from '../shared/contracts';
+import { clipboardProcessError } from './feedback';
 import './clipboard.css';
 
 export interface ClipboardDetailData extends ClipboardRecord {
@@ -114,8 +114,8 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const shown = active && detail && !failed ? detail : null;
   const current = shown?.id === id ? shown : null;
   const singleImage = shown?.kind === 'image' || shown?.kind === 'files' && isSingleImage(shown.files);
-  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : snapshot.capabilities.imageOcr && singleImage && shown?.imageIndexStatus !== 'empty' && !recognizedEmpty;
-  const canOcr = canTranslate && shown?.kind !== 'text' && snapshot.capabilities.clipboardWrite;
+  const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : shown?.kind === 'image' && snapshot.capabilities.imageOcr && shown.imageIndexStatus !== 'empty' && !recognizedEmpty;
+  const canOcr = canTranslate && shown?.kind === 'image';
   const [indexingId, setIndexingId] = useState<string | null>(null);
   const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
   const smart = useMemo(() => (current?.kind === 'text' ? analyzeSmartDetail(current.text) : null), [current?.kind, current?.text]);
@@ -134,7 +134,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     if (!singleImage) { paletteRecord.current = null; setImagePalette([]); }
   }, [singleImage]);
   useEffect(() => {
-    if (!active || !native || !current || !singleImage || !snapshot.capabilities.imageOcr) { setQrCodes([]); return; }
+    if (!active || !native || !current || current.kind !== 'image' || !snapshot.capabilities.imageOcr) { setQrCodes([]); return; }
     let disposed = false;
     const timer = window.setTimeout(() => {
       void invoke<string[]>('clipboard_image_qr_codes', { recordId: current.id })
@@ -142,7 +142,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         .catch(() => { if (!disposed) setQrCodes([]); });
     }, QR_PREVIEW_DWELL_MS);
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [active, native, current?.id, singleImage, snapshot.capabilities.imageOcr, snapshot.window.recordsSession]);
+  }, [active, native, current?.id, current?.kind, snapshot.capabilities.imageOcr, snapshot.window.recordsSession]);
   async function openCurrentTarget() {
     if (!current || loading) return;
     const revision = operation.current;
@@ -151,19 +151,6 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     try { await clipboardOpenTarget(current.id, true); }
     catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
-    }
-  }
-  async function copyDerivedText(text: string) {
-    if (!native || !snapshot.capabilities.clipboardWrite) return false;
-    const revision = operation.current;
-    const feedbackRevision = ++feedbackOperation.current;
-    setFeedback(null);
-    try {
-      await invoke('clipboard_text_copy', { text });
-      return operation.current === revision;
-    } catch (error) {
-      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardUseError(error)));
-      return false;
     }
   }
   async function openQrUrl(url: string) {
@@ -194,33 +181,25 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
     }
   }
-  async function action(type: 'copy' | 'copyPlain' | 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
+  async function action(type: 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
     const process = type === 'translate' || type === 'ocr';
-    if (!current || loading || processing.current && (process || type === 'delete')) return false;
+    if (!current || loading || processing.current && (process || type === 'delete')) return;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     if (process) { processing.current = true; setBusy(true); }
     setFeedback(null);
     try {
-      if (type === 'copy' || type === 'copyPlain') {
-        const result = await invoke<ClipboardResult>('clipboard_record_use', { recordId: current.id, action: type });
-        if (operation.current !== revision) return false;
-        const message = clipboardUseFeedback(result);
-        if (feedbackOperation.current === feedbackRevision) setFeedback(message ? t(message) : null);
-        return result.copyStatus === 'current' && result.status === 'copied';
-      }
       if (process) await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type });
     } catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') {
-        const message = (type === 'copy' || type === 'copyPlain') ? t(clipboardUseError(error)) : process ? clipboardProcessError(error, type) : t('nativeError');
+        const message = process ? clipboardProcessError(error, type) : t('nativeError');
         if (process && message === null && current.kind === 'image') setRecognizedEmpty(true);
         else if (message) setFeedback(message);
       }
     } finally {
       if (process && operation.current === revision) { processing.current = false; setBusy(false); }
     }
-    return false;
   }
   function requestDelete() {
     if (!current || loading || processing.current) return;
@@ -231,23 +210,21 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     if (!active || snapshot.window.recordsEditorOpen) return;
     const dismiss = (event: KeyboardEvent) => {
       if (confirmDelete || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (event.key === 'Escape' || ((snapshot.capabilities.primaryModifier === 'meta' ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'w')) {
+      if (matchesBinding({ code: 'Escape', modifiers: [] }, event)) {
         event.preventDefault();
+        if (event.repeat) return;
         if (snapshot.window.clipboardTranslationVisible) void command('clipboard_translation_close');
         else void command('window_hide', { region: 'clipboard' });
       }
     };
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
-  }, [active, confirmDelete, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, snapshot.capabilities.primaryModifier, command]);
+  }, [active, confirmDelete, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, command]);
   const hasRichPreview = Boolean(current?.kind === 'text' && current.richTextHtml);
   const showingRich = hasRichPreview && textViewMode === 'rich';
-  const copyPlain = hasRichPreview && !showingRich && !showQr;
   const displayedText = current?.kind === 'text' && smart?.kind === 'json'
     ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
     : current?.text ?? '';
-  const canCopyDerived = native && current !== null && !loading && snapshot.capabilities.clipboardWrite;
-  const hasMissingFile = Boolean(shown?.kind === 'files' && shown.files.some((entry) => !entry.exists));
   const language = resolveLanguage(snapshot.locale);
   const mac = snapshot.capabilities.platform === 'macos';
   const openTargetAction = current && openTargetKind ? {
@@ -268,7 +245,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
         <button type="button" aria-pressed={showingRich} onClick={() => setTextViewMode('rich')}>{t('clipboardRichView')}</button>
         <button type="button" aria-pressed={!showingRich} onClick={() => setTextViewMode('plain')}>{t('clipboardPlainView')}</button>
       </div>}
-      {shown && <RecordActions allowMarkedDelete recordId={shown.id} t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} copyLabel={copyPlain ? t('clipboardCopyPlain') : undefined} deleteLabel={t('deleteClipboard')} canCopy={snapshot.capabilities.clipboardWrite && !hasMissingFile} onCopy={() => action(copyPlain ? 'copyPlain' : 'copy')}
+      {shown && <RecordActions allowMarkedDelete t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} deleteLabel={t('deleteClipboard')}
         onOpenTarget={openTargetAction} onQrCode={qrAction}
         translateActive={snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === shown.id}
         onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
@@ -282,20 +259,20 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
             : showingRich && current.richTextHtml
               ? <ClipboardRichText html={current.richTextHtml} />
               : <>
-                {smart?.kind === 'json' && <ClipboardJsonBar json={smart} mode={jsonMode} onModeChange={setJsonMode} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'json' && <ClipboardJsonBar mode={jsonMode} onModeChange={setJsonMode} t={t} />}
                 {smart?.kind === 'imageData' && <ClipboardImageDataBar imageData={smart} mode={imageDataMode} onModeChange={setImageDataMode} dimensions={imageDataDims} t={t} />}
                 {smart?.kind === 'imageData' && imageDataMode === 'preview'
                   ? <ClipboardImageDataPreview imageData={smart} onDimensions={setImageDataDims} t={t} />
                   : <ClipboardTextPreview as="div" text={displayedText} className="clipboard-detail-text" data-tauri-drag-region="false" />}
-                {smart?.kind === 'color' && <ClipboardColorCard color={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'datetime' && <ClipboardDateTimeCard dateTime={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'url' && <ClipboardUrlCard url={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'jwt' && <ClipboardJwtCard jwt={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'cron' && <ClipboardCronCard cron={smart} locale={language} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'math' && <ClipboardMathCard math={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'number' && <ClipboardNumberCard number={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
-                {smart?.kind === 'decoded' && <ClipboardDecodedCard decoded={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
+                {smart?.kind === 'color' && <ClipboardColorCard color={smart} />}
+                {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} locale={language} t={t} />}
+                {smart?.kind === 'datetime' && <ClipboardDateTimeCard dateTime={smart} locale={language} t={t} />}
+                {smart?.kind === 'url' && <ClipboardUrlCard url={smart} t={t} />}
+                {smart?.kind === 'jwt' && <ClipboardJwtCard jwt={smart} locale={language} t={t} />}
+                {smart?.kind === 'cron' && <ClipboardCronCard cron={smart} locale={language} t={t} />}
+                {smart?.kind === 'math' && <ClipboardMathCard math={smart} t={t} />}
+                {smart?.kind === 'number' && <ClipboardNumberCard number={smart} t={t} />}
+                {smart?.kind === 'decoded' && <ClipboardDecodedCard decoded={smart} t={t} />}
               </>)
           : singleImage
             ? <>
@@ -304,13 +281,13 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
                 paletteRecord.current = current.id;
                 setImagePalette(extractImagePalette(img));
               }} />
-              <ClipboardImagePalette colors={imagePalette} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />
-              <ClipboardImageQrBar codes={qrCodes} canCopy={canCopyDerived} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onCopy={copyDerivedText} onOpenUrl={openQrUrl} t={t} />
-              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact canCopy={canCopyDerived} onCopy={copyDerivedText}
+              <ClipboardImagePalette colors={imagePalette} t={t} />
+              {current.kind === 'image' && <ClipboardImageQrBar codes={qrCodes} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onOpenUrl={openQrUrl} t={t} />}
+              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact
                 onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
                 revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
             </>
-            : <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText}
+            : <ClipboardFilesCard entries={current.files}
               onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
               revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}

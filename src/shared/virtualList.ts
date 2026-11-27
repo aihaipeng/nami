@@ -19,6 +19,7 @@ export interface VirtualWindow {
   virtualized: boolean;
   start: number;
   end: number;
+  visibleStart: number;
   paddingTop: number;
   paddingBottom: number;
   totalHeight: number;
@@ -80,7 +81,7 @@ export function computeVirtualWindow({
   overscanRows = VIRTUAL_OVERSCAN_ROWS,
 }: VirtualWindowParams): VirtualWindow {
   if (ids.length <= threshold) {
-    return { virtualized: false, start: 0, end: ids.length, paddingTop: 0, paddingBottom: 0, totalHeight: 0 };
+    return { virtualized: false, start: 0, end: ids.length, visibleStart: 0, paddingTop: 0, paddingBottom: 0, totalHeight: 0 };
   }
   const offsets = buildOffsets(ids, heights, fallbackHeight);
   const clampedTop = Math.max(0, scrollTop);
@@ -95,6 +96,7 @@ export function computeVirtualWindow({
     virtualized: true,
     start,
     end,
+    visibleStart,
     paddingTop: offsets[start],
     paddingBottom: Math.max(0, totalHeight - offsets[end]),
     totalHeight,

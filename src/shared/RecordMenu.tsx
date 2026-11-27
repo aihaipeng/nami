@@ -2,20 +2,21 @@ import { Fragment, useRef, type ReactNode } from 'react';
 import { keycapLabels, matchesBinding, modifierKey, type KeyBinding } from './shortcuts';
 import type { Translate } from './i18n';
 import { FloatingPanel } from './FloatingPanel';
+import { isRecordBrowserDefaultNavigation } from './clipboardShortcuts';
 
-export interface RecordMenuItem { action: string; label: string; icon: ReactNode; description?: string; disabled?: boolean; destructive?: boolean; active?: boolean; separatorBefore?: boolean; shortcut?: { binding: KeyBinding; label: string; aria?: string } | null }
+export interface RecordMenuItem { action: string; label: string; icon: ReactNode; description?: string; disabled?: boolean; destructive?: boolean; active?: boolean; separatorBefore?: boolean; keyHint?: string; shortcut?: { binding: KeyBinding; label: string; aria?: string } | null }
 
 const navigation = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
 
-function recordMenuAllowsBinding(action: string, { code, modifiers }: KeyBinding) {
-  return code !== 'Escape' && code !== 'Tab' && (modifiers.length > 0 || (code === 'Enter' ? action === 'paste' : code !== 'Space' && !navigation.includes(code)));
+function recordMenuAllowsBinding({ code, modifiers }: KeyBinding) {
+  return code !== 'Escape' && code !== 'Tab' && (modifiers.length > 0 || (code !== 'Enter' && code !== 'Space' && !navigation.includes(code)));
 }
 
 export function recordMenuItems(groups: readonly (readonly RecordMenuItem[])[], mac: boolean, t: Translate, bindingFor: (action: string) => KeyBinding | null | undefined) {
   return groups.filter((group) => group.length).flatMap((group, index) => group.map((item, row) => {
     const binding = !item.disabled && bindingFor(item.action);
     const separatorBefore = index > 0 && row === 0;
-    if (!binding || !recordMenuAllowsBinding(item.action, binding)) return { ...item, separatorBefore, shortcut: null };
+    if (!binding || !recordMenuAllowsBinding(binding)) return { ...item, separatorBefore, shortcut: null };
     const keys = keycapLabels(binding, mac, t);
     const symbol = keys.at(-1) ?? '';
     const ariaKey = /^[!-~]$/.test(symbol) ? symbol : binding.code;
@@ -41,12 +42,16 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
           if (!event.repeat) { onReturnFocus(); onAction(item.action); }
           return;
         }
-        // An unbound modified Return is not the focused button's activation key.
-        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)) {
-          event.preventDefault();
+        if (isRecordBrowserDefaultNavigation(event.nativeEvent)) {
+          event.preventDefault(); event.stopPropagation();
           return;
         }
-        if (!navigation.includes(event.key)) return;
+        const modified = event.metaKey || event.ctrlKey || event.altKey || event.shiftKey;
+        if (event.key === 'Enter' || event.key === ' ') {
+          if (modified || event.repeat) event.preventDefault();
+          return;
+        }
+        if (modified || !navigation.includes(event.key)) return;
         event.preventDefault();
         const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
         const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -59,7 +64,7 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
             title={item.description} aria-description={item.description} aria-keyshortcuts={item.shortcut?.aria}
             className={item.destructive ? 'clipboard-menu-delete' : item.action === 'favorite' && item.active ? 'record-favorite' : undefined}>
             {item.icon}<span className="record-menu-label">{item.label}</span>
-            {item.shortcut !== undefined && <kbd className="record-menu-shortcut" aria-hidden="true">{item.shortcut?.label ?? '—'}</kbd>}
+            {item.shortcut !== undefined && <kbd className="record-menu-shortcut" aria-hidden="true">{item.shortcut?.label ?? item.keyHint ?? '—'}</kbd>}
           </button>
         </Fragment>)}
       </div>

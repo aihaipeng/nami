@@ -25,14 +25,6 @@ pub(crate) struct ExcludedApp {
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum Activation {
-    Copy,
-    #[default]
-    Paste,
-}
-
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum RecordsOpenFocus {
     Search,
     #[default]
@@ -73,7 +65,6 @@ pub(crate) struct ClipboardOptions {
     #[serde(skip)]
     compiled_regexps: Vec<regex::Regex>,
     pub history_policy: HistoryPolicy,
-    pub activation: Activation,
     pub paste_as_plain_text: bool,
     pub hover_preview_enabled: bool,
     pub hover_preview_delay_ms: u32,
@@ -105,7 +96,6 @@ impl Default for ClipboardOptions {
             ignore_secrets: false,
             compiled_regexps: Vec::new(),
             history_policy: HistoryPolicy::default(),
-            activation: Activation::default(),
             paste_as_plain_text: false,
             hover_preview_enabled: false,
             hover_preview_delay_ms: DEFAULT_HOVER_PREVIEW_DELAY_MS,
@@ -159,10 +149,6 @@ impl ClipboardOptions {
             .preference("clipboard_ignore_secrets")?
             .is_some_and(|value| value == "true");
         options.history_policy = db.clipboard_history_policy()?;
-        options.activation = db
-            .preference("clipboard_activation")?
-            .and_then(|value| serde_json::from_str(&value).ok())
-            .unwrap_or_default();
         options.paste_as_plain_text = db
             .preference("clipboard_paste_as_plain_text")?
             .is_some_and(|value| value == "true");
@@ -577,7 +563,6 @@ pub async fn clipboard_ignored_regex_remove(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClipboardControls {
-    activation: Activation,
     search: ClipboardSearchOptions,
     records_open_focus: RecordsOpenFocus,
     preview_lines: RecordPreviewLines,
@@ -589,7 +574,6 @@ pub(crate) struct ClipboardControls {
 impl ClipboardOptions {
     pub(crate) fn controls(&self) -> ClipboardControls {
         ClipboardControls {
-            activation: self.activation,
             search: self.search,
             records_open_focus: self.records_open_focus,
             preview_lines: self.preview_lines.clone(),
@@ -651,35 +635,24 @@ pub async fn clipboard_record_shortcut_set(
 pub async fn clipboard_behavior_set(
     window: Webview,
     app: AppHandle,
-    activation: Option<Activation>,
     paste_as_plain_text: Option<bool>,
     hover_preview_enabled: Option<bool>,
     hover_preview_delay_ms: Option<u32>,
 ) -> Result<(), String> {
     authorize(&window, &["settings"])?;
-    if (activation.is_some() || paste_as_plain_text.is_some())
-        && !platform::capabilities().clipboard_write
-    {
+    if paste_as_plain_text.is_some() && !platform::capabilities().clipboard_write {
         return Err("platform_unavailable".into());
     }
     let (key, value, broadcast) = match (
-        activation,
         paste_as_plain_text,
         hover_preview_enabled,
         hover_preview_delay_ms,
     ) {
-        (Some(activation), None, None, None) => (
-            "clipboard_activation",
-            serde_json::to_string(&activation).map_err(|_| "storage_record")?,
-            true,
-        ),
-        (None, Some(plain), None, None) => {
-            ("clipboard_paste_as_plain_text", plain.to_string(), false)
-        }
-        (None, None, Some(enabled), None) => {
+        (Some(plain), None, None) => ("clipboard_paste_as_plain_text", plain.to_string(), false),
+        (None, Some(enabled), None) => {
             ("clipboard_hover_preview_enabled", enabled.to_string(), true)
         }
-        (None, None, None, Some(delay_ms)) => {
+        (None, None, Some(delay_ms)) => {
             if delay_ms > MAX_HOVER_PREVIEW_DELAY_MS {
                 return Err("invalid_argument".into());
             }
@@ -696,9 +669,6 @@ pub async fn clipboard_behavior_set(
     database(&app, move |db| db.preference_set(key, &value)).await?;
     {
         let mut options = state.clipboard_options.lock().unwrap();
-        if let Some(activation) = activation {
-            options.activation = activation;
-        }
         if let Some(plain) = paste_as_plain_text {
             options.paste_as_plain_text = plain;
         }
@@ -1093,6 +1063,22 @@ pub(crate) async fn set_recording(app: &AppHandle, enabled: Option<bool>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_legacy_activation_and_preserves_paste_format() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        db.preference_set("clipboard_activation", r#""copy""#)
+            .unwrap();
+        db.preference_set("clipboard_paste_as_plain_text", "true")
+            .unwrap();
+
+        let options = ClipboardOptions::load(&db).unwrap();
+        let controls = serde_json::to_value(options.controls()).unwrap();
+        let options = serde_json::to_value(options).unwrap();
+        assert!(controls.get("activation").is_none());
+        assert!(options.get("activation").is_none());
+        assert_eq!(options["pasteAsPlainText"], true);
+    }
 
     #[test]
     fn records_open_on_the_list_unless_another_focus_was_saved() {

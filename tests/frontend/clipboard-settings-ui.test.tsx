@@ -33,7 +33,6 @@ describe('clipboard recording settings', () => {
     prefs.shortcuts.translate = null;
     prefs.selectionEnabled = false;
     prefs.disabledShortcuts = ['openTranslation', 'focusSearch', 'translate'];
-    records.switchCategory = { binding: { code: 'KeyH', modifiers: ['alt'] }, enabled: false };
     records.note = { binding: null, enabled: false };
     records.preview = { binding: null, enabled: false };
     await mount('settings');
@@ -43,8 +42,6 @@ describe('clipboard recording settings', () => {
     fireEvent.click(restore('Window'));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Focus Input shortcut' }).textContent).toBe('⌘F'));
     expect(screen.getByRole('checkbox', { name: 'Focus Input' })).toHaveProperty('checked', true);
-    expect(screen.getByRole('button', { name: 'Switch Group shortcut' }).textContent).toBe('Tab');
-    expect(screen.getByRole('checkbox', { name: 'Switch Group' })).toHaveProperty('checked', true);
     expect(records.note).toEqual({ binding: null, enabled: false });
     expect(records.preview).toEqual({ binding: null, enabled: false });
     expect(prefs.shortcuts.translate).toBeNull();
@@ -105,22 +102,22 @@ describe('clipboard recording settings', () => {
     ]);
     const windowGroup = within(screen.getByRole('group', { name: 'Window' }));
     expect(windowGroup.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual([
-      'Focus Input', 'Switch Group', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
+      'Focus Input', 'Pin / Unpin Window', 'Show Shortcuts', 'Open Settings',
     ]);
     expect(windowGroup.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
-      '⌘F', 'Tab', '⌘P', '⌘K', '⌘,',
+      '⌘F', '⌘P', '⌘K', '⌘,',
     ]);
-    for (const retired of ['Switch Record View', 'Open Translation History', 'Focus Record List', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Paste (Context Menu)']) {
+    for (const retired of ['Switch Group', 'Switch Record View', 'Open Translation History', 'Focus Record List', 'Navigate Up', 'Navigate Down', 'Previous Category', 'Next Category', 'Paste (Context Menu)']) {
       expect(screen.queryByRole('checkbox', { name: retired })).toBeNull();
     }
     const recordGroup = within(screen.getByRole('group', { name: 'Record Actions' }));
     const recordOrder = [
-      'Preview', 'Copy', 'Paste as Plain Text', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note',
-      'Translate', 'Extract Text', 'Open Link, Email or Locate File', 'Save Image', 'Delete',
+      'Preview', 'Paste as Plain Text', 'Favorite/Unfavorite', 'Pin/Unpin', 'Add/Remove Note',
+      'Translate', 'Extract Text', 'Open Link, Email or Locate File', 'Delete',
     ];
     expect(recordGroup.getAllByRole<HTMLInputElement>('checkbox').map(rowTitle)).toEqual(recordOrder);
     expect(recordGroup.getAllByRole('checkbox').map((toggle) => toggle.closest('.settings-shortcut-row')?.querySelector('.keycaps')?.textContent)).toEqual([
-      'Space', '⌘C', '⌘↵', '⌘D', '⌥⌘P', '⌘N', '⌘T', '⇧⌘O', '⌘O', '⌘S', '⌘⌫',
+      'Space', '⌘↵', '⌘D', '⌥⌘P', '⌘N', '⌘T', '⇧⌘O', '⌘O', '⌘⌫',
     ]);
     for (const name of recordOrder) {
       expect(recordGroup.getByRole('button', { name: `${name} shortcut` })).toBeTruthy();
@@ -200,12 +197,11 @@ describe('clipboard recording settings', () => {
     }
   });
 
-  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Copy', 'copyRecord', '⌘C'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵'], ['Save Image', 'saveImage', '⌘S'], ['Switch Group', 'switchCategory', 'Tab']])(
+  it.each([['Preview', 'preview', 'Space'], ['Add/Remove Note', 'note', '⌘N'], ['Extract Text', 'ocr', '⇧⌘O'], ['Translate', 'translate', '⌘T'], ['Favorite/Unfavorite', 'favorite', '⌘D'], ['Delete', 'delete', '⌘⌫'], ['Paste as Plain Text', 'pastePlain', '⌘↵']])(
     'edits %s while unchecked and scopes Record Actions restore to its own group', async (title, action, defaultKeys) => {
       const user = userEvent.setup(); await mount('settings');
       await user.click(screen.getByRole('button', { name: 'HotKey' }));
-      const inRecords = action !== 'switchCategory';
-      const group = within(screen.getByRole('group', { name: inRecords ? 'Record Actions' : 'Window' }));
+      const group = within(screen.getByRole('group', { name: 'Record Actions' }));
       const recorder = group.getByRole('button', { name: `${title} shortcut` });
       const toggle = group.getByRole<HTMLInputElement>('checkbox', { name: title });
       await user.click(toggle);
@@ -215,8 +211,8 @@ describe('clipboard recording settings', () => {
       await waitFor(() => expect(recorder.textContent).toBe('⌥J'));
       expect(toggle.checked).toBe(false);
       await user.click(within(screen.getByRole('region', { name: 'Record Actions' })).getByRole('button', { name: 'Restore Default Shortcuts' }));
-      await waitFor(() => expect(recorder.textContent).toBe(inRecords ? defaultKeys : '⌥J'));
-      expect(toggle.checked).toBe(inRecords);
+      await waitFor(() => expect(recorder.textContent).toBe(defaultKeys));
+      expect(toggle.checked).toBe(true);
     });
 
   it.each([[' ', 'Space', false, 'Space'], ['F6', 'F6', false, 'F6'], ['J', 'KeyJ', true, '⇧J'], ['Escape', 'Escape', false, 'Escape'], ['Backspace', 'Backspace', false, '⌫']])('records %s in the preview recorder', async (key, code, shiftKey, label) => {
@@ -232,20 +228,20 @@ describe('clipboard recording settings', () => {
   it('waits for a main key during shortcut capture and omits the manual key picker', async () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
-    const recorder = screen.getByRole('button', { name: 'Copy shortcut' });
+    const recorder = screen.getByRole('button', { name: 'Add/Remove Note shortcut' });
     fireEvent.click(recorder);
     expect(screen.queryByRole('button', { name: 'Choose Keys' })).toBeNull();
     // A modifier-tap event emitted when WebView misses the main key must not replace the binding.
     fireEvent.keyDown(recorder, { key: 'Meta', code: 'MetaLeft' });
     expect(recorder.textContent).toBe('Press shortcut');
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(0);
-    fireEvent.keyDown(recorder, { key: 'c', code: 'KeyC', metaKey: true });
+    fireEvent.keyDown(recorder, { key: 'j', code: 'KeyJ', metaKey: true });
     await waitFor(() => {
-      expect(recorder.textContent).toBe('⌘C');
+      expect(recorder.textContent).toBe('⌘J');
       expect(recorder.getAttribute('aria-disabled')).toBeNull();
     });
     expect(calls('clipboard_record_shortcut_set')).toHaveLength(1);
-    expect(bridge.snapshot.clipboardControls.shortcuts.copyRecord.binding).toEqual({ code: 'KeyC', modifiers: ['meta'] });
+    expect(bridge.snapshot.clipboardControls.shortcuts.note.binding).toEqual({ code: 'KeyJ', modifiers: ['meta'] });
   });
 
   it('shows shortcut explanation tooltips on hover or click and dismisses them on mouse leave', async () => {
@@ -253,8 +249,8 @@ describe('clipboard recording settings', () => {
     await mount('settings');
     fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
 
-    // Only the 6 non-obvious actions (plus any conflicting row) render tip icons.
-    expect(document.querySelectorAll('.settings-shortcut-tip')).toHaveLength(7);
+    // Only the 5 non-obvious actions (plus any conflicting row) render tip icons.
+    expect(document.querySelectorAll('.settings-shortcut-tip')).toHaveLength(6);
     expect(screen.queryByRole('button', { name: 'Open Settings info' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Preview info' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Favorite/Unfavorite info' })).toBeNull();
@@ -271,14 +267,14 @@ describe('clipboard recording settings', () => {
     expect(screen.queryByRole('tooltip')).toBeNull();
 
     // Direct click opens the tooltip, mouse leave dismisses it, and clicking again toggles it off.
-    const switchTip = screen.getByRole('button', { name: 'Switch Group info' });
-    fireEvent.click(switchTip);
-    expect(screen.getByRole('tooltip').textContent).toContain('Hold Shift to go backward');
-    fireEvent.mouseLeave(switchTip);
+    const pastePlainTip = screen.getByRole('button', { name: 'Paste as Plain Text info' });
+    fireEvent.click(pastePlainTip);
+    expect(screen.getByRole('tooltip').textContent).toContain('Pastes plain text');
+    fireEvent.mouseLeave(pastePlainTip);
     expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.click(switchTip);
+    fireEvent.click(pastePlainTip);
     expect(screen.getByRole('tooltip')).toBeTruthy();
-    fireEvent.click(switchTip);
+    fireEvent.click(pastePlainTip);
     expect(screen.queryByRole('tooltip')).toBeNull();
 
     // Global conflict surfaces a warning tooltip on otherwise plain items.
@@ -308,16 +304,16 @@ describe('clipboard recording settings', () => {
 
     const previewToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Preview' });
     const previewRecorder = screen.getByRole('button', { name: 'Preview shortcut' });
-    const copyToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Copy' });
-    const copyRecorder = screen.getByRole('button', { name: 'Copy shortcut' });
+    const noteToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Add/Remove Note' });
+    const noteRecorder = screen.getByRole('button', { name: 'Add/Remove Note shortcut' });
     const globalToggle = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Open Clipboard History' });
     const restoreButtons = screen.getAllByRole<HTMLButtonElement>('button', { name: 'Restore Default Shortcuts' });
 
     fireEvent.click(previewToggle);
     await waitFor(() => expect(previewToggle.getAttribute('aria-disabled')).toBe('true'));
     expect(previewRecorder.getAttribute('aria-disabled')).toBe('true');
-    expect(copyToggle.getAttribute('aria-disabled')).toBeNull();
-    expect(copyRecorder.getAttribute('aria-disabled')).toBeNull();
+    expect(noteToggle.getAttribute('aria-disabled')).toBeNull();
+    expect(noteRecorder.getAttribute('aria-disabled')).toBeNull();
     expect(globalToggle.getAttribute('aria-disabled')).toBeNull();
     expect(restoreButtons.every((button) => !button.disabled)).toBe(true);
 
@@ -508,7 +504,6 @@ describe('clipboard privacy, retention and behavior', () => {
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'clipboard_options_get') return {
         excludedApps: apps,
-        activation: 'paste',
         pasteAsPlainText: false,
       };
       if (name === 'clipboard_excluded_app_pick') return [{ bundleId: 'com.apple.Passwords', name: 'Passwords' }, { bundleId: 'com.apple.keychainaccess', name: 'Keychain Access' }, { bundleId: 'com.example.synthetic', name: 'Synthetic App' }];
@@ -945,33 +940,31 @@ describe('clipboard privacy, retention and behavior', () => {
     expect(calls('records_preview_lines_set').at(-1)?.[1]).toEqual({ lines: 1 });
   });
 
-  it('saves automatic paste format independently of the row activation behavior', async () => {
+  it('saves automatic paste format without showing an activation mode', async () => {
     await openSettings();
     fireEvent.click(screen.getByRole('button', { name: 'Automatic Paste Format: Keep Original Formatting' }));
     fireEvent.click(screen.getByRole('option', { name: 'Paste as Plain Text' }));
     const plain = await screen.findByRole('button', { name: 'Automatic Paste Format: Paste as Plain Text' });
     expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ pasteAsPlainText: true });
-    expect(bridge.snapshot.clipboardControls.activation).toBe('paste');
-    expect(screen.getByRole('button', { name: 'When Activating an Item: Paste into Previous App' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /When Activating an Item/ })).toBeNull();
     fireEvent.click(plain);
     fireEvent.click(screen.getByRole('option', { name: 'Keep Original Formatting' }));
     await screen.findByRole('button', { name: 'Automatic Paste Format: Keep Original Formatting' });
     expect(calls('clipboard_behavior_set').at(-1)?.[1]).toEqual({ pasteAsPlainText: false });
   });
 
-  it('saves Copy Only as the row activation behavior', async () => {
-    await openSettings();
-    fireEvent.click(screen.getByRole('button', { name: 'When Activating an Item: Paste into Previous App' }));
-    fireEvent.click(screen.getByRole('option', { name: 'Copy Only' }));
-    await screen.findByRole('button', { name: 'When Activating an Item: Copy Only' });
-    expect(calls('clipboard_behavior_set')[0][1]).toEqual({ activation: 'copy' });
+  it('removes the clipboard Copy shortcut without affecting independent translation copy shortcuts', async () => {
+    await mount('settings');
+    fireEvent.click(screen.getByRole('button', { name: 'HotKey' }));
+    expect(screen.queryByRole('button', { name: 'Copy shortcut' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Copy Primary Translation shortcut' })).toBeTruthy();
   });
 
   it('previews and applies custom MB clipboard storage space limits while preserving existing retention fields', async () => {
     const invoke = bridge.invoke.getMockImplementation()!;
     let storedPolicy: { limit: number; maxAgeDays?: number; maxStorageMb?: number } = { limit: 500, maxAgeDays: 7 };
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
-      if (name === 'clipboard_options_get') return { excludedApps, activation: 'paste', pasteAsPlainText: false };
+      if (name === 'clipboard_options_get') return { excludedApps, pasteAsPlainText: false };
       if (name === 'records_storage_info') return { bytes: 8000, ...storedPolicy };
       if (name === 'records_cleanup_preview') return { count: 2, token: 'storage-limit-token' };
       if (name === 'records_cleanup_apply') {
@@ -1028,7 +1021,7 @@ describe('clipboard privacy, retention and behavior', () => {
     let ignoreSecrets = false;
     bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
       if (name === 'clipboard_options_get') {
-        return { excludedApps, ignoredPasteboardTypes: [...types], ignoredRegexps: [], ignoreSecrets, activation: 'paste', pasteAsPlainText: false };
+        return { excludedApps, ignoredPasteboardTypes: [...types], ignoredRegexps: [], ignoreSecrets, pasteAsPlainText: false };
       }
       if (name === 'clipboard_ignored_type_update') {
         const { oldPasteboardType, newPasteboardType } = args as { oldPasteboardType: string; newPasteboardType: string };
@@ -1176,7 +1169,7 @@ describe('clipboard privacy, retention and behavior', () => {
       ['Files info', 'Original files', 2],
       ['Apps info', 'active app only', 1],
       ['Search Rule info', 'Mixed tries Exact', 3],
-      ['Automatic Paste Format info', 'auto-pasted text only', 2],
+      ['Automatic Paste Format info', 'auto-pasted text only', 1],
     ] as const) {
       const tip = screen.getByRole('button', { name: tipName });
       fireEvent.mouseEnter(tip);

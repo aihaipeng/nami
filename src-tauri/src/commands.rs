@@ -180,7 +180,10 @@ pub async fn translation_copy(
     part: String,
     source_text: Option<String>,
 ) -> Result<(), String> {
-    authorize(&window, &["translation", "clipboard"])?;
+    authorize(&window, &["translation"])?;
+    if scope != nami::model::TranslationScope::Standalone {
+        return Err("invalid_argument".into());
+    }
     let state = app.state::<AppState>();
     let _write = state.clipboard_writes.lock().await;
     let text = on_main(&app, move |app| {
@@ -615,30 +618,19 @@ pub async fn clipboard_record_use(
     action: String,
 ) -> Result<OperationResult, String> {
     authorize(&window, &["clipboard", "translation"])?;
-    use crate::clipboard_preferences::Activation;
     use crate::clipboard_runtime::PayloadMode;
-    let (action, mode) = {
-        let state = app.state::<AppState>();
-        let options = state.clipboard_options.lock().unwrap();
-        let activation = match action.as_str() {
-            "copy" | "copyPlain" => Activation::Copy,
-            "paste" | "pastePlain" | "pastePaths" => Activation::Paste,
-            "activate" => options.activation,
-            "activateAlternate" => match options.activation {
-                Activation::Paste => Activation::Copy,
-                Activation::Copy => Activation::Paste,
-            },
-            _ => return Err("invalid_argument".into()),
-        };
-        let mode = match action.as_str() {
-            "pastePlain" | "copyPlain" => PayloadMode::PlainText,
-            "pastePaths" => PayloadMode::FilePaths,
-            "activateAlternate" => PayloadMode::Restore { plain_text: false },
-            _ => PayloadMode::Restore {
-                plain_text: matches!(activation, Activation::Paste) && options.paste_as_plain_text,
-            },
-        };
-        (activation, mode)
+    let mode = match action.as_str() {
+        "paste" | "activate" => PayloadMode::Restore {
+            plain_text: app
+                .state::<AppState>()
+                .clipboard_options
+                .lock()
+                .unwrap()
+                .paste_as_plain_text,
+        },
+        "pastePlain" => PayloadMode::PlainText,
+        "pastePaths" => PayloadMode::FilePaths,
+        _ => return Err("invalid_argument".into()),
     };
     let operation = on_main(&app, |app| {
         app.state::<AppState>()
@@ -650,7 +642,6 @@ pub async fn clipboard_record_use(
     let state = app.state::<AppState>();
     let write = state.clipboard_writes.lock().await;
     let used_id = record_id.clone();
-    let duplicate_plain = matches!(mode, PayloadMode::PlainText);
     let payload = crate::clipboard_runtime::payload(&app, record_id, mode).await?;
     // Transcode TIFF before taking the main thread. PNG bytes are left unchanged.
     let payload =
@@ -678,9 +669,6 @@ pub async fn clipboard_record_use(
             }
         };
         state.clipboard_version.store(version, Ordering::SeqCst);
-        if matches!(action, Activation::Copy) {
-            return Err(OperationResult::copied());
-        }
         let written_at = std::time::Instant::now();
         let Some(target) = *state.target.lock().unwrap() else {
             return Err(OperationResult::failed(
@@ -725,13 +713,12 @@ pub async fn clipboard_record_use(
     .await?;
     let (target, version, written_at, return_session) = match initial {
         Ok(values) => {
-            // Clicking a row writes the clipboard before it pastes. That write is the same copy.
-            save_record_use(&app, used_id, false, false).await?;
+            promote_pasted_record(&app, used_id).await?;
             values
         }
         Err(result) => {
             if result.copy_status == "current" {
-                save_record_use(&app, used_id, result.status == "copied", duplicate_plain).await?;
+                promote_pasted_record(&app, used_id).await?;
             }
             drop(write);
             reveal_failure(&app, operation, &result).await?;
@@ -852,27 +839,9 @@ pub async fn clipboard_record_use(
     Ok(result)
 }
 
-async fn save_record_use(
-    app: &AppHandle,
-    id: String,
-    copied: bool,
-    plain_text: bool,
-) -> Result<(), String> {
-    crate::clipboard_runtime::database(app, move |database| {
-        if copied {
-            if plain_text {
-                database.clipboard_duplicate_plain_text(&id)
-            } else {
-                database.clipboard_duplicate(&id)
-            }
-        } else {
-            database.clipboard_promote(&id)
-        }
-    })
-    .await?;
-    if copied {
-        crate::clipboard_preferences::enforce_history_locked(app).await;
-    }
+async fn promote_pasted_record(app: &AppHandle, id: String) -> Result<(), String> {
+    crate::clipboard_runtime::database(app, move |database| database.clipboard_promote(&id))
+        .await?;
     crate::clipboard_runtime::changed(app)
 }
 
@@ -1191,7 +1160,6 @@ pub async fn translation_shortcuts_restore(
             sync_globals = true;
         }
         Some(ShortcutRestoreGroup::Window) => {
-            let records = current_records.restore_window()?;
             let mut preferences = current_preferences.clone();
             let actions = [
                 ShortcutAction::FocusSearch,
@@ -1207,16 +1175,13 @@ pub async fn translation_shortcuts_restore(
             preferences
                 .disabled_shortcuts
                 .retain(|action| !is_general_window_action(*action));
-            if preferences.shortcuts.conflicts_with_records(&records)
-                || current_clipboard
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| records.conflicts(binding, None))
+            if preferences
+                .shortcuts
+                .conflicts_with_records(&current_records)
             {
                 return Err("shortcut_clipboard_panel".into());
             }
             next_preferences = Some(preferences);
-            next_records = Some(records);
         }
         Some(ShortcutRestoreGroup::Records) => {
             let records = current_records.restore_records()?;
@@ -2032,37 +1997,6 @@ pub async fn clipboard_record_detail(
 }
 
 #[tauri::command]
-pub async fn clipboard_image_save(
-    window: Webview,
-    app: AppHandle,
-    record_id: String,
-) -> Result<bool, String> {
-    authorize(&window, &["clipboard", "translation"])?;
-    if !platform::capabilities().clipboard_image_save {
-        return Err("platform_unavailable".into());
-    }
-    let png = crate::clipboard_runtime::image_export_png(&app, record_id).await?;
-    let app_data = crate::storage_location::active_data_dir(&app)?;
-    let parent = window.window();
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    on_main(&app, move |_| {
-        platform::pick_image_save_path(&parent, move |result| {
-            let _ = sender.send(result);
-        })
-    })
-    .await??;
-    let Some(destination) = receiver.await.map_err(|_| "clipboard_save_dialog")?? else {
-        return Ok(false);
-    };
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::clipboard_runtime::save_image_export(&app_data, &destination, png)
-    })
-    .await
-    .map_err(|_| "storage_worker")??;
-    Ok(true)
-}
-
-#[tauri::command]
 pub async fn clipboard_record_drag(
     window: Webview,
     app: AppHandle,
@@ -2126,32 +2060,6 @@ pub async fn clipboard_image_qr_codes(
         return Ok(Vec::new());
     }
     crate::clipboard_text::detail_qr_codes(&app, record_id).await
-}
-
-#[tauri::command]
-pub async fn clipboard_text_copy(
-    window: Webview,
-    app: AppHandle,
-    text: String,
-) -> Result<(), String> {
-    authorize(&window, &["clipboard", "translation"])?;
-    if !platform::capabilities().clipboard_write {
-        return Err("platform_unavailable".into());
-    }
-    if text.is_empty() || text.len() > nami::clipboard::MAX_TEXT_BYTES {
-        return Err("invalid_argument".into());
-    }
-    let state = app.state::<AppState>();
-    let _write = state.clipboard_writes.lock().await;
-    on_main(&app, move |app| {
-        let version = platform::write_clipboard(&platform::ClipboardPayload::Text(text))
-            .map_err(|(code, _)| code.to_owned())?;
-        app.state::<AppState>()
-            .clipboard_version
-            .store(version, Ordering::SeqCst);
-        Ok(())
-    })
-    .await?
 }
 
 #[tauri::command]

@@ -118,14 +118,14 @@ describe('unified records workspace', () => {
   it.each(['{Enter}', ' '])('deletes on the first button activation with %s', async (key) => {
     const onUpdate = vi.fn();
     const user = userEvent.setup();
-    render(<RecordActions recordId="keyboard" t={translator('en')} native favorite={false} pinned={false} deleteLabel="Delete" onUpdate={onUpdate} />);
+    render(<RecordActions t={translator('en')} native favorite={false} pinned={false} deleteLabel="Delete" onUpdate={onUpdate} />);
     screen.getByRole('button', { name: 'Delete' }).focus();
     await user.keyboard(key);
     expect(onUpdate).toHaveBeenCalledExactlyOnceWith('delete');
   });
 
   it('keeps one outline favorite icon and changes only its color state', () => {
-    const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate: vi.fn() };
+    const props = { t: translator('en'), native: true, pinned: false, deleteLabel: 'Delete', onUpdate: vi.fn() };
     const view = render(<RecordActions {...props} favorite={false} />);
     const icon = screen.getByRole('button', { name: 'Favorite' }).firstElementChild;
     view.rerender(<RecordActions {...props} favorite />);
@@ -161,35 +161,9 @@ describe('unified records workspace', () => {
     expect(button.classList.contains('record-favorite')).toBe(false);
   });
 
-  it('shows copy success only after confirmation, ignores repeats and restores the same-size copy after one second', async () => {
-    let finish!: (success: boolean) => void;
-    const onCopy = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
-    render(<RecordActions t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={onCopy} onUpdate={vi.fn()} />);
-    const button = screen.getByRole('button', { name: 'Copy' });
-    fireEvent.click(button); fireEvent.click(button);
-    expect(onCopy).toHaveBeenCalledTimes(1);
-    expect(button.querySelector('.copy-success')).toBeNull();
-    vi.useFakeTimers();
-    try {
-      await act(async () => finish(true));
-      expect(button.classList.contains('record-copied')).toBe(true);
-      expect(button.querySelector('.copy-success')).toBeTruthy();
-      fireEvent.click(button);
-      expect(onCopy).toHaveBeenCalledTimes(1);
-      act(() => vi.advanceTimersByTime(999));
-      expect(button.querySelector('.copy-success')).toBeTruthy();
-      act(() => vi.advanceTimersByTime(1));
-      expect(button.querySelector('.copy-success')).toBeNull();
-      expect(button.querySelector('[data-symbol="doc.on.doc"]')).toBeTruthy();
-    } finally { vi.useRealTimers(); }
-    fireEvent.click(button);
-    await act(async () => finish(false));
-    expect(button.querySelector('.copy-success')).toBeNull();
-  });
-
   it.each([{ favorite: true, pinned: false }, { favorite: false, pinned: true }])('keeps a protected detail delete in place but disabled: %j', (marks) => {
     const update = vi.fn();
-    render(<RecordActions t={translator('en')} native {...marks} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={update} retainDelete />);
+    render(<RecordActions t={translator('en')} native {...marks} deleteLabel="Delete" onUpdate={update} retainDelete />);
     const button = screen.getByRole('button', { name: 'Delete' });
     expect((button as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(button);
@@ -197,19 +171,9 @@ describe('unified records workspace', () => {
   });
 
   it('blocks conflicting deletion during processing while keeping independent actions available', () => {
-    render(<RecordActions t={translator('en')} native favorite={false} pinned={false} canCopy copyLabel="Copy" deleteLabel="Delete" onCopy={vi.fn()} onUpdate={vi.fn()} onNote={vi.fn()} onTranslate={vi.fn()} onOcr={vi.fn()} busy />);
+    render(<RecordActions t={translator('en')} native favorite={false} pinned={false} deleteLabel="Delete" onUpdate={vi.fn()} onNote={vi.fn()} onTranslate={vi.fn()} onOcr={vi.fn()} busy />);
     for (const label of ['Delete', 'Translate', 'Extract text']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(true);
-    for (const label of ['Copy', 'Note', 'Favorite', 'Pin record']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it('does not carry pending copy feedback to the next detail record', async () => {
-    let finish!: (success: boolean) => void;
-    const props = { t: translator('en'), native: true, favorite: false, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: () => new Promise<boolean>((resolve) => { finish = resolve; }), onUpdate: vi.fn(), retainDelete: true };
-    const view = render(<RecordActions {...props} recordId="first" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
-    view.rerender(<RecordActions {...props} recordId="second" />);
-    await act(async () => finish(true));
-    expect(view.container.querySelector('.copy-success')).toBeNull();
+    for (const label of ['Note', 'Favorite', 'Pin record']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('suppresses very short activity and cancels its delayed reveal', () => {
@@ -260,7 +224,7 @@ describe('unified records workspace', () => {
 
   it('keeps a protected delete button for its exit animation, blocks it immediately and can reverse the exit', () => {
     const onUpdate = vi.fn();
-    const props = { t: translator('en'), native: true, pinned: false, canCopy: true, copyLabel: 'Copy', deleteLabel: 'Delete', onCopy: vi.fn(), onUpdate };
+    const props = { t: translator('en'), native: true, pinned: false, deleteLabel: 'Delete', onUpdate };
     const view = render(<RecordActions {...props} favorite={false} />);
     expect(view.container.querySelector('[data-action=pin]')?.getAttribute('style') ?? '').not.toMatch(/translate/i);
     const button = screen.getByRole('button', { name: 'Delete' }) as HTMLButtonElement;
@@ -337,13 +301,92 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(input);
     const favorite = within(panel()).getByRole('button', { name: 'Favorite clipboard records' });
     expect(favorite.getAttribute('aria-pressed')).toBe('false');
+    // Empty search allows Left/Right arrows to switch category while keeping focus in search.
+    expect(key(input, 'ArrowRight')).toBe(false);
+    expect(favorite.getAttribute('aria-pressed')).toBe('true');
+    expect(document.activeElement).toBe(input);
+    expect(key(input, 'ArrowLeft')).toBe(false);
+    expect(favorite.getAttribute('aria-pressed')).toBe('false');
+    expect(document.activeElement).toBe(input);
+    // Non-empty search preserves Left/Right cursor editing instead of switching category.
+    fireEvent.change(input, { target: { value: 'a' } });
     expect(key(input, 'ArrowRight')).toBe(true);
     expect(favorite.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.change(input, { target: { value: 'a' } });
-    expect(key(input, 'Tab')).toBe(false);
-    expect(favorite.getAttribute('aria-pressed')).toBe('true');
-    expect(fireEvent.keyDown(input, { key: 'Tab', code: 'Tab', shiftKey: true })).toBe(false);
+    expect(key(input, 'ArrowLeft')).toBe(true);
+    expect(fireEvent.keyDown(input, { key: 'ArrowLeft', code: 'ArrowLeft', metaKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(input, { key: 'v', code: 'KeyV', metaKey: true, shiftKey: true })).toBe(true);
     expect(favorite.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('ignores unbound Tab and Shift-Tab while arrows still navigate the records', async () => {
+    bridge.snapshot.clipboardControls.recordsOpenFocus = 'list';
+    const user = userEvent.setup();
+    await mount('clipboard');
+    const [first, second] = panel().querySelectorAll<HTMLButtonElement>('.history-row-select');
+    const all = within(panel()).getByRole('button', { name: 'All clipboard records' });
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    await user.tab();
+    expect(document.activeElement).toBe(first);
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(second);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(second);
+    all.focus();
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(all);
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(first);
+    const input = search();
+    input.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(input);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+  });
+
+  it('keeps button activation, record actions and unbound browser keys separate', async () => {
+    await mount('clipboard');
+    const user = userEvent.setup();
+    const row = panel().querySelector<HTMLButtonElement>('.history-row-select')!;
+    const favorite = within(panel()).getByRole('button', { name: 'Favorite clipboard records' });
+    favorite.focus();
+    await user.keyboard(' ');
+    expect(favorite.getAttribute('aria-pressed')).toBe('true');
+    expect(calls('records_details_toggle')).toHaveLength(0);
+    within(panel()).getByRole('button', { name: 'All clipboard records' }).click();
+    await waitFor(() => expect(panel().querySelectorAll('.history-row:not([hidden])')).toHaveLength(2));
+    row.focus();
+    expect(fireEvent.keyDown(row, { key: 'Enter', code: 'Enter', shiftKey: true })).toBe(false);
+    expect(fireEvent.keyDown(row, { key: 'r', code: 'KeyR', metaKey: true })).toBe(false);
+    expect(fireEvent.keyDown(row, { key: 'ArrowDown', code: 'ArrowDown', isComposing: true })).toBe(true);
+    expect(document.activeElement).toBe(row);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(row);
+    await user.keyboard('{ContextMenu}');
+    const menu = await screen.findByRole('menu', { name: 'Actions' });
+    expect(menu.contains(document.activeElement)).toBe(true);
+    const focusedItem = document.activeElement;
+    await user.tab();
+    expect(document.activeElement).toBe(focusedItem);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(focusedItem);
+    await user.keyboard('{ArrowDown}');
+    expect(menu.contains(document.activeElement)).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(document.activeElement).toBe(row);
+    expect(calls('window_hide')).toHaveLength(0);
+  });
+
+  it('keeps an explicitly bound record shortcut ahead of the browser default guard', async () => {
+    bridge.snapshot.clipboardControls.shortcuts.favorite.binding = { code: 'F10', modifiers: ['shift'] };
+    await mount('clipboard');
+    const row = panel().querySelector<HTMLButtonElement>('.history-row-select')!;
+    row.focus();
+    expect(fireEvent.keyDown(row, { key: 'F10', code: 'F10', shiftKey: true })).toBe(false);
+    await waitFor(() => expect(calls('clipboard_record_update').at(-1)?.[1]).toEqual({ recordId: 'clip-first', action: 'favorite' }));
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it.each(['search', 'list'] as const)('opens clipboard with %s focus and hands off without changing the query', async (openingFocus) => {
@@ -389,8 +432,8 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(openingFocus === 'list' ? button(second) : search());
     if (openingFocus === 'search') fireEvent.keyDown(search(), { key: 'ArrowDown', code: 'ArrowDown' });
     expect(document.activeElement).toBe(button(second));
-    fireEvent.keyDown(document.activeElement!, { key: 'c', code: 'KeyC', metaKey: true });
-    await waitFor(() => expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: second.dataset.recordId, action: 'copy' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Enter', code: 'Enter' });
+    expect(calls('clipboard_record_use').at(-1)?.[1]).toEqual({ recordId: second.dataset.recordId, action: 'activate' });
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp', code: 'ArrowUp' });
     expect(document.activeElement).toBe(button(first));
     fireEvent.mouseMove(second, { clientX: 10, clientY: 100 });
@@ -539,22 +582,57 @@ describe('unified records workspace', () => {
     } finally { clipboardRecords.forEach((record) => { record.isPinned = false; }); }
   });
 
-  it('cycles clipboard categories with tab and shift tab', async () => {
+  it('cycles clipboard categories with left and right arrows without stealing focus to search', async () => {
     await mount('clipboard');
-    const tab = (shiftKey = false) => fireEvent.keyDown(search(), { key: 'Tab', code: 'Tab', shiftKey });
+    const input = search();
+    const firstRow = await waitFor(() => {
+      const button = panel().querySelector<HTMLButtonElement>('.history-row:not([hidden]) .history-row-select');
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    expect(document.activeElement).toBe(firstRow);
+    const arrow = (direction: 'ArrowLeft' | 'ArrowRight', target: Element | Window = document.activeElement ?? document.body) =>
+      fireEvent.keyDown(target, { key: direction, code: direction });
     const pressed = (label: string) => screen.getByRole('button', { name: label }).getAttribute('aria-pressed');
     expect(pressed('All clipboard records')).toBe('true');
+
+    // Cycling from a focused record row must keep focus out of the search box across non-empty and empty groups.
     for (const label of ['Favorite clipboard records', 'Text clipboard records', 'Image clipboard records', 'File clipboard records']) {
-      tab();
+      expect(arrow('ArrowRight')).toBe(false);
       expect(pressed(label)).toBe('true');
       expect(pressed('All clipboard records')).toBe('false');
+      await waitFor(() => expect(panel().hasAttribute('data-focus-ready')).toBe(true));
+      expect(document.activeElement).not.toBe(input);
     }
-    tab();
+    expect(arrow('ArrowRight')).toBe(false);
     expect(pressed('File clipboard records')).toBe('false');
     expect(pressed('All clipboard records')).toBe('true');
-    tab(true);
+    await waitFor(() => expect(document.activeElement).toBe(panel().querySelector('.history-row:not([hidden]) .history-row-select')));
+    expect(document.activeElement).not.toBe(input);
+
+    // Reverse from All -> Files, and also works when focus is on a row action button or document.body.
+    expect(arrow('ArrowLeft')).toBe(false);
     expect(pressed('File clipboard records')).toBe('true');
     expect(pressed('All clipboard records')).toBe('false');
+    expect(document.activeElement).not.toBe(input);
+    expect(arrow('ArrowRight', document.body)).toBe(false);
+    expect(pressed('All clipboard records')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(panel().querySelector('.history-row:not([hidden]) .history-row-select')));
+
+    const rowAction = panel().querySelector<HTMLButtonElement>('.history-row-actions button')!;
+    rowAction.focus();
+    expect(arrow('ArrowRight', rowAction)).toBe(false);
+    expect(pressed('Favorite clipboard records')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(panel().querySelector('.history-row:not([hidden]) .history-row-select')));
+    expect(document.activeElement).not.toBe(input);
+
+    // Clicking a footer filter button must prevent mousedown focus theft and not jump focus to search.
+    const allButton = screen.getByRole('button', { name: 'All clipboard records' });
+    expect(fireEvent.mouseDown(allButton)).toBe(false);
+    fireEvent.click(allButton);
+    expect(pressed('All clipboard records')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(panel().querySelector('.history-row:not([hidden]) .history-row-select')));
+    expect(document.activeElement).not.toBe(input);
   });
 
   it('has one ordered toolbar without view-switcher buttons and centered footer filter groups', async () => {
@@ -596,19 +674,12 @@ describe('unified records workspace', () => {
     expect(list.scrollTop).toBe(0);
   });
 
-  it('routes macOS Copy to the focused clipboard row only when bound', async () => {
-    const shortcuts = bridge.snapshot.clipboardControls.shortcuts;
-    shortcuts.copyRecord.binding = { code: 'KeyC', modifiers: ['meta'] };
+  it('does not turn macOS Copy into an app command when a record row is focused', async () => {
     await mount('clipboard');
     const selected = panel().querySelector<HTMLButtonElement>('.history-row-select')!;
-    const input = search();
-    input.focus();
-    expect(fireEvent.copy(input)).toBe(true);
-    expect(calls('clipboard_record_use')).toHaveLength(0);
     selected.focus();
-    expect(fireEvent.copy(selected)).toBe(false);
-    await waitFor(() => expect(calls('clipboard_record_use')).toHaveLength(1));
-    expect(calls('clipboard_record_use')[0][1]).toMatchObject({ recordId: selected.closest('article')?.dataset.recordId, action: 'copy' });
+    expect(fireEvent.copy(selected)).toBe(true);
+    expect(calls('clipboard_record_use')).toHaveLength(0);
   });
 
   it.each(['search', 'list'] as const)('restores the %s opening target on explicit clipboard entry without stealing focus during normal updates', async (openingFocus) => {
@@ -625,7 +696,7 @@ describe('unified records workspace', () => {
     expect(document.activeElement).toBe(target());
   });
 
-  it('keeps clipboard text unchanged and delegates clicked records to the configured activation', async () => {
+  it('keeps clipboard text unchanged and pastes clicked records', async () => {
     await mount('translation');
     await waitFor(() => expect(within(panel()).getByRole('button', { name: 'Clipboard: Saved text' })).toBeTruthy());
     fireEvent.click(within(panel()).getByRole('button', { name: 'Clipboard: Saved text' }));
@@ -668,9 +739,9 @@ describe('unified records workspace', () => {
     const handleRef = createRef<HistoryListHandle>();
     const items = Array.from({ length: 240 }, (_, index) => ({ id: `row-${index}`, text: `Deep record ${index}` }));
     const pinned = [<article key="pin-0" data-record-id="pin-0" className="history-row pinned">Pinned 0</article>];
-    const renderItem = (item: { id: string; text: string }) => (
+    const renderItem = (item: { id: string; text: string }, tabbable: boolean) => (
       <article key={item.id} data-record-id={item.id} className="history-row">
-        <button type="button" className="history-row-select">{item.text}</button>
+        <button type="button" className="history-row-select" tabIndex={tabbable ? 0 : -1}>{item.text}</button>
       </article>
     );
     const view = render(
@@ -679,7 +750,7 @@ describe('unified records workspace', () => {
         pinnedList={pinnedRef}
         handleRef={handleRef}
         pinned={pinned}
-        virtualItems={{ items, itemKey: (item) => item.id, renderItem }}
+        virtualItems={{ items, itemKey: (item) => item.id, renderItem, tabStopId: 'row-0' }}
         onNearEnd={() => {}}
       />,
     );
@@ -702,6 +773,7 @@ describe('unified records workspace', () => {
     expect(view.container.querySelector('[data-record-id="pin-0"]')).not.toBeNull();
     expect(view.container.querySelector('[data-record-id="row-0"]')).not.toBeNull();
     expect(view.container.querySelector('[data-record-id="row-200"]')).toBeNull();
+    expect(itemsBox.querySelector('button[tabindex="0"]')?.closest('article')?.dataset.recordId).toBe('row-0');
     expect(parseFloat(itemsBox.style.paddingTop)).toBe(0);
     expect(parseFloat(itemsBox.style.paddingBottom)).toBeGreaterThan(10000);
 
@@ -710,6 +782,9 @@ describe('unified records workspace', () => {
     expect(itemsBox.querySelectorAll('.history-row').length).toBeLessThan(60);
     expect(view.container.querySelector('[data-record-id="row-180"]')).not.toBeNull();
     expect(view.container.querySelector('[data-record-id="row-0"]')).toBeNull();
+    const tabStops = itemsBox.querySelectorAll('button[tabindex="0"]');
+    expect(tabStops).toHaveLength(1);
+    expect(tabStops[0].closest('article')?.dataset.recordId).toBe('row-180');
     expect(parseFloat(itemsBox.style.paddingTop)).toBeGreaterThan(10000);
 
     const deepRows = [...itemsBox.querySelectorAll('.history-row')];
