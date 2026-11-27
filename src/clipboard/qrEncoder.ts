@@ -1,11 +1,15 @@
+export type QrEcLevel = 'L' | 'M';
+
 export interface QrMatrix {
   version: number;
   size: number;
+  ecLevel: QrEcLevel;
   modules: boolean[];
 }
 
 interface VersionSpec {
   version: number;
+  ecLevel: QrEcLevel;
   dataCodewords: number;
   ecPerBlock: number;
   g1Blocks: number;
@@ -15,23 +19,91 @@ interface VersionSpec {
   alignment: readonly number[];
 }
 
-// ISO/IEC 18004 ECC Level M parameters for Versions 1..12.
-const VERSION_SPECS: readonly VersionSpec[] = [
-  { version: 1, dataCodewords: 16, ecPerBlock: 10, g1Blocks: 1, g1Data: 16, g2Blocks: 0, g2Data: 0, alignment: [] },
-  { version: 2, dataCodewords: 28, ecPerBlock: 16, g1Blocks: 1, g1Data: 28, g2Blocks: 0, g2Data: 0, alignment: [6, 18] },
-  { version: 3, dataCodewords: 44, ecPerBlock: 26, g1Blocks: 1, g1Data: 44, g2Blocks: 0, g2Data: 0, alignment: [6, 22] },
-  { version: 4, dataCodewords: 64, ecPerBlock: 18, g1Blocks: 2, g1Data: 32, g2Blocks: 0, g2Data: 0, alignment: [6, 26] },
-  { version: 5, dataCodewords: 86, ecPerBlock: 24, g1Blocks: 2, g1Data: 43, g2Blocks: 0, g2Data: 0, alignment: [6, 30] },
-  { version: 6, dataCodewords: 108, ecPerBlock: 16, g1Blocks: 4, g1Data: 27, g2Blocks: 0, g2Data: 0, alignment: [6, 34] },
-  { version: 7, dataCodewords: 124, ecPerBlock: 18, g1Blocks: 4, g1Data: 31, g2Blocks: 0, g2Data: 0, alignment: [6, 22, 38] },
-  { version: 8, dataCodewords: 154, ecPerBlock: 22, g1Blocks: 2, g1Data: 38, g2Blocks: 2, g2Data: 39, alignment: [6, 24, 42] },
-  { version: 9, dataCodewords: 182, ecPerBlock: 22, g1Blocks: 3, g1Data: 36, g2Blocks: 2, g2Data: 37, alignment: [6, 26, 46] },
-  { version: 10, dataCodewords: 216, ecPerBlock: 26, g1Blocks: 4, g1Data: 43, g2Blocks: 1, g2Data: 44, alignment: [6, 28, 50] },
-  { version: 11, dataCodewords: 254, ecPerBlock: 30, g1Blocks: 1, g1Data: 50, g2Blocks: 4, g2Data: 51, alignment: [6, 30, 54] },
-  { version: 12, dataCodewords: 290, ecPerBlock: 22, g1Blocks: 6, g1Data: 36, g2Blocks: 2, g2Data: 37, alignment: [6, 32, 58] },
-];
+// ISO/IEC 18004 Table 9 parameters for Versions 1..40 (1-indexed via offset - 1).
+const ECC_CODEWORDS_PER_BLOCK: Record<QrEcLevel, readonly number[]> = {
+  L: [
+    7, 10, 15, 20, 26, 18, 20, 24, 30, 18,
+    20, 24, 26, 30, 22, 24, 28, 30, 28, 28,
+    28, 28, 30, 30, 26, 28, 30, 30, 30, 30,
+    30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+  ],
+  M: [
+    10, 16, 26, 18, 24, 16, 18, 22, 22, 26,
+    30, 22, 22, 24, 24, 28, 28, 26, 26, 26,
+    26, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+  ],
+};
 
-export const MAX_QR_UTF8_BYTES = 280;
+const NUM_ERROR_CORRECTION_BLOCKS: Record<QrEcLevel, readonly number[]> = {
+  L: [
+    1, 1, 1, 1, 1, 2, 2, 2, 2, 4,
+    4, 4, 4, 4, 6, 6, 6, 6, 7, 8,
+    8, 9, 9, 10, 12, 12, 12, 13, 14, 15,
+    16, 17, 18, 19, 19, 20, 21, 22, 24, 25,
+  ],
+  M: [
+    1, 1, 1, 2, 2, 4, 4, 4, 5, 5,
+    5, 8, 9, 9, 10, 10, 11, 13, 14, 16,
+    17, 17, 18, 20, 21, 23, 25, 26, 28, 29,
+    31, 33, 35, 37, 38, 40, 43, 45, 47, 49,
+  ],
+};
+
+function alignmentCenters(version: number): number[] {
+  if (version === 1) return [];
+  const count = Math.floor(version / 7) + 2;
+  const step = version === 32 ? 26 : Math.ceil((version * 4 + 4) / (count * 2 - 2)) * 2;
+  const centers = [6];
+  for (let pos = version * 4 + 10; centers.length < count; pos -= step) {
+    centers.splice(1, 0, pos);
+  }
+  return centers;
+}
+
+function rawDataModules(version: number): number {
+  let result = (16 * version + 128) * version + 64;
+  if (version >= 2) {
+    const numAlign = Math.floor(version / 7) + 2;
+    result -= (25 * numAlign - 10) * numAlign - 55;
+    if (version >= 7) result -= 36;
+  }
+  return result;
+}
+
+function buildVersionSpecs(ecLevel: QrEcLevel): VersionSpec[] {
+  const specs: VersionSpec[] = [];
+  for (let version = 1; version <= 40; version += 1) {
+    const totalCodewords = Math.floor(rawDataModules(version) / 8);
+    const ecPerBlock = ECC_CODEWORDS_PER_BLOCK[ecLevel][version - 1];
+    const numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecLevel][version - 1];
+    const dataCodewords = totalCodewords - ecPerBlock * numBlocks;
+    const g2Blocks = totalCodewords % numBlocks;
+    const g1Blocks = numBlocks - g2Blocks;
+    const g1Data = Math.floor(dataCodewords / numBlocks);
+    const g2Data = g2Blocks > 0 ? g1Data + 1 : 0;
+    specs.push({
+      version,
+      ecLevel,
+      dataCodewords,
+      ecPerBlock,
+      g1Blocks,
+      g1Data,
+      g2Blocks,
+      g2Data,
+      alignment: alignmentCenters(version),
+    });
+  }
+  return specs;
+}
+
+const VERSION_SPECS: Record<QrEcLevel, readonly VersionSpec[]> = {
+  L: buildVersionSpecs('L'),
+  M: buildVersionSpecs('M'),
+};
+
+export const MAX_QR_ECC_M_BYTES = 280;
+export const MAX_QR_UTF8_BYTES = 2953;
 
 const GF_EXP = new Uint8Array(512);
 const GF_LOG = new Uint8Array(256);
@@ -50,7 +122,11 @@ function gfMul(a: number, b: number): number {
   return a === 0 || b === 0 ? 0 : GF_EXP[GF_LOG[a] + GF_LOG[b]];
 }
 
+const RS_GENERATORS = new Map<number, Uint8Array>();
+
 function rsGenerator(degree: number): Uint8Array {
+  const cached = RS_GENERATORS.get(degree);
+  if (cached) return cached;
   let poly = new Uint8Array([1]);
   for (let i = 0; i < degree; i += 1) {
     const next = new Uint8Array(poly.length + 1);
@@ -61,6 +137,7 @@ function rsGenerator(degree: number): Uint8Array {
     }
     poly = next;
   }
+  RS_GENERATORS.set(degree, poly);
   return poly;
 }
 
@@ -79,7 +156,9 @@ function rsRemainder(data: Uint8Array, ecCount: number): Uint8Array {
 }
 
 function selectSpec(byteLength: number): VersionSpec | null {
-  for (const spec of VERSION_SPECS) {
+  // Keep higher resilience (ECC M) for compact payloads; step to ECC L for longer text to stay sparser up to 2,953 bytes.
+  const level: QrEcLevel = byteLength <= MAX_QR_ECC_M_BYTES ? 'M' : 'L';
+  for (const spec of VERSION_SPECS[level]) {
     const headerBits = 4 + (spec.version <= 9 ? 8 : 16);
     const capacityBits = spec.dataCodewords * 8;
     if (headerBits + byteLength * 8 <= capacityBits) return spec;
@@ -147,9 +226,10 @@ function interleaveCodewords(data: Uint8Array, spec: VersionSpec): Uint8Array {
   return interleaved;
 }
 
-function formatBits(mask: number): number {
-  // ECC Level M = 0b00
-  const data = (0b00 << 3) | (mask & 0b111);
+function formatBits(ecLevel: QrEcLevel, mask: number): number {
+  // ISO/IEC 18004 Table 25: ECC Level L = 0b01, M = 0b00.
+  const ecIndicator = ecLevel === 'L' ? 0b01 : 0b00;
+  const data = (ecIndicator << 3) | (mask & 0b111);
   let rem = data << 10;
   for (let i = 14; i >= 10; i -= 1) {
     if ((rem >>> i) & 1) rem ^= 0x537 << (i - 10);
@@ -246,8 +326,8 @@ function penaltyScore(modules: Uint8Array, size: number): number {
   return score;
 }
 
-function placeFormat(modules: Uint8Array, size: number, mask: number) {
-  const bits = formatBits(mask);
+function placeFormat(modules: Uint8Array, size: number, ecLevel: QrEcLevel, mask: number) {
+  const bits = formatBits(ecLevel, mask);
   const set = (r: number, c: number, bit: number) => { modules[r * size + c] = bit; };
   // Top-left around finder (LSB = bit 0).
   for (let i = 0; i <= 5; i += 1) set(8, i, (bits >>> (14 - i)) & 1);
@@ -362,7 +442,6 @@ export function encodeQrCode(text: string): QrMatrix | null {
   }
 
   // Pick the lowest-penalty mask.
-  let bestMask = 0;
   let bestScore = Number.POSITIVE_INFINITY;
   let bestModules = base;
   for (let mask = 0; mask < 8; mask += 1) {
@@ -374,18 +453,25 @@ export function encodeQrCode(text: string): QrMatrix | null {
         }
       }
     }
-    placeFormat(candidate, size, mask);
+    placeFormat(candidate, size, spec.ecLevel, mask);
     const score = penaltyScore(candidate, size);
     if (score < bestScore) {
       bestScore = score;
-      bestMask = mask;
       bestModules = candidate;
     }
   }
-  void bestMask;
   return {
     version: spec.version,
     size,
+    ecLevel: spec.ecLevel,
     modules: Array.from(bestModules, (value) => value === 1),
   };
+}
+
+export function packQrModules(matrix: QrMatrix): number[] {
+  const packed = new Array<number>(Math.ceil(matrix.modules.length / 8)).fill(0);
+  for (let i = 0; i < matrix.modules.length; i += 1) {
+    if (matrix.modules[i]) packed[i >>> 3] |= 1 << (7 - (i & 7));
+  }
+  return packed;
 }

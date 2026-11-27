@@ -980,9 +980,18 @@ export function analyzeSmartDetail(raw: string): SmartDetailMatch | null {
 }
 
 export function canEncodeQr(raw: string): boolean {
+  const payload = normalizeQrPayload(raw);
+  if (!payload || payload.length > MAX_QR_UTF8_BYTES) return false;
+  return new TextEncoder().encode(payload).length <= MAX_QR_UTF8_BYTES;
+}
+
+export function normalizeQrPayload(raw: string): string {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > MAX_QR_UTF8_BYTES) return false;
-  return new TextEncoder().encode(trimmed).length <= MAX_QR_UTF8_BYTES;
+  if (!trimmed) return '';
+  if (isOpenableQrLink(trimmed) && /^www\./i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
 }
 
 export function isOpenableQrLink(raw: string): boolean {

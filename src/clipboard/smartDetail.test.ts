@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { encodeQrCode, MAX_QR_UTF8_BYTES } from './qrEncoder';
+import { encodeQrCode, MAX_QR_ECC_M_BYTES, MAX_QR_UTF8_BYTES, packQrModules } from './qrEncoder';
 import {
   analyzeSmartDetail,
   canEncodeQr,
@@ -8,6 +8,7 @@ import {
   formatCronRunTime,
   formatRelativeTime,
   isOpenableQrLink,
+  normalizeQrPayload,
 } from './smartDetail';
 
 describe('smartDetail', () => {
@@ -65,9 +66,10 @@ describe('smartDetail', () => {
     }
   });
 
-  it('encodes valid QR matrices locally across versions and enforces byte bounds', () => {
+  it('encodes valid QR matrices locally across Versions 1..40 and enforces byte bounds', () => {
     const short = encodeQrCode('https://example.test');
     expect(short).not.toBeNull();
+    expect(short!.ecLevel).toBe('M');
     expect(short!.size).toBe(short!.version * 4 + 17);
     expect(short!.modules).toHaveLength(short!.size * short!.size);
     // Top-left finder corners and dark module at (size - 8, 8).
@@ -77,16 +79,43 @@ describe('smartDetail', () => {
     const longUrl = `https://example.test/${'a'.repeat(160)}`;
     const higher = encodeQrCode(longUrl);
     expect(higher).not.toBeNull();
+    expect(higher!.ecLevel).toBe('M');
     expect(higher!.version).toBeGreaterThanOrEqual(7);
     // Alignment patterns centered on timing lines (e.g. row 6 or col 6) must still be drawn.
     const mid = Math.floor((higher!.size - 1) / 2);
     expect(higher!.modules[6 * higher!.size + mid]).toBe(true);
     expect(higher!.modules[mid * higher!.size + 6]).toBe(true);
 
+    // Beyond ECC M compact bound, encoder steps up smoothly through ECC L up to Version 40 (2,953 UTF-8 bytes).
+    const medium = encodeQrCode('m'.repeat(MAX_QR_ECC_M_BYTES + 120));
+    expect(medium).not.toBeNull();
+    expect(medium!.ecLevel).toBe('L');
+    expect(medium!.version).toBeGreaterThanOrEqual(12);
+
+    const maxPayload = 'z'.repeat(MAX_QR_UTF8_BYTES);
+    const maxQr = encodeQrCode(maxPayload);
+    expect(maxQr).not.toBeNull();
+    expect(maxQr!.version).toBe(40);
+    expect(maxQr!.size).toBe(177);
+    expect(maxQr!.ecLevel).toBe('L');
+    expect(packQrModules(maxQr!)).toHaveLength(Math.ceil((177 * 177) / 8));
+
     expect(canEncodeQr('你好 Nami')).toBe(true);
     expect(encodeQrCode('你好 Nami')).not.toBeNull();
+    expect(canEncodeQr(maxPayload)).toBe(true);
     expect(canEncodeQr('x'.repeat(MAX_QR_UTF8_BYTES + 1))).toBe(false);
     expect(encodeQrCode('x'.repeat(MAX_QR_UTF8_BYTES + 1))).toBeNull();
+  });
+
+  it('normalizes bare www web links while keeping non-pure-link text untouched', () => {
+    expect(normalizeQrPayload('  www.example.test/docs  ')).toBe('https://www.example.test/docs');
+    expect(normalizeQrPayload('https://example.test/docs')).toBe('https://example.test/docs');
+    expect(normalizeQrPayload('  hello world  ')).toBe('hello world');
+    // Text containing a URL alongside prose is not a pure link and stays plain text as-is.
+    expect(normalizeQrPayload('Check www.example.test/docs for details')).toBe('Check www.example.test/docs for details');
+    expect(normalizeQrPayload('See https://example.test/docs now')).toBe('See https://example.test/docs now');
+    // Expanding bare www. by adding https:// (8 bytes) still enforces MAX_QR_UTF8_BYTES.
+    expect(canEncodeQr(`www.a.co/${'x'.repeat(MAX_QR_UTF8_BYTES - 9)}`)).toBe(false);
   });
 
   it('restricts openable QR links to safe web URLs only', () => {
