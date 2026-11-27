@@ -757,7 +757,7 @@ it('shows image previews immediately but scans only a settled detail and ignores
   } finally { vi.useRealTimers(); }
 });
 
-it('displays locally detected QR codes on images and provides copy before open only for link rows', async () => {
+it('copies every detected image QR payload and opens only allowlisted links', async () => {
   records[1] = { ...first(), id: 'qr-img', kind: 'image', text: 'Image', imageIndexStatus: 'indexed', width: 400, height: 400, characterCount: null, size: 12_000 };
   bridge.snapshot.window.clipboardDetailId = 'qr-img';
   bridge.snapshot.window.clipboardDetailVisible = true;
@@ -770,10 +770,14 @@ it('displays locally detected QR codes on images and provides copy before open o
   render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
   const linkRow = (await within(pane()).findByText('https://example.test/from-qr')).closest<HTMLElement>('.clipboard-smart-row')!;
   const plainRow = within(pane()).getByText('plain-qr-payload').closest<HTMLElement>('.clipboard-smart-row')!;
-  expect(within(plainRow).queryAllByRole('button')).toHaveLength(0);
+  const plainButtons = within(plainRow).getAllByRole('button');
+  expect(plainButtons.map((button) => button.getAttribute('aria-label'))).toEqual(['Copy QR Code']);
   const linkButtons = within(linkRow).getAllByRole('button');
   expect(linkButtons.map((button) => button.getAttribute('aria-label'))).toEqual(['Copy QR Code', 'Open Link']);
   expect(calls('clipboard_open_url')).toHaveLength(0);
+  fireEvent.click(plainButtons[0]);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'plain-qr-payload' }));
+  expect(plainButtons[0].classList.contains('record-copied')).toBe(true);
   fireEvent.click(linkButtons[0]);
   await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'https://example.test/from-qr' }));
   expect(linkButtons[0].classList.contains('record-copied')).toBe(true);

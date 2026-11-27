@@ -664,7 +664,7 @@ export function ClipboardImageQrBar({ codes, canCopy, canOpen, onCopy, onOpenUrl
       return <div className="clipboard-smart-row clipboard-smart-row-wrap" key={`${index}:${code}`}>
         <ScanQrCode className="clipboard-smart-icon" aria-hidden="true" />
         <code className="clipboard-smart-value clipboard-smart-value-wrap" title={code}>{code}</code>
-        {isLink && <span className="clipboard-smart-actions">
+        <span className="clipboard-smart-actions">
           <SmartCopyButton active={copied === key} disabled={!canCopy} label={`${t('copy')} ${t('clipboardQrDetected')}`} tooltip={t('copy')}
             onClick={() => { void copyValue(key, code.trim(), onCopy); }} />
           {canOpenLink && <button type="button" className={`icon-button clipboard-smart-icon-button${openDone ? ' record-copied' : ''}`}
@@ -672,7 +672,7 @@ export function ClipboardImageQrBar({ codes, canCopy, canOpen, onCopy, onOpenUrl
             onClick={() => { void runAction(openKey, () => onOpenUrl(code.trim())); }}>
             {openDone ? <CircleCheck className="copy-success" aria-hidden="true" /> : <ExternalLink aria-hidden="true" />}
           </button>}
-        </span>}
+        </span>
       </div>;
     })}
   </div>;
