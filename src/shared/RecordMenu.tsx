@@ -2,9 +2,10 @@ import { Fragment, useRef, type ReactNode } from 'react';
 import { keycapLabels, matchesBinding, modifierKey, type KeyBinding } from './shortcuts';
 import type { Translate } from './i18n';
 import { FloatingPanel } from './FloatingPanel';
+import { RecordShortcutHint } from './RecordShortcutHint';
 import { isRecordBrowserDefaultNavigation } from './clipboardShortcuts';
 
-export interface RecordMenuItem { action: string; label: string; icon: ReactNode; description?: string; disabled?: boolean; destructive?: boolean; active?: boolean; separatorBefore?: boolean; keyHint?: string; shortcut?: { binding: KeyBinding; label: string; aria?: string } | null }
+export interface RecordMenuItem { action: string; label: string; icon: ReactNode; description?: string; disabled?: boolean; destructive?: boolean; active?: boolean; separatorBefore?: boolean; keyHint?: string; shortcut?: { binding: KeyBinding; keys: readonly string[]; aria?: string } | null }
 
 const navigation = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
 
@@ -21,12 +22,12 @@ export function recordMenuItems(groups: readonly (readonly RecordMenuItem[])[], 
     const symbol = keys.at(-1) ?? '';
     const ariaKey = /^[!-~]$/.test(symbol) ? symbol : binding.code;
     const aria = modifierKey(binding.code) ? undefined : [...binding.modifiers.map((modifier) => modifier[0].toUpperCase() + modifier.slice(1)), ariaKey].join('+');
-    return { ...item, separatorBefore, shortcut: { binding, label: keys.join(mac ? '' : '+'), aria } };
+    return { ...item, separatorBefore, shortcut: { binding, keys, aria } };
   }));
 }
 
-export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
-  x: number; y: number; items: readonly RecordMenuItem[];
+export function RecordMenu({ x, y, items, mac, onClose, onReturnFocus, onAction }: {
+  x: number; y: number; items: readonly RecordMenuItem[]; mac: boolean;
   onClose: () => void; onReturnFocus: () => void; onAction: (action: string) => void;
 }) {
   const anchor = useRef<HTMLSpanElement>(null);
@@ -64,7 +65,7 @@ export function RecordMenu({ x, y, items, onClose, onReturnFocus, onAction }: {
             title={item.description} aria-description={item.description} aria-keyshortcuts={item.shortcut?.aria}
             className={item.destructive ? 'clipboard-menu-delete' : item.action === 'favorite' && item.active ? 'record-favorite' : undefined}>
             {item.icon}<span className="record-menu-label">{item.label}</span>
-            {item.shortcut !== undefined && <kbd className="record-menu-shortcut" aria-hidden="true">{item.shortcut?.label ?? item.keyHint ?? '—'}</kbd>}
+            {item.shortcut !== undefined && <RecordShortcutHint keys={item.shortcut?.keys ?? [item.keyHint ?? '—']} separator={mac ? '' : '+'} decorative />}
           </button>
         </Fragment>)}
       </div>

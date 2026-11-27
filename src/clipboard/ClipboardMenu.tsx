@@ -46,5 +46,5 @@ export function ClipboardMenu({ record, snapshot, x, y, canPaste, canTranslate, 
   const configured = clipboardPanelShortcuts(snapshot);
   const items = recordMenuItems(groups, mac, t, (itemAction) =>
     snapshot.storageError ? null : configured.find(({ action, enabled, globalConflict }) => action === itemAction && enabled && !globalConflict)?.binding);
-  return <RecordMenu x={x} y={y} items={items} onClose={onClose} onReturnFocus={onReturnFocus} onAction={(action) => onAction(action as Action)} />;
+  return <RecordMenu x={x} y={y} items={items} mac={mac} onClose={onClose} onReturnFocus={onReturnFocus} onAction={(action) => onAction(action as Action)} />;
 }

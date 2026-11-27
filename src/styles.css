@@ -219,12 +219,13 @@
   .record-view[hidden] { display: none; }
 
   .history-shortcuts-panel { position: absolute; right: 12px; bottom: 36px; width: 230px; max-height: calc(100vh - 72px); display: flex; flex-direction: column; overflow: hidden; padding: 0; border-radius: 10px; font-size: 11px; }
-  .history-shortcuts-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px; scrollbar-width: none; }
+  .history-shortcuts-scroll { display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content; column-gap: 4px; align-content: start; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px; scrollbar-width: none; }
   .history-shortcuts-scroll[data-scrollable=true] { -webkit-mask-image: var(--history-edge-mask, linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent)); mask-image: var(--history-edge-mask, linear-gradient(to bottom, transparent, black 8px, black calc(100% - 8px), transparent)); }
   .history-shortcuts-scroll::-webkit-scrollbar { display: none; }
-  .history-shortcuts-panel strong { display: block; font-size: 12px; margin-bottom: 10px; }
-  .history-shortcuts-scroll > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; height: 24px; color: var(--history-label); }
-  .history-shortcuts-scroll > div > span:last-child { color: var(--history-secondary); flex-shrink: 0; }
+  .history-shortcuts-panel strong { grid-column: 1 / -1; font-size: 12px; margin-bottom: 10px; }
+  .history-shortcuts-scroll > div { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; min-height: 24px; padding-block: 3px; color: var(--history-label); }
+  .history-shortcuts-scroll > div > span { padding-inline-end: 4px; }
+  .history-shortcuts-scroll .record-shortcut-hint { color: var(--history-secondary); }
   .history-shortcuts-panel .history-scrollbar { top: 8px; bottom: 8px; right: 1px; width: 10px; }
   .history-shortcuts-panel .history-scrollbar-thumb { right: 2px; width: 3px; }
   .history-row { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-feature-settings: normal; position: relative; border: 1px solid transparent; border-radius: 10px; margin-bottom: 4px; }
@@ -333,9 +334,16 @@ html[data-native-material=true] .app-surface.clipboard { box-shadow: none; }
 .record-context-menu { --history-label: hsl(var(--foreground)); --history-red: hsl(var(--destructive)); z-index: 50; padding: 4px; color: var(--history-label); }
 .record-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; height: 29px; padding: 0 8px; border-radius: 6px; font-size: 12px; text-align: left; }
 .record-context-menu-keys { overflow-y: auto; overscroll-behavior: contain; }
+.record-context-menu-keys > div { display: grid; grid-template-columns: 14px minmax(0, 1fr) max-content max-content; column-gap: 4px; }
+.record-context-menu-keys button { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: normal; height: auto; min-height: 29px; padding-block: 3px; }
+.record-context-menu-keys .record-menu-label { padding-inline: 5px 4px; }
+.record-shortcut-hint { display: grid; grid-column: -3 / -1; grid-template-columns: subgrid; align-items: baseline; font: inherit; white-space: nowrap; }
+.record-shortcut-modifiers { grid-column: 1; display: flex; gap: 3px; justify-content: end; }
+.record-shortcut-key { grid-column: 2; }
+.record-shortcut-hint[data-wide-single=true] .record-shortcut-key { grid-column: 1 / -1; justify-self: end; }
 .history-pinned:not(.empty)::after, .record-menu-divider { width: 94%; height: 1px; background: linear-gradient(to right, transparent, hsl(var(--foreground) / .28) 25%, hsl(var(--foreground) / .28) 75%, transparent); }
-.record-menu-divider { margin: 3px auto; }
-.record-menu-shortcut { margin-inline-start: auto; color: hsl(var(--muted-foreground)); font: inherit; white-space: nowrap; }
+.record-menu-divider { grid-column: 1 / -1; margin: 3px auto; }
+.record-context-menu .record-shortcut-hint { color: hsl(var(--muted-foreground)); }
 .record-context-menu button:hover:not(:disabled), .record-context-menu button:focus-visible { background: hsl(var(--foreground) / .1); outline: none; }
 .record-context-menu button:disabled { opacity: .4; }
 .record-context-menu button > svg, .record-context-menu .history-symbol, .clipboard-note-icon { flex: 0 0 14px; width: 14px; height: 14px; stroke-width: 1.5; }

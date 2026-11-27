@@ -4157,6 +4157,32 @@ return {ready:window.__unpinnedAll&&pinned.classList.contains('empty'),divider:g
 fn run_unified_records(app: &AppHandle) -> DomCase {
     let mut samples = Vec::new();
     let result = (|| {
+        let shortcut_columns = |selector: &str| {
+            wait_records(
+                app,
+                &format!(
+                    r#"
+const keys=[...document.querySelectorAll({selector:?})];
+const chords=keys.flatMap(key=>{{
+  const walker=document.createTreeWalker(key,NodeFilter.SHOW_TEXT), range=document.createRange();
+  let command;
+  for(let node=walker.nextNode();node;node=walker.nextNode()){{
+    for(let i=0;i<node.length;i++){{
+      const glyph=node.data[i];
+      if((!command&&glyph!=='⌘')||/\s/.test(glyph))continue;
+      range.setStart(node,i);range.setEnd(node,i+1);
+      const box=range.getBoundingClientRect();
+      if(command)return [{{command:command.left,key:box.left,gap:box.left-command.right}}];
+      command=box;
+    }}
+  }}
+  return [];
+}});
+return {{ready:chords.length>=3,chords}};
+"#
+                ),
+            )
+        };
         let record = nami::clipboard::ClipboardRecord {
             id: "unified-clipboard-one".into(),
             kind: "text".into(),
@@ -4237,6 +4263,7 @@ return {ready:true,contextTarget:!!document.querySelector('.record-view:not([hid
             ));
         }
         samples.push(serde_json::json!({"mode":"clipboard","menuLabels":menu["labels"],"pasteKey":menu["keys"][0],"contextTarget":true}));
+        let menu_columns = shortcut_columns(".record-context-menu kbd")?;
         evaluate_view_dom(app,"clipboard","document.querySelector('.record-context-menu').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;")?;
         wait_records(
             app,
@@ -4251,11 +4278,33 @@ return {ready:true};
             evaluate_view_dom(app, "clipboard", "document.querySelector('.clipboard-panel .history-shortcuts').click();return true;")
         };
         toggle_help()?;
+        let help_columns = shortcut_columns(".history-shortcuts-scroll > div > :last-child")?;
         wait_records(
             app,
             r#"const row=[...document.querySelectorAll('.history-shortcuts-scroll > div')].find(row=>row.firstElementChild.textContent==='Hide window');return {ready:row?.lastElementChild.textContent==='Esc'};"#,
         )?;
         toggle_help()?;
+        for (surface, layout) in [("menu", menu_columns), ("help", help_columns)] {
+            let chords = layout["chords"].as_array().unwrap();
+            for column in ["command", "key"] {
+                let anchor = chords[0][column].as_f64().unwrap();
+                if chords
+                    .iter()
+                    .any(|chord| (chord[column].as_f64().unwrap() - anchor).abs() > 0.5)
+                {
+                    return Err(format!("{surface}: misaligned {column} column: {layout}"));
+                }
+            }
+            if chords
+                .iter()
+                .any(|chord| (chord["gap"].as_f64().unwrap() - 4.0).abs() > 0.5)
+            {
+                return Err(format!(
+                    "{surface}: inconsistent shortcut spacing: {layout}"
+                ));
+            }
+            samples.push(serde_json::json!({"shortcutSurface": surface, "layout": layout}));
+        }
         evaluate_view_dom(
             app,
             "clipboard",

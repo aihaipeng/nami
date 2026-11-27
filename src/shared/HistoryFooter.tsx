@@ -5,6 +5,7 @@ import { translationShortcutEnabled } from './contracts';
 import { editsText, globalTranslationActions, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles, translationWindowActions } from './shortcuts';
 import type { ClipboardKind } from '../clipboard/useClipboard';
 import { HistoryIcon } from '../translation/HistoryIcon';
+import { RecordShortcutHint } from './RecordShortcutHint';
 
 function ShortcutsPopover({ label, children }: { label: string; children: ReactNode }) {
   const scrollId = useId();
@@ -177,7 +178,7 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
       return binding && translationShortcutEnabled(preferences, action)
         ? [{ label: shortcutTitles[action], binding }] : [];
     });
-  const keyLabel = (binding: Parameters<typeof keycapLabels>[0]) => keycapLabels(binding, capabilities.platform === 'macos', t).join(' ');
+  const keyLabels = (binding: Parameters<typeof keycapLabels>[0]) => keycapLabels(binding, capabilities.platform === 'macos', t);
   // Registered once per activation. Holding Command re-renders the panel during the same key dispatch, and a
   // listener removed mid-dispatch never runs for that key in WebKit.
   const keydown = useEffectEvent((event: KeyboardEvent) => {
@@ -217,14 +218,14 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} title={t('hotKey')} aria-expanded={open} aria-keyshortcuts={shortcutsHint ? `Meta+${shortcutsHint}` : undefined} onClick={() => setOpen(!open)}>{shortcutsHint ? <span className="history-command-hint" aria-hidden="true">{shortcutsHint}</span> : <HistoryIcon name="keyboard" />}</button>
     {open && <ShortcutsPopover label={t('hotKey')}>
       <strong>{t('hotKey')}</strong>
-      <div><span>{clipboard ? 'Paste selection' : 'Open selection'}</span><span>{keyLabel({ code: 'Enter', modifiers: [] })}</span></div>
-      <div><span>{t('navigateRecords')}</span><span>↑ / ↓</span></div>
-      {clipboard && <div><span>{t('switchCategory')}</span><span>← / →</span></div>}
-      {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><span>⌘ 1～5</span></div>}
-      {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><span>{keyLabel(binding)}</span></div>)}
-      {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><span>{keyLabel(binding)}</span></div>)}
-      {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><span>{keyLabel(binding)}</span></div>)}
-      <div><span>Hide window</span><span>{clipboard ? 'Esc' : `Esc / ${capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl'} W`}</span></div>
+      <div><span>{clipboard ? 'Paste selection' : 'Open selection'}</span><RecordShortcutHint keys={keyLabels({ code: 'Enter', modifiers: [] })} /></div>
+      <div><span>{t('navigateRecords')}</span><RecordShortcutHint keys={['↑ / ↓']} /></div>
+      {clipboard && <div><span>{t('switchCategory')}</span><RecordShortcutHint keys={['← / →']} /></div>}
+      {clipboard && native && !snapshot.storageError && capabilities.platform === 'macos' && capabilities.autoPaste && <div><span>{t('clipboardQuickPaste')}</span><RecordShortcutHint keys={['⌘', '1～5']} /></div>}
+      {localShortcuts.map(({ action, binding }) => binding && <div key={action}><span>{t(clipboardShortcutLabels[action])}</span><RecordShortcutHint keys={keyLabels(binding)} /></div>)}
+      {shortcuts.map(({ action, binding }) => <div key={action}><span>{t(shortcutTitles[action])}</span><RecordShortcutHint keys={keyLabels(binding)} /></div>)}
+      {contextualShortcuts.map(({ label, binding }) => <div key={label}><span>{t(label)}</span><RecordShortcutHint keys={keyLabels(binding)} /></div>)}
+      <div><span>Hide window</span><RecordShortcutHint keys={clipboard ? ['Esc'] : ['Esc /', capabilities.primaryModifier === 'meta' ? '⌘' : 'Ctrl', 'W']} /></div>
     </ShortcutsPopover>}
   </footer>;
 }

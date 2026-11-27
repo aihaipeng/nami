@@ -175,6 +175,9 @@ describe('clipboard type filters', () => {
     const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
       (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
     expect(entries()).toMatchObject({ 'Paste selection': '↵', 'Navigate Records': '↑ / ↓', 'Switch Group': '← / →', 'Paste one of first 5 items': '⌘ 1～5', 'Open Clipboard History': '⌃ `', 'Paste as Plain Text': '⌘ ↵', 'Extract Text': '⇧ ⌘ O', Translate: '⌘ T', 'Hide window': 'Esc' });
+    const quickPaste = within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('Paste one of first 5 items').nextElementSibling!;
+    expect(quickPaste.querySelector('.record-shortcut-modifiers')?.textContent?.trim()).toBe('⌘');
+    expect(quickPaste.querySelector('.record-shortcut-key')?.textContent).toBe('1～5');
     view.rerender(<HistoryFooter {...props} t={translator('zh-CN')} clipboard />);
     expect(entries()).toMatchObject({ '切换分组': '← / →', '粘贴前5项': '⌘ 1～5' });
     view.rerender(<HistoryFooter {...props} clipboard />);
@@ -834,6 +837,9 @@ describe('database clipboard history', () => {
       ['Favorite', '⌘D'], ['Pin', '⌥⌘P'], ['Note', '⌘N'], '/',
       ['Translate', '⌘T'], ['Extract Text', '⇧⌘O'], '/', ['Delete', '⌘⌫'],
     ]);
+    const ocr = within(menu).getByRole('menuitem', { name: 'Extract Text' });
+    expect([...ocr.querySelectorAll('.record-shortcut-modifiers > span')].map((key) => key.textContent)).toEqual(['⇧', '⌘']);
+    expect(ocr.querySelector('.record-shortcut-key')?.textContent).toBe('O');
     fireEvent.scroll(menu);
     expect(screen.getByRole('menu')).toBe(menu);
     fireEvent.keyDown(document.activeElement!, { key: 'End', code: 'End' });
