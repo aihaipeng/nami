@@ -7,6 +7,7 @@ mod commands;
 mod media;
 #[cfg(all(feature = "ui-tests", feature = "portable-ui"))]
 mod portable_ui_tests;
+mod qr_image;
 #[cfg(target_os = "macos")]
 mod shortcut_capture;
 use nami::{
@@ -479,6 +480,9 @@ fn main() {
             commands::clipboard_query,
             commands::clipboard_record_detail,
             commands::clipboard_image_qr_codes,
+            commands::clipboard_qr_image_copy,
+            commands::clipboard_qr_image_save,
+            commands::clipboard_qr_enlarge,
             commands::clipboard_text_copy,
             commands::clipboard_open_url,
             commands::clipboard_open_target,
@@ -785,6 +789,7 @@ fn main() {
                 }
             }
             tauri::RunEvent::Exit => {
+                platform::close_enlarged_qr();
                 tray_menu::cleanup(app);
                 platform::shutdown_vision_worker();
                 record_lifecycle(app, "exit", None);

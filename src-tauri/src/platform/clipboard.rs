@@ -531,6 +531,31 @@ unsafe fn render_thumbnail_from_source(
     Ok(std::slice::from_raw_parts(pointer, length).to_vec())
 }
 
+pub fn compress_png(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if bytes.is_empty() || bytes.len() > LIMIT {
+        return Err("clipboard_capture_limit");
+    }
+    let result = objc2::rc::autoreleasepool(|_| unsafe {
+        let data: Retained<AnyObject> =
+            msg_send![class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+        let bitmap: Option<Retained<AnyObject>> =
+            msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
+        let bitmap = bitmap.ok_or("clipboard_image_invalid")?;
+        let properties: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+        let png: Option<Retained<AnyObject>> =
+            msg_send![&*bitmap, representationUsingType: 4usize, properties: &*properties];
+        let png = png.ok_or("clipboard_image_invalid")?;
+        let length: usize = msg_send![&*png, length];
+        let pointer: *const u8 = msg_send![&*png, bytes];
+        if length == 0 || pointer.is_null() {
+            return Err("clipboard_image_invalid");
+        }
+        Ok(std::slice::from_raw_parts(pointer, length).to_vec())
+    });
+    release_allocator_memory();
+    result
+}
+
 pub fn clipboard_image_preview(bytes: &[u8], max_pixels: u32) -> Result<Vec<u8>, &'static str> {
     if bytes.is_empty() || bytes.len() > LIMIT {
         return Err("clipboard_capture_limit");

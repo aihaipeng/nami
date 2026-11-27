@@ -2063,6 +2063,154 @@ pub async fn clipboard_image_qr_codes(
 }
 
 #[tauri::command]
+pub async fn clipboard_qr_image_copy(
+    window: Webview,
+    app: AppHandle,
+    size: u32,
+    modules: Vec<u8>,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    let png = tauri::async_runtime::spawn_blocking(move || {
+        crate::qr_image::render_qr_png(size, &modules, 768)
+    })
+    .await
+    .map_err(|_| "qr_render_failed")??;
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let copied = png.clone();
+    on_main(&app, move |app| {
+        let version = platform::write_clipboard(&platform::ClipboardPayload::Image {
+            bytes: copied,
+            extension: "png".into(),
+        })
+        .map_err(|(code, _)| code.to_owned())?;
+        app.state::<AppState>()
+            .clipboard_version
+            .store(version, Ordering::SeqCst);
+        Ok::<_, String>(())
+    })
+    .await??;
+    if let Ok(root) = crate::clipboard_runtime::image_root(&app) {
+        let worker = app.clone();
+        let saved = tauri::async_runtime::spawn_blocking(move || {
+            let fingerprint = nami::clipboard::fingerprint("image", &png);
+            let (path, created) = nami::clipboard::store_image_with_status(&root, &png, "png")?;
+            let state = worker.state::<AppState>();
+            if let Some(error) = state.storage_error.lock().unwrap().clone() {
+                if created {
+                    let _ = nami::clipboard::remove_image(&root, &path);
+                }
+                return Err(error);
+            }
+            let mut database = state.database.lock().unwrap();
+            let Some(db) = database.as_mut() else {
+                if created {
+                    let _ = nami::clipboard::remove_image(&root, &path);
+                }
+                return Err("storage_unavailable".into());
+            };
+            match db.clipboard_insert_image_copy(path.clone(), fingerprint) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    if created {
+                        let _ = nami::clipboard::remove_image(&root, &path);
+                    }
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|_| "storage_worker".to_owned())
+        .and_then(|result| result);
+        match saved {
+            Ok(()) => {
+                crate::clipboard_preferences::enforce_history_locked(&app).await;
+                let _ = crate::clipboard_runtime::changed(&app);
+            }
+            Err(error) => eprintln!("Nami clipboard history after QR copy: {error}"),
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clipboard_qr_image_save(
+    window: Webview,
+    app: AppHandle,
+    size: u32,
+    modules: Vec<u8>,
+) -> Result<bool, String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().local_backup {
+        return Err("platform_unavailable".into());
+    }
+    crate::qr_image::validate_matrix(size, &modules)?;
+    let app_data = crate::storage_location::active_data_dir(&app)?;
+    let parent = window.window();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    on_main(&app, move |_| {
+        platform::pick_qr_save_path(&parent, move |result| {
+            let _ = sender.send(result);
+        })
+    })
+    .await??;
+    let Some(destination) = receiver.await.map_err(|_| "qr_save_failed")?? else {
+        return Ok(false);
+    };
+    let resolved = crate::qr_image::validate_save_destination(&app_data, &destination)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let png = crate::qr_image::render_qr_png(size, &modules, 768)?;
+        crate::qr_image::atomic_write_png(&resolved, &png)
+    })
+    .await
+    .map_err(|_| "qr_save_failed")??;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn clipboard_qr_enlarge(
+    window: Webview,
+    app: AppHandle,
+    size: u32,
+    modules: Vec<u8>,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().native_chrome {
+        return Err("platform_unavailable".into());
+    }
+    let png = tauri::async_runtime::spawn_blocking(move || {
+        crate::qr_image::render_qr_png(size, &modules, 960)
+    })
+    .await
+    .map_err(|_| "qr_enlarge_failed")??;
+    let host_window = window.window();
+    let dismiss_app = app.clone();
+    on_main(&app, move |_| {
+        platform::show_enlarged_qr(&png, size, Some(&host_window), move |clicked_outside| {
+            if !clicked_outside {
+                if let Some(win) = dismiss_app.get_window("translation") {
+                    let _ = win.set_focus();
+                }
+                return;
+            }
+            let app = dismiss_app.clone();
+            let _ = dismiss_app.run_on_main_thread(move || {
+                let state = app.state::<AppState>();
+                let pinned = state.windows.lock().unwrap().clipboard_pinned;
+                if !pinned {
+                    state.windows.lock().unwrap().blur();
+                    let _ = windows::apply_translation(&app);
+                }
+            });
+        })
+    })
+    .await?
+}
+
+#[tauri::command]
 pub async fn clipboard_text_copy(
     window: Webview,
     app: AppHandle,

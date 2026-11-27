@@ -1289,6 +1289,28 @@ impl HistoryDatabase {
         self.clipboard_insert_text_copy(text).map(|_| ())
     }
 
+    pub fn clipboard_insert_image_copy(
+        &mut self,
+        image_path: String,
+        fingerprint: String,
+    ) -> Result<ClipboardRecord, String> {
+        if image_path.is_empty() || fingerprint.is_empty() {
+            return Err("invalid_argument".into());
+        }
+        let record = ClipboardRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: "image".into(),
+            text: String::new(),
+            date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            is_favorite: false,
+            is_pinned: false,
+            source_app: Some(serde_json::json!({"name":"Nami"})),
+            image_path: Some(image_path),
+            fingerprint,
+        };
+        self.insert_clipboard_record(&record, None, None, None, false, None)
+    }
+
     pub fn clipboard_duplicate(&mut self, id: &str) -> Result<(), String> {
         self.duplicate_clipboard_record(id, false)
     }
@@ -5499,6 +5521,30 @@ mod tests {
         assert_eq!(
             db.clipboard_directory_paths(&persisted2.id).unwrap(),
             vec![folder]
+        );
+    }
+
+    #[test]
+    fn image_copy_insert_creates_new_history_record_each_time() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        let fp = fingerprint("image", b"synthetic-qr-png");
+        let first = db
+            .clipboard_insert_image_copy("qr-copy.png".into(), fp.clone())
+            .unwrap();
+        assert_eq!(first.kind, "image");
+        assert!(!first.is_favorite);
+        assert_eq!(first.image_path.as_deref(), Some("qr-copy.png"));
+
+        let second = db
+            .clipboard_insert_image_copy("qr-copy.png".into(), fp)
+            .unwrap();
+        assert_ne!(second.id, first.id);
+        assert_eq!(
+            db.clipboard_page("", false, None, 10)
+                .unwrap()
+                .records
+                .len(),
+            2
         );
     }
 

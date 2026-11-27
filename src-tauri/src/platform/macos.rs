@@ -3,12 +3,13 @@ use objc2::{
     class, msg_send,
     rc::{Allocated, Retained},
     runtime::AnyObject,
+    ClassType,
 };
 use objc2_foundation::{ns_string, NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 
 mod selection;
@@ -1010,6 +1011,438 @@ pub(crate) fn pick_backup_save_path(
             msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
     }
     Ok(())
+}
+
+pub(crate) fn pick_qr_save_path(
+    window: &tauri::Window,
+    complete: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    use std::cell::Cell;
+    unsafe {
+        let parent = window.ns_window().map_err(|_| "qr_save_failed")?;
+        let parent = parent.cast::<AnyObject>();
+        let visible: bool = msg_send![parent, isVisible];
+        let sheet: *mut AnyObject = msg_send![parent, attachedSheet];
+        if !visible || !sheet.is_null() {
+            return Err("qr_save_failed".into());
+        }
+        let panel: Retained<AnyObject> = msg_send![class!(NSSavePanel), savePanel];
+        let png_type: Option<Retained<AnyObject>> =
+            msg_send![class!(UTType), typeWithFilenameExtension: ns_string!("png")];
+        if let Some(png_type) = png_type {
+            let types = NSArray::from_retained_slice(&[png_type]);
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+        let _: () = msg_send![&*panel, setAllowsOtherFileTypes: false];
+        let _: () = msg_send![&*panel, setCanCreateDirectories: true];
+        let name = chrono::Local::now()
+            .format("Nami_QRCode_%Y-%m-%d_%H-%M-%S.png")
+            .to_string();
+        let _: () = msg_send![&*panel, setNameFieldStringValue: &*NSString::from_str(&name)];
+        let result_panel = panel.clone();
+        let complete = Cell::new(Some(complete));
+        let finish = RcBlock::new(move |response: isize| {
+            let Some(complete) = complete.take() else {
+                return;
+            };
+            complete(match response {
+                1 => {
+                    let url: Option<Retained<NSURL>> = msg_send![&*result_panel, URL];
+                    url.and_then(|url| url.path())
+                        .map(|path| Some(path.to_string().into()))
+                        .ok_or_else(|| "qr_save_failed".into())
+                }
+                0 => Ok(None),
+                _ => Err("qr_save_failed".into()),
+            });
+        });
+        let _: () =
+            msg_send![&*panel, beginSheetModalForWindow: parent, completionHandler: &*finish];
+    }
+    Ok(())
+}
+
+unsafe fn zoom_out_cursor() -> Option<Retained<AnyObject>> {
+    let cls = class!(NSCursor);
+    let responds: bool = msg_send![cls, respondsToSelector: objc2::sel!(zoomOutCursor)];
+    if responds {
+        let cursor: Option<Retained<AnyObject>> = msg_send![cls, zoomOutCursor];
+        if cursor.is_some() {
+            return cursor;
+        }
+    }
+    let symbol: Option<Retained<AnyObject>> = msg_send![
+        class!(NSImage),
+        imageWithSystemSymbolName: ns_string!("minus.magnifyingglass"),
+        accessibilityDescription: std::ptr::null::<AnyObject>()
+    ];
+    if let Some(image) = symbol {
+        let alloc: Allocated<AnyObject> = msg_send![cls, alloc];
+        let cursor: Option<Retained<AnyObject>> =
+            msg_send![alloc, initWithImage: &*image, hotSpot: NSPoint::new(7.0, 7.0)];
+        if cursor.is_some() {
+            return cursor;
+        }
+    }
+    msg_send![cls, pointingHandCursor]
+}
+
+objc2::define_class!(
+    #[unsafe(super = objc2_app_kit::NSView)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = ()]
+    struct NamiQrCardView;
+
+    impl NamiQrCardView {
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            unsafe {
+                let bounds: NSRect = msg_send![self, bounds];
+                if let Some(cursor) = zoom_out_cursor() {
+                    let _: () = msg_send![self, addCursorRect: bounds, cursor: &*cursor];
+                }
+            }
+        }
+    }
+);
+
+objc2::define_class!(
+    #[unsafe(super = objc2_app_kit::NSWindow)]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = ()]
+    struct NamiQrWindow;
+
+    impl NamiQrWindow {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: *mut AnyObject) {
+            if !event.is_null() {
+                unsafe {
+                    let event_type: usize = msg_send![event, type];
+                    // NSEventTypeLeftMouseDown (1): single-click anywhere on the card shrinks back.
+                    if event_type == 1 {
+                        dismiss_enlarged_qr(false);
+                        return;
+                    }
+                    // NSEventTypeKeyDown (10) with Escape (keyCode 53): shrink back.
+                    if event_type == 10 {
+                        let key_code: u16 = msg_send![event, keyCode];
+                        if key_code == 53 {
+                            dismiss_enlarged_qr(false);
+                            return;
+                        }
+                    }
+                    let _: () = msg_send![super(self), sendEvent: event];
+                }
+            }
+        }
+
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, _sender: *mut AnyObject) {
+            dismiss_enlarged_qr(false);
+        }
+
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key_window(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), resignKeyWindow];
+            }
+            dismiss_enlarged_qr(true);
+        }
+    }
+);
+
+type EnlargedQrDismissCallback = Box<dyn Fn(bool) + Send + Sync>;
+
+struct EnlargedQrWindowState {
+    window_ptr: usize,
+    image_view_ptr: usize,
+    visible: bool,
+    closing_internally: bool,
+    on_dismiss: Option<EnlargedQrDismissCallback>,
+}
+
+static ENLARGED_QR_WINDOW: OnceLock<Mutex<Option<EnlargedQrWindowState>>> = OnceLock::new();
+static ENLARGED_QR_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+pub fn enlarged_qr_visible() -> bool {
+    ENLARGED_QR_VISIBLE.load(Ordering::SeqCst)
+}
+
+fn take_enlarged_qr_dismiss_plan(
+    invoke_callback: bool,
+) -> Option<(usize, Option<EnlargedQrDismissCallback>)> {
+    let lock = ENLARGED_QR_WINDOW.get()?;
+    let mut slot = lock.lock().ok()?;
+    let state = slot.as_mut()?;
+    if !state.visible || state.closing_internally {
+        return None;
+    }
+    state.closing_internally = true;
+    state.visible = false;
+    ENLARGED_QR_VISIBLE.store(false, Ordering::SeqCst);
+    let callback = if invoke_callback {
+        state.on_dismiss.take()
+    } else {
+        state.on_dismiss = None;
+        None
+    };
+    Some((state.window_ptr, callback))
+}
+
+fn finish_enlarged_qr_close() {
+    if let Some(lock) = ENLARGED_QR_WINDOW.get() {
+        if let Ok(mut slot) = lock.lock() {
+            if let Some(state) = slot.as_mut() {
+                state.closing_internally = false;
+            }
+        }
+    }
+}
+
+fn dismiss_enlarged_qr(clicked_outside: bool) {
+    // Release ENLARGED_QR_WINDOW before calling AppKit orderOut:, because orderOut:
+    // synchronously re-enters resignKeyWindow -> dismiss_enlarged_qr on the main thread.
+    let Some((window_ptr, callback)) = take_enlarged_qr_dismiss_plan(true) else {
+        return;
+    };
+    let window = window_ptr as *mut AnyObject;
+    unsafe {
+        let _: () = msg_send![window, orderOut: std::ptr::null_mut::<AnyObject>()];
+    }
+    finish_enlarged_qr_close();
+    if let Some(callback) = callback {
+        callback(clicked_outside);
+    }
+}
+
+pub fn hide_enlarged_qr() {
+    if !is_main_thread() {
+        return;
+    }
+    let Some((window_ptr, _)) = take_enlarged_qr_dismiss_plan(false) else {
+        return;
+    };
+    let window = window_ptr as *mut AnyObject;
+    unsafe {
+        let _: () = msg_send![window, orderOut: std::ptr::null_mut::<AnyObject>()];
+    }
+    finish_enlarged_qr_close();
+}
+
+fn compute_enlarged_qr_origin(anchor_frame: Option<NSRect>, visible: NSRect, side: f64) -> NSPoint {
+    let target = anchor_frame.unwrap_or(visible);
+    let raw_x = target.origin.x + (target.size.width - side) * 0.5;
+    let raw_y = target.origin.y + (target.size.height - side) * 0.5;
+    let margin = 12.0;
+    let min_x = visible.origin.x + margin;
+    let max_x = (visible.origin.x + visible.size.width - side - margin).max(min_x);
+    let min_y = visible.origin.y + margin;
+    let max_y = (visible.origin.y + visible.size.height - side - margin).max(min_y);
+    NSPoint::new(
+        raw_x.clamp(min_x, max_x).round(),
+        raw_y.clamp(min_y, max_y).round(),
+    )
+}
+
+pub fn show_enlarged_qr(
+    png_bytes: &[u8],
+    qr_modules: u32,
+    anchor_window: Option<&tauri::Window>,
+    on_dismiss: impl Fn(bool) + Send + Sync + 'static,
+) -> Result<(), String> {
+    if png_bytes.is_empty() {
+        return Err("invalid_argument".into());
+    }
+    unsafe {
+        let data: Retained<AnyObject> =
+            msg_send![class!(NSData), dataWithBytes: png_bytes.as_ptr(), length: png_bytes.len()];
+        let image: Allocated<AnyObject> = msg_send![class!(NSImage), alloc];
+        let image: Option<Retained<AnyObject>> = msg_send![image, initWithData: &*data];
+        let image = image.ok_or("qr_enlarge_failed")?;
+
+        let desired_side: f64 = if qr_modules >= 125 {
+            580.0
+        } else if qr_modules >= 69 {
+            500.0
+        } else {
+            420.0
+        };
+        let anchor_ns = anchor_window.and_then(|win| win.ns_window().ok());
+        let anchor_frame = anchor_ns.map(|ns| {
+            let frame: NSRect = msg_send![ns.cast::<AnyObject>(), frame];
+            frame
+        });
+        let anchor_level: isize = anchor_ns
+            .map(|ns| msg_send![ns.cast::<AnyObject>(), level])
+            .unwrap_or(0);
+        let qr_level = anchor_level.saturating_add(1).max(4);
+        let screen: *mut AnyObject = anchor_ns
+            .and_then(|ns| {
+                let s: *mut AnyObject = msg_send![ns.cast::<AnyObject>(), screen];
+                (!s.is_null()).then_some(s)
+            })
+            .unwrap_or_else(|| msg_send![class!(NSScreen), mainScreen]);
+        let (side, origin) = if !screen.is_null() {
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            let clamped = desired_side
+                .min((visible.size.width - 80.0).max(300.0))
+                .min((visible.size.height - 80.0).max(300.0));
+            (
+                clamped,
+                Some(compute_enlarged_qr_origin(anchor_frame, visible, clamped)),
+            )
+        } else {
+            (desired_side, None)
+        };
+
+        let window_ptr = {
+            let mut slot = ENLARGED_QR_WINDOW
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap();
+            let (window, image_view) = if let Some(state) = slot.as_mut() {
+                state.visible = true;
+                state.closing_internally = false;
+                state.on_dismiss = Some(Box::new(on_dismiss));
+                ENLARGED_QR_VISIBLE.store(true, Ordering::SeqCst);
+                (
+                    state.window_ptr as *mut AnyObject,
+                    state.image_view_ptr as *mut AnyObject,
+                )
+            } else {
+                let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
+                // Must use NamiQrWindow::class() so objc2 registers the custom class.
+                let alloc: Allocated<NamiQrWindow> = msg_send![NamiQrWindow::class(), alloc];
+                // Borderless floating card (styleMask = 0), NSBackingStoreBuffered = 2.
+                let win: Retained<NamiQrWindow> = msg_send![
+                    alloc,
+                    initWithContentRect: rect,
+                    styleMask: 0usize,
+                    backing: 2usize,
+                    defer: false
+                ];
+                let win_obj = (&*win as *const NamiQrWindow)
+                    .cast::<AnyObject>()
+                    .cast_mut();
+                let _: () = msg_send![win_obj, setReleasedWhenClosed: false];
+                let _: () = msg_send![win_obj, setOpaque: false];
+                let clear: Retained<AnyObject> = msg_send![class!(NSColor), clearColor];
+                let _: () = msg_send![win_obj, setBackgroundColor: &*clear];
+                let _: () = msg_send![win_obj, setHasShadow: true];
+                // Above normal floating panels so it renders cleanly over the clipboard window.
+                let _: () = msg_send![win_obj, setLevel: 4isize];
+                let _: () =
+                    msg_send![win_obj, setCollectionBehavior: (1usize << 1) | (1usize << 8)];
+
+                let content_alloc: Allocated<NamiQrCardView> =
+                    msg_send![NamiQrCardView::class(), alloc];
+                let content_view: Retained<NamiQrCardView> =
+                    msg_send![content_alloc, initWithFrame: rect];
+                let _: () = msg_send![win_obj, setContentView: &*content_view];
+                let content: *mut AnyObject = msg_send![win_obj, contentView];
+                let _: () = msg_send![content, setWantsLayer: true];
+                let content_layer: *mut AnyObject = msg_send![content, layer];
+                if !content_layer.is_null() {
+                    let white: Retained<AnyObject> = msg_send![class!(NSColor), whiteColor];
+                    let cg_white: *const c_void = msg_send![&*white, CGColor];
+                    let _: () = msg_send![content_layer, setBackgroundColor: cg_white];
+                    let _: () = msg_send![content_layer, setCornerRadius: 18.0_f64];
+                    let _: () = msg_send![content_layer, setMasksToBounds: true];
+                    let border: Retained<AnyObject> = msg_send![
+                        class!(NSColor),
+                        colorWithWhite: 0.0_f64,
+                        alpha: 0.08_f64
+                    ];
+                    let cg_border: *const c_void = msg_send![&*border, CGColor];
+                    let _: () = msg_send![content_layer, setBorderColor: cg_border];
+                    let _: () = msg_send![content_layer, setBorderWidth: 1.0_f64];
+                }
+
+                let inset = 12.0_f64;
+                let frame = NSRect::new(
+                    NSPoint::new(inset, inset),
+                    NSSize::new((side - inset * 2.0).max(1.0), (side - inset * 2.0).max(1.0)),
+                );
+                let view_alloc: Allocated<AnyObject> = msg_send![class!(NSImageView), alloc];
+                let view: Retained<AnyObject> = msg_send![view_alloc, initWithFrame: frame];
+                let _: () = msg_send![&*view, setEditable: false];
+                // NSImageScaleProportionallyUpOrDown = 3; NSViewWidthSizable | NSViewHeightSizable = 18.
+                let _: () = msg_send![&*view, setImageScaling: 3usize];
+                let _: () = msg_send![&*view, setAutoresizingMask: 18usize];
+                let _: () = msg_send![&*view, setWantsLayer: true];
+                let layer: *mut AnyObject = msg_send![&*view, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setMagnificationFilter: ns_string!("nearest")];
+                }
+                let _: () = msg_send![content, addSubview: &*view];
+                let view_ptr = (&*view as *const AnyObject) as usize;
+                let win_ptr = Retained::into_raw(win) as usize;
+                ENLARGED_QR_VISIBLE.store(true, Ordering::SeqCst);
+                *slot = Some(EnlargedQrWindowState {
+                    window_ptr: win_ptr,
+                    image_view_ptr: view_ptr,
+                    visible: true,
+                    closing_internally: false,
+                    on_dismiss: Some(Box::new(on_dismiss)),
+                });
+                (win_ptr as *mut AnyObject, view_ptr as *mut AnyObject)
+            };
+
+            let _: () = msg_send![image_view, setImage: &*image];
+            let _: () = msg_send![window, setLevel: qr_level];
+            let _: () = msg_send![window, setContentSize: NSSize::new(side, side)];
+            if let Some(pos) = origin {
+                let _: () = msg_send![window, setFrameOrigin: pos];
+            } else {
+                let _: () = msg_send![window, center];
+            }
+            let _: () = msg_send![window, invalidateShadow];
+            let content: *mut AnyObject = msg_send![window, contentView];
+            if !content.is_null() {
+                let _: () = msg_send![window, invalidateCursorRectsForView: content];
+            }
+            window as usize
+        };
+
+        let window = window_ptr as *mut AnyObject;
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, activateIgnoringOtherApps: true];
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        let content: *mut AnyObject = msg_send![window, contentView];
+        if !content.is_null() {
+            let _: () = msg_send![window, invalidateCursorRectsForView: content];
+        }
+    }
+    Ok(())
+}
+
+pub fn close_enlarged_qr() {
+    if !is_main_thread() {
+        return;
+    }
+    let taken = ENLARGED_QR_WINDOW.get().and_then(|lock| {
+        lock.lock().ok().and_then(|mut slot| {
+            slot.take().map(|mut state| {
+                state.closing_internally = true;
+                state.visible = false;
+                state.on_dismiss = None;
+                ENLARGED_QR_VISIBLE.store(false, Ordering::SeqCst);
+                state.window_ptr
+            })
+        })
+    });
+    if let Some(window_ptr) = taken {
+        unsafe {
+            let window = window_ptr as *mut NamiQrWindow;
+            let _: () = msg_send![window, orderOut: std::ptr::null_mut::<AnyObject>()];
+            drop(Retained::from_raw(window));
+        }
+    }
 }
 
 pub(crate) fn pick_backup_open_path(
@@ -2017,5 +2450,73 @@ mod tests {
             dir_icon, file_icon,
             "missing folder icon must reuse folder icon rather than generic missing file icon"
         );
+    }
+
+    #[test]
+    fn nami_qr_window_class_registers_cleanly() {
+        let win_cls = <super::NamiQrWindow as objc2::ClassType>::class();
+        assert!(win_cls.name().to_string_lossy().contains("NamiQrWindow"));
+        let view_cls = <super::NamiQrCardView as objc2::ClassType>::class();
+        assert!(view_cls.name().to_string_lossy().contains("NamiQrCardView"));
+    }
+
+    #[test]
+    fn enlarged_qr_centers_on_clipboard_window_and_clamps_to_screen() {
+        use super::{NSPoint, NSRect, NSSize};
+        let visible = NSRect::new(NSPoint::new(0.0, 40.0), NSSize::new(1440.0, 860.0));
+        // Centered over a clipboard window positioned on the right side of the screen.
+        let anchor = NSRect::new(NSPoint::new(600.0, 200.0), NSSize::new(800.0, 600.0));
+        let pos = super::compute_enlarged_qr_origin(Some(anchor), visible, 420.0);
+        assert_eq!(pos.x, 790.0);
+        assert_eq!(pos.y, 290.0);
+
+        // Clipboard parked near the left/bottom edge clamps cleanly inside visible screen bounds.
+        let edge_anchor = NSRect::new(NSPoint::new(-100.0, 0.0), NSSize::new(360.0, 300.0));
+        let clamped = super::compute_enlarged_qr_origin(Some(edge_anchor), visible, 420.0);
+        assert_eq!(clamped.x, 12.0);
+        assert_eq!(clamped.y, 52.0);
+    }
+
+    #[test]
+    fn enlarged_qr_dismiss_plan_is_reentrant_safe_and_fires_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_cb = Arc::clone(&calls);
+        {
+            let mut slot = super::ENLARGED_QR_WINDOW
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .unwrap();
+            *slot = Some(super::EnlargedQrWindowState {
+                window_ptr: 0,
+                image_view_ptr: 0,
+                visible: true,
+                closing_internally: false,
+                on_dismiss: Some(Box::new(move |_| {
+                    calls_cb.fetch_add(1, Ordering::SeqCst);
+                })),
+            });
+            super::ENLARGED_QR_VISIBLE.store(true, Ordering::SeqCst);
+        }
+
+        // First call takes the plan and releases the lock before AppKit orderOut: runs.
+        let plan = super::take_enlarged_qr_dismiss_plan(true);
+        assert!(plan.is_some());
+        assert!(!super::enlarged_qr_visible());
+
+        // Simulated synchronous resignKeyWindow re-entry must NOT deadlock and must be a no-op.
+        assert!(super::take_enlarged_qr_dismiss_plan(true).is_none());
+
+        super::finish_enlarged_qr_close();
+        if let Some((_, Some(cb))) = plan {
+            cb(false);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Clean up synthetic test slot.
+        *super::ENLARGED_QR_WINDOW.get().unwrap().lock().unwrap() = None;
     }
 }

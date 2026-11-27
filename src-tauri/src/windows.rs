@@ -858,6 +858,7 @@ fn create(app: &AppHandle, label: &str) -> Result<Window, String> {
                 .state::<AppState>()
                 .clipboard_dragging
                 .load(Ordering::SeqCst)
+                || platform::enlarged_qr_visible()
             {
                 return;
             }
@@ -904,6 +905,7 @@ pub fn emit_state(app: &AppHandle) -> Result<(), String> {
         (regions.clone(), ended)
     };
     if ended {
+        platform::hide_enlarged_qr();
         let app_state = app.state::<AppState>();
         app_state.clipboard_side_translation.clear();
         app_state.clipboard_translation.lock().unwrap().take();

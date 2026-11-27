@@ -11,7 +11,7 @@ commands.allow = ["window_pin", "records_details_toggle", "records_editor_set", 
 [[permission]]
 identifier = "allow-p0-clipboard"
 description = "Clipboard window may query and restore local clipboard history."
-commands.allow = ["window_pin", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_width_set", "clipboard_detail_width_set", "clipboard_translation_close", "clipboard_translation_clear_record", "clipboard_capture_set", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_image_qr_codes", "clipboard_text_copy", "clipboard_open_url", "clipboard_open_target", "clipboard_details_select", "clipboard_note_open", "clipboard_record_has_text", "clipboard_record_drag", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files", "translation_language_settings_open"]
+commands.allow = ["window_pin", "records_details_toggle", "records_editor_set", "records_navigation_resolve", "clipboard_width_set", "clipboard_detail_width_set", "clipboard_translation_close", "clipboard_translation_clear_record", "clipboard_capture_set", "clipboard_record_use", "clipboard_query", "clipboard_record_detail", "clipboard_image_qr_codes", "clipboard_qr_image_copy", "clipboard_qr_image_save", "clipboard_qr_enlarge", "clipboard_text_copy", "clipboard_open_url", "clipboard_open_target", "clipboard_details_select", "clipboard_note_open", "clipboard_record_has_text", "clipboard_record_drag", "clipboard_record_process", "clipboard_record_update", "clipboard_image", "clipboard_files", "translation_language_settings_open"]
 
 [[permission]]
 identifier = "allow-p0-settings"

@@ -176,6 +176,36 @@ pub fn prepare_image_paste(payload: super::ClipboardPayload) -> super::Clipboard
     payload
 }
 
+pub fn compress_png(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Ok(bytes.to_vec())
+}
+
+pub(crate) fn pick_qr_save_path(
+    _: &tauri::Window,
+    _: impl FnOnce(Result<Option<std::path::PathBuf>, String>) + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+#[allow(dead_code)]
+pub fn enlarged_qr_visible() -> bool {
+    false
+}
+
+#[allow(dead_code)]
+pub fn hide_enlarged_qr() {}
+
+pub fn show_enlarged_qr(
+    _: &[u8],
+    _: u32,
+    _: Option<&tauri::Window>,
+    _: impl Fn(bool) + Send + Sync + 'static,
+) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+
+pub fn close_enlarged_qr() {}
+
 pub fn clipboard_image_preview(_: &[u8], _: u32) -> Result<Vec<u8>, &'static str> {
     Err(UNAVAILABLE)
 }
