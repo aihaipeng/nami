@@ -37,7 +37,7 @@ import { extractImagePalette } from './imagePalette';
 import { analyzeSmartDetail, canEncodeQr } from './smartDetail';
 import { resolveLanguage } from '../shared/i18n';
 import type { ClipboardRecord } from './useClipboard';
-import { clipboardProcessError } from './feedback';
+import { clipboardProcessError, clipboardUseError } from './feedback';
 import './clipboard.css';
 
 export interface ClipboardDetailData extends ClipboardRecord {
@@ -153,6 +153,19 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
     }
   }
+  async function copyDerivedText(text: string) {
+    if (!native || !current || !snapshot.capabilities.clipboardWrite) return false;
+    const revision = operation.current;
+    const feedbackRevision = ++feedbackOperation.current;
+    setFeedback(null);
+    try {
+      await invoke('clipboard_text_copy', { text });
+      return operation.current === revision;
+    } catch (error) {
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardUseError(error)));
+      return false;
+    }
+  }
   async function openQrUrl(url: string) {
     if (!native || !snapshot.capabilities.clipboardOpenTarget) return;
     const revision = operation.current;
@@ -225,6 +238,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const displayedText = current?.kind === 'text' && smart?.kind === 'json'
     ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
     : current?.text ?? '';
+  const canCopyDerived = native && current !== null && snapshot.capabilities.clipboardWrite;
   const language = resolveLanguage(snapshot.locale);
   const mac = snapshot.capabilities.platform === 'macos';
   const openTargetAction = current && openTargetKind ? {
@@ -267,7 +281,7 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
                 {smart?.kind === 'color' && <ClipboardColorCard color={smart} />}
                 {smart?.kind === 'timestamp' && <ClipboardTimestampCard timestamp={smart} locale={language} t={t} />}
                 {smart?.kind === 'datetime' && <ClipboardDateTimeCard dateTime={smart} locale={language} t={t} />}
-                {smart?.kind === 'url' && <ClipboardUrlCard url={smart} t={t} />}
+                {smart?.kind === 'url' && <ClipboardUrlCard url={smart} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />}
                 {smart?.kind === 'jwt' && <ClipboardJwtCard jwt={smart} locale={language} t={t} />}
                 {smart?.kind === 'cron' && <ClipboardCronCard cron={smart} locale={language} t={t} />}
                 {smart?.kind === 'math' && <ClipboardMathCard math={smart} t={t} />}
@@ -281,13 +295,13 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
                 paletteRecord.current = current.id;
                 setImagePalette(extractImagePalette(img));
               }} />
-              <ClipboardImagePalette colors={imagePalette} t={t} />
-              {current.kind === 'image' && <ClipboardImageQrBar codes={qrCodes} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onOpenUrl={openQrUrl} t={t} />}
-              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact
+              <ClipboardImagePalette colors={imagePalette} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />
+              {current.kind === 'image' && <ClipboardImageQrBar codes={qrCodes} canCopy={canCopyDerived} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onCopy={copyDerivedText} onOpenUrl={openQrUrl} t={t} />}
+              {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact canCopy={canCopyDerived} onCopy={copyDerivedText}
                 onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
                 revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
             </>
-            : <ClipboardFilesCard entries={current.files}
+            : <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText}
               onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
               revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
       </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}

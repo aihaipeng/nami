@@ -479,6 +479,7 @@ fn main() {
             commands::clipboard_query,
             commands::clipboard_record_detail,
             commands::clipboard_image_qr_codes,
+            commands::clipboard_text_copy,
             commands::clipboard_open_url,
             commands::clipboard_open_target,
             commands::clipboard_record_has_text,

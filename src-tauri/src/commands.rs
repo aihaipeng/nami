@@ -2063,6 +2063,45 @@ pub async fn clipboard_image_qr_codes(
 }
 
 #[tauri::command]
+pub async fn clipboard_text_copy(
+    window: Webview,
+    app: AppHandle,
+    text: String,
+) -> Result<(), String> {
+    authorize(&window, &["clipboard", "translation"])?;
+    if !platform::capabilities().clipboard_write {
+        return Err("platform_unavailable".into());
+    }
+    if text.is_empty() || text.contains('\0') || text.len() > nami::clipboard::MAX_TEXT_BYTES {
+        return Err("invalid_argument".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.clipboard_writes.lock().await;
+    let copied = text.clone();
+    on_main(&app, move |app| {
+        let version = platform::write_clipboard(&platform::ClipboardPayload::Text(copied))
+            .map_err(|(code, _)| code.to_owned())?;
+        app.state::<AppState>()
+            .clipboard_version
+            .store(version, Ordering::SeqCst);
+        Ok::<_, String>(())
+    })
+    .await??;
+    match crate::clipboard_runtime::database(&app, move |database| {
+        database.clipboard_insert_text_copy(text).map(|_| ())
+    })
+    .await
+    {
+        Ok(()) => {
+            crate::clipboard_preferences::enforce_history_locked(&app).await;
+            let _ = crate::clipboard_runtime::changed(&app);
+        }
+        Err(error) => eprintln!("Nami clipboard history after detail copy: {error}"),
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn clipboard_open_url(
     window: Webview,
     app: AppHandle,

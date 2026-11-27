@@ -38,6 +38,7 @@ fn main() {
             "clipboard_query",
             "clipboard_record_detail",
             "clipboard_image_qr_codes",
+            "clipboard_text_copy",
             "clipboard_open_url",
             "clipboard_open_target",
             "clipboard_record_has_text",

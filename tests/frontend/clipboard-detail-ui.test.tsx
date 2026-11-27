@@ -695,24 +695,27 @@ it('shows image previews immediately but scans only a settled detail and ignores
   } finally { vi.useRealTimers(); }
 });
 
-it('displays locally detected QR codes on images and opens links only on explicit click', async () => {
+it('displays locally detected QR codes on images and provides copy before open only for link rows', async () => {
   records[1] = { ...first(), id: 'qr-img', kind: 'image', text: 'Image', imageIndexStatus: 'indexed', width: 400, height: 400, characterCount: null, size: 12_000 };
   bridge.snapshot.window.clipboardDetailId = 'qr-img';
   bridge.snapshot.window.clipboardDetailVisible = true;
   const baseInvoke = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_image_qr_codes') return ['https://example.test/from-qr', 'plain-qr-payload'];
-    if (name === 'clipboard_open_url') return null;
+    if (name === 'clipboard_open_url' || name === 'clipboard_text_copy') return null;
     return baseInvoke(name, args);
   });
   render(<ClipboardDetail snapshot={bridge.snapshot} native t={translator('en')} command={vi.fn()} activity={vi.fn()} />);
-  expect(await within(pane()).findByText('https://example.test/from-qr')).toBeTruthy();
-  expect(within(pane()).getByText('plain-qr-payload')).toBeTruthy();
-  expectNoCopyButtons();
+  const linkRow = (await within(pane()).findByText('https://example.test/from-qr')).closest<HTMLElement>('.clipboard-smart-row')!;
+  const plainRow = within(pane()).getByText('plain-qr-payload').closest<HTMLElement>('.clipboard-smart-row')!;
+  expect(within(plainRow).queryAllByRole('button')).toHaveLength(0);
+  const linkButtons = within(linkRow).getAllByRole('button');
+  expect(linkButtons.map((button) => button.getAttribute('aria-label'))).toEqual(['Copy QR Code', 'Open Link']);
   expect(calls('clipboard_open_url')).toHaveLength(0);
-  const openButtons = within(pane()).getAllByRole('button', { name: 'Open Link' });
-  expect(openButtons).toHaveLength(1);
-  fireEvent.click(openButtons[0]);
+  fireEvent.click(linkButtons[0]);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'https://example.test/from-qr' }));
+  expect(linkButtons[0].classList.contains('record-copied')).toBe(true);
+  fireEvent.click(linkButtons[1]);
   await waitFor(() => expect(calls('clipboard_open_url').at(-1)?.[1]).toEqual({ url: 'https://example.test/from-qr' }));
 });
 
@@ -778,16 +781,30 @@ it('shows detail toolbar open-target actions for text links and paths while loca
     .toEqual([{ recordId: 'first', execute: true, fileIndex: undefined }]));
 });
 
-it('renders URL, DateTime, JWT, and decoded text smart cards without copy buttons', async () => {
-  // URL card: Clean URL, Decoded URL, and decoded query parameters.
-  first().text = 'https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&utm_source=share&q=%E6%B5%8B%E8%AF%95';
+it('renders URL link copy buttons while keeping non-link smart cards without copy buttons', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_text_copy') return null;
+    return baseInvoke(name, args);
+  });
+  // URL card: Clean URL, Decoded URL, and link-valued query parameters include copy buttons.
+  first().text = 'https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&utm_source=share&q=%E6%B5%8B%E8%AF%95&next=https%3A%2F%2Ftarget.test%2Fgo';
   direct();
-  expect(await within(pane()).findByText('https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&q=%E6%B5%8B%E8%AF%95')).toBeTruthy();
-  expect(within(pane()).getByText('https://example.test/wiki/中文?id=42&utm_source=share&q=测试')).toBeTruthy();
+  const cleanUrl = 'https://example.test/wiki/%E4%B8%AD%E6%96%87?id=42&q=%E6%B5%8B%E8%AF%95&next=https%3A%2F%2Ftarget.test%2Fgo';
+  const decodedUrl = 'https://example.test/wiki/中文?id=42&utm_source=share&q=测试&next=https%3A%2F%2Ftarget.test%2Fgo';
+  expect(await within(pane()).findByText(cleanUrl)).toBeTruthy();
+  expect(within(pane()).getByText(decodedUrl)).toBeTruthy();
   const paramsList = pane().querySelector<HTMLElement>('.clipboard-smart-params')!;
   expect(within(paramsList).getByText('测试')).toBeTruthy();
   expect(getComputedStyle(paramsList).overflowY).not.toBe('auto');
-  expectNoCopyButtons();
+  expect(within(pane()).getAllByRole('button', { name: /^Copy\b/ }).map((button) => button.getAttribute('aria-label')))
+    .toEqual(['Copy Clean URL', 'Copy Decoded', 'Copy next']);
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Clean URL' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: cleanUrl }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy Decoded' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: decodedUrl }));
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Copy next' }));
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: 'https://target.test/go' }));
 
   // DateTime card: ISO UTC -> Local, Unix (s), Unix (ms), Relative
   first().text = '2026-11-25T00:22:55Z';
@@ -838,16 +855,17 @@ it('renders URL, DateTime, JWT, and decoded text smart cards without copy button
   expect(getComputedStyle(codeBlock!).overflowY).not.toBe('auto');
 });
 
-it('shows unified file+path cards for single files, local images, and multi-file groups without toolbar file reveal buttons', async () => {
+it('shows unified file+path cards with path copy buttons and compact single-image path copy before reveal', async () => {
   const original = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name, args) => {
     if (name === 'clipboard_open_target') return 'file';
     if (name === 'clipboard_image_qr_codes') return [];
     if (name === 'clipboard_image') return 'data:image/png;base64,iVBORw0KGgo=';
+    if (name === 'clipboard_text_copy') return null;
     return original(name, args);
   });
 
-  // Single regular file: unified file+path card with reveal on the file row and no toolbar reveal.
+  // Single regular file: unified file+path card with reveal on the file row and copy on the path row.
   const record = first();
   record.kind = 'files';
   record.text = JSON.stringify(['/Users/apple/Downloads/report.pdf']);
@@ -859,38 +877,48 @@ it('shows unified file+path cards for single files, local images, and multi-file
   const singleBlocks = pane().querySelectorAll('.clipboard-smart-file-item');
   expect(singleBlocks).toHaveLength(1);
   expect(singleBlocks[0].querySelector('.clipboard-file > img')?.getAttribute('src')).toBe('data:image/png;base64,aWNvbg==');
-  expect(singleBlocks[0].querySelector('.clipboard-smart-file-path svg[data-icon="file-path"]')).not.toBeNull();
+  const singlePathRow = singleBlocks[0].querySelector<HTMLElement>('.clipboard-smart-file-path')!;
+  expect(singlePathRow.querySelector('svg[data-icon="file-path"]')).not.toBeNull();
   expect(singleBlocks[0].contains(revealReport)).toBe(true);
-  expect(within(singleBlocks[0] as HTMLElement).getByText('/Users/apple/Downloads/report.pdf')).toBeTruthy();
-  expectNoCopyButtons();
+  expect(within(singlePathRow).getByText('/Users/apple/Downloads/report.pdf')).toBeTruthy();
+  const copyReport = within(singlePathRow).getByRole('button', { name: 'Copy report.pdf' });
+  fireEvent.click(copyReport);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Downloads/report.pdf' }));
+  expect(copyReport.classList.contains('record-copied')).toBe(true);
   fireEvent.click(revealReport);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
 
-  // Local single image keeps the preview and compact path card with reveal, without a toolbar reveal.
+  // Local single image keeps the preview and compact path card without the "Path" label, with copy before reveal.
   record.kind = 'image';
   record.text = '';
   record.files = [{ path: '/Users/apple/Pictures/photo.png', name: 'photo.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }];
   await emit('clipboard_changed', 2);
   const revealImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
   expect(pane().querySelector('img')).toBeTruthy();
-  expect(within(pane()).getByText('Path')).toBeTruthy();
-  expect(within(pane()).getByText('/Users/apple/Pictures/photo.png')).toBeTruthy();
+  expect(within(pane()).queryByText('Path')).toBeNull();
+  const compactRow = pane().querySelector<HTMLElement>('.clipboard-smart-files .clipboard-smart-file-path')!;
+  expect(compactRow.querySelector('svg[data-icon="file-path"]')).not.toBeNull();
+  expect(within(compactRow).getByText('/Users/apple/Pictures/photo.png')).toBeTruthy();
   expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
-  expectNoCopyButtons();
+  const compactButtons = within(compactRow).getAllByRole('button');
+  expect(compactButtons.map((button) => button.getAttribute('aria-label'))).toEqual(['Copy photo.png', 'Show in Finder: photo.png']);
+  fireEvent.click(compactButtons[0]);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Pictures/photo.png' }));
   const beforeImageReveal = calls('clipboard_open_target').length;
   fireEvent.click(revealImgBtn);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
   expect(calls('clipboard_open_target')).toHaveLength(beforeImageReveal + 1);
 
-  // Missing local image paths are not exposed; stored pixels remain visible.
+  // Missing local image paths are not exposed and disable both copy and reveal; stored pixels remain visible.
   record.files = [{ path: '/Users/apple/Pictures/photo.png', name: 'photo.png', exists: false, isDir: false, isImage: true, iconDataUrl: null }];
   await emit('clipboard_changed', 3);
   const missingImgBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: photo.png' });
+  const missingCopyBtn = within(pane()).getByRole('button', { name: 'Copy photo.png' });
   expect((missingImgBtn as HTMLButtonElement).disabled).toBe(true);
+  expect((missingCopyBtn as HTMLButtonElement).disabled).toBe(true);
   expect(within(pane()).getByText('Path unavailable')).toBeTruthy();
   expect(within(pane()).queryByText('/Users/apple/Pictures/photo.png')).toBeNull();
   expect(pane().querySelector('.clipboard-image-preview img')).not.toBeNull();
-  expectNoCopyButtons();
   const beforeMissingReveal = calls('clipboard_open_target').length;
   fireEvent.click(missingImgBtn);
   expect(calls('clipboard_open_target')).toHaveLength(beforeMissingReveal);
@@ -902,7 +930,7 @@ it('shows unified file+path cards for single files, local images, and multi-file
   expect(within(pane()).queryByRole('button', { name: 'Show in Finder' })).toBeNull();
   expectNoCopyButtons();
 
-  // Multiple files: only existing files expose their paths and can be revealed.
+  // Multiple files: only existing files expose their paths and enable copy and reveal.
   record.kind = 'files';
   record.text = JSON.stringify(['/Users/apple/Desktop/a.txt', '/Users/apple/Desktop/b.txt', '/Users/apple/Desktop/trashed-dir']);
   record.files = [
@@ -912,24 +940,29 @@ it('shows unified file+path cards for single files, local images, and multi-file
   ];
   await emit('clipboard_changed', 5);
   await within(pane()).findByText('/Users/apple/Desktop/a.txt');
-  expectNoCopyButtons();
   expect(within(pane()).queryByText('Folder')).toBeNull();
   expect(pane().querySelector('.clipboard-files')).toBeNull();
   const blocks = pane().querySelectorAll('.clipboard-smart-file-item');
   expect(blocks).toHaveLength(3);
   const revealA = within(blocks[0] as HTMLElement).getByRole('button', { name: 'Show in Finder: a.txt' });
+  const copyA = within(blocks[0] as HTMLElement).getByRole('button', { name: 'Copy a.txt' });
   expect((revealA as HTMLButtonElement).disabled).toBe(false);
+  expect((copyA as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(copyA);
+  await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '/Users/apple/Desktop/a.txt' }));
   const beforeMultiReveal = calls('clipboard_open_target').length;
   fireEvent.click(revealA);
   await waitFor(() => expect(calls('clipboard_open_target').at(-1)?.[1]).toEqual({ recordId: 'first', execute: true, fileIndex: 0 }));
   expect(calls('clipboard_open_target')).toHaveLength(beforeMultiReveal + 1);
   const revealB = within(blocks[1] as HTMLElement).getByRole('button', { name: 'Show in Finder: b.txt' });
+  const copyB = within(blocks[1] as HTMLElement).getByRole('button', { name: 'Copy b.txt' });
   expect((revealB as HTMLButtonElement).disabled).toBe(true);
+  expect((copyB as HTMLButtonElement).disabled).toBe(true);
   expect(blocks[1].querySelector('.clipboard-file svg.lucide-file')).not.toBeNull();
   expect(within(blocks[1] as HTMLElement).getByText('Path unavailable')).toBeTruthy();
   expect(blocks[1].querySelector('.clipboard-smart-file-path svg[data-icon="file-path"]')).not.toBeNull();
   expect(within(blocks[1] as HTMLElement).queryByText('/Users/apple/Desktop/b.txt')).toBeNull();
-  // A trashed or deleted folder keeps its folder icon and cannot be revealed.
+  // A trashed or deleted folder keeps its folder icon and cannot be copied or revealed.
   const trashedFileEl = blocks[2].querySelector('.clipboard-file') as HTMLElement;
   expect(trashedFileEl.dataset.missing).toBe('true');
   expect(trashedFileEl.querySelector('svg.lucide-folder')).not.toBeNull();
@@ -937,7 +970,9 @@ it('shows unified file+path cards for single files, local images, and multi-file
   expect(within(blocks[2] as HTMLElement).getByText('Path unavailable')).toBeTruthy();
   expect(within(blocks[2] as HTMLElement).queryByText('/Users/apple/Desktop/trashed-dir')).toBeNull();
   const revealTrashedDir = within(blocks[2] as HTMLElement).getByRole('button', { name: 'Show in Finder: trashed-dir' });
+  const copyTrashedDir = within(blocks[2] as HTMLElement).getByRole('button', { name: 'Copy trashed-dir' });
   expect((revealTrashedDir as HTMLButtonElement).disabled).toBe(true);
+  expect((copyTrashedDir as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(revealB);
   fireEvent.click(revealTrashedDir);
   expect(calls('clipboard_open_target')).toHaveLength(beforeMultiReveal + 1);
@@ -1031,10 +1066,11 @@ it('aligns detail key-value rows on a shared grid with centered keys and left-al
   expect(cronGrid.querySelector('.clipboard-smart-key')?.getAttribute('title')).toBe('Schedule');
 });
 
-it('extracts an offscreen image palette below single images alongside QR and path cards and shows HEX as text', async () => {
+it('extracts an offscreen image palette below single images and copies clicked swatches', async () => {
   const baseInvoke = bridge.invoke.getMockImplementation()!;
   bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
     if (name === 'clipboard_image_qr_codes') return ['https://example.test/img-qr'];
+    if (name === 'clipboard_text_copy') return null;
     return baseInvoke(name, args);
   });
 
@@ -1091,17 +1127,12 @@ it('extracts an offscreen image palette below single images alongside QR and pat
 
     const paletteGroup = await within(pane()).findByRole('group', { name: 'Color Palette' });
     expect(sampledCanvasSize).toEqual([48, 27]);
-    const hexCodes = within(paletteGroup).getAllByRole('code');
-    expect(hexCodes.map((code) => code.textContent).sort()).toEqual(['#1E293B', '#38BDF8', '#818CF8', '#F472B6', '#FACC15']);
-    expect(within(paletteGroup).queryAllByRole('button')).toHaveLength(0);
-    const skyHex = within(paletteGroup).getByText('#38BDF8');
-    const selection = document.getSelection()!;
-    selection.selectAllChildren(skyHex);
-    try {
-      expect(selection.toString()).toBe('#38BDF8');
-    } finally {
-      selection.removeAllRanges();
-    }
+    const swatches = within(paletteGroup).getAllByRole('button');
+    expect(swatches.map((button) => button.querySelector('.clipboard-palette-hex')?.textContent).sort()).toEqual(['#1E293B', '#38BDF8', '#818CF8', '#F472B6', '#FACC15']);
+    const skyButton = within(paletteGroup).getByRole('button', { name: 'Copy #38BDF8' });
+    fireEvent.click(skyButton);
+    await waitFor(() => expect(calls('clipboard_text_copy').at(-1)?.[1]).toEqual({ text: '#38BDF8' }));
+    expect(skyButton.classList.contains('record-copied')).toBe(true);
 
     // Ordering under single image: ImagePreview -> Color Palette -> QR -> Compact Path card
     await within(pane()).findByText('https://example.test/img-qr');
@@ -1118,4 +1149,62 @@ it('extracts an offscreen image palette below single images alongside QR and pat
   } finally {
     getContext.mockRestore();
   }
+});
+
+it('keeps the list selection and keyboard target on the current record when detail copy inserts a new top record', async () => {
+  records[1] = {
+    ...first(),
+    kind: 'files',
+    text: JSON.stringify(['/Users/apple/.agents/skills/ui-ux-review']),
+    characterCount: null,
+    size: null,
+    files: [{ path: '/Users/apple/.agents/skills/ui-ux-review', name: 'ui-ux-review', exists: true, isDir: true, isImage: false, iconDataUrl: null }],
+  };
+  let revision = 10;
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_files') return structuredClone(records.find((record) => record.id === (args as { recordId: string }).recordId)?.files ?? []);
+    if (name === 'clipboard_text_copy') {
+      const text = (args as { text: string }).text;
+      const inserted: ClipboardDetailData = {
+        id: `copied-${++revision}`,
+        kind: 'text',
+        title: '',
+        text,
+        date: '2026-11-27T09:10:00Z',
+        isFavorite: false,
+        isPinned: false,
+        sourceApp: { name: 'Nami', iconDataUrl: null },
+        width: null,
+        height: null,
+        size: null,
+        characterCount: text.length,
+        files: [],
+      };
+      records = [records[0], inserted, ...records.slice(1)];
+      bridge.listeners.get('clipboard_changed')?.forEach((callback) => callback({ payload: revision }));
+      return null;
+    }
+    return baseInvoke(name, args);
+  });
+
+  await mount('translation');
+  await waitFor(() => expect(row('first')).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+  await screen.findByRole('region', { name: 'Clipboard details' });
+  const copyPath = await within(pane()).findByRole('button', { name: 'Copy ui-ux-review' });
+
+  fireEvent.click(copyPath);
+  await waitFor(() => expect(row('copied-11')).toBeTruthy());
+
+  // The new text record appears at the top of the unpinned list, while focus/selection and details stay on "first".
+  expect(bridge.snapshot.window.clipboardDetailId).toBe('first');
+  expect(row('first').classList.contains('selected')).toBe(true);
+  expect(row('first').dataset.keyboardCurrent).toBe('true');
+  expect(row('first').querySelector('button')?.getAttribute('aria-pressed')).toBe('true');
+  expect(row('first').querySelector('button')?.getAttribute('aria-current')).toBe('true');
+  expect(row('copied-11').classList.contains('selected')).toBe(false);
+  expect(row('copied-11').dataset.keyboardCurrent).toBeUndefined();
+  expect(within(pane()).getByText('/Users/apple/.agents/skills/ui-ux-review')).toBeTruthy();
+  expect(copyPath.classList.contains('record-copied')).toBe(true);
 });

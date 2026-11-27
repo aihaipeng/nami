@@ -1267,7 +1267,10 @@ impl HistoryDatabase {
         self.insert_clipboard_record(record, None, None, None, true, Some(source_id))
     }
 
-    pub fn clipboard_insert_translation_copy(&mut self, text: String) -> Result<(), String> {
+    pub fn clipboard_insert_text_copy(&mut self, text: String) -> Result<ClipboardRecord, String> {
+        if text.is_empty() || text.contains('\0') || text.len() > MAX_TEXT_BYTES {
+            return Err("invalid_argument".into());
+        }
         let record = ClipboardRecord {
             id: uuid::Uuid::new_v4().to_string(),
             kind: "text".into(),
@@ -1280,7 +1283,10 @@ impl HistoryDatabase {
             image_path: None,
         };
         self.insert_clipboard_record(&record, None, None, None, false, None)
-            .map(|_| ())
+    }
+
+    pub fn clipboard_insert_translation_copy(&mut self, text: String) -> Result<(), String> {
+        self.clipboard_insert_text_copy(text).map(|_| ())
     }
 
     pub fn clipboard_duplicate(&mut self, id: &str) -> Result<(), String> {
@@ -3651,6 +3657,33 @@ mod tests {
             assert_eq!(details.source_app.unwrap()["name"], "Nami");
             assert!(!details.is_favorite && !details.is_pinned);
         }
+    }
+
+    #[test]
+    fn text_copies_append_new_records_and_reject_invalid_payloads() {
+        let mut db = HistoryDatabase::open(Path::new(":memory:")).unwrap();
+        assert_eq!(
+            db.clipboard_insert_text_copy(String::new()).unwrap_err(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            db.clipboard_insert_text_copy("bad\0text".into())
+                .unwrap_err(),
+            "invalid_argument"
+        );
+        let original = record("existing", "/Users/apple/demo.txt");
+        db.clipboard_insert(&original).unwrap();
+        let first_copy = db
+            .clipboard_insert_text_copy("/Users/apple/demo.txt".into())
+            .unwrap();
+        let second_copy = db.clipboard_insert_text_copy("#38BDF8".into()).unwrap();
+        assert_ne!(first_copy.id, original.id);
+        assert_ne!(second_copy.id, first_copy.id);
+        assert_eq!(first_copy.source_app.unwrap()["name"], "Nami");
+        assert_eq!(second_copy.text, "#38BDF8");
+        let page = db.clipboard_page("", false, None, 100).unwrap();
+        assert_eq!(page.total_records, 3);
+        assert!(db.clipboard_record("existing").is_ok());
     }
 
     #[test]

@@ -117,7 +117,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   };
   const first = records.find((record) => !record.isPinned) ?? records[0];
   const targetOnMouseMove = useRecordPointer();
-  const keyboardId = clipboard.displayReady ? (selected && visibleIds.has(selected) ? selected : first?.id) : undefined;
+  const activeRecordId = selected ?? (snapshot.window.clipboardDetailVisible ? snapshot.window.clipboardDetailId : null);
+  const keyboardId = clipboard.displayReady ? (activeRecordId && visibleIds.has(activeRecordId) ? activeRecordId : first?.id) : undefined;
   const hoverPreviewContext = useRef({
     active,
     clipboardVisible: snapshot.window.clipboardVisible,
@@ -312,7 +313,9 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
   }, [active, snapshot.window.clipboardDetailVisible, snapshot.window.clipboardDetailId, records, clipboard.loading, clipboard.displayReady, first, command]);
   async function toggleDetails() {
     if (!snapshot.window.clipboardDetailVisible) {
-      await command('clipboard_details_select', { recordId: keyboardId ?? null, browsing: true });
+      const targetId = keyboardId ?? null;
+      if (targetId) setSelected(targetId);
+      await command('clipboard_details_select', { recordId: targetId, browsing: true });
     }
     await command('records_details_toggle');
   }
@@ -603,7 +606,10 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
 
     if (action === 'preview' && (record || snapshot.window.clipboardDetailVisible)) {
       key.preventDefault();
-      if (!key.repeat) void command('records_details_toggle', record ? { recordId: record.id } : undefined);
+      if (!key.repeat) {
+        if (!snapshot.window.clipboardDetailVisible && record) setSelected(record.id);
+        void command('records_details_toggle', record ? { recordId: record.id } : undefined);
+      }
       return;
     }
 
