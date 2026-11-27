@@ -169,8 +169,12 @@ describe('clipboard type filters', () => {
     const props = { t: translator('en'), snapshot: bridge.snapshot, command: vi.fn(), native: true, active: true, search: { current: null }, total: 1 };
     const view = render(<HistoryFooter {...props} clipboard />);
     const helpButton = screen.getByRole('button', { name: 'HotKey' });
-    expect(helpButton.title).toBe('HotKey');
+    expect(helpButton.getAttribute('data-tooltip')).toBe('HotKey');
+    expect(helpButton.getAttribute('title')).toBeNull();
+    fireEvent.mouseOver(helpButton);
+    expect(screen.getByRole('tooltip').textContent).toBe('HotKey');
     fireEvent.click(helpButton);
+    expect(screen.queryByRole('tooltip')).toBeNull();
     expect(within(screen.getByRole('dialog', { name: 'HotKey' })).getByText('HotKey')).toBeTruthy();
     const entries = () => Object.fromEntries(Array.from(screen.getByRole('dialog', { name: 'HotKey' }).querySelectorAll('div'),
       (row) => [row.firstElementChild?.textContent, row.lastElementChild?.textContent]));
@@ -392,10 +396,13 @@ describe('clipboard text processing', () => {
     expect(screen.getByRole('menuitem', { name: 'Translate' }).getAttribute('aria-description')).toBe(online);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     const actions = (id: string) => within(row(id)).getAllByRole('button').filter((button) => button.closest('.history-row-actions')).map((button) => button.getAttribute('aria-label'));
-    expect(actions('first')).toEqual(['Translate', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('text-image')).toEqual(['Translate', 'Extract text', 'Note', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('ordinary')).toEqual(['Translate', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
-    expect(actions('ordinary-image')).toEqual(['Translate', 'Extract text', 'Note', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('first')).toEqual(['Translate', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('text-image')).toEqual(['Translate', 'Extract text', 'Remove favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary')).toEqual(['Translate', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    expect(actions('ordinary-image')).toEqual(['Translate', 'Extract text', 'Favorite', 'Pin record', 'Delete clipboard record']);
+    // Delete and OCR tooltips use concise action labels.
+    expect(within(row('text-image')).getByRole('button', { name: 'Extract text' }).getAttribute('data-tooltip')).toBe('Extract Text');
+    expect(within(row('text-image')).getByRole('button', { name: 'Delete clipboard record' }).getAttribute('data-tooltip')).toBe('Delete');
     for (const id of ['blank', 'pinned']) {
       expect(within(row(id)).queryByRole('button', { name: 'Translate' })).toBeNull();
       expect(within(row(id)).queryByRole('button', { name: 'Extract text' })).toBeNull();
@@ -3436,7 +3443,7 @@ describe('clipboard open target', () => {
       // Hovering over row actions cancels preview instead of opening details.
       fireEvent.mouseMove(row('first'), { clientX: 42, clientY: 82 });
       await act(async () => { vi.advanceTimersByTime(400); });
-      const actionButton = within(row('first')).getByRole('button', { name: 'Note' });
+      const actionButton = within(row('first')).getByRole('button', { name: 'Favorite' });
       fireEvent.mouseMove(actionButton, { clientX: 120, clientY: 82 });
       await act(async () => { vi.advanceTimersByTime(700); });
       expect(calls('records_details_toggle')).toHaveLength(0);
@@ -3491,5 +3498,71 @@ describe('clipboard open target', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('provides hover tooltip bubbles without native title conflicts for every clipboard control button', async () => {
+    await mount('clipboard');
+    await waitFor(() => expect(row('first')).toBeTruthy());
+
+    const searchInput = screen.getByRole('searchbox', { name: 'Search clipboard' });
+    fireEvent.change(searchInput, { target: { value: 'Saved' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clear clipboard search' })).toBeTruthy());
+
+    // List rows omit the inline Note button (kept in details and context menu).
+    expect(within(row('first')).queryByRole('button', { name: 'Note' })).toBeNull();
+    fireEvent.contextMenu(row('first'));
+    expect(screen.getByRole('menuitem', { name: 'Note' })).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    // Every visible control button in the clipboard panel (excluding the full record row select surface) has a bubble tooltip.
+    const panel = screen.getByRole('region', { name: 'Clipboard' });
+    const controlButtons = Array.from(panel.querySelectorAll<HTMLButtonElement>('button:not(.history-row-select):not([hidden]):not(:disabled)'));
+    expect(controlButtons.length).toBeGreaterThanOrEqual(11);
+    for (const button of controlButtons) {
+      expect(button.dataset.tooltip?.trim()).toBeTruthy();
+      expect(button.getAttribute('title')).toBeNull();
+    }
+
+    // Delete tooltip uses concise localized label ("删除" in zh-CN, "Delete" in en).
+    const deleteRowButton = within(row('first')).getByRole('button', { name: 'Delete clipboard record' });
+    fireEvent.mouseOver(deleteRowButton);
+    expect(screen.getByRole('tooltip').textContent).toBe('Delete');
+    await emit('locale_changed', 'zh-CN');
+    await waitFor(() => expect(within(row('first')).getByRole('button', { name: '删除这条剪贴板记录' }).dataset.tooltip).toBe('删除'));
+    await emit('locale_changed', 'en');
+    await waitFor(() => expect(within(row('first')).getByRole('button', { name: 'Delete clipboard record' }).dataset.tooltip).toBe('Delete'));
+
+    // Hovering toolbar, footer, and row action buttons renders a single live bubble tooltip and dismisses on leave / Escape.
+    const pinButton = screen.getByRole('button', { name: 'Pin records' });
+    fireEvent.mouseOver(pinButton);
+    expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+    expect(screen.getByRole('tooltip').textContent).toBe('Pin window');
+    expect(screen.getByRole('tooltip').getAttribute('data-side')).toBe('bottom');
+
+    const favoritesButton = screen.getByRole('button', { name: 'Favorite clipboard records' });
+    fireEvent.mouseOut(pinButton, { relatedTarget: favoritesButton });
+    expect(screen.getByRole('tooltip').textContent).toBe('Favorites');
+
+    const translateButton = within(row('first')).getByRole('button', { name: 'Translate' });
+    fireEvent.mouseOver(translateButton);
+    const tip = screen.getByRole('tooltip');
+    expect(tip.textContent).toBe('Translate');
+    expect(tip.textContent).not.toContain('Sends text');
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    // Delete confirm dialog buttons also show concise tooltip bubbles inside the modal top layer.
+    fireEvent.change(searchInput, { target: { value: '' } });
+    await waitFor(() => expect(row('pinned')).toBeTruthy());
+    fireEvent.click(within(row('pinned')).getByRole('button', { name: 'Delete clipboard record' }));
+    const confirmDialog = await screen.findByRole('alertdialog');
+    const confirmDelete = within(confirmDialog).getByRole('button', { name: 'Delete' });
+    fireEvent.mouseOver(confirmDelete);
+    const modalTooltip = screen.getByRole('tooltip');
+    expect(modalTooltip.textContent).toBe('Delete');
+    expect(confirmDialog.contains(modalTooltip)).toBe(true);
+    fireEvent.mouseOut(confirmDelete, { relatedTarget: document.body });
+    expect(screen.queryByRole('tooltip')).toBeNull();
   });
 });

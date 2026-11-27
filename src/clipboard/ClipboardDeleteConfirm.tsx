@@ -1,4 +1,5 @@
 import { useId, useLayoutEffect, useRef } from 'react';
+import { ActionTooltipHost } from '../shared/ActionTooltip';
 import type { Translate } from '../shared/i18n';
 
 export function markedDeleteDescription(t: Translate, record: { isFavorite: boolean; isPinned: boolean }) {
@@ -48,8 +49,9 @@ export function ClipboardDeleteConfirm({ t, description, onCancel, onConfirm }: 
     <strong id={titleId}>{t('clipboardDeleteMarkedTitle')}</strong>
     <p id={descriptionId}>{description}</p>
     <div className="clipboard-delete-confirm-actions">
-      <button type="button" aria-keyshortcuts="Escape" onClick={onCancel}>{t('clipboardCancel')}<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button>
-      <button type="button" className="clipboard-delete-confirm-action" aria-keyshortcuts="Enter" onClick={onConfirm}>{t('clipboardDeleteConfirm')}<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span></button>
+      <button type="button" data-tooltip={t('clipboardCancel')} aria-keyshortcuts="Escape" onClick={onCancel}>{t('clipboardCancel')}<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button>
+      <button type="button" className="clipboard-delete-confirm-action" data-tooltip={t('clipboardDeleteConfirm')} aria-keyshortcuts="Enter" onClick={onConfirm}>{t('clipboardDeleteConfirm')}<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span></button>
     </div>
+    <ActionTooltipHost />
   </dialog>;
 }

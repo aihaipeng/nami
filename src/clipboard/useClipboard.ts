@@ -299,8 +299,8 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     return () => window.clearTimeout(timer);
   }, [query, favoritesOnly, kind, searchKey, fetchPage]);
 
-  const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete') => {
-    if (!native || !active.current) return;
+  const update = useCallback(async (recordId: string, action: 'favorite' | 'pin' | 'delete'): Promise<boolean> => {
+    if (!native || !active.current) return false;
     setWriteError(false);
     const session = lifecycle.current;
     ++defaultRevision.current;
@@ -309,11 +309,11 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
     writeQueue.current = new Promise<void>((resolve) => { release = resolve; });
     ++localWrites.current;
     await pending;
-    if (!active.current || session !== lifecycle.current) { --localWrites.current; release(); return; }
+    if (!active.current || session !== lifecycle.current) { --localWrites.current; release(); return false; }
     const previous = latest.current.records.find((record) => record.id === recordId);
     try {
       await invoke('clipboard_record_update', { recordId, action });
-      if (!active.current || session !== lifecycle.current) return;
+      if (!active.current || session !== lifecycle.current) return false;
       if (action === 'pin') copiedMark.current = null;
       if (action === 'delete' && defaultPage.current) defaultPage.current.page = { ...defaultPage.current.page, records: defaultPage.current.page.records.filter((record) => record.id !== recordId) };
       if (!shouldDefer.current?.()) {
@@ -349,8 +349,10 @@ export function useClipboard(native: boolean, query: string, favoritesOnly: bool
         const next = pages.current.get(cacheKey(filters.current.kind, filters.current.favoritesOnly));
         if (next) { latest.current = next; setPage(next); }
       }
+      return true;
     } catch {
       if (active.current && session === lifecycle.current) setWriteError(true);
+      return false;
     } finally {
       --localWrites.current; release();
       if (panelActiveRef.current && hiddenDirty.current) void fetchPage(false, false);

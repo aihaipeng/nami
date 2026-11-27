@@ -35,7 +35,10 @@ export function SearchableDropdown({ value, onChange, label, items, t, side = 't
   return <>
     <button ref={trigger} id={triggerId} type="button" className={iconTrigger ? (open ? 'icon-button record-active' : 'icon-button') : settings ? 'language-picker settings-dropdown' : capsule ? 'language-picker dropdown-capsule' : 'language-picker'} aria-label={`${label}: ${selected}`}
       aria-hidden={hiddenTrigger || undefined} inert={hiddenTrigger} tabIndex={hiddenTrigger ? -1 : undefined}
-      title={triggerTitle ?? description} aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
+      title={iconTrigger ? undefined : (triggerTitle ?? description)}
+      data-tooltip={iconTrigger && !open ? (triggerTitle ?? description) : undefined}
+      data-tooltip-side={iconTrigger ? 'bottom' : undefined}
+      aria-description={description} aria-haspopup="dialog" aria-expanded={open} onClick={() => onOpenChange(!open)}>
       {iconTrigger ?? <><span>{selected}</span><ChevronDown aria-hidden="true" /></>}
     </button>
     {open && <FloatingPanel anchor={trigger} onClose={() => onOpenChange(false)} label={label} role="dialog" width={menuWidth} side={side} className={settings ? 'language-popover settings-popover' : 'language-popover'} dismissOnSettingsScroll={settings}>

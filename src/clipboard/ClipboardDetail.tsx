@@ -6,6 +6,7 @@ import type { ViewProps } from '../App';
 import { RecordActions } from '../shared/RecordActions';
 import { RecordHeading } from '../shared/RecordHeading';
 import { ActivityBeam } from '../shared/ActivityBeam';
+import { ActionTooltipHost } from '../shared/ActionTooltip';
 import { RecordFeedback } from '../shared/RecordFeedback';
 import { HistoryList } from '../shared/HistoryList';
 import { matchesBinding } from '../shared/shortcuts';
@@ -34,7 +35,8 @@ import {
 } from './ClipboardSmartDetail';
 import { ClipboardTextPreview } from './ClipboardTextPreview';
 import { extractImagePalette } from './imagePalette';
-import { analyzeSmartDetail, canEncodeQr } from './smartDetail';
+import { packQrModules, type QrMatrix } from './qrEncoder';
+import { analyzeSmartDetail, canEncodeQr, normalizeQrPayload } from './smartDetail';
 import { resolveLanguage } from '../shared/i18n';
 import type { ClipboardRecord } from './useClipboard';
 import { clipboardProcessError, clipboardUseError } from './feedback';
@@ -116,12 +118,16 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
   const singleImage = shown?.kind === 'image' || shown?.kind === 'files' && isSingleImage(shown.files);
   const canTranslate = shown?.kind === 'text' ? !!shown.text.trim() : shown?.kind === 'image' && snapshot.capabilities.imageOcr && shown.imageIndexStatus !== 'empty' && !recognizedEmpty;
   const canOcr = canTranslate && shown?.kind === 'image';
-  const [indexingId, setIndexingId] = useState<string | null>(null);
-  const indexStatus = current && (indexingId === current.id ? 'pending' : current.imageIndexStatus);
   const smart = useMemo(() => (current?.kind === 'text' ? analyzeSmartDetail(current.text) : null), [current?.kind, current?.text]);
+  const hasRichPreview = Boolean(current?.kind === 'text' && current.richTextHtml);
+  const showingRich = hasRichPreview && textViewMode === 'rich';
+  const displayedText = current?.kind === 'text' && smart?.kind === 'json'
+    ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
+    : current?.text ?? '';
   const imageDataSrc = smart?.kind === 'imageData' ? smart.src : null;
   useEffect(() => { setImageDataDims(null); }, [imageDataSrc]);
-  const canShowQr = Boolean(current?.kind === 'text' && canEncodeQr(current.text));
+  const qrPayload = useMemo(() => (current?.kind === 'text' ? normalizeQrPayload(displayedText) : ''), [current?.kind, displayedText]);
+  const canShowQr = Boolean(current?.kind === 'text' && canEncodeQr(displayedText));
   useEffect(() => {
     if (!active || !native || !current || current.kind !== 'text' || !snapshot.capabilities.clipboardOpenTarget) { setOpenTargetKind(null); return; }
     let disposed = false;
@@ -143,14 +149,17 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     }, QR_PREVIEW_DWELL_MS);
     return () => { disposed = true; window.clearTimeout(timer); };
   }, [active, native, current?.id, current?.kind, snapshot.capabilities.imageOcr, snapshot.window.recordsSession]);
-  async function openCurrentTarget() {
-    if (!current || loading) return;
+  async function openCurrentTarget(): Promise<boolean> {
+    if (!current || loading) return false;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     setFeedback(null);
-    try { await clipboardOpenTarget(current.id, true); }
-    catch (error) {
+    try {
+      await clipboardOpenTarget(current.id, true);
+      return operation.current === revision;
+    } catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
+      return false;
     }
   }
   async function copyDerivedText(text: string) {
@@ -166,37 +175,61 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
       return false;
     }
   }
-  async function openQrUrl(url: string) {
-    if (!native || !snapshot.capabilities.clipboardOpenTarget) return;
+  async function openQrUrl(url: string): Promise<boolean> {
+    if (!native || !snapshot.capabilities.clipboardOpenTarget) return false;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     setFeedback(null);
-    try { await invoke('clipboard_open_url', { url }); }
-    catch (error) {
+    try {
+      await invoke('clipboard_open_url', { url });
+      return operation.current === revision;
+    } catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
+      return false;
     }
   }
-  async function indexImage(recordId: string) {
-    const revision = operation.current;
-    setIndexingId(recordId);
-    setFeedback(null);
-    try { await invoke('clipboard_record_process', { recordId, action: 'index' }); }
-    catch { if (operation.current === revision) setFeedback(t('clipboardImageIndexFailed')); }
-    finally { setIndexingId((id) => id === recordId ? null : id); }
-  }
-  async function revealFile(index: number) {
-    if (!current || loading) return;
+  async function runQrCommand<T>(name: string, matrix: QrMatrix): Promise<{ ok: boolean; value?: T }> {
+    if (!native || !current || loading) return { ok: false };
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     setFeedback(null);
-    try { await clipboardOpenTarget(current.id, true, index); }
-    catch (error) {
-      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
+    try {
+      const value = await invoke<T>(name, { size: matrix.size, modules: packQrModules(matrix) });
+      return { ok: operation.current === revision, value };
+    } catch {
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t('clipboardQrActionFailed'));
+      return { ok: false };
     }
   }
-  async function action(type: 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete') {
+  async function copyQrImage(matrix: QrMatrix): Promise<boolean> {
+    if (!snapshot.capabilities.clipboardWrite) return false;
+    return (await runQrCommand('clipboard_qr_image_copy', matrix)).ok;
+  }
+  async function saveQrImage(matrix: QrMatrix): Promise<boolean> {
+    if (!snapshot.capabilities.localBackup) return false;
+    const result = await runQrCommand<boolean>('clipboard_qr_image_save', matrix);
+    return result.ok && result.value !== false;
+  }
+  async function enlargeQrImage(matrix: QrMatrix): Promise<boolean> {
+    if (!snapshot.capabilities.nativeChrome) return false;
+    return (await runQrCommand('clipboard_qr_enlarge', matrix)).ok;
+  }
+  async function revealFile(index: number): Promise<boolean> {
+    if (!current || loading) return false;
+    const revision = operation.current;
+    const feedbackRevision = ++feedbackOperation.current;
+    setFeedback(null);
+    try {
+      await clipboardOpenTarget(current.id, true, index);
+      return operation.current === revision;
+    } catch (error) {
+      if (operation.current === revision && feedbackOperation.current === feedbackRevision) setFeedback(t(clipboardOpenError(error)));
+      return false;
+    }
+  }
+  async function action(type: 'translate' | 'ocr' | 'favorite' | 'pin' | 'delete'): Promise<boolean> {
     const process = type === 'translate' || type === 'ocr';
-    if (!current || loading || processing.current && (process || type === 'delete')) return;
+    if (!current || loading || processing.current && (process || type === 'delete')) return false;
     const revision = operation.current;
     const feedbackRevision = ++feedbackOperation.current;
     if (process) { processing.current = true; setBusy(true); }
@@ -204,12 +237,14 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     try {
       if (process) await invoke('clipboard_record_process', { recordId: current.id, action: type });
       else await invoke('clipboard_record_update', { recordId: current.id, action: type });
+      return operation.current === revision;
     } catch (error) {
       if (operation.current === revision && feedbackOperation.current === feedbackRevision && String(error) !== 'cancelled') {
         const message = process ? clipboardProcessError(error, type) : t('nativeError');
         if (process && message === null && current.kind === 'image') setRecognizedEmpty(true);
         else if (message) setFeedback(message);
       }
+      return false;
     } finally {
       if (process && operation.current === revision) { processing.current = false; setBusy(false); }
     }
@@ -233,43 +268,50 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     window.addEventListener('keydown', dismiss);
     return () => window.removeEventListener('keydown', dismiss);
   }, [active, confirmDelete, snapshot.window.recordsEditorOpen, snapshot.window.clipboardTranslationVisible, command]);
-  const hasRichPreview = Boolean(current?.kind === 'text' && current.richTextHtml);
-  const showingRich = hasRichPreview && textViewMode === 'rich';
-  const displayedText = current?.kind === 'text' && smart?.kind === 'json'
-    ? (jsonMode === 'pretty' ? smart.pretty : jsonMode === 'minified' ? smart.minified : current.text)
-    : current?.text ?? '';
   const canCopyDerived = native && current !== null && snapshot.capabilities.clipboardWrite;
+  const qrInteractive = native && current !== null && !loading;
   const language = resolveLanguage(snapshot.locale);
   const mac = snapshot.capabilities.platform === 'macos';
   const openTargetAction = current && openTargetKind ? {
     kind: openTargetKind,
     label: openTargetKind === 'file' ? t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')
       : openTargetKind === 'link' ? t('clipboardQrOpenLink') : t('clipboardShortcutOpenTarget'),
-    onClick: () => { void openCurrentTarget(); },
+    tooltip: openTargetKind === 'email' ? t('clipboardOpenEmail') : undefined,
+    onClick: () => openCurrentTarget(),
   } : undefined;
   const qrAction = canShowQr ? {
     active: showQr,
     label: t(showQr ? 'clipboardQrHide' : 'clipboardQrGenerate'),
-    onClick: () => setShowQr((value) => !value),
+    onClick: () => { setShowQr((value) => !value); return true; },
   } : undefined;
   return <section inert={snapshot.window.recordsEditorOpen} className="history-panel clipboard-detail" data-qr-view={(showQr && canShowQr) || undefined} aria-label="Clipboard details" aria-busy={loading}>
     <ActivityBeam label={t('working')} active={active && loading} />
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
-      {hasRichPreview && !showQr && <div className="clipboard-detail-mode" role="group" aria-label={t('clipboardRichPreviewMode')} data-tauri-drag-region="false">
-        <button type="button" aria-pressed={showingRich} onClick={() => setTextViewMode('rich')}>{t('clipboardRichView')}</button>
-        <button type="button" aria-pressed={!showingRich} onClick={() => setTextViewMode('plain')}>{t('clipboardPlainView')}</button>
+      {hasRichPreview && <div className="clipboard-detail-mode" role="group" aria-label={t('clipboardRichPreviewMode')} data-tauri-drag-region="false">
+        <button type="button" aria-pressed={!showQr && showingRich} data-tooltip={t('clipboardRichView')} data-tooltip-side="bottom" onClick={() => { setTextViewMode('rich'); setShowQr(false); }}>{t('clipboardRichView')}</button>
+        <button type="button" aria-pressed={!showQr && !showingRich} data-tooltip={t('clipboardPlainView')} data-tooltip-side="bottom" onClick={() => { setTextViewMode('plain'); setShowQr(false); }}>{t('clipboardPlainView')}</button>
       </div>}
-      {shown && <RecordActions allowMarkedDelete t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} deleteLabel={t('deleteClipboard')}
-        onOpenTarget={openTargetAction} onQrCode={qrAction}
+      {shown && <RecordActions recordId={shown.id} allowMarkedDelete t={t} native={native && current !== null && !loading} favorite={shown.isFavorite} pinned={shown.isPinned} deleteLabel={t('deleteClipboard')}
+        tooltipSide="bottom" onOpenTarget={openTargetAction} onQrCode={qrAction}
         translateActive={snapshot.window.clipboardTranslationVisible && snapshot.window.clipboardTranslationRecordId === shown.id}
-        onTranslate={canTranslate ? () => { void action('translate'); } : undefined} onOcr={canOcr ? () => { void action('ocr'); } : undefined}
-        onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { if (type === 'delete') requestDelete(); else void action(type); }} busy={busy} retainDelete />}
+        onTranslate={canTranslate ? () => action('translate') : undefined} onOcr={canOcr ? () => action('ocr') : undefined}
+        onNote={() => { if (current) void command('clipboard_note_open', { recordId: current.id }); }} onUpdate={(type) => { if (type === 'delete') { requestDelete(); return false; } return action(type); }} busy={busy} retainDelete />}
     </header>
     <HistoryList scrollOnly active={active} list={list} pinnedList={pinned} pinned={[]} onNearEnd={() => {}}>
       {current ? <div className="clipboard-detail-content" key={current.id}>
         {current.kind === 'text'
           ? (showQr && canShowQr
-            ? <ClipboardQrPreview text={current.text} />
+            ? <ClipboardQrPreview
+              text={qrPayload}
+              recordId={current.id}
+              canCopy={qrInteractive && snapshot.capabilities.clipboardWrite}
+              canSave={qrInteractive && snapshot.capabilities.localBackup}
+              canEnlarge={qrInteractive && snapshot.capabilities.nativeChrome}
+              onCopyImage={copyQrImage}
+              onSaveImage={saveQrImage}
+              onEnlarge={enlargeQrImage}
+              t={t}
+            />
             : showingRich && current.richTextHtml
               ? <ClipboardRichText html={current.richTextHtml} />
               : <>
@@ -298,17 +340,14 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
               <ClipboardImagePalette colors={imagePalette} canCopy={canCopyDerived} onCopy={copyDerivedText} t={t} />
               {current.kind === 'image' && <ClipboardImageQrBar codes={qrCodes} canCopy={canCopyDerived} canOpen={native && snapshot.capabilities.clipboardOpenTarget} onCopy={copyDerivedText} onOpenUrl={openQrUrl} t={t} />}
               {current.files.length > 0 && <ClipboardFilesCard entries={current.files} compact canCopy={canCopyDerived} onCopy={copyDerivedText}
-                onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
+                onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => revealFile(index) : undefined}
                 revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
             </>
             : <ClipboardFilesCard entries={current.files} canCopy={canCopyDerived} onCopy={copyDerivedText}
-              onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => { void revealFile(index); } : undefined}
+              onReveal={snapshot.capabilities.clipboardOpenTarget ? (index) => revealFile(index) : undefined}
               revealLabel={t(mac ? 'clipboardRevealFile' : 'clipboardRevealInFileManager')} t={t} />}
-      </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
+      </div> : <div className="history-empty" role={failed ? 'alert' : 'status'}>{failed ? t(failed === 'unavailable' ? 'clipboardDetailUnavailable' : 'clipboardDetailLoadError') : !id ? 'No record selected' : ''}{failed === 'retry' && <button type="button" data-tooltip={t('retry')} onClick={() => setAttempt((value) => value + 1)}>{t('retry')}</button>}</div>}
     </HistoryList>
-    {current && (indexStatus === 'unindexed' || indexStatus === 'failed') && <div className="clipboard-image-index-action">
-      <button type="button" disabled={loading || busy} onClick={() => { void indexImage(current.id); }}>{t(indexStatus === 'failed' ? 'retry' : 'clipboardIndexImage')}</button>
-    </div>}
     {current && <footer className="clipboard-detail-metadata">
       <div><span>Application</span><RecordHeading date={current.date} label={current.sourceApp?.name ?? 'Nami'} sourceApp={current.sourceApp} /></div>
       {current.width != null && current.height != null && <div><span>Dimensions</span><span>{current.width} × {current.height}</span></div>}
@@ -318,5 +357,6 @@ export function ClipboardDetail({ snapshot, native, t, command }: ViewProps) {
     </footer>}
     {confirmDelete && current && <ClipboardDeleteConfirm t={t} description={markedDeleteDescription(t, current)} onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void action('delete'); }} />}
     <RecordFeedback message={feedback} />
+    <ActionTooltipHost />
   </section>;
 }

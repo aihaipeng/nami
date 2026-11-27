@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { ActivityBeam } from '../shared/ActivityBeam';
+import { ActionTooltipHost } from '../shared/ActionTooltip';
 
 interface Detail { title: string; text: string; kind: 'text' | 'image' | 'files' }
 export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, saveTitle }: { recordId: string; saveTitle?: (title: string) => Promise<boolean>; onClose: () => void; onReturnFocus: () => void; onSaved?: (detail: Detail) => void }) {
@@ -112,12 +113,13 @@ export function ClipboardEditor({ recordId, onClose, onReturnFocus, onSaved, sav
         <label><span className="clipboard-editor-label">Title</span><input aria-label="Title" maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={!detail || saving || closing} /></label>
         <label><span className="clipboard-editor-label">Content</span><textarea className={nonEditable ? 'non-editable' : undefined} aria-label="Content" value={content} readOnly={!!saveTitle || detail?.kind !== 'text'} onChange={(event) => { if (!nonEditable && !saveTitle) setText(event.target.value); }} disabled={nonEditable || !detail || saving || closing} /></label>
       </div>
-      {error && !navigation && <p role="alert" className="clipboard-editor-error">{detail ? 'Could not save changes. Your edits are preserved.' : 'Could not load this record.'}{!detail && <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button>}</p>}
-      <div className="clipboard-editor-actions" inert={navigation}><button type="button" onClick={() => close()} disabled={saving || closing} aria-keyshortcuts="Escape">Cancel<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button><button type="submit" disabled={!detail || saving || closing} aria-keyshortcuts="Enter">Save<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span></button></div>
+      {error && !navigation && <p role="alert" className="clipboard-editor-error">{detail ? 'Could not save changes. Your edits are preserved.' : 'Could not load this record.'}{!detail && <button type="button" data-tooltip="Retry" onClick={() => setAttempt((value) => value + 1)}>Retry</button>}</p>}
+      <div className="clipboard-editor-actions" inert={navigation}><button type="button" data-tooltip="Cancel" onClick={() => close()} disabled={saving || closing} aria-keyshortcuts="Escape">Cancel<span className="keycaps" aria-hidden="true"><kbd>Esc</kbd></span></button><button type="submit" data-tooltip="Save" disabled={!detail || saving || closing} aria-keyshortcuts="Enter">Save<span className="keycaps" aria-hidden="true"><kbd>↵</kbd></span></button></div>
       {navigation && <div ref={confirmation} className="clipboard-navigation-confirm" role="alertdialog" aria-modal="true" aria-label="Save changes?">
         <strong>Save changes?</strong><p>Your note has unsaved changes.</p>{error && <p role="alert" className="clipboard-editor-error">Could not save changes. Your edits are preserved.</p>}
-        <div className="clipboard-editor-actions"><button type="button" disabled={saving || closing} onClick={cancelNavigation}>Cancel</button><button type="button" disabled={saving || closing} onClick={() => close(true)}>Discard</button><button type="button" disabled={saving || closing} onClick={() => void save(true)}>Save</button></div>
+        <div className="clipboard-editor-actions"><button type="button" data-tooltip="Cancel" disabled={saving || closing} onClick={cancelNavigation}>Cancel</button><button type="button" data-tooltip="Discard" disabled={saving || closing} onClick={() => close(true)}>Discard</button><button type="button" data-tooltip="Save" disabled={saving || closing} onClick={() => void save(true)}>Save</button></div>
       </div>}
+      <ActionTooltipHost />
     </form>
   </div>, document.body);
 }

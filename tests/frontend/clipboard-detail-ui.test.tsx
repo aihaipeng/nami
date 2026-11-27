@@ -60,29 +60,23 @@ function direct() {
 }
 
 describe('clipboard details', () => {
-  it('hides passive index status and keeps indexing and retry actions without extracting or copying', async () => {
+  it('never renders image index status or inline index prompts while keeping OCR visibility aligned with index status', async () => {
     records[1] = { ...first(), kind: 'image', imageIndexStatus: 'unindexed' };
-    const invoke = bridge.invoke.getMockImplementation()!;
-    let finish!: () => void;
-    bridge.invoke.mockImplementation((name, args) => name === 'clipboard_record_process'
-      ? new Promise<void>((resolve) => { finish = resolve; }) : invoke(name, args));
     direct();
-    const index = await within(pane()).findByRole('button', { name: 'Index image text' });
+    expect(await within(pane()).findByRole('button', { name: 'Extract text' })).toBeTruthy();
+    expect(pane().querySelector('.clipboard-image-index-action')).toBeNull();
+    expect(within(pane()).queryByRole('button', { name: 'Index image text' })).toBeNull();
     expect(within(pane()).queryByText('Image text not indexed')).toBeNull();
-    fireEvent.click(index);
-    expect(index.isConnected).toBe(false);
-    expect(within(pane()).queryByText('Indexing image text…')).toBeNull();
-    expect(calls('clipboard_record_process').at(-1)?.[1]).toEqual({ recordId: 'first', action: 'index' });
     first().imageIndexStatus = 'failed';
-    await act(async () => finish());
     await emit('clipboard_changed', 30);
-    const retry = await within(pane()).findByRole('button', { name: 'Retry' });
+    await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Extract text' })).toBeTruthy());
+    expect(pane().querySelector('.clipboard-image-index-action')).toBeNull();
+    expect(within(pane()).queryByRole('button', { name: 'Retry' })).toBeNull();
     expect(within(pane()).queryByText('Could not index image text')).toBeNull();
-    fireEvent.click(retry);
     first().imageIndexStatus = 'empty';
-    await act(async () => finish());
     await emit('clipboard_changed', 31);
     await waitFor(() => expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull());
+    expect(pane().querySelector('.clipboard-image-index-action')).toBeNull();
     expect(within(pane()).queryByText('No text recognized')).toBeNull();
     first().imageIndexStatus = 'indexed';
     await emit('clipboard_changed', 32);
@@ -225,9 +219,9 @@ describe('clipboard details', () => {
     expect(within(pane()).getByText('1,200')).toBeTruthy();
     expect(within(pane()).queryByText('Dimensions')).toBeNull();
     expect(within(pane()).queryByText('Size')).toBeNull();
-    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['translate', 'note', 'favorite', 'pin', 'delete']);
+    expect([...row('first').querySelectorAll('[data-action]')].map((button) => (button as HTMLElement).dataset.action)).toEqual(['translate', 'favorite', 'pin', 'delete']);
     expect(within(pane()).queryByRole('button', { name: 'Extract text' })).toBeNull();
-    expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')?.getAttribute('style')).toBe(row('first').querySelector('[data-action=note] .history-symbol')?.getAttribute('style'));
+    expect(within(pane()).getByRole('button', { name: 'Note' }).querySelector('.history-symbol')).toBeTruthy();
   });
 
   it('follows hover and keyboard focus without pasting, keeps preview on leave, and preserves the keyboard target on details reopen', async () => {
@@ -635,20 +629,88 @@ it('renders L2 color, JSON, timestamp, and QR code views in details without modi
   fireEvent.click(qrToggle);
   expect(pane().dataset.qrView).toBe('true');
   expect(within(pane()).getByRole('img', { name: 'QR Code' })).toBeTruthy();
-  expectNoCopyButtons();
+  const qrActions = within(pane().querySelector<HTMLElement>('.clipboard-qr-actions')!);
+  expect(qrActions.getByRole('button', { name: 'Copy' })).toBeTruthy();
+  expect(qrActions.getByRole('button', { name: 'Download' })).toBeTruthy();
+  expect(qrActions.queryByRole('button', { name: 'Favorite' })).toBeNull();
+  expect(qrActions.queryByRole('button', { name: 'Enlarge' })).toBeNull();
   const hideQr = within(pane()).getByRole('button', { name: 'Hide QR Code' });
   expect(hideQr.classList.contains('record-active')).toBe(true);
   fireEvent.click(hideQr);
   expect(pane().dataset.qrView).toBeUndefined();
   expect(within(pane()).queryByRole('img', { name: 'QR Code' })).toBeNull();
 
-  // Ordinary long plain text shows no extra smart cards or QR toggle
-  first().text = 'Plain text without structured data. '.repeat(12);
+  // Ordinary over-limit plain text (> 2,953 UTF-8 bytes) shows no extra smart cards or QR toggle
+  first().text = 'Plain text without structured data. '.repeat(90);
   await emit('clipboard_changed', 5);
   await waitFor(() => expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe(first().text));
   expect(pane().querySelector('.clipboard-smart-card')).toBeNull();
   expect(pane().querySelector('.clipboard-smart-bar')).toBeNull();
   expect(within(pane()).queryByRole('button', { name: 'Show QR Code' })).toBeNull();
+});
+
+it('encodes plain text only in QR view, returns to text on Rich/Plain click, and single-clicks QR to enlarge', async () => {
+  bridge.snapshot.capabilities.nativeChrome = true;
+  let saveResult = false;
+  const original = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name: string, args?: unknown) => {
+    if (name === 'clipboard_qr_image_copy') return null;
+    if (name === 'clipboard_qr_image_save') return saveResult;
+    if (name === 'clipboard_qr_enlarge') return null;
+    return original(name, args);
+  });
+
+  first().text = 'Read Guide';
+  first().richTextFormat = 'html';
+  first().richTextHtml = '<p><a href="https://example.test/guide">Read Guide</a></p>';
+  direct();
+  const qrToggle = await within(pane()).findByRole('button', { name: 'Show QR Code' });
+  fireEvent.click(qrToggle);
+
+  // Rich/Plain segmented mode toggle remains visible (unpressed) during QR view; clicking either returns to text view.
+  const modeGroup = within(pane().querySelector<HTMLElement>('.clipboard-detail-mode')!);
+  expect(modeGroup.getByRole('button', { name: 'Rich' }).getAttribute('aria-pressed')).toBe('false');
+  expect(modeGroup.getByRole('button', { name: 'Plain' }).getAttribute('aria-pressed')).toBe('false');
+
+  // QR action bar contains strictly Copy and Download (no Favorite, Enlarge, or Clean Link button).
+  const qrBar = within(pane().querySelector<HTMLElement>('.clipboard-qr-actions')!);
+  expect(qrBar.getAllByRole('button')).toHaveLength(2);
+  const copyBtn = qrBar.getByRole('button', { name: 'Copy' });
+  const downloadBtn = qrBar.getByRole('button', { name: 'Download' });
+
+  fireEvent.click(copyBtn);
+  await waitFor(() => expect(calls('clipboard_qr_image_copy')).toHaveLength(1));
+  expect(copyBtn.classList.contains('record-copied')).toBe(true);
+
+  // Cancelled download dialog must not flash green completion state.
+  fireEvent.click(downloadBtn);
+  await waitFor(() => expect(calls('clipboard_qr_image_save')).toHaveLength(1));
+  expect(downloadBtn.classList.contains('record-copied')).toBe(false);
+
+  // Confirmed download dialog shows green completion state.
+  saveResult = true;
+  fireEvent.click(downloadBtn);
+  await waitFor(() => expect(downloadBtn.classList.contains('record-copied')).toBe(true));
+
+  // Single-clicking the QR card invokes clipboard_qr_enlarge directly without showing a tooltip bubble.
+  const qrTrigger = within(pane()).getByRole('button', { name: 'Enlarge' });
+  expect(qrTrigger.hasAttribute('data-tooltip')).toBe(false);
+  fireEvent.click(qrTrigger);
+  await waitFor(() => expect(calls('clipboard_qr_enlarge')).toHaveLength(1));
+
+  // Clicking Plain exits QR view and lands on plain text.
+  fireEvent.click(modeGroup.getByRole('button', { name: 'Plain' }));
+  await waitFor(() => expect(pane().dataset.qrView).toBeUndefined());
+  expect(modeGroup.getByRole('button', { name: 'Plain' }).getAttribute('aria-pressed')).toBe('true');
+  expect(pane().querySelector('.clipboard-detail-text')?.textContent).toBe('Read Guide');
+
+  // Re-open QR and click Rich: exits QR view and lands on rich text preview.
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Show QR Code' }));
+  await waitFor(() => expect(pane().dataset.qrView).toBe('true'));
+  fireEvent.click(modeGroup.getByRole('button', { name: 'Rich' }));
+  await waitFor(() => expect(pane().dataset.qrView).toBeUndefined());
+  expect(modeGroup.getByRole('button', { name: 'Rich' }).getAttribute('aria-pressed')).toBe('true');
+  expect(pane().querySelector('a[href="https://example.test/guide"]')).toBeTruthy();
 });
 
 it('shows image previews immediately but scans only a settled detail and ignores late QR results', async () => {
@@ -1207,4 +1269,174 @@ it('keeps the list selection and keyboard target on the current record when deta
   expect(row('copied-11').dataset.keyboardCurrent).toBeUndefined();
   expect(within(pane()).getByText('/Users/apple/.agents/skills/ui-ux-review')).toBeTruthy();
   expect(copyPath.classList.contains('record-copied')).toBe(true);
+});
+
+it('shows hover tooltip bubbles without native title conflicts for every button in clipboard details', async () => {
+  records[1] = {
+    ...records[1],
+    kind: 'text',
+    text: '{"hello":"world"}',
+    richTextFormat: 'html',
+    richTextHtml: '<p><strong>Hello</strong></p>',
+  };
+  await mount('translation');
+  await waitFor(() => expect(row('first')).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+  await screen.findByRole('region', { name: 'Clipboard details' });
+  await within(pane()).findByRole('button', { name: 'Plain' });
+
+  // Rich/Plain toggle + detail toolbar action buttons all provide bubble tooltips.
+  const detail = pane();
+  const initialButtons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+  expect(initialButtons.length).toBeGreaterThanOrEqual(6);
+  for (const button of initialButtons) {
+    expect(button.dataset.tooltip?.trim()).toBeTruthy();
+    expect(button.getAttribute('title')).toBeNull();
+  }
+
+  const plainButton = within(detail).getByRole('button', { name: 'Plain' });
+  fireEvent.mouseOver(plainButton);
+  expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+  expect(screen.getByRole('tooltip').textContent).toBe('Plain');
+  expect(screen.getByRole('tooltip').getAttribute('data-side')).toBe('bottom');
+
+  // Switching to plain JSON view exposes Format/Minify/Original buttons, all with tooltips.
+  fireEvent.click(plainButton);
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  const formatButton = await within(detail).findByRole('button', { name: 'Format' });
+  fireEvent.mouseOver(formatButton);
+  expect(screen.getByRole('tooltip').textContent).toBe('Format');
+  fireEvent.mouseOut(formatButton, { relatedTarget: document.body });
+  expect(screen.queryByRole('tooltip')).toBeNull();
+
+  // Switch to a single-image record with palette, QR link, and compact path actions.
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name, args) => {
+    if (name === 'clipboard_image_qr_codes') return ['https://example.com/qr'];
+    return baseInvoke(name, args);
+  });
+  records[1] = {
+    ...records[1],
+    kind: 'image',
+    text: '',
+    richTextFormat: undefined,
+    richTextHtml: undefined,
+    files: [{ path: '/tmp/wallpaper.jpg', name: 'wallpaper.jpg', exists: true, isDir: false, isImage: true, iconDataUrl: null }],
+    imageIndexStatus: 'unindexed',
+  };
+  await windowState({ clipboardDetailId: 'second' });
+  await windowState({ clipboardDetailId: 'first' });
+  await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Copy wallpaper.jpg' })).toBeTruthy());
+
+  const img = pane().querySelector('img') as HTMLImageElement;
+  Object.defineProperty(img, 'naturalWidth', { value: 4, configurable: true });
+  Object.defineProperty(img, 'naturalHeight', { value: 4, configurable: true });
+  const ctxSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    drawImage: vi.fn(),
+    getImageData: () => ({
+      data: new Uint8ClampedArray(16 * 4).map((_, i) => [0x20, 0x3d, 0x63, 255][i % 4]),
+    }),
+  } as unknown as CanvasRenderingContext2D);
+  try {
+    fireEvent.load(img);
+    const swatch = await within(pane()).findByRole('button', { name: 'Copy #203D63' });
+    fireEvent.mouseOver(swatch);
+    expect(screen.getByRole('tooltip').textContent).toBe('Copy #203D63');
+
+    const revealButton = within(pane()).getByRole('button', { name: 'Show in Finder: wallpaper.jpg' });
+    fireEvent.mouseOut(swatch, { relatedTarget: revealButton });
+    expect(screen.getByRole('tooltip').textContent).toBe('Show in Finder');
+
+    // OCR and Delete buttons show concise single-line tooltips ("提取文本" / "删除" in zh-CN).
+    const ocrButton = within(pane()).getByRole('button', { name: 'Extract text' });
+    fireEvent.mouseOver(ocrButton);
+    expect(screen.getByRole('tooltip').textContent).toBe('Extract Text');
+    await emit('locale_changed', 'zh-CN');
+    await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Extract text' }).dataset.tooltip).toBe('提取文本'));
+    expect(within(pane()).getByRole('button', { name: '删除这条剪贴板记录' }).dataset.tooltip).toBe('删除');
+    await emit('locale_changed', 'en');
+    await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Extract text' }).dataset.tooltip).toBe('Extract Text'));
+
+    await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Open Link' })).toBeTruthy(), { timeout: 1000 });
+    const allImageButtons = Array.from(pane().querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+    for (const button of allImageButtons) {
+      expect(button.dataset.tooltip?.trim()).toBeTruthy();
+      expect(button.dataset.tooltip).not.toContain('\n');
+      expect(button.getAttribute('title')).toBeNull();
+    }
+    expect(within(pane()).getByRole('button', { name: 'Copy wallpaper.jpg' }).dataset.tooltip).toBe('Copy');
+  } finally {
+    ctxSpy.mockRestore();
+  }
+});
+
+it('plays transparent green completion animation on translate, favorite, qr code, open link, reveal file, and ocr actions', async () => {
+  const baseInvoke = bridge.invoke.getMockImplementation()!;
+  bridge.invoke.mockImplementation(async (name, args) => {
+    if (name === 'clipboard_open_target') {
+      const { execute } = args as { execute: boolean };
+      return execute ? null : 'link';
+    }
+    if (name === 'clipboard_image_qr_codes') return ['https://example.com/qr'];
+    return baseInvoke(name, args);
+  });
+
+  records[1] = {
+    ...records[1],
+    kind: 'text',
+    text: 'https://example.com/hello',
+    isFavorite: false,
+    isPinned: false,
+  };
+  await mount('translation');
+  await waitFor(() => expect(row('first')).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: 'Expand details' }));
+  await screen.findByRole('region', { name: 'Clipboard details' });
+
+  // Open target (toolbar link) shows green checkmark completion state.
+  const openTargetBtn = await within(pane()).findByRole('button', { name: 'Open Link' });
+  fireEvent.click(openTargetBtn);
+  await waitFor(() => expect(openTargetBtn.classList.contains('record-copied')).toBe(true));
+  expect(openTargetBtn.querySelector('.copy-success')).toBeTruthy();
+
+  // Generate QR code shows green checkmark completion state while preserving active state.
+  const qrBtn = within(pane()).getByRole('button', { name: 'Show QR Code' });
+  fireEvent.click(qrBtn);
+  await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Hide QR Code' }).classList.contains('record-copied')).toBe(true));
+  expect(within(pane()).getByRole('button', { name: 'Hide QR Code' }).querySelector('.copy-success')).toBeTruthy();
+  // Hiding QR code clears completion state instead of flashing success.
+  fireEvent.click(within(pane()).getByRole('button', { name: 'Hide QR Code' }));
+  await waitFor(() => expect(within(pane()).getByRole('button', { name: 'Show QR Code' }).classList.contains('record-copied')).toBe(false));
+
+  // Favorite shows green checkmark completion state when marking favorite.
+  const favBtn = within(pane()).getByRole('button', { name: 'Favorite' });
+  fireEvent.click(favBtn);
+  await waitFor(() => expect(favBtn.classList.contains('record-copied')).toBe(true));
+  expect(favBtn.querySelector('.copy-success')).toBeTruthy();
+
+  // Translate shows green checkmark completion state when triggered.
+  const translateBtn = within(pane()).getByRole('button', { name: 'Translate' });
+  fireEvent.click(translateBtn);
+  await waitFor(() => expect(translateBtn.classList.contains('record-copied')).toBe(true));
+  expect(translateBtn.querySelector('.copy-success')).toBeTruthy();
+
+  // Single-image detail: Reveal file & QR Open Link both show green checkmark completion states.
+  records[1] = {
+    ...records[1],
+    kind: 'image',
+    text: '',
+    files: [{ path: '/tmp/shot.png', name: 'shot.png', exists: true, isDir: false, isImage: true, iconDataUrl: null }],
+  };
+  await windowState({ clipboardDetailId: 'second' });
+  await windowState({ clipboardDetailId: 'first' });
+
+  const revealBtn = await within(pane()).findByRole('button', { name: 'Show in Finder: shot.png' });
+  fireEvent.click(revealBtn);
+  await waitFor(() => expect(revealBtn.classList.contains('record-copied')).toBe(true));
+  expect(revealBtn.querySelector('.copy-success')).toBeTruthy();
+
+  const qrOpenBtn = await within(pane()).findByRole('button', { name: 'Open Link' }, { timeout: 1000 });
+  fireEvent.click(qrOpenBtn);
+  await waitFor(() => expect(qrOpenBtn.classList.contains('record-copied')).toBe(true));
+  expect(qrOpenBtn.querySelector('.copy-success')).toBeTruthy();
 });

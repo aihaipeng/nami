@@ -563,4 +563,30 @@ describe('clipboard attached translate pane', () => {
     expect(calls('translation_cancel').length).toBeGreaterThan(before);
     expect(calls('translation_cancel').at(-1)?.[1]).toEqual({ scope: 'clipboard' });
   });
+
+  it('shows hover tooltip bubbles on translate pane tabs and toolbar icon buttons and hides them while dropdowns open', async () => {
+    await mount('translation');
+    await waitFor(() => expect(listRow('first')).toBeTruthy());
+    fireEvent.click(within(listRow('first')).getByRole('button', { name: 'Translate' }));
+    const pane = await screen.findByRole('region', { name: 'Translation pane' });
+    await within(pane).findByText('Synthetic translation 1');
+
+    const buttons = Array.from(pane.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+    expect(buttons.length).toBeGreaterThanOrEqual(4);
+    for (const button of buttons) {
+      expect(button.dataset.tooltip?.trim()).toBeTruthy();
+      expect(button.dataset.tooltip).not.toContain('\n');
+      expect(button.getAttribute('title')).toBeNull();
+    }
+    expect(within(pane).getByRole('button', { name: /Primary language:/ }).dataset.tooltip).toBe('Switch language');
+
+    const engineButton = within(pane).getByRole('button', { name: /Translation Service:/ });
+    fireEvent.mouseOver(engineButton);
+    expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+    expect(screen.getByRole('tooltip').textContent).toBe('Switch translation engine');
+
+    fireEvent.click(engineButton);
+    expect(screen.getByRole('dialog', { name: 'Translation Service' })).toBeTruthy();
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
 });

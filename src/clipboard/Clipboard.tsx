@@ -7,6 +7,7 @@ import type { ViewProps } from '../App';
 import type { ClipboardResult } from '../shared/contracts';
 import type { MessageKey } from '../shared/i18n';
 import { ActivityBeam } from '../shared/ActivityBeam';
+import { ActionTooltipHost } from '../shared/ActionTooltip';
 import { RecordToolbar } from '../shared/RecordToolbar';
 import { VIRTUALIZE_THRESHOLD } from '../shared/virtualList';
 import { useRecordBrowser } from '../shared/useRecordBrowser';
@@ -351,13 +352,14 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
   }
 
-  async function processRecord(recordId: string, action: 'translate' | 'ocr') {
-    if (!native || processing !== null) return;
+  async function processRecord(recordId: string, action: 'translate' | 'ocr'): Promise<boolean> {
+    if (!native || processing !== null) return false;
     const current = ++operation.current;
     const revision = ++processingRevision.current;
     setProcessing(recordId); setProcessingError(null); setFeedback(null);
     try {
       await invoke('clipboard_record_process', { recordId, action });
+      return mounted.current && operation.current === current;
     } catch (error) {
       if (mounted.current && operation.current === current && String(error) !== 'cancelled') {
         const message = clipboardProcessError(error, action);
@@ -370,6 +372,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
           return next;
         });
       }
+      return false;
     } finally {
       if (mounted.current && processingRevision.current === revision) setProcessing(null);
     }
@@ -495,22 +498,22 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     }
     void clipboard.update(record.id, 'delete');
   }
-  function updateRecord(record: ClipboardRecord, action: 'favorite' | 'pin' | 'delete', source?: HTMLElement | null) {
+  function updateRecord(record: ClipboardRecord, action: 'favorite' | 'pin' | 'delete', source?: HTMLElement | null): Promise<boolean> | boolean {
     if (action === 'delete') {
       const origin = source ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
       if (record.isFavorite || record.isPinned) {
         setPendingDelete({ record, source: origin });
-        return;
+        return false;
       }
       commitDelete(record, origin);
-      return;
+      return true;
     }
     if (action === 'pin') {
       const origin = source ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
       if (origin?.closest('article')) refocus.current = { id: record.id, previous: origin };
     }
     setSelected(record.id);
-    void clipboard.update(record.id, action);
+    return clipboard.update(record.id, action);
   }
 
   const handleClipboardKeyDown = useEffectEvent((key: KeyboardEvent) => {
@@ -728,15 +731,15 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
       } else if (overActions && hoverPreviewTarget.current === record.id) {
         cancelHoverPreview();
       }
-    }} onPointerLeave={(event) => pointerLeftRow(event, record.id)} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${99 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
+    }} onPointerLeave={(event) => pointerLeftRow(event, record.id)} onMouseLeave={() => setRevealed((current) => current === record.id ? null : current)} onContextMenu={(event) => { event.preventDefault(); setMenu({ id: record.id, x: event.clientX, y: event.clientY }); }} key={record.id} hidden={!visibleIds.has(record.id)} data-record-id={record.id} className={cn('history-row', selection === record.id && 'selected', menu?.id === record.id && 'context-target', record.isPinned && 'pinned')} style={{ '--history-actions-width': `${74 + 25 * (Number(canTranslate) + Number(canOcr))}px` } as CSSProperties}>
       <button type="button" tabIndex={tabbable ? 0 : -1} ref={(element) => { if (element) rowRefs.current.set(record.id, element); else rowRefs.current.delete(record.id); }} className="history-row-select" draggable={native && snapshot.capabilities.clipboardDrag && !editing && !menu} onDragStart={(event) => { if (!native || !snapshot.capabilities.clipboardDrag || editing || menu) return; cancelHoverPreview(); event.preventDefault(); void dragRecord(record.id); }} aria-label={`${t('clipboard')}: ${record.text || kind}`} aria-description={description} aria-keyshortcuts={quickHint ? `Meta+${quickHint}` : undefined} aria-current={keyboardCurrent || undefined} aria-pressed={selection === record.id} aria-haspopup="menu" onClick={() => { previewRecord(record.id, true); void useRecord(record.id, 'activate'); }}>
         <RecordHeading date={record.date} label={kind} sourceApp={record.sourceApp} quickPasteHint={quickHint} />
         {record.title ? <ClipboardNotePreview record={record} revealed={revealed === record.id} native={native} media={media} /> : media ? media : <ClipboardTextPreview text={historyPreview(record.text)} className="history-preview history-text-preview" />}
         {record.imageTextMatch && <span className="clipboard-search-match">{t('clipboardImageTextMatch')}</span>}
       </button>
-      <RecordActions tabIndex={-1} allowMarkedDelete t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} deleteLabel={t('deleteClipboard')}
-        onNote={() => setEditing({ id: record.id })} busy={processing !== null} translateActive={translating} onTranslate={canTranslate ? () => { void processRecord(record.id, 'translate'); } : undefined} onOcr={canOcr ? () => { void processRecord(record.id, 'ocr'); } : undefined}
-        onUpdate={(action) => { updateRecord(record, action); }} />
+      <RecordActions recordId={record.id} tabIndex={-1} allowMarkedDelete t={t} native={native} favorite={record.isFavorite} pinned={record.isPinned} deleteLabel={t('deleteClipboard')}
+        busy={processing !== null} translateActive={translating} onTranslate={canTranslate ? () => processRecord(record.id, 'translate') : undefined} onOcr={canOcr ? () => processRecord(record.id, 'ocr') : undefined}
+        onUpdate={(action) => updateRecord(record, action)} />
     </article>;
   }
   return <section ref={panel} data-focus-ready={clipboard.displayReady || undefined} data-pointer-outside={pointerOutside || undefined} inert={editing !== null} onCompositionStartCapture={() => { composing.current = true; }} onCompositionEndCapture={() => { composing.current = false; }} className="history-panel clipboard-panel" style={{ '--history-preview-lines': snapshot.clipboardControls.previewLines?.clipboard } as CSSProperties} aria-label={t('clipboard')}>
@@ -744,7 +747,7 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     <div className="drag-strip" data-tauri-drag-region />
     <RecordToolbar t={t} snapshot={snapshot} command={command} query={query} onQuery={setQuery} search={search} onDetailsToggle={() => { void toggleDetails(); }} searchHint={windowShortcut('focusSearch')} pinHint={windowShortcut('pin')} />
     {clipboard.error && <p role="alert" className="history-error">{t(clipboard.searchError === 'invalidRegex' ? 'clipboardSearchInvalidRegex' : clipboard.searchError === 'tooBroad' ? 'clipboardSearchTooBroad' : 'nativeError')}
-      {!clipboard.searchError && <> <button onClick={() => void clipboard.refresh()}>{t('retry')}</button></>}
+      {!clipboard.searchError && <> <button type="button" data-tooltip={t('retry')} onClick={() => void clipboard.refresh()}>{t('retry')}</button></>}
     </p>}
     <HistoryList
       onScrollOwnerChange={restoreScroll}
@@ -767,8 +770,8 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     >
       {!clipboard.loading && !clipboard.error && !records.length && <div className="history-empty clipboard-empty" role="status">
         <p>{query ? t('clipboardNoMatches') : favoritesOnly ? t('clipboardFavoritesEmpty') : kindFilter ? t(kindFilter === 'text' ? 'clipboardTextEmpty' : kindFilter === 'image' ? 'clipboardImagesEmpty' : 'clipboardFilesEmpty') : !snapshot.capabilities.clipboardWrite ? t('platformUnavailable') : snapshot.clipboardCaptureEnabled ? t('clipboardEmpty') : t('clipboardRecordingPaused')}</p>
-        {kindFilter && <button type="button" onClick={() => { applyCategoryFilter(false, null, false); }}>{t('clearClipboardFilter')}</button>}
-        {!query && !favoritesOnly && !kindFilter && native && !snapshot.storageError && snapshot.capabilities.clipboardWrite && !snapshot.clipboardCaptureEnabled && <button type="button" disabled={resumingCapture} onClick={() => {
+        {kindFilter && <button type="button" data-tooltip={t('clearClipboardFilter')} onClick={() => { applyCategoryFilter(false, null, false); }}>{t('clearClipboardFilter')}</button>}
+        {!query && !favoritesOnly && !kindFilter && native && !snapshot.storageError && snapshot.capabilities.clipboardWrite && !snapshot.clipboardCaptureEnabled && <button type="button" data-tooltip={t('clipboardResumeRecording')} disabled={resumingCapture} onClick={() => {
           if (resumingCapture) return;
           setResumingCapture(true);
           setFeedback(null);
@@ -788,5 +791,6 @@ export function Clipboard({ t, snapshot, command, native, active = true }: ViewP
     {editing && <ClipboardEditor recordId={editing.id} onClose={() => setEditing(null)} onSaved={(detail) => clipboard.applyEdit(editing.id, detail)} onReturnFocus={() => { editorReturn.current = editing.id; }} />}
     {pendingDelete && <ClipboardDeleteConfirm t={t} description={markedDeleteDescription(t, pendingDelete.record)} onCancel={() => setPendingDelete(null)} onConfirm={() => { const pending = pendingDelete; setPendingDelete(null); commitDelete(pending.record, pending.source); }} />}
     <RecordFeedback message={active ? processingError ?? (feedback ? t(feedback) : null) : null} />
+    <ActionTooltipHost />
   </section>;
 }

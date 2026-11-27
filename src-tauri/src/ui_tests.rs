@@ -8539,9 +8539,9 @@ return true;
                 &format!(
                     r#"
 const pane=document.querySelector('.clipboard-detail'),image=!!pane?.querySelector('.clipboard-detail-content .clipboard-image-preview');
-const index=!!pane?.querySelector('.clipboard-image-index-action button:not(:disabled)'),ocr=!!pane?.querySelector('[data-action=ocr]:not([aria-hidden=true]) button:not(:disabled)');
+const index=!!pane?.querySelector('.clipboard-image-index-action'),ocr=!!pane?.querySelector('[data-action=ocr]:not([aria-hidden=true]) button:not(:disabled)');
 const status=['Image text not indexed','No text recognized','Image text is searchable'].find(text=>pane?.textContent.includes(text));
-return {{ready:image&&!status&&index==={action_visible}&&ocr==={action_visible},image,status,index,ocr}};
+return {{ready:image&&!status&&!index&&ocr==={action_visible},image,status,index,ocr}};
 "#
                 ),
             )?;

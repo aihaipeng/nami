@@ -117,7 +117,7 @@ export function FileList({ entries, onReveal, revealLabel }: { entries: FileEntr
   return <span className="clipboard-files">{entries.map((entry, index) => {
     const content = <><FileIcon entry={entry} /><span className="clipboard-file-name">{entry.name}</span></>;
     const props = { className: 'clipboard-file', title: entry.path, 'data-missing': !entry.exists };
-    return onReveal ? <button key={index} type="button" {...props} aria-label={`${revealLabel}: ${entry.name}`} disabled={!entry.exists} onClick={() => onReveal(index)}>{content}</button>
+    return onReveal ? <button key={index} type="button" className="clipboard-file" data-missing={!entry.exists} data-tooltip={revealLabel ?? entry.path} aria-label={`${revealLabel}: ${entry.name}`} disabled={!entry.exists} onClick={() => onReveal(index)}>{content}</button>
       : <span key={index} {...props}>{content}</span>;
   })}</span>;
 }

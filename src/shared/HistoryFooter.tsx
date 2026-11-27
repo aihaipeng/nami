@@ -5,6 +5,7 @@ import { translationShortcutEnabled } from './contracts';
 import { editsText, globalTranslationActions, keycapLabels, matchesBinding, recordWindowActions, sameBinding, shortcutTitles, translationWindowActions } from './shortcuts';
 import type { ClipboardKind } from '../clipboard/useClipboard';
 import { HistoryIcon } from '../translation/HistoryIcon';
+import { ActionTooltipHost } from './ActionTooltip';
 import { RecordShortcutHint } from './RecordShortcutHint';
 
 function ShortcutsPopover({ label, children }: { label: string; children: ReactNode }) {
@@ -211,11 +212,12 @@ export function HistoryFooter({ t, snapshot, command, native, active, search, to
     <span className="history-record-count">{total} {total === 1 ? 'record' : 'records'}</span>
     <span className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</span>
     <div className="history-filters" role="group" aria-label="Filter records">
-      {onKindChange && <button type="button" className="icon-button history-all" aria-label="All clipboard records" title="All" aria-pressed={!favoritesOnly && kind === null} onClick={() => { if (favoritesOnly || kind !== null) onKindChange(null); }}><HistoryIcon name="list.bullet" /></button>}
-      {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} title="Favorites" aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
-      {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} title={value === 'text' ? 'Text' : value === 'image' ? 'Images' : 'Files'} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
+      {onKindChange && <button type="button" className="icon-button history-all" aria-label="All clipboard records" data-tooltip={t('clipboardFilterAll')} aria-pressed={!favoritesOnly && kind === null} onClick={() => { if (favoritesOnly || kind !== null) onKindChange(null); }}><HistoryIcon name="list.bullet" /></button>}
+      {onFavorites && <button type="button" className={`icon-button history-favorites${favoritesOnly ? ' record-favorite' : ''}`} aria-label={clipboard ? 'Favorite clipboard records' : 'Favorite history'} data-tooltip={t('clipboardCleanupFavorites')} aria-pressed={favoritesOnly} onClick={onFavorites}><HistoryIcon name="star" /></button>}
+      {onKindChange && <span className="history-kinds">{(['text', 'image', 'files'] as const).map((value) => <button key={value} type="button" className="icon-button history-kind" aria-label={`${value === 'text' ? 'Text' : value === 'image' ? 'Image' : 'File'} clipboard records`} data-tooltip={t(value === 'text' ? 'text' : value === 'image' ? 'clipboardImages' : 'clipboardFiles')} aria-pressed={kind === value} onClick={() => onKindChange(kind === value ? null : value)}><HistoryIcon name={value} /></button>)}</span>}
     </div>
-    <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} title={t('hotKey')} aria-expanded={open} aria-keyshortcuts={shortcutsHint ? `Meta+${shortcutsHint}` : undefined} onClick={() => setOpen(!open)}>{shortcutsHint ? <span className="history-command-hint" aria-hidden="true">{shortcutsHint}</span> : <HistoryIcon name="keyboard" />}</button>
+    <button ref={button} type="button" className="icon-button history-shortcuts" aria-label={t('hotKey')} data-tooltip={open ? undefined : t('hotKey')} aria-expanded={open} aria-keyshortcuts={shortcutsHint ? `Meta+${shortcutsHint}` : undefined} onClick={() => setOpen(!open)}>{shortcutsHint ? <span className="history-command-hint" aria-hidden="true">{shortcutsHint}</span> : <HistoryIcon name="keyboard" />}</button>
+    <ActionTooltipHost />
     {open && <ShortcutsPopover label={t('hotKey')}>
       <strong>{t('hotKey')}</strong>
       <div><span>{clipboard ? 'Paste selection' : 'Open selection'}</span><RecordShortcutHint keys={keyLabels({ code: 'Enter', modifiers: [] })} /></div>

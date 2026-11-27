@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { ArrowLeftRight, Globe } from 'lucide-react';
 import type { ViewProps } from '../App';
 import { ActivityBeam } from '../shared/ActivityBeam';
+import { ActionTooltipHost } from '../shared/ActionTooltip';
 import { HistoryList } from '../shared/HistoryList';
 import { restorePanelFocus } from '../shared/FloatingPanel';
 import { SearchableDropdown, ServiceMark } from '../shared/SearchableDropdown';
@@ -368,10 +369,10 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   }
 
   const languagePackAction = (error: string | null | undefined) => capabilities.appleTranslation && appleLanguagePackMissing(error) &&
-    <button type="button" onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button>;
+    <button type="button" data-tooltip={t('openTranslationLanguages')} onClick={() => void command('translation_language_settings_open')}>{t('openTranslationLanguages')}</button>;
   const retryAfterDownload = !partial && appleLanguagePackMissing(serviceError) &&
-    <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation('apple')}>{t('retry')}</button>;
-  const retryElsewhere = retryServices.map(({ code, retry }) => <button key={code} type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(code)}>
+    <button type="button" data-tooltip={t('retry')} disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation('apple')}>{t('retry')}</button>;
+  const retryElsewhere = retryServices.map(({ code, retry }) => <button key={code} type="button" data-tooltip={t(retry)} disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation(code)}>
     {t(retry)}
   </button>);
 
@@ -427,9 +428,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
   const activeResult = currentTab === 'source' ? '' : (notice ? '' : cachedResults[activeIndex] ?? '');
   const activePartialError = currentTab === 'source' ? null : partial?.errors[activeIndex] ?? null;
   const taskStatus = serviceError ?? (notice ? t(notice) : !activeTabSupported ? t('languageNotSupported') : null);
-  const sourceTabTitle = activePickerDescription && currentTab === 'source'
-    ? `${t('sourceLanguage')}: ${sourceLabel} (${activePickerDescription})`
-    : `${t('sourceLanguage')}: ${sourceLabel}`;
   const activeEngine: Engine = (currentTab !== 'source'
     ? (completedOutput.current?.translation.targetEngines?.[activeIndex] ?? completedOutput.current?.translation.engine ?? partialEngine)
     : (completedOutput.current?.translation.engine ?? partialEngine)) ?? effectiveEngine;
@@ -450,9 +448,9 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
     <ActivityBeam label={t('working')} active={active && translating} />
     <header className="clipboard-detail-toolbar" data-tauri-drag-region>
       <div className="clipboard-detail-mode clipboard-translate-tabs" role="group" aria-label={t('translateViewTabs')} data-tauri-drag-region="false">
-        <button type="button" data-tab="source" aria-pressed={currentTab === 'source'} title={sourceTabTitle} onClick={() => selectTab('source')}>{sourceLabel}</button>
-        <button type="button" data-tab="primary" aria-pressed={currentTab === 'primary'} title={`${t('primaryLanguage')}: ${primaryLabel}`} onClick={() => selectTab('primary')}>{primaryLabel}</button>
-        {secondary !== 'none' && <button type="button" data-tab="secondary" aria-pressed={currentTab === 'secondary'} title={`${t('secondaryLanguage')}: ${secondaryLabel}`} onClick={() => selectTab('secondary')}>{secondaryLabel}</button>}
+        <button type="button" data-tab="source" aria-pressed={currentTab === 'source'} data-tooltip={t('translateTabSource')} data-tooltip-side="bottom" onClick={() => selectTab('source')}>{sourceLabel}</button>
+        <button type="button" data-tab="primary" aria-pressed={currentTab === 'primary'} data-tooltip={t('translateTabPrimary')} data-tooltip-side="bottom" onClick={() => selectTab('primary')}>{primaryLabel}</button>
+        {secondary !== 'none' && <button type="button" data-tab="secondary" aria-pressed={currentTab === 'secondary'} data-tooltip={t('translateTabSecondary')} data-tooltip-side="bottom" onClick={() => selectTab('secondary')}>{secondaryLabel}</button>}
       </div>
       <div className="history-row-actions" role="group" aria-label={t('actions')} data-tauri-drag-region="false">
         <span className="history-action" data-action="language">
@@ -464,7 +462,7 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
             t={t}
             valueLabel={activePickerValueLabel}
             description={activePickerDescription}
-            triggerTitle={`${t('switchLanguage')} · ${activePickerLabel}`}
+            triggerTitle={t('switchLanguage')}
             iconTrigger={<Globe aria-hidden="true" />}
             side="bottom"
             open={popup === 'language'}
@@ -500,7 +498,7 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
             {activePartialError && <div className="result-error">
               <span role="alert">{activePartialError}</span>
               {languagePackAction(activePartialError)}
-              <button type="button" disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
+              <button type="button" data-tooltip={t(retrying ? 'translationRetrying' : 'retry')} disabled={retrying || !!snapshot.storageError} onClick={() => retryTranslation()}>{t(retrying ? 'translationRetrying' : 'retry')}</button>
               {retryElsewhere}
             </div>}
             {taskStatus && !activeResult && !activePartialError && <div className="translation-status">
@@ -526,5 +524,6 @@ export function ClipboardTranslatePane({ t, snapshot, command, native }: ViewPro
         </span>
       </div>
     </footer>
+    <ActionTooltipHost />
   </section>;
 }

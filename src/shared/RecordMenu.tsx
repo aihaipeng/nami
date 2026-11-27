@@ -62,7 +62,7 @@ export function RecordMenu({ x, y, items, mac, onClose, onReturnFocus, onAction 
         {items.map((item) => <Fragment key={item.action}>
           {item.separatorBefore && <div role="separator" className="record-menu-divider" />}
           <button type="button" role="menuitem" disabled={item.disabled} onClick={() => { if (item.action !== 'note') onReturnFocus(); onAction(item.action); }}
-            title={item.description} aria-description={item.description} aria-keyshortcuts={item.shortcut?.aria}
+            aria-description={item.description} aria-keyshortcuts={item.shortcut?.aria}
             className={item.destructive ? 'clipboard-menu-delete' : item.action === 'favorite' && item.active ? 'record-favorite' : undefined}>
             {item.icon}<span className="record-menu-label">{item.label}</span>
             {item.shortcut !== undefined && <RecordShortcutHint keys={item.shortcut?.keys ?? [item.keyHint ?? '—']} separator={mac ? '' : '+'} decorative />}
